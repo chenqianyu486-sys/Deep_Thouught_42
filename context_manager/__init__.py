@@ -17,6 +17,8 @@ from .estimator import ContextEstimator
 from .events import EventBus, EventHook
 from .manager import MemoryManager
 from .agent_context import AgentContext, AgentContextManager
+from .strategies.smart_compress import SmartCompressionStrategy
+from .strategies.aggressive_compress import AggressiveCompressionStrategy
 
 __all__ = [
     "Message",
@@ -36,4 +38,6 @@ __all__ = [
     "MemoryManager",
     "AgentContext",
     "AgentContextManager",
+    "SmartCompressionStrategy",
+    "AggressiveCompressionStrategy",
 ]

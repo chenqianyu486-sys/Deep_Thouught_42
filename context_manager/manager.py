@@ -179,14 +179,17 @@ class MemoryManager:
         if strategy not in self._failed_strategies:
             self._failed_strategies.append(strategy)
 
-    def add_tool_result(self, tool_name: str, result: str, wns: float = None, error: bool = False) -> None:
-        self._tool_call_details.append({
+    def add_tool_result(self, tool_name: str, result: str, wns: float = None, error: bool = False, extra_fields: dict = None) -> None:
+        entry = {
             "tool_name": tool_name,
             "result": result[:500] if result else "",
             "wns": wns,
             "error": error,
             "iteration": self._iteration
-        })
+        }
+        if extra_fields:
+            entry.update(extra_fields)
+        self._tool_call_details.append(entry)
         if wns is not None and wns > self._best_wns:
             self._best_wns = wns
 

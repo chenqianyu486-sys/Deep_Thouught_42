@@ -34,6 +34,14 @@ except ImportError:
     print("Error: openai package not installed. Please run: pip install openai", file=sys.stderr)
     sys.exit(1)
 
+# === Section 7.0: Context Manager Integration ===
+from context_manager import MemoryManager, SmartCompressionStrategy, AggressiveCompressionStrategy
+from context_manager.compat import DCPOptimizerCompat
+from context_manager.interfaces import CompressionContext as CMCompressionContext
+from context_manager.estimator import ContextEstimator
+from context_manager.events import EventBus
+from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent
+
 # === Section 2: Logging & Constants ===
 
 # Configure logging
@@ -543,11 +551,8 @@ class DCPOptimizer(DCPOptimizerBase):
         self.model_planner = model_planner
         self.model_worker = model_worker
 
-        # Track failed strategies to improve agent self-awareness
-        self.failed_strategies = []
-
+        # Track failed strategies via compat (MemoryManager.failed_strategies)
         self.tools: list[dict] = []
-        self.messages: list[dict] = []
         
         self.openai = AsyncOpenAI(  # Use async instance
             api_key=api_key,
@@ -584,12 +589,56 @@ class DCPOptimizer(DCPOptimizerBase):
         self.total_cost = 0.0
         self.api_call_details = []
         
-        # Track all tool calls with timing and WNS
-        self.tool_call_details = []
+        # Track all tool calls with timing and WNS (actual tracking done via _compat.add_tool_result())
         
         # Track total runtime
         self.start_time = None
         self.end_time = None
+
+        # === Section 7.0: Context Manager Integration ===
+        # Initialize EventBus for context change notifications
+        self._event_bus = EventBus()
+
+        # Initialize MemoryManager for context compression
+        self._memory_manager = MemoryManager(
+            compression_strategy=SmartCompressionStrategy(),
+            event_bus=self._event_bus
+        )
+        self._compat = DCPOptimizerCompat(self._memory_manager)
+        self._context_estimator = ContextEstimator()
+
+        # === Phase 3: Subscribe to EventBus events ===
+        self._event_bus.subscribe(CMEventType.CONTEXT_COMPRESSED, self._on_context_compressed)
+        self._event_bus.subscribe(CMEventType.LAYER_PROMOTED, self._on_layer_promoted)
+
+    # === Section 7.1.1: messages Property (Phase 2) ===
+    # Route all message access through DCPOptimizerCompat / MemoryManager
+
+    @property
+    def messages(self) -> list[dict]:
+        """Proxy to compat messages (MemoryManager-backed). Read-only view."""
+        return self._compat.messages
+
+    @messages.setter
+    def messages(self, value: list[dict]) -> None:
+        """Setter: clear MemoryManager and reload from provided list."""
+        from context_manager.interfaces import MessageRole, Message
+        mm = self._memory_manager
+        mm._working_store.clear()
+        for msg_dict in value:
+            role_str = msg_dict.get("role", "user")
+            content = msg_dict.get("content", "")
+            metadata = {k: v for k, v in msg_dict.items() if k not in ("role", "content")}
+            try:
+                role = MessageRole(role_str)
+            except ValueError:
+                role = MessageRole.USER
+            mm._working_store.add(Message(role=role, content=content, metadata=metadata))
+
+    @property
+    def tool_call_details(self) -> list[dict]:
+        """Proxy to compat tool_call_details (MemoryManager-backed). Read-only view."""
+        return self._compat.tool_call_details
 
     # === Section 7.2: Context Management ===
 
@@ -616,7 +665,7 @@ class DCPOptimizer(DCPOptimizerBase):
         msg_count = len(self.messages)
         token_est = self._estimate_tokens()
         iteration_factor = min(self.iteration / 10, 2)
-        failure_factor = min(len(self.failed_strategies) / 5, 2)
+        failure_factor = min(len(self._compat.failed_strategies) / 5, 2)
 
         # Data-driven task complexity: use historical success rate as signal
         task_complexity_factor = 0
@@ -644,124 +693,111 @@ class DCPOptimizer(DCPOptimizerBase):
         complexity = base_score + iteration_factor + failure_factor + task_complexity_factor
         return int(min(complexity, 10))
 
+    # === Section 7.2.1: Context Manager Integration (Phase 1) ===
+
+    def _sync_state_to_memory_manager(self) -> None:
+        """Sync DCPOptimizer state to MemoryManager for compression context."""
+        mm = self._memory_manager
+        # Sync WNS state (failed_strategies and tool_call_details via compat now)
+        if self.initial_wns is not None:
+            mm._initial_wns = self.initial_wns
+        if self.best_wns > float('-inf'):
+            mm._best_wns = self.best_wns
+        mm._clock_period = self.clock_period
+        mm._iteration = self.iteration
+
+    def _get_current_wns(self) -> Optional[float]:
+        """Get latest non-null WNS from tool_call_details via compat."""
+        for call in reversed(self._compat.tool_call_details):
+            if call.get("wns") is not None:
+                return call["wns"]
+        return None
+
+    def _build_compression_context(self, current_tokens: int) -> CMCompressionContext:
+        """Build CompressionContext from DCPOptimizer state for MemoryManager."""
+        return CMCompressionContext(
+            current_tokens=current_tokens,
+            threshold_tokens=CONTEXT_COMPRESSION_THRESHOLD,
+            hard_limit_tokens=CONTEXT_HARD_LIMIT,
+            failed_strategies=self._compat.failed_strategies,
+            tool_call_details=self._compat.tool_call_details,
+            best_wns=self.best_wns,
+            initial_wns=self.initial_wns,
+            current_wns=self._get_current_wns(),
+            iteration=self.iteration,
+            clock_period=self.clock_period
+        )
+
+    def _pull_compressed_messages_from_memory_manager(self) -> None:
+        """Pull compressed messages from MemoryManager back into self.messages."""
+        from context_manager.interfaces import MessageRole
+        compressed = self._memory_manager.get_context()
+        self.messages = [
+            {"role": m.role.value, "content": m.content, **m.metadata}
+            for m in compressed
+        ]
+
     def _compress_context(self):
-        """Multi-level context compression strategy"""
+        """Multi-level context compression strategy - delegates to MemoryManager."""
+        # Sync optimizer state to MemoryManager
+        self._sync_state_to_memory_manager()
+
+        # Note: self.messages is now a property proxying to MemoryManager via compat.
+        # No need to reload - messages are already in MemoryManager.
+
         current_tokens = self._estimate_tokens()
 
         # Hard limit: must compress
         if current_tokens > CONTEXT_HARD_LIMIT:
             logger.warning(f"[WARNING] Context hard limit exceeded (~{current_tokens:,} tokens). Triggering aggressive compression...")
-            self._aggressive_compress()
+            context = self._build_compression_context(current_tokens)
+            self._memory_manager._compress("aggressive", context)
+            self._pull_compressed_messages_from_memory_manager()
             return
 
         # Soft threshold: light compression
         if current_tokens > CONTEXT_COMPRESSION_THRESHOLD:
             logger.info(f"[WARNING] Context threshold exceeded (~{current_tokens:,} tokens). Triggering smart compression...")
-            self._smart_compress()
+            context = self._build_compression_context(current_tokens)
+            self._memory_manager._compress("smart", context)
+            self._pull_compressed_messages_from_memory_manager()
             return
 
     def _smart_compress(self):
-        """Smart light compression - preserve key information, merge similar tool calls"""
-        # Extract real-time optimization state
-        current_wns = next((t["wns"] for t in reversed(self.tool_call_details) if t["wns"] is not None), None)
-
-        # Build deterministic state summary
-        summary_lines = [
-            "[CONTEXT COMPRESSED - SMART] OPTIMIZATION STATE SUMMARY",
-            "History has been intelligently compressed, preserving key operation traces. Please strictly continue optimization based on the latest state below, without retrying operations that have already failed.",
-            f"- Target Clock: {self.clock_period:.3f} ns" if self.clock_period else "- Target Clock: N/A",
-            f"- Initial WNS: {self.initial_wns:.3f} ns" if self.initial_wns else "- Initial WNS: N/A",
-            f"- Historical Best WNS: {self.best_wns:.3f} ns",
-            f"- Current Measured WNS: {current_wns:.3f} ns" if current_wns is not None else "- Current WNS: awaiting next report",
-            f"- Current Iteration: {self.iteration}",
-        ]
-        if self.failed_strategies:
-            summary_lines.append(f"[BLOCKED] Confirmed failed strategies (do not repeat): {', '.join(self.failed_strategies[-10:])}")
-        summary_lines.append("[WARNING] Core principle: Must be data-driven. Evaluate effects after each phys_opt. Do not blindly stack optimization commands when there is no improvement.")
-        summary_lines.append("[STAT] Key operation traces (merged similar operations):")
-
-        # Merge similar tool calls, preserve best results
-        seen_iters = set()
-        merged_calls = []
-        for call in self.tool_call_details[-40:]:
-            if call['iteration'] not in seen_iters:
-                seen_iters.add(call['iteration'])
-                merged_calls.append(call)
-
-        # Preserve key information from last 30 iterations
-        for call in merged_calls[-30:]:
-            if call.get('error'):
-                status = "[FAIL] Failed"
-            elif call['wns'] is not None:
-                status = f"[WNS] {call['wns']:.3f} ns"
-            else:
-                status = "[OK] Executed (No WNS change)"
-            summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
-
-        # Reconstruct message list
-        # 1. Preserve System Prompt
-        # 2. Preserve initial User Prompt (includes DCP path and Initial Analysis)
-        new_messages = [self.messages[0], self.messages[1]]
-        # 3. Inject state summary (use user role as system reminder)
-        new_messages.append({
-            "role": "user",
-            "content": "\n".join(summary_lines)
-        })
-        # 4. Append recent conversation window (ensure tool call results are complete)
-        if len(self.messages) > 2:
-            recent_start = max(2, len(self.messages) - RECENT_TURNS_TO_KEEP)
-            recent = self.messages[recent_start:]
-            new_messages.extend(recent)
-        self.messages = new_messages
-        logger.info(f"[OK] Smart compression complete. New length: {self._estimate_context_length():,} chars, ~{self._estimate_tokens():,} tokens")
+        """DEPRECATED: Delegated to MemoryManager._compress() via _compress_context()."""
+        logger.debug("_smart_compress() deprecated - using MemoryManager")
+        self._compress_context()
 
     def _aggressive_compress(self):
-        """Aggressive compression - only preserve core state"""
-        # Extract real-time optimization state
-        current_wns = next((t["wns"] for t in reversed(self.tool_call_details) if t["wns"] is not None), None)
+        """DEPRECATED: Delegated to MemoryManager._compress() via _compress_context()."""
+        logger.debug("_aggressive_compress() deprecated - using MemoryManager")
+        self._compress_context()
 
-        # Build minimized state summary
-        summary_lines = [
-            "[CONTEXT COMPRESSED - AGGRESSIVE] OPTIMIZATION STATE SUMMARY",
-            "[WARNING] History has been heavily compressed. Please rely entirely on the state information below to continue optimization.",
-            f"- Target Clock: {self.clock_period:.3f} ns" if self.clock_period else "- Target Clock: N/A",
-            f"- Initial WNS: {self.initial_wns:.3f} ns" if self.initial_wns else "- Initial WNS: N/A",
-            f"- Historical Best WNS: {self.best_wns:.3f} ns",
-            f"- Current Measured WNS: {current_wns:.3f} ns" if current_wns is not None else "- Current WNS: N/A",
-            f"- Current Iteration: {self.iteration}",
-            f"- Total Tool Calls: {len(self.tool_call_details)}",
-        ]
-        if self.failed_strategies:
-            summary_lines.append(f"[BLOCKED] Confirmed failed strategies: {', '.join(self.failed_strategies[-5:])}")
+    # === Phase 3: EventBus event handlers ===
 
-        # Only preserve last 5 tool call traces
-        summary_lines.append("[STAT] Last 5 key operations:")
-        recent_iterations = set()
-        count = 0
-        for call in reversed(self.tool_call_details):
-            if call['iteration'] not in recent_iterations and count < 5:
-                recent_iterations.add(call['iteration'])
-                count += 1
-                if call.get('error'):
-                    status = "[FAIL] Failed"
-                elif call['wns'] is not None:
-                    status = f"[WNS] {call['wns']:.3f} ns"
-                else:
-                    status = "[OK]"
-                summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
+    def _on_context_compressed(self, event: CMContextEvent) -> None:
+        """Handle CONTEXT_COMPRESSED events from MemoryManager."""
+        data = event.data or {}
+        compression_type = data.get("compression_type", "unknown")
+        original_count = data.get("original_count", 0)
+        compressed_count = data.get("compressed_count", 0)
+        compression_ratio = (original_count - compressed_count) / original_count if original_count > 0 else 0
+        logger.info(
+            f"[EventBus] CONTEXT_COMPRESSED: type={compression_type}, "
+            f"messages={original_count}->{compressed_count} (removed {compression_ratio:.0%}), "
+            f"agent={event.source_agent_id}"
+        )
+        # Emit to standard logger for visibility
+        print(f"[CONTEXT COMPRESSED] {compression_type} - {original_count} messages -> {compressed_count} messages")
 
-        # Reconstruct message list: only preserve system prompt and compressed state
-        new_messages = [self.messages[0]]  # System prompt
-        new_messages.append({
-            "role": "user",
-            "content": "\n".join(summary_lines)
-        })
-        # Only keep last 3 messages to ensure tool call continuity
-        if len(self.messages) > 2:
-            recent = self.messages[-3:]
-            new_messages.extend(recent)
-        self.messages = new_messages
-        logger.info(f"[OK] Aggressive compression complete. New length: {self._estimate_context_length():,} chars, ~{self._estimate_tokens():,} tokens")
+    def _on_layer_promoted(self, event: CMContextEvent) -> None:
+        """Handle LAYER_PROMOTED events (messages archived to historical memory)."""
+        data = event.data or {}
+        layer = data.get("layer", "unknown")
+        message_count = data.get("message_count", 0)
+        logger.info(
+            f"[EventBus] LAYER_PROMOTED: layer={layer}, messages={message_count}"
+        )
 
     def _filter_tool_result(self, tool_name: str, result: str) -> str:
         """Retain key information based on tool type, truncate redundant content"""
@@ -850,7 +886,7 @@ class DCPOptimizer(DCPOptimizerBase):
                         complex_score += 1
 
         # 2. Scan last 3 tool calls
-        recent_tools = [t.get('tool_name', '') for t in self.tool_call_details[-3:]]
+        recent_tools = [t.get('tool_name', '') for t in self._compat.tool_call_details[-3:]]
         complex_tools = {'place_design', 'route_design', 'phys_opt_design', 'create_and_apply_pblock'}
         for tool in recent_tools:
             if any(ct in tool.lower() for ct in complex_tools):
@@ -1226,33 +1262,38 @@ class DCPOptimizer(DCPOptimizerBase):
             # [FIX] Dynamically mark whether it is an optimization task: use enhanced classify_task to deeply check vivado_run_tcl command content
             is_optimization = (self.classify_task(tool_name, arguments) == TaskCategory.OPTIMIZATION)
 
-            # Record tool call details
-            self.tool_call_details.append({
-                "tool_name": tool_name,
-                "iteration": self.iteration,
-                "elapsed_time": elapsed_time,
-                "wns": wns_measured,
-                "error": False,
-                "is_optimization": is_optimization  # new field
-            })
+            # Record tool call details via compat (MemoryManager tracks for compression)
+            # Note: extra fields (elapsed_time, is_optimization) stored in _compat._mm._tool_call_details entry
+            self._compat.add_tool_result(
+                tool_name=tool_name,
+                result=result_text,
+                wns=wns_measured,
+                error=False,
+                extra_fields={
+                    "elapsed_time": elapsed_time,
+                    "is_optimization": is_optimization
+                }
+            )
             
             return result_text
             
         except Exception as e:
             error_occurred = True
             elapsed_time = time.time() - start_time
-            
-            # Record failed tool call
-            self.tool_call_details.append({
-                "tool_name": tool_name,
-                "iteration": self.iteration,
-                "elapsed_time": elapsed_time,
-                "wns": None,
-                "error": True,
-                "error_message": str(e),
-                "is_optimization": False  # default non-optimization class on failure
-            })
-            
+
+            # Record failed tool call via compat
+            self._compat.add_tool_result(
+                tool_name=tool_name,
+                result=str(e),
+                wns=None,
+                error=True,
+                extra_fields={
+                    "elapsed_time": elapsed_time,
+                    "error_message": str(e),
+                    "is_optimization": False
+                }
+            )
+
             logger.error(f"Tool call failed: {e}")
             return json.dumps({"error": str(e)})
     
@@ -1457,15 +1498,25 @@ class DCPOptimizer(DCPOptimizerBase):
         wns_at_start = self.best_wns
         logger.info(f"Iteration {self.iteration}: Using {current_model} (complexity={context_complexity}, task={self.current_task_type})...")
         while True:
-            # 1. Inject failed strategies
-            if self.failed_strategies:
+            # [Phase 2] Disable automatic compression during tool-call loop
+            # It will be re-enabled before the LLM API call
+            saved_compression_strategy = self._memory_manager._compression_strategy
+            self._memory_manager._compression_strategy = None
+
+            # 1. Inject failed strategies via compat
+            if self._compat.failed_strategies:
                 last_msg = self.messages[-1] if self.messages else None
                 already_notified = last_msg and "has been tried and showed no effect" in last_msg.get("content", "")
                 if not already_notified:
-                    self.messages.append({
-                        "role": "user",
-                        "content": f"Note: The following strategies have been tried and showed no effect (avoid repetition): {', '.join(self.failed_strategies[-3:])}"
-                    })
+                    self._compat.add_message(
+                        "user",
+                        f"Note: The following strategies have been tried and showed no effect (avoid repetition): {', '.join(self._compat.failed_strategies[-3:])}"
+                    )
+
+            # Re-enable compression and compress before LLM call
+            self._memory_manager._compression_strategy = saved_compression_strategy
+            if saved_compression_strategy is not None:
+                self._compress_context()
 
             # 2. Async call LLM
             self.llm_call_count += 1
@@ -1476,7 +1527,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 try:
                     response = await self.openai.chat.completions.create(  # Async wait
                         model=current_model,
-                        messages=self.messages,
+                        messages=self._compat.get_formatted_for_api(),
                         tools=self.tools,
                         tool_choice="auto",
                         max_tokens=4096,
@@ -1534,11 +1585,11 @@ class DCPOptimizer(DCPOptimizerBase):
                 raise ValueError("Empty choices in API response")
                 
             message = response.choices[0].message
-            message_dict = message.model_dump(exclude_none=True)
-            self.messages.append(message_dict)
+            # [Phase 2] Add assistant message via compat (tool_calls extracted below)
+            assistant_content = message.content or ""
+            self._compat.add_message("assistant", assistant_content)
             
             if message.tool_calls:
-                tool_results = []
                 for tc in message.tool_calls:
                     if not tc.function: continue
                     tool_name = tc.function.name
@@ -1576,12 +1627,11 @@ class DCPOptimizer(DCPOptimizerBase):
                             "result": result[:500]  # Store truncated result for analysis
                         })
 
-                    tool_results.append({
-                        "role": "tool", "tool_call_id": tc.id,
-                        "name": tool_name, "content": result
+                    # [Phase 2] Add tool result via compat (each tool result is a separate message)
+                    self._compat.add_message("tool", result, {
+                        "tool_call_id": tc.id,
+                        "name": tool_name
                     })
-
-                self.messages.extend(tool_results)
                 continue  # Loop continues to process tool results
 
             # 4. No tool call, update improvement tracking
@@ -1596,7 +1646,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 current_wns = current_iter_wns_list[-1]   # Take latest WNS from this iteration
                 if current_wns > wns_at_start:            # Compare with entry snapshot
                     self.global_no_improvement = 0
-                    self.failed_strategies.clear()
+                    self._compat.failed_strategies.clear()
                 else:
                     self.global_no_improvement += 1
             # else: Non-WNS iterations don't count (may be query operations only)
@@ -1719,12 +1769,9 @@ class DCPOptimizer(DCPOptimizerBase):
             input_dcp=input_dcp.resolve()
         )
         
-        # Initialize conversation with analysis results
-        self.messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"""Optimize this FPGA design for timing.
+        # Initialize conversation with analysis results via compat (Phase 2)
+        self._compat.add_message("system", system_prompt)
+        initial_user_content = f"""Optimize this FPGA design for timing.
 
 PATHS:
 - Input DCP: {input_dcp.resolve()}
@@ -1743,8 +1790,7 @@ Proceed with optimization strategy based on the analysis above. Do NOT reload th
 CRITICAL OPTIMIZATION RULES:
 1. DATA-DRIVEN EVALUATION: After each physical optimization operation like `phys_opt_design`, you must evaluate the effect combined with timing reports (the system is configured to automatically append the latest timing results after phys_opt).
 2. AVOID BLIND OPERATIONS: Strictly decide next steps based on WNS changes before and after optimization. If WNS worsens or shows no significant improvement, proactively mark that operation as a failed strategy and find a new direction. Do not blindly and consecutively stack the same optimization commands."""
-            }
-        ]
+        self._compat.add_message("user", initial_user_content)
         
         max_iterations = 50  # Safety limit
         
@@ -1808,10 +1854,10 @@ CRITICAL OPTIMIZATION RULES:
                 if recent_routing_failure == 'timeout':
                     logger.info("route_design timeout recorded, but does not restrict subsequent routing attempts")
                     # Automatically trigger re-placement flow
-                    self.messages.append({
-                        "role": "user",
-                        "content": "Note: route_design failed due to timeout. The system will try re-placement (place_design -unplace then place_design) and retry routing. Please use phys_opt_design for load reduction optimization in subsequent steps."
-                    })
+                    self._compat.add_message(
+                        "user",
+                        "Note: route_design failed due to timeout. The system will try re-placement (place_design -unplace then place_design) and retry routing. Please use phys_opt_design for load reduction optimization in subsequent steps."
+                    )
                 
                 if is_done:
                     logger.info("Optimization workflow completed")
@@ -1822,10 +1868,10 @@ CRITICAL OPTIMIZATION RULES:
             except Exception as e:
                 logger.exception(f"Error during optimization: {e}")
                 # Add error context to conversation
-                self.messages.append({
-                    "role": "user",
-                    "content": f"An error occurred: {e}. Please verify your approach and continue or report if unrecoverable."
-                })
+                self._compat.add_message(
+                    "user",
+                    f"An error occurred: {e}. Please verify your approach and continue or report if unrecoverable."
+                )
         
         logger.warning("Reached maximum iterations")
         self.end_time = time.time()

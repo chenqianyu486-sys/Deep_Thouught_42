@@ -39,19 +39,20 @@ class DCPOptimizerCompat:
     def iteration(self) -> int:
         return self._mm.iteration
 
-    def add_message(self, role: str, content: str) -> None:
+    def add_message(self, role: str, content: str, metadata: dict = None) -> None:
         """Add message in original format."""
-        self._mm.add_message(MessageRole(role), content)
+        self._mm.add_message(MessageRole(role), content, metadata)
 
     def add_tool_result(
         self,
         tool_name: str,
         result: str,
         wns: Optional[float] = None,
-        error: bool = False
+        error: bool = False,
+        extra_fields: dict = None
     ) -> None:
         """Track tool call result."""
-        self._mm.add_tool_result(tool_name, result, wns, error)
+        self._mm.add_tool_result(tool_name, result, wns, error, extra_fields)
 
     def record_failure(self, strategy: str) -> None:
         """Record a failed strategy."""
