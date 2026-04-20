@@ -1,0 +1,14 @@
+*.class
+/data/
+/jars/
+/build/
+/.gradle/
+.pydevproject
+/.settings/
+/bin/com
+/bin/rapidwright_classpath.sh
+.idea
+*.iml
+/designs/
+interchange/schema/capnp/java.capnp
+*.orig

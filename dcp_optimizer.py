@@ -1,0 +1,3036 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Portions of this file consist of AI-generated content.
+# SPDX-License-Identifier: Apache 2.0
+
+"""
+FPGA Design Optimization Agent
+
+An autonomous AI agent that analyzes FPGA designs and applies optimizations
+using RapidWright and Vivado via MCP servers.
+"""
+
+# === Section 1: Imports ===
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import re
+import shutil
+import sys
+import tempfile
+import time
+from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import Optional
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    print("Error: openai package not installed. Please run: pip install openai", file=sys.stderr)
+    sys.exit(1)
+
+# === Section 2: Logging & Constants ===
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
+logger = logging.getLogger(__name__)
+
+# Default model
+DEFAULT_MODEL_PLANNER = "xiaomi/mimo-v2-pro"
+DEFAULT_MODEL_WORKER = "xiaomi/mimo-v2-flash"
+
+# Context Compression Configuration
+CONTEXT_COMPRESSION_THRESHOLD = 80_000   # token count threshold (~40% of flash limit)
+CONTEXT_HARD_LIMIT = 150_000             # hard limit; exceeds this value triggers aggressive compression
+
+# Model context window limits (tokens)
+WORKER_MODEL_MAX_TOKENS = 200_000       # mimo-v2-flash max context window
+PLANNER_MODEL_MAX_TOKENS = 1_000_000   # mimo-v2-pro max context window
+WORKER_CONTEXT_WARN_TOKENS = 120_000   # 60% of flash limit → bias toward planner
+WORKER_CONTEXT_FORCE_TOKENS = 170_000  # 85% of flash limit → hard override to planner
+RECENT_TURNS_TO_KEEP = 20              # number of recent messages to keep during compression (maintains conversation continuity)
+TOOL_RESULT_TRUNCATE = 30000           # tool result truncation threshold (retains key info after type-based filtering)
+
+# === Section 5.1: Token Estimation ===
+# Note: All context/prompts must be in English for consistent token estimation.
+# Token estimation uses English approximation: ~4 chars per token.
+
+def _estimate_tokens_char_based(text: str) -> int:
+    """Estimate tokens using character count (English: ~4 chars/token)."""
+    return len(text) // 4
+
+# === Section 3: Task Classification ===
+
+# Task classification constants
+class TaskCategory:
+    """Task categories: distinguish optimization vs. information tasks"""
+    INFORMATION = "information"    # Information tasks: queries, read-only
+    OPTIMIZATION = "optimization"  # Optimization tasks: design decisions, placement optimization
+    UNKNOWN = "unknown"
+
+# Task classification patterns
+INFORMATION_PATTERNS = ["get_", "read", "query", "check", "list", "show", "status", "report"]
+OPTIMIZATION_PATTERNS = ["optimize", "improve", "place", "route", "synthesize",
+                          "floorplan", "create", "modify", "fix", "debug", "analyze"]
+
+
+# === Section 4: Model Tier & Tool Mapping ===
+
+class ModelTier:
+    PLANNER = "planner"
+    WORKER = "worker"
+    DEFAULT = None
+
+
+# Tool-level model mapping (highest priority)
+TOOL_MODEL_MAPPING = {
+    # === Planner model tasks ===
+    "place_design": ModelTier.PLANNER,
+    "phys_opt_design": ModelTier.PLANNER,
+    "route_design": ModelTier.PLANNER,
+    "optimize_placement": ModelTier.PLANNER,
+    "optimize_routing": ModelTier.PLANNER,
+    "synthesize": ModelTier.PLANNER,
+    "create_floorplan": ModelTier.PLANNER,
+    "debug_timing": ModelTier.PLANNER,
+    "fix_timing": ModelTier.PLANNER,
+    # === Worker model tasks ===
+    "get_utilization": ModelTier.WORKER,
+    "get_timing": ModelTier.WORKER,
+    "report_power": ModelTier.WORKER,
+    "list_ports": ModelTier.WORKER,
+    "read_checkpoint": ModelTier.WORKER,
+}
+
+
+# === Section 5: Utility Functions ===
+
+
+def parse_timing_summary_static(timing_report: str) -> dict:
+    """
+    Parse timing summary report to extract WNS, TNS, and failing endpoints.
+    Enhanced version: automatically skip separator lines and empty lines, locate the first valid data row.
+    """
+    result = {"wns": None, "tns": None, "failing_endpoints": None}
+    lines = timing_report.split('\n')
+
+    header_idx = -1
+    for i, line in enumerate(lines):
+        if 'WNS(ns)' in line and 'TNS(ns)' in line:
+            header_idx = i
+            break
+    if header_idx == -1:
+        return result
+
+    # Search for the first valid data row after the header
+    for data_line in lines[header_idx + 1:]:
+        stripped = data_line.strip()
+        if not stripped or stripped.startswith('---') or stripped.startswith('==='):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 3:
+            try:
+                result["wns"] = float(parts[0])
+                result["tns"] = float(parts[1])
+                result["failing_endpoints"] = int(parts[2])
+                break
+            except (ValueError, IndexError):
+                continue
+    return result
+
+
+def load_system_prompt() -> str:
+    """Load system prompt from SYSTEM_PROMPT.TXT file."""
+    script_dir = Path(__file__).parent.resolve()
+    prompt_file = script_dir / "SYSTEM_PROMPT.TXT"
+    
+    try:
+        with open(prompt_file, 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        logger.error(f"System prompt file not found: {prompt_file}")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to load system prompt: {e}")
+        raise
+
+
+def convert_mcp_tool_to_openai(tool, server_prefix: str) -> dict:
+    """Convert MCP tool definition to OpenAI-compatible format with server prefix."""
+    schema = tool.inputSchema or {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "function": {
+            "name": f"{server_prefix}_{tool.name}",
+            "description": tool.description or "",
+            "parameters": schema,  # Pass complete schema directly
+            "strict": False
+        }
+    }
+
+
+# === Section 6: DCPOptimizerBase — Shared Base Class ===
+
+class DCPOptimizerBase:
+    """Base class with shared functionality for FPGA optimization."""
+    
+    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None):
+        self.debug = debug
+        
+        # Create run directory if not provided
+        if run_dir is None:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created run directory: {self.run_dir}")
+        else:
+            self.run_dir = run_dir
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.exit_stack = AsyncExitStack()
+        self.rapidwright_session: Optional[ClientSession] = None
+        self.vivado_session: Optional[ClientSession] = None
+        
+        # Use run directory for all temporary files
+        self.temp_dir = self.run_dir
+        logger.info(f"Working directory: {self.temp_dir}")
+        
+        # Timing tracking
+        self.initial_wns = None
+        self.initial_tns = None
+        self.initial_failing_endpoints = None
+        self.high_fanout_nets = []
+        self.clock_period = None
+        
+        # Log file handles
+        self._rw_log_file = None
+        self._v_log_file = None
+    
+    async def start_servers(self, log_prefix: str = ""):
+        """Start and connect to both MCP servers."""
+        script_dir = Path(__file__).parent.resolve()
+        
+        # Create log files in run directory
+        rapidwright_log = self.run_dir / "rapidwright.log"
+        rapidwright_mcp_log = self.run_dir / "rapidwright-mcp.log"
+        vivado_log = self.run_dir / "vivado.log"
+        vivado_journal = self.run_dir / "vivado.jou"
+        vivado_mcp_log = self.run_dir / "vivado-mcp.log"
+        
+        # Open log files (if not in debug mode, redirect stderr to log)
+        if self.debug:
+            self._rw_log_file = None
+            self._v_log_file = None
+            logger.info("Debug mode: MCP server output will be shown in console")
+            if log_prefix:
+                print(f"{log_prefix} Debug mode: MCP server output will be shown in console")
+        else:
+            self._rw_log_file = open(rapidwright_mcp_log, 'w')
+            self._v_log_file = open(vivado_mcp_log, 'w')
+            logger.info(f"RapidWright Java output: {rapidwright_log}")
+            logger.info(f"RapidWright MCP output: {rapidwright_mcp_log}")
+            logger.info(f"Vivado output: {vivado_log}")
+            logger.info(f"Vivado journal: {vivado_journal}")
+            logger.info(f"Vivado MCP output: {vivado_mcp_log}")
+            print(f"Log files in {self.run_dir.name}/: {rapidwright_log.name}, {rapidwright_mcp_log.name}, {vivado_log.name}, {vivado_journal.name}, {vivado_mcp_log.name}")
+        
+        # RapidWright MCP server config
+        rapidwright_args = [str(script_dir / "RapidWrightMCP" / "server.py")]
+        if not self.debug:
+            rapidwright_args.extend([
+                "--java-log", str(rapidwright_log),
+                "--mcp-log", str(rapidwright_mcp_log)
+            ])
+        
+        rapidwright_config = {
+            "command": sys.executable,
+            "args": rapidwright_args,
+            "cwd": str(self.run_dir),
+            "env": {**os.environ}
+        }
+        
+        # Vivado MCP server config
+        vivado_args = [str(script_dir / "VivadoMCP" / "vivado_mcp_server.py")]
+        if not self.debug:
+            vivado_args.extend([
+                "--vivado-log", str(vivado_log),
+                "--vivado-journal", str(vivado_journal)
+            ])
+        
+        vivado_config = {
+            "command": sys.executable,
+            "args": vivado_args,
+            "cwd": str(self.run_dir),
+            "env": {**os.environ}
+        }
+        
+        # Start RapidWright MCP
+        logger.info("Starting RapidWright MCP server...")
+        if log_prefix:
+            print(f"{log_prefix} Starting RapidWright MCP server...")
+        start_time = time.time()
+        
+        rw_params = StdioServerParameters(**rapidwright_config)
+        rw_transport = await self.exit_stack.enter_async_context(
+            stdio_client(rw_params, errlog=self._rw_log_file)
+        )
+        rw_read, rw_write = rw_transport
+        self.rapidwright_session = await self.exit_stack.enter_async_context(
+            ClientSession(rw_read, rw_write)
+        )
+        await self.rapidwright_session.initialize()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"RapidWright MCP server started in {elapsed:.2f}s")
+        if log_prefix:
+            print(f"{log_prefix} RapidWright MCP server started in {elapsed:.2f}s")
+        
+        # Start Vivado MCP
+        logger.info("Starting Vivado MCP server...")
+        if log_prefix:
+            print(f"{log_prefix} Starting Vivado MCP server...")
+        start_time = time.time()
+        
+        vivado_params = StdioServerParameters(**vivado_config)
+        vivado_transport = await self.exit_stack.enter_async_context(
+            stdio_client(vivado_params, errlog=self._v_log_file)
+        )
+        v_read, v_write = vivado_transport
+        self.vivado_session = await self.exit_stack.enter_async_context(
+            ClientSession(v_read, v_write)
+        )
+        await self.vivado_session.initialize()
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Vivado MCP server started in {elapsed:.2f}s")
+        if log_prefix:
+            print(f"{log_prefix} Vivado MCP server started in {elapsed:.2f}s")
+        
+        logger.info("Both MCP servers connected")
+        if log_prefix:
+            print(f"{log_prefix} Both MCP servers connected successfully")
+    
+    async def cleanup(self):
+        """Clean up resources."""
+        await self.exit_stack.aclose()
+        
+        if self._rw_log_file:
+            self._rw_log_file.close()
+        if self._v_log_file:
+            self._v_log_file.close()
+        
+        logger.info(f"Run directory preserved at: {self.run_dir}")
+
+    # === Section 6.1: Timing Utilities ===
+
+    def calculate_fmax(self, wns: Optional[float], clock_period: Optional[float]) -> Optional[float]:
+        """
+        Calculate achievable fmax in MHz based on WNS and clock period.
+        
+        fmax = 1 / (clock_period - WNS) when WNS < 0 (timing violation)
+        fmax = 1 / clock_period when WNS >= 0 (timing met)
+        
+        Returns fmax in MHz, or None if cannot be calculated.
+        """
+        if clock_period is None or clock_period <= 0:
+            return None
+        if wns is None:
+            return None
+        
+        achievable_period_ns = clock_period - wns
+        if achievable_period_ns <= 0:
+            return None
+        
+        return 1000.0 / achievable_period_ns
+    
+    async def get_clock_period(self, call_tool_fn) -> Optional[float]:
+        """
+        Query the clock period of the critical (worst-slack) clock from Vivado in nanoseconds.
+        
+        Uses a Tcl script that finds the endpoint clock of the worst setup timing path
+        and returns its period. This should improve handling of multi-clock designs.
+        
+        Args:
+            call_tool_fn: Function to call Vivado tools, should accept (tool_name, arguments)
+        
+        Returns the period of the critical clock, or None if no clocks.
+        """
+        # Get the period of the endpoint clock on the worst setup timing path
+        tcl_cmd = (
+            "set tp [get_timing_paths -max_paths 1 -setup]; "
+            "if {$tp ne {}} { "
+            "  set clk [get_property ENDPOINT_CLOCK $tp]; "
+            "  if {$clk ne {}} { "
+            "    puts [get_property PERIOD [get_clocks $clk]]; "
+            "  } "
+            "}"
+        )
+        try:
+            result = await call_tool_fn("run_tcl", {"command": tcl_cmd})
+            
+            for token in result.strip().split():
+                if token.startswith('ERROR') or token.startswith('WARNING'):
+                    continue
+                try:
+                    period = float(token)
+                    if period > 0:
+                        logger.info(f"Critical clock period: {period:.3f} ns")
+                        return period
+                except ValueError:
+                    continue
+        except Exception as e:
+            logger.warning(f"Failed to get critical clock period: {e}")
+        
+        logger.warning("Could not determine critical clock period from Vivado")
+        return None
+    
+    def parse_high_fanout_nets(self, report: str) -> list[tuple[str, int, int]]:
+        """
+        Parse high fanout nets report and return list of (net_name, fanout, path_count).
+        """
+        nets = []
+        lines = report.split('\n')
+        in_net_section = False
+        
+        for line in lines:
+            if 'Paths' in line and 'Fanout' in line and 'Parent Net Name' in line:
+                in_net_section = True
+                continue
+            
+            if in_net_section:
+                if line.startswith('---') or not line.strip():
+                    continue
+                if line.startswith('==='):
+                    break
+                
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        path_count = int(parts[0])
+                        fanout = int(parts[1])
+                        net_name = parts[2]
+                        
+                        if (net_name and 
+                            '/' in net_name and
+                            not net_name.startswith('get_') and
+                            not net_name.startswith('ERROR') and
+                            not net_name.startswith('WARNING')):
+                            nets.append((net_name, fanout, path_count))
+                    except ValueError:
+                        continue
+        
+        return nets
+
+    # === Section 6.2: Result Formatting & Reporting ===
+
+    def _format_fmax_results(
+        self,
+        clock_period: Optional[float],
+        initial_wns: Optional[float],
+        result_wns: Optional[float],
+        result_label: str = "Final",
+    ) -> list[str]:
+        """Format Fmax/WNS results block as a list of lines.
+        
+        """
+        initial_fmax = self.calculate_fmax(initial_wns, clock_period)
+        result_fmax = self.calculate_fmax(result_wns, clock_period)
+        result_fmax_label = f"{result_label} Fmax:"
+        result_wns_label = f"{result_label} WNS:"
+        
+        lines: list[str] = []
+        if initial_fmax is not None and result_fmax is not None:
+            target_fmax = 1000.0 / clock_period
+            fmax_change = result_fmax - initial_fmax
+            lines.append(f"  {'Target Fmax:':<21s}{target_fmax:8.2f} MHz  (clock period: {clock_period:.3f} ns)")
+            lines.append(f"  {'Initial Fmax:':<21s}{initial_fmax:8.2f} MHz  (WNS: {initial_wns:.3f} ns)")
+            lines.append(f"  {result_fmax_label:<21s}{result_fmax:8.2f} MHz  (WNS: {result_wns:.3f} ns)")
+            lines.append(f"  {'Fmax Improvement:':<21s}{fmax_change:+8.2f} MHz  (WNS: {result_wns - initial_wns:+.3f} ns)")
+        else:
+            if clock_period is not None:
+                target_fmax = 1000.0 / clock_period
+                lines.append(f"  {'Clock period:':<21s}{clock_period:8.3f} ns (target: {target_fmax:.2f} MHz)")
+            if initial_wns is not None:
+                fmax_str = f"  (fmax: {initial_fmax:.2f} MHz)" if initial_fmax else ""
+                lines.append(f"  {'Initial WNS:':<21s}{initial_wns:8.3f} ns{fmax_str}")
+            if result_wns is not None:
+                fmax_str = f"  (fmax: {result_fmax:.2f} MHz)" if result_fmax else ""
+                lines.append(f"  {result_wns_label:<21s}{result_wns:8.3f} ns{fmax_str}")
+            if initial_wns is not None and result_wns is not None:
+                lines.append(f"  {'WNS Improvement:':<21s}{result_wns - initial_wns:+8.3f} ns")
+        
+        return lines
+    
+    
+    def print_wns_change(
+        self,
+        initial_wns: Optional[float],
+        final_wns: Optional[float],
+        clock_period: Optional[float]
+    ):
+        """Print Fmax/WNS change comparison with improvement/regression status."""
+        if final_wns is None or initial_wns is None:
+            return
+        
+        initial_fmax = self.calculate_fmax(initial_wns, clock_period)
+        final_fmax = self.calculate_fmax(final_wns, clock_period)
+        wns_improvement = final_wns - initial_wns
+        
+        if initial_fmax is not None and final_fmax is not None:
+            fmax_improvement = final_fmax - initial_fmax
+            print(f"\n*** Fmax Change: {fmax_improvement:+.2f} MHz ({initial_fmax:.2f} -> {final_fmax:.2f} MHz) ***")
+            print(f"*** WNS Change: {wns_improvement:+.3f} ns ({initial_wns:.3f} -> {final_wns:.3f} ns) ***")
+        else:
+            print(f"\n*** WNS Change: {wns_improvement:+.3f} ns ***")
+        
+        if wns_improvement > 0:
+            print(f"IMPROVEMENT: Timing improved by {wns_improvement:.3f} ns")
+        elif wns_improvement < 0:
+            print(f"REGRESSION: Timing got worse by {-wns_improvement:.3f} ns")
+        else:
+            print("NO CHANGE: Timing is the same")
+    
+    def print_test_summary(
+        self,
+        title: str,
+        elapsed_seconds: float,
+        initial_wns: Optional[float],
+        final_wns: Optional[float],
+        clock_period: Optional[float],
+        extra_info: str = ""
+    ):
+        """Print formatted test summary."""
+        print("\n" + "="*70)
+        print(title)
+        print("="*70)
+        print(f"Total runtime: {elapsed_seconds:.2f} seconds ({elapsed_seconds/60:.2f} minutes)")
+        
+        result_lines = self._format_fmax_results(clock_period, initial_wns, final_wns)
+        if result_lines:
+            print(f"\nFmax Results:")
+            print("\n".join(result_lines))
+        
+        if extra_info:
+            print(f"\n{extra_info}")
+        print("="*70)
+
+
+# === Section 7: DCPOptimizer — LLM-Driven Optimization Agent ===
+
+class DCPOptimizer(DCPOptimizerBase):
+    """FPGA Design Optimization Agent using RapidWright and Vivado MCPs."""
+    
+    def __init__(
+        self,
+        api_key: str,
+        model_planner: str = DEFAULT_MODEL_PLANNER,
+        model_worker: str = DEFAULT_MODEL_WORKER,
+        debug: bool = False,
+        run_dir: Optional[Path] = None
+    ):
+        super().__init__(debug=debug, run_dir=run_dir)
+        
+        self.api_key = api_key
+        self.model_planner = model_planner
+        self.model_worker = model_worker
+
+        # Track failed strategies to improve agent self-awareness
+        self.failed_strategies = []
+
+        self.tools: list[dict] = []
+        self.messages: list[dict] = []
+        
+        self.openai = AsyncOpenAI(  # Use async instance
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            timeout=300.0  # Global timeout in seconds
+        )
+
+        # Track optimization progress
+        self.iteration = 0
+        self.best_wns = float('-inf')
+        self.current_task_type = ""  # Current task type
+        # Task type success rate tracking (task_type -> {success: int, total: int})
+        self.task_type_stats: dict[str, dict[str, int]] = {}
+        self.llm_call_count = 0
+        self.last_used_model = None
+        self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
+
+        # === Section 7.1: Context Compression & Model Switching State ===
+        # Simplified model switching mechanism - only uses two counters for model selection
+        self.worker_consecutive_success = 0          # Worker consecutive success count (for downgrade)
+        self.worker_consecutive_failures = 0         # Worker cumulative failure count (for upgrade)
+        self.global_no_improvement = 0               # Global consecutive no-improvement count
+        self.iteration_tool_errors = []              # Tool errors in current iteration for failure classification
+
+        # Threshold configuration
+        self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
+        self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
+        self.GLOBAL_NO_IMPROVEMENT_LIMIT = 5         # Global no-improvement limit
+        
+        # Track token usage and costs
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
+        self.total_cost = 0.0
+        self.api_call_details = []
+        
+        # Track all tool calls with timing and WNS
+        self.tool_call_details = []
+        
+        # Track total runtime
+        self.start_time = None
+        self.end_time = None
+
+    # === Section 7.2: Context Management ===
+
+    def _estimate_context_length(self) -> int:
+        """Rough estimate of current context length (character count proxy)"""
+        return sum(len(str(msg.get("content", ""))) for msg in self.messages)
+
+    def _estimate_tokens(self) -> int:
+        """Token estimation using character count (~4 chars/token for English)."""
+        total = 0
+        for msg in self.messages:
+            content = str(msg.get("content", ""))
+            total += _estimate_tokens_char_based(content)
+        return total
+
+    def _estimate_context_complexity(self, task_type: str = "") -> int:
+        """
+        Estimate context complexity score (0-10).
+        Data-driven: uses historical task success rate instead of keyword matching.
+
+        Args:
+            task_type: Current task type, e.g., "place_design", "get_utilization", "optimize_placement"
+        """
+        msg_count = len(self.messages)
+        token_est = self._estimate_tokens()
+        iteration_factor = min(self.iteration / 10, 2)
+        failure_factor = min(len(self.failed_strategies) / 5, 2)
+
+        # Data-driven task complexity: use historical success rate as signal
+        task_complexity_factor = 0
+        if task_type and task_type in self.task_type_stats:
+            stats = self.task_type_stats[task_type]
+            if stats['total'] >= 3:
+                success_rate = stats['success'] / stats['total']
+                # High success rate → simple/easy task → low factor
+                # Low success rate → hard task → high factor
+                if success_rate >= 0.8:
+                    task_complexity_factor = 0
+                elif success_rate >= 0.6:
+                    task_complexity_factor = 1
+                elif success_rate >= 0.4:
+                    task_complexity_factor = 2
+                else:
+                    task_complexity_factor = 3
+        else:
+            # Unknown task type: neutral
+            task_complexity_factor = 1
+
+        # Base score: based on message count and token amount
+        base_score = min(msg_count / 20, 3) + min(token_est / 50000, 3)
+
+        complexity = base_score + iteration_factor + failure_factor + task_complexity_factor
+        return int(min(complexity, 10))
+
+    def _compress_context(self):
+        """Multi-level context compression strategy"""
+        current_tokens = self._estimate_tokens()
+
+        # Hard limit: must compress
+        if current_tokens > CONTEXT_HARD_LIMIT:
+            logger.warning(f"[WARNING] Context hard limit exceeded (~{current_tokens:,} tokens). Triggering aggressive compression...")
+            self._aggressive_compress()
+            return
+
+        # Soft threshold: light compression
+        if current_tokens > CONTEXT_COMPRESSION_THRESHOLD:
+            logger.info(f"[WARNING] Context threshold exceeded (~{current_tokens:,} tokens). Triggering smart compression...")
+            self._smart_compress()
+            return
+
+    def _smart_compress(self):
+        """Smart light compression - preserve key information, merge similar tool calls"""
+        # Extract real-time optimization state
+        current_wns = next((t["wns"] for t in reversed(self.tool_call_details) if t["wns"] is not None), None)
+
+        # Build deterministic state summary
+        summary_lines = [
+            "[CONTEXT COMPRESSED - SMART] OPTIMIZATION STATE SUMMARY",
+            "History has been intelligently compressed, preserving key operation traces. Please strictly continue optimization based on the latest state below, without retrying operations that have already failed.",
+            f"- Target Clock: {self.clock_period:.3f} ns" if self.clock_period else "- Target Clock: N/A",
+            f"- Initial WNS: {self.initial_wns:.3f} ns" if self.initial_wns else "- Initial WNS: N/A",
+            f"- Historical Best WNS: {self.best_wns:.3f} ns",
+            f"- Current Measured WNS: {current_wns:.3f} ns" if current_wns is not None else "- Current WNS: awaiting next report",
+            f"- Current Iteration: {self.iteration}",
+        ]
+        if self.failed_strategies:
+            summary_lines.append(f"[BLOCKED] Confirmed failed strategies (do not repeat): {', '.join(self.failed_strategies[-10:])}")
+        summary_lines.append("[WARNING] Core principle: Must be data-driven. Evaluate effects after each phys_opt. Do not blindly stack optimization commands when there is no improvement.")
+        summary_lines.append("[STAT] Key operation traces (merged similar operations):")
+
+        # Merge similar tool calls, preserve best results
+        seen_iters = set()
+        merged_calls = []
+        for call in self.tool_call_details[-40:]:
+            if call['iteration'] not in seen_iters:
+                seen_iters.add(call['iteration'])
+                merged_calls.append(call)
+
+        # Preserve key information from last 30 iterations
+        for call in merged_calls[-30:]:
+            if call.get('error'):
+                status = "[FAIL] Failed"
+            elif call['wns'] is not None:
+                status = f"[WNS] {call['wns']:.3f} ns"
+            else:
+                status = "[OK] Executed (No WNS change)"
+            summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
+
+        # Reconstruct message list
+        # 1. Preserve System Prompt
+        # 2. Preserve initial User Prompt (includes DCP path and Initial Analysis)
+        new_messages = [self.messages[0], self.messages[1]]
+        # 3. Inject state summary (use user role as system reminder)
+        new_messages.append({
+            "role": "user",
+            "content": "\n".join(summary_lines)
+        })
+        # 4. Append recent conversation window (ensure tool call results are complete)
+        if len(self.messages) > 2:
+            recent_start = max(2, len(self.messages) - RECENT_TURNS_TO_KEEP)
+            recent = self.messages[recent_start:]
+            new_messages.extend(recent)
+        self.messages = new_messages
+        logger.info(f"[OK] Smart compression complete. New length: {self._estimate_context_length():,} chars, ~{self._estimate_tokens():,} tokens")
+
+    def _aggressive_compress(self):
+        """Aggressive compression - only preserve core state"""
+        # Extract real-time optimization state
+        current_wns = next((t["wns"] for t in reversed(self.tool_call_details) if t["wns"] is not None), None)
+
+        # Build minimized state summary
+        summary_lines = [
+            "[CONTEXT COMPRESSED - AGGRESSIVE] OPTIMIZATION STATE SUMMARY",
+            "[WARNING] History has been heavily compressed. Please rely entirely on the state information below to continue optimization.",
+            f"- Target Clock: {self.clock_period:.3f} ns" if self.clock_period else "- Target Clock: N/A",
+            f"- Initial WNS: {self.initial_wns:.3f} ns" if self.initial_wns else "- Initial WNS: N/A",
+            f"- Historical Best WNS: {self.best_wns:.3f} ns",
+            f"- Current Measured WNS: {current_wns:.3f} ns" if current_wns is not None else "- Current WNS: N/A",
+            f"- Current Iteration: {self.iteration}",
+            f"- Total Tool Calls: {len(self.tool_call_details)}",
+        ]
+        if self.failed_strategies:
+            summary_lines.append(f"[BLOCKED] Confirmed failed strategies: {', '.join(self.failed_strategies[-5:])}")
+
+        # Only preserve last 5 tool call traces
+        summary_lines.append("[STAT] Last 5 key operations:")
+        recent_iterations = set()
+        count = 0
+        for call in reversed(self.tool_call_details):
+            if call['iteration'] not in recent_iterations and count < 5:
+                recent_iterations.add(call['iteration'])
+                count += 1
+                if call.get('error'):
+                    status = "[FAIL] Failed"
+                elif call['wns'] is not None:
+                    status = f"[WNS] {call['wns']:.3f} ns"
+                else:
+                    status = "[OK]"
+                summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
+
+        # Reconstruct message list: only preserve system prompt and compressed state
+        new_messages = [self.messages[0]]  # System prompt
+        new_messages.append({
+            "role": "user",
+            "content": "\n".join(summary_lines)
+        })
+        # Only keep last 3 messages to ensure tool call continuity
+        if len(self.messages) > 2:
+            recent = self.messages[-3:]
+            new_messages.extend(recent)
+        self.messages = new_messages
+        logger.info(f"[OK] Aggressive compression complete. New length: {self._estimate_context_length():,} chars, ~{self._estimate_tokens():,} tokens")
+
+    def _filter_tool_result(self, tool_name: str, result: str) -> str:
+        """Retain key information based on tool type, truncate redundant content"""
+        if len(result) <= TOOL_RESULT_TRUNCATE:
+            return result
+
+        # Timing reports: retain WNS/TNS/key path summary
+        if 'timing' in tool_name.lower():
+            lines = result.split('\n')
+            kept_lines = []
+            for line in lines:
+                # Retain key metric lines
+                if any(kw in line.lower() for kw in ['wns', 'tns', 'failing', 'clock', 'target', 'level']):
+                    kept_lines.append(line)
+                # Retain headers
+                elif line.strip().startswith('---') or line.strip().startswith('==='):
+                    kept_lines.append(line)
+            if kept_lines:
+                filtered = '\n'.join(kept_lines[:100])  # Keep at most 100 lines
+                if len(result) > len(filtered):
+                    return filtered + f"\n...[timing report truncated, original: {len(result)} chars]..."
+            return result[:TOOL_RESULT_TRUNCATE]
+
+        # Route status: retain errors and congestion info
+        if 'route' in tool_name.lower():
+            lines = result.split('\n')
+            kept_lines = []
+            for line in lines:
+                # Retain key information
+                if any(kw in line.lower() for kw in ['error', 'fail', 'congestion', 'unrouted', 'nets', 'status']):
+                    kept_lines.append(line)
+            if kept_lines:
+                filtered = '\n'.join(kept_lines[:50])
+                if len(result) > len(filtered):
+                    return filtered + f"\n...[route status truncated, original: {len(result)} chars]..."
+            return result[:TOOL_RESULT_TRUNCATE]
+
+        # General truncation: preserve beginning and ending key information
+        head_len = TOOL_RESULT_TRUNCATE // 2
+        tail_len = TOOL_RESULT_TRUNCATE // 2
+        return result[:head_len] + f"\n...[{len(result) - TOOL_RESULT_TRUNCATE} chars truncated]...\n" + result[-tail_len:]
+    
+    def _estimate_immediate_complexity(self, recent_messages: list) -> int:
+        """
+        Immediate complexity assessment: determine actual task complexity based on recent message content.
+        """
+        complexity = 0
+        complex_patterns = [
+            r"optimize|optimization",
+            r"analyze.*timing|timing.*analyz",
+            r"floorplan|placement",
+            r"constraint",
+            r"strategy",
+            r"debug|fix.*error",
+            r"compare.*approach|evaluate",
+            r"implement.*logic|custom.*block"
+        ]
+        import re
+        for msg in recent_messages[-3:]:  # Only look at last 3 messages
+            content = str(msg.get("content", "")).lower()
+            for pattern in complex_patterns:
+                if re.search(pattern, content):
+                    complexity += 1
+        return min(complexity, 5)
+
+    def _is_complex_task(self, window_size: int = 5) -> bool:
+        """
+        Determine task complexity based on recent messages and tool calls (sliding window + weighted scoring).
+        Returns:
+            True if Planner should be used, False if Worker may be sufficient.
+        """
+        complex_score = 0
+
+        # 1. Scan last N user messages
+        if self.messages:
+            user_msgs = [m for m in reversed(self.messages) if m.get('role') == 'user'][:window_size]
+            for msg in user_msgs:
+                content = msg.get('content', '').lower()
+                # High-weight keywords
+                for kw in ['optimize', 'strategy', 'floorplan', 'pblock', 'debug', 'violation', 'congestion']:
+                    if kw in content:
+                        complex_score += 2
+                # Normal-weight keywords
+                for kw in ['place', 'route', 'synthesize', 'implement', 'modify']:
+                    if kw in content:
+                        complex_score += 1
+
+        # 2. Scan last 3 tool calls
+        recent_tools = [t.get('tool_name', '') for t in self.tool_call_details[-3:]]
+        complex_tools = {'place_design', 'route_design', 'phys_opt_design', 'create_and_apply_pblock'}
+        for tool in recent_tools:
+            if any(ct in tool.lower() for ct in complex_tools):
+                complex_score += 3
+
+        # 3. Context complexity score
+        complexity = self._estimate_context_complexity(self.current_task_type)
+        if complexity >= 5:
+            complex_score += 5
+
+        return complex_score >= 5
+
+    def _on_iteration_end(self, wns_improved: bool, model_used: str):
+        """
+        Simplified iteration end processing: only update counters, _select_model decides next iteration's model.
+
+        Args:
+            wns_improved: Whether WNS improved this iteration
+            model_used: The model actually used this iteration
+        """
+        if wns_improved:
+            # Improved: reset failure count, clear historical failure accumulation
+            self.worker_consecutive_failures = 0
+            self.global_no_improvement = 0
+            # Only count consecutive success for Worker
+            if model_used == self.model_worker:
+                self.worker_consecutive_success += 1
+        else:
+            # Not improved: reset success count
+            self.worker_consecutive_success = 0
+            # Only count failures for Worker (information tasks don't count)
+            if model_used == self.model_worker:
+                if self.classify_task(self.current_task_type) == TaskCategory.OPTIMIZATION:
+                    self.worker_consecutive_failures += 1
+            # Global no-improvement count
+            self.global_no_improvement += 1
+
+    def classify_task(self, tool_name: str, arguments: dict = None) -> str:
+        """Simplified: only distinguish OPTIMIZATION / INFORMATION / UNKNOWN"""
+        if not tool_name:
+            return TaskCategory.UNKNOWN
+
+        name_lower = tool_name.lower()
+
+        if any(p in name_lower for p in OPTIMIZATION_PATTERNS):
+            return TaskCategory.OPTIMIZATION
+
+        if any(p in name_lower for p in INFORMATION_PATTERNS):
+            return TaskCategory.INFORMATION
+
+        if tool_name == "vivado_run_tcl" and arguments:
+            tcl_cmd = str(arguments.get("command", "")).lower()
+            if any(p in tcl_cmd for p in OPTIMIZATION_PATTERNS):
+                return TaskCategory.OPTIMIZATION
+
+        return TaskCategory.UNKNOWN
+
+    # === Section 7.3: Model Routing & Task Classification ===
+
+    def _is_trivial_task(self, task_type: str, context_complexity: int) -> bool:
+        """
+        Determine if this is a trivial task: read-only query tool and complexity < 3
+        """
+        trivial_patterns = ["get", "read", "query", "check", "list", "show", "status"]
+        is_query_only = any(p in task_type.lower() for p in trivial_patterns)
+        return is_query_only and context_complexity < 3
+
+    def _is_highly_complex_task(self, task_type: str, context_complexity: int, recent_messages: list) -> bool:
+        """
+        Determine if this is a highly complex task: explicit optimization tool, complexity >= 6, or messages contain strategy planning
+        """
+        optimize_patterns = ["optimize", "improve", "place", "route", "synthesize", "floorplan"]
+        has_optimize = any(p in task_type.lower() for p in optimize_patterns)
+        if has_optimize or context_complexity >= 6:
+            return True
+        strategy_keywords = ["strategy", "plan", "approach"]
+        for msg in recent_messages[-3:]:
+            content = msg.get("content", "").lower()
+            if any(kw in content for kw in strategy_keywords):
+                return True
+        return False
+
+    def _select_model(self, tool_name: str = "", context_complexity: int = 0,
+                       arguments: dict = None, **kwargs) -> str:
+        """
+        Scoring-based model selection across 7 dimensions.
+        Replaces the old 4-layer linear override logic with a weighted score system
+        where each dimension contributes points; the model with the higher score wins.
+        A margin (>=2) is required to switch models, preventing oscillation.
+        A hard override forces planner when context approaches flash's 200K limit.
+        """
+        # ── Hard override: context window safety ─────────────────────────────
+        current_tokens = self._estimate_tokens()
+        if current_tokens >= WORKER_CONTEXT_FORCE_TOKENS:
+            logger.info(f"Context window override: ~{current_tokens:,} tokens ≥ {WORKER_CONTEXT_FORCE_TOKENS:,} (flash limit), forcing planner model")
+            return self.model_planner
+
+        planner_score = 0
+        worker_score = 0
+
+        # ── Dimension 1: Tool mapping (intrinsic complexity of the tool) ─────
+        if tool_name in TOOL_MODEL_MAPPING:
+            tier = TOOL_MODEL_MAPPING[tool_name]
+            if tier == ModelTier.PLANNER:
+                planner_score += 3
+            elif tier == ModelTier.WORKER:
+                worker_score += 3
+
+        # ── Dimension 2: Task category ───────────────────────────────────────
+        category = self.classify_task(tool_name, arguments)
+        if category == TaskCategory.OPTIMIZATION:
+            planner_score += 2
+        elif category == TaskCategory.INFORMATION:
+            worker_score += 1
+
+        # ── Dimension 3: Current context complexity (real-time signal) ───────
+        if context_complexity >= 6:
+            planner_score += 2
+        elif context_complexity < 3:
+            worker_score += 1
+
+        # ── Dimension 4: Historical capability score (data-driven) ───────────
+        capability = self._get_task_capability_score(tool_name)
+        if capability >= 0.7 and category != TaskCategory.OPTIMIZATION:
+            worker_score += 2
+        elif capability < 0.3:
+            planner_score += 2
+
+        # ── Dimension 5: Counter state (short-term trend intervention) ────────
+        # Consecutive failures → force upgrade; consecutive successes → allow downgrade
+        if self.worker_consecutive_failures >= self.WORKER_UPGRADE_THRESHOLD:
+            planner_score += 4          # Strong intervention, creates clear separation
+        if self.worker_consecutive_success >= self.WORKER_DOWNGRADE_THRESHOLD:
+            worker_score += 1           # Allow downgrade, but does not force
+
+        # ── Dimension 6: Global no-improvement signal ────────────────────────
+        # Previously only used to halt optimization; now also biases toward Worker
+        # when Planner has been stuck for too long, encouraging a strategy shift
+        if self.global_no_improvement >= self.GLOBAL_NO_IMPROVEMENT_LIMIT // 2:
+            worker_score += 1
+
+        # ── Dimension 7: Context window capacity ──────────────────────────────
+        # Flash has 200K limit; bias toward planner (1M) when approaching it
+        if current_tokens >= WORKER_CONTEXT_WARN_TOKENS:
+            planner_score += 2
+
+        # ── Decision threshold ────────────────────────────────────────────────
+        if planner_score > worker_score + 1:   # Margin of 2 required to switch, avoids thrashing
+            return self.model_planner
+        elif worker_score > planner_score:
+            return self.model_worker
+        else:
+            return self.model_planner  # Default to safe choice
+
+    def _get_task_capability_score(self, task_type: str) -> float:
+        """
+        Issue 4 optimization: calculate Worker model capability score for specific task based on historical performance.
+        Return value: 0.0-1.0 (Worker success rate), returns 0.5 (neutral) if task has never been seen
+        """
+        if not task_type or task_type not in self.task_type_stats:
+            return 0.5  # Never seen this task, default to neutral
+        stats = self.task_type_stats[task_type]
+        total = stats.get('total', 0)
+        if total == 0:
+            return 0.5
+        success = stats.get('success', 0)
+        return success / total
+
+    def _evaluate_task_success(self, tool_name: str, tool_result: str,
+                                wns_before: float, wns_after: float) -> tuple[bool, str]:
+        """
+        Evaluate whether a task completed successfully based on task type.
+
+        Returns:
+            (is_success, failure_reason): is_success=True means task achieved its goal,
+            failure_reason explains why if not successful
+        """
+        category = self.classify_task(tool_name)
+
+        # Tool call error check (applies to all task types)
+        has_error = False
+        error_msg = ""
+        if tool_result:
+            result_lower = tool_result.lower()
+            if "error" in result_lower and "success" not in result_lower:
+                has_error = True
+                if '"error"' in result_lower:
+                    try:
+                        import json
+                        data = json.loads(tool_result)
+                        error_msg = str(data.get("error", ""))
+                    except:
+                        error_msg = tool_result[tool_result.lower().find("error"):][:200]
+
+        # INFORMATION task: success = got valid data (no error)
+        if category == TaskCategory.INFORMATION:
+            if has_error:
+                error_lower = error_msg.lower()
+                if "timeout" in error_lower or "timed out" in error_lower:
+                    return False, "recoverable_timeout"
+                return False, "unrecoverable_error"
+            return True, ""
+
+        # OPTIMIZATION task: success = WNS improved
+        if category == TaskCategory.OPTIMIZATION:
+            if has_error:
+                error_lower = error_msg.lower()
+                if "timeout" in error_lower or "timed out" in error_lower:
+                    return False, "recoverable_timeout"
+                if any(phrase in error_lower for phrase in [
+                    "routing failed", "route error", "cannot route",
+                    "unroutable", "exceeds", "congestion"
+                ]):
+                    return False, "routing_failure"
+                return False, "unrecoverable_error"
+
+            if wns_after > wns_before:
+                return True, ""
+            elif wns_after < wns_before:
+                return False, "wns_regression"
+            else:
+                return False, "wns_no_improvement"
+
+        return not has_error, "unrecoverable_error" if has_error else ""
+
+    def _record_task_outcome(self, task_type: str, model_used: str,
+                              improved: bool, tool_error: bool = False,
+                              failure_type: str = ""):
+        """Record task execution result for Worker capability scoring."""
+        if not task_type:
+            return
+        if not hasattr(self, 'task_type_stats'):
+            self.task_type_stats = {}
+        if task_type not in self.task_type_stats:
+            self.task_type_stats[task_type] = {'success': 0, 'total': 0, 'failures': []}
+
+        stats = self.task_type_stats[task_type]
+        stats['total'] += 1
+
+        category = self.classify_task(task_type)
+        is_success = False
+
+        if category == TaskCategory.INFORMATION:
+            is_success = not tool_error
+        elif category == TaskCategory.OPTIMIZATION:
+            is_success = improved
+        else:
+            is_success = improved
+
+        if is_success:
+            stats['success'] += 1
+        else:
+            if failure_type:
+                stats['failures'].append(failure_type)
+                if len(stats['failures']) > 10:
+                    stats['failures'] = stats['failures'][-10:]
+
+    # === Section 7.4: Server & Tool Management ===
+
+    async def start_servers(self):
+        """Start and connect to both MCP servers."""
+        await super().start_servers()
+        await self._collect_tools()
+        logger.info(f"Connected to servers with {len(self.tools)} tools available")
+    
+    async def _collect_tools(self):
+        """Collect and convert tools from both MCP servers."""
+        self.tools = []
+        
+        rw_response = await self.rapidwright_session.list_tools()
+        for tool in rw_response.tools:
+            self.tools.append(convert_mcp_tool_to_openai(tool, "rapidwright"))
+        
+        v_response = await self.vivado_session.list_tools()
+        for tool in v_response.tools:
+            self.tools.append(convert_mcp_tool_to_openai(tool, "vivado"))
+    
+    async def call_tool(self, tool_name: str, arguments: dict) -> str:
+        """Execute a tool call on the appropriate MCP server."""
+        # Parse server prefix from tool name
+        if tool_name.startswith("rapidwright_"):
+            session = self.rapidwright_session
+            actual_name = tool_name[len("rapidwright_"):]
+        elif tool_name.startswith("vivado_"):
+            session = self.vivado_session
+            actual_name = tool_name[len("vivado_"):]
+        else:
+            return json.dumps({"error": f"Unknown tool prefix in: {tool_name}"})
+        
+        # Track timing for this tool call
+        start_time = time.time()
+        wns_measured = None
+        error_occurred = False
+        
+        try:
+            logger.info(f"Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
+            result = await session.call_tool(actual_name, arguments)
+
+            # Extract text content from result
+            if result.content:
+                text_parts = [c.text for c in result.content if hasattr(c, 'text')]
+                result_text = "\n".join(text_parts)
+            else:
+                result_text = "(no output)"
+
+            # Auto-evaluate: After executing phys_opt_design (or Tcl containing this command), proactively append timing report
+            is_phys_opt_tool = (tool_name == "vivado_phys_opt_design")
+            is_tcl_phys_opt = (tool_name == "vivado_run_tcl" and "phys_opt_design" in str(arguments.get("command", "")))
+
+            if is_phys_opt_tool or is_tcl_phys_opt:
+                logger.info("Auto-evaluating timing after phys_opt_design to enforce data-driven strategy...")
+                try:
+                        # Use the actual mapped vivado_run_tcl tool to run timing report for best reliability
+                        timing_text = await self.call_tool("vivado_run_tcl", {"command": "report_timing_summary"})
+                        result_text += "\n\n=== AUTO TIMING EVALUATION AFTER PHYS_OPT ===\n" + timing_text
+
+                        # Try to extract WNS and print to terminal for human to observe progress
+                        import re
+                        wns_match = re.search(r'WNS.*?([-\d.]+)', timing_text) or re.search(r'WNS\s*[=:]\s*([-\d.]+)', timing_text, re.IGNORECASE)
+                        if wns_match and hasattr(self, 'best_wns'):
+                            try:
+                                current_wns = float(wns_match.group(1))
+                                if current_wns > self.best_wns:
+                                    logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
+                                    self.best_wns = current_wns
+                                else:
+                                    logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
+                            except ValueError:
+                                pass
+                except Exception as eval_err:
+                    logger.warning(f"Auto-eval timing failed: {eval_err}")
+                    result_text += f"\n\n[Warning: Auto timing evaluation failed: {eval_err}]"
+
+            # Track WNS from timing reports and get_wns calls
+            if tool_name == "vivado_report_timing_summary":            
+                timing_info = parse_timing_summary_static(result_text)
+                if timing_info["wns"] is not None:
+                    current_wns = timing_info["wns"]
+                    wns_measured = current_wns  # Store for tracking
+                    current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                    
+                    # Format fmax string if available
+                    fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                    
+                    if current_wns > self.best_wns:
+                        logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                        self.best_wns = current_wns
+                    else:
+                        logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+            
+            # Also track WNS from get_wns tool (returns just the numeric WNS value)
+            elif tool_name == "vivado_get_wns":
+                try:
+                    # get_wns returns just a number like "-0.099" or "0.016"
+                    current_wns = float(result_text.strip())
+                    wns_measured = current_wns  # Store for tracking
+                    current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                    
+                    # Format fmax string if available
+                    fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                    
+                    if current_wns > self.best_wns:
+                        logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                        self.best_wns = current_wns
+                    else:
+                        logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                except (ValueError, AttributeError):
+                    # Could not parse WNS from get_wns output
+                    logger.warning(f"Could not parse WNS from get_wns output: {result_text[:100]}")
+            
+            elapsed_time = time.time() - start_time
+
+            # [FIX] Dynamically mark whether it is an optimization task: use enhanced classify_task to deeply check vivado_run_tcl command content
+            is_optimization = (self.classify_task(tool_name, arguments) == TaskCategory.OPTIMIZATION)
+
+            # Record tool call details
+            self.tool_call_details.append({
+                "tool_name": tool_name,
+                "iteration": self.iteration,
+                "elapsed_time": elapsed_time,
+                "wns": wns_measured,
+                "error": False,
+                "is_optimization": is_optimization  # new field
+            })
+            
+            return result_text
+            
+        except Exception as e:
+            error_occurred = True
+            elapsed_time = time.time() - start_time
+            
+            # Record failed tool call
+            self.tool_call_details.append({
+                "tool_name": tool_name,
+                "iteration": self.iteration,
+                "elapsed_time": elapsed_time,
+                "wns": None,
+                "error": True,
+                "error_message": str(e),
+                "is_optimization": False  # default non-optimization class on failure
+            })
+            
+            logger.error(f"Tool call failed: {e}")
+            return json.dumps({"error": str(e)})
+    
+    async def _call_vivado_tool(self, tool_name: str, arguments: dict) -> str:
+        """Helper to call Vivado tools (for use with base class methods)."""
+        return await self.call_tool(f"vivado_{tool_name}", arguments)
+
+    # === Section 7.5: Initial Design Analysis ===
+
+    async def perform_initial_analysis(self, input_dcp: Path) -> str:
+        """
+        Perform initial analysis without LLM:
+        1. Initialize RapidWright
+        2. Open checkpoint in Vivado
+        3. Report timing summary
+        4. Get critical high fanout nets
+        
+        Returns a formatted summary of the analysis.
+        """
+        logger.info("Performing initial design analysis...")
+        print("\n=== Initial Design Analysis ===\n")
+        
+        # Step 1: Initialize RapidWright
+        logger.info("Initializing RapidWright...")
+        print("Initializing RapidWright...")
+        result = await self.call_tool("rapidwright_initialize_rapidwright", {})
+        if "error" in result.lower() and "success" not in result.lower():
+            raise RuntimeError(f"Failed to initialize RapidWright: {result}")
+        print("✓ RapidWright initialized\n")
+        
+        # Step 2: Open checkpoint in Vivado
+        logger.info(f"Opening checkpoint: {input_dcp}")
+        print(f"Opening checkpoint: {input_dcp.name}")
+        result = await self.call_tool("vivado_open_checkpoint", {
+            "dcp_path": str(input_dcp.resolve())
+        })
+        if "error" in result.lower() and "opened successfully" not in result.lower():
+            raise RuntimeError(f"Failed to open checkpoint: {result}")
+        print("✓ Checkpoint opened in Vivado\n")
+        
+        # Step 3: Report timing summary
+        logger.info("Analyzing timing...")
+        print("Analyzing timing...")
+        timing_report = await self.call_tool("vivado_report_timing_summary", {})
+        
+        # Parse timing
+        timing_info = parse_timing_summary_static(timing_report)
+        self.initial_wns = timing_info["wns"]
+        self.initial_tns = timing_info["tns"]
+        self.initial_failing_endpoints = timing_info["failing_endpoints"]
+        self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
+        
+        # Get clock period for fmax calculation
+        self.clock_period = await super().get_clock_period(self._call_vivado_tool)
+        
+        print(f"✓ Timing analyzed:")
+        if self.clock_period is not None:
+            target_fmax = 1000.0 / self.clock_period  # MHz
+            print(f"  - Clock period: {self.clock_period:.3f} ns (target fmax: {target_fmax:.2f} MHz)")
+        if self.initial_wns is not None:
+            print(f"  - WNS: {self.initial_wns:.3f} ns")
+            # Calculate and display achievable fmax
+            initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+            if initial_fmax is not None:
+                print(f"  - Achievable fmax: {initial_fmax:.2f} MHz")
+        if self.initial_tns is not None:
+            print(f"  - TNS: {self.initial_tns:.3f} ns")
+        if self.initial_failing_endpoints is not None:
+            print(f"  - Failing endpoints: {self.initial_failing_endpoints}")
+        print()
+        
+        # Step 4: Get critical high fanout nets
+        logger.info("Identifying critical high fanout nets...")
+        print("Identifying critical high fanout nets...")
+        nets_report = await self.call_tool("vivado_get_critical_high_fanout_nets", {
+            "num_paths": 50,
+            "min_fanout": 100
+        })
+        
+        # Parse high fanout nets
+        self.high_fanout_nets = self.parse_high_fanout_nets(nets_report)
+        print(f"✓ Found {len(self.high_fanout_nets)} high fanout nets (>100 fanout)\n")
+        
+        # Step 5: Load design in RapidWright for spread analysis
+        critical_path_spread_info = None  # Initialize
+        
+        logger.info("Loading design in RapidWright...")
+        print("Loading design in RapidWright for spread analysis...")
+        result = await self.call_tool("rapidwright_read_checkpoint", {
+            "dcp_path": str(input_dcp.resolve())
+        })
+        if "error" in result.lower() and "success" not in result.lower():
+            print(f"[WARNING] Could not load design in RapidWright: {result}")
+        else:
+            print("✓ Design loaded in RapidWright\n")
+            
+            # Step 6: Extract critical path cells and analyze spread
+            logger.info("Extracting and analyzing critical path spread...")
+            print("Analyzing critical path spread...")
+            
+            # Extract critical path cells from Vivado
+            temp_path = Path(self.temp_dir) / "initial_critical_paths.json"
+            cells_json = await self.call_tool("vivado_extract_critical_path_cells", {
+                "num_paths": 50,
+                "output_file": str(temp_path)
+            })
+            
+            # Analyze spread in RapidWright
+            spread_result = await self.call_tool("rapidwright_analyze_critical_path_spread", {
+                "input_file": str(temp_path)
+            })
+            
+            # Parse spread results
+            import json
+            try:
+                spread_data = json.loads(spread_result)
+                critical_path_spread_info = {
+                    "max_distance": spread_data.get("max_distance_found", 0),
+                    "avg_distance": spread_data.get("avg_max_distance", 0),
+                    "paths_analyzed": spread_data.get("paths_analyzed", 0)
+                }
+                print(f"✓ Critical path spread analyzed:")
+                print(f"  - Max distance: {critical_path_spread_info['max_distance']} tiles")
+                print(f"  - Avg distance: {critical_path_spread_info['avg_distance']:.1f} tiles")
+                print(f"  - Paths analyzed: {critical_path_spread_info['paths_analyzed']}")
+                print()
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"[WARNING] Could not parse spread results: {e}")
+                critical_path_spread_info = None
+        
+        # Create concise summary for LLM
+        summary = []
+        summary.append("=== Initial Design Analysis ===\n")
+        
+        # Timing status
+        summary.append("TIMING STATUS:")
+        if self.clock_period is not None:
+            target_fmax = 1000.0 / self.clock_period
+            summary.append(f"  Clock period: {self.clock_period:.3f} ns (target fmax: {target_fmax:.2f} MHz)")
+        if self.initial_wns is not None:
+            if self.initial_wns >= 0:
+                summary.append(f"  WNS: {self.initial_wns:.3f} ns - TIMING MET ✓")
+            else:
+                summary.append(f"  WNS: {self.initial_wns:.3f} ns - TIMING VIOLATED")
+            # Add fmax information
+            initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+            if initial_fmax is not None:
+                summary.append(f"  Achievable fmax: {initial_fmax:.2f} MHz")
+        if self.initial_tns is not None:
+            summary.append(f"  TNS: {self.initial_tns:.3f} ns")
+        if self.initial_failing_endpoints is not None:
+            summary.append(f"  Failing endpoints: {self.initial_failing_endpoints}")
+        summary.append("")
+        
+        # Critical path spread analysis
+        if critical_path_spread_info:
+            summary.append("CRITICAL PATH SPREAD ANALYSIS:")
+            summary.append(f"  Max cell distance: {critical_path_spread_info['max_distance']} tiles")
+            summary.append(f"  Avg cell distance: {critical_path_spread_info['avg_distance']:.1f} tiles")
+            summary.append(f"  Paths analyzed: {critical_path_spread_info['paths_analyzed']}")
+            
+            # Recommendation based on spread
+            if critical_path_spread_info['avg_distance'] > 70 and critical_path_spread_info['paths_analyzed'] >= 5:
+                summary.append(f"  [WARNING] RECOMMENDATION: Use PBLOCK strategy (high spread detected)")
+            summary.append("")
+        
+        # High fanout nets (show top 10)
+        if self.high_fanout_nets:
+            summary.append("CRITICAL HIGH FANOUT NETS (top 10):")
+            for i, (net_name, fanout, path_count) in enumerate(self.high_fanout_nets[:10]):
+                summary.append(f"  {i+1}. {net_name}")
+                summary.append(f"     Fanout: {fanout}, Critical paths: {path_count}")
+            if len(self.high_fanout_nets) > 10:
+                summary.append(f"  ... and {len(self.high_fanout_nets) - 10} more nets")
+        else:
+            summary.append("CRITICAL HIGH FANOUT NETS: None found")
+        
+        summary.append("")
+        summary.append(f"Total nets available for optimization: {len(self.high_fanout_nets)}")
+        
+        summary_text = "\n".join(summary)
+        print(summary_text)
+        print()
+
+        self._prev_best_wns = self.best_wns
+        return summary_text
+
+    # === Section 7.6: LLM Completion Loop ===
+
+    WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
+    async def get_completion(self) -> tuple[str, bool]:
+        """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
+        # [NEW] Auto-check and compress context before model selection
+        self._compress_context()
+        # Calculate context complexity for dynamic model routing (after compression for accurate token count)
+        context_complexity = self._estimate_context_complexity(self.current_task_type)
+        current_model = self._select_model(
+            tool_name=self.current_task_type,
+            context_complexity=context_complexity,
+        )
+        self.last_used_model = current_model
+        wns_at_start = self.best_wns
+        logger.info(f"Iteration {self.iteration}: Using {current_model} (complexity={context_complexity}, task={self.current_task_type})...")
+        while True:
+            # 1. Inject failed strategies
+            if self.failed_strategies:
+                last_msg = self.messages[-1] if self.messages else None
+                already_notified = last_msg and "has been tried and showed no effect" in last_msg.get("content", "")
+                if not already_notified:
+                    self.messages.append({
+                        "role": "user",
+                        "content": f"Note: The following strategies have been tried and showed no effect (avoid repetition): {', '.join(self.failed_strategies[-3:])}"
+                    })
+
+            # 2. Async call LLM
+            self.llm_call_count += 1
+            max_retries = 3
+            retry_delay = 2  # Initial delay in seconds
+            last_exception = None
+            for retry in range(max_retries):
+                try:
+                    response = await self.openai.chat.completions.create(  # Async wait
+                        model=current_model,
+                        messages=self.messages,
+                        tools=self.tools,
+                        tool_choice="auto",
+                        max_tokens=4096,
+                        timeout=600.0  # Increased timeout to 600 seconds (10 minutes) to allow complex reasoning
+                    )
+                    if response is None:
+                        raise ValueError("API returned None response")
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_exception = e
+                    if retry < max_retries - 1:
+                        wait_time = retry_delay * (2 ** retry)  # Exponential backoff
+                        logger.warning(f"API call failed, retry {retry+1}/{max_retries}, waiting {wait_time}s: {e}")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"API call failed, retried {max_retries} times: {e}")
+                        raise
+            # If still failed after retry loop, throw the last exception
+            if last_exception is not None:
+                raise last_exception
+
+            # Safely extract Usage and Cost (compatible with OpenRouter extended fields)
+            try:
+                usage = getattr(response, 'usage', None)
+                if usage:
+                    prompt = getattr(usage, 'prompt_tokens', 0) or 0
+                    completion = getattr(usage, 'completion_tokens', 0) or 0
+                    raw_total = getattr(usage, 'total_tokens', 0) or 0
+                    # [FIX] When API returns total_tokens as 0/null, fall back to prompt+completion sum
+                    total = raw_total if raw_total > 0 else (prompt + completion)
+                    cost = float(getattr(usage, 'cost', 0.0) or 0.0)
+                    # Extract cached and reasoning tokens (OpenAI/OpenRouter extended fields)
+                    prompt_details = getattr(usage, 'prompt_tokens_details', None)
+                    completion_details = getattr(usage, 'completion_tokens_details', None)
+                    cached = getattr(prompt_details, 'cached_tokens', 0) or 0
+                    reasoning = getattr(completion_details, 'reasoning_tokens', 0) or 0
+                    self.total_prompt_tokens += prompt
+                    self.total_completion_tokens += completion
+                    self.total_tokens += total
+                    self.total_cost += cost
+                    self.api_call_details.append({
+                        "call_number": self.llm_call_count, "iteration": self.iteration,
+                        "model": current_model,
+                        "prompt_tokens": prompt, "completion_tokens": completion,
+                        "total_tokens": total, "cost": cost,
+                        "cached_tokens": cached,
+                        "reasoning_tokens": reasoning,
+                    })
+                    logger.info(f"API call #{self.llm_call_count} ({current_model}) - Tokens: {total:,} | Cost: ${cost:.4f}")
+            except Exception as e:
+                logger.warning(f"Failed to parse token usage/cost: {e}")
+
+            # 3. Parse response
+            if not response.choices:
+                raise ValueError("Empty choices in API response")
+                
+            message = response.choices[0].message
+            message_dict = message.model_dump(exclude_none=True)
+            self.messages.append(message_dict)
+            
+            if message.tool_calls:
+                tool_results = []
+                for tc in message.tool_calls:
+                    if not tc.function: continue
+                    tool_name = tc.function.name
+                    try:
+                        tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        tool_args = {}
+
+                    # [FIX] vivado_run_tcl routing issue: set current_task_type based on Tcl command content
+                    effective_task_type = tool_name
+                    if tool_name == "vivado_run_tcl":
+                        tcl_cmd = str(tool_args.get("command", "")).lower()
+                        # If Tcl command contains optimization keywords, use command name as task_type for correct classification
+                        if any(p in tcl_cmd for p in OPTIMIZATION_PATTERNS):
+                            # Extract first optimization command as task_type (e.g., place_design, phys_opt_design)
+                            for p in OPTIMIZATION_PATTERNS:
+                                if p in tcl_cmd:
+                                    effective_task_type = p
+                                    logger.info(f"Detected optimization Tcl command '{p}' in vivado_run_tcl, routing will use '{effective_task_type}'")
+                                    break
+                        else:
+                            effective_task_type = "vivado_run_tcl_info"  # Information-class Tcl uses different identifier
+
+                    result = await self.call_tool(tool_name, tool_args)
+                    # Smart filter tool results, retain key information
+                    result = self._filter_tool_result(tool_name, result)
+                    # Update current task type for next iteration's model routing decision
+                    self.current_task_type = effective_task_type
+
+                    # Track tool errors for failure classification
+                    result_lower = result.lower() if result else ""
+                    if "error" in result_lower and "success" not in result_lower:
+                        self.iteration_tool_errors.append({
+                            "tool": tool_name,
+                            "result": result[:500]  # Store truncated result for analysis
+                        })
+
+                    tool_results.append({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "name": tool_name, "content": result
+                    })
+
+                self.messages.extend(tool_results)
+                continue  # Loop continues to process tool results
+
+            # 4. No tool call, update improvement tracking
+            content = message.content or ""
+
+            # [FIX] Only take WNS generated within this iteration, avoid cross-iteration misuse of historical records
+            current_iter_wns_list = [
+                t["wns"] for t in self.tool_call_details
+                if t["iteration"] == self.iteration and t["wns"] is not None
+            ]
+            if current_iter_wns_list:
+                current_wns = current_iter_wns_list[-1]   # Take latest WNS from this iteration
+                if current_wns > wns_at_start:            # Compare with entry snapshot
+                    self.global_no_improvement = 0
+                    self.failed_strategies.clear()
+                else:
+                    self.global_no_improvement += 1
+            # else: Non-WNS iterations don't count (may be query operations only)
+
+            # [FIX] Completion flag no longer depends on model output, changed to objective data judgment
+            # 5. Objective judgment of whether optimization is complete
+            current_best_wns = self.best_wns if self.best_wns > float('-inf') else None
+
+            # Condition 1: WNS target check (core completion condition)
+            wns_target_met = (current_best_wns is not None and
+                              current_best_wns >= self.WNS_TARGET_THRESHOLD)
+
+            # Condition 2: Hard limit reached (consecutive no-improvement count exceeds threshold)
+            max_iterations_reached = (self.global_no_improvement >= self.GLOBAL_NO_IMPROVEMENT_LIMIT)
+
+            # Comprehensive judgment: WNS met OR hard limit reached
+            is_done = wns_target_met or max_iterations_reached
+
+            # Log the judgment reasons
+            if is_done:
+                reasons = []
+                if wns_target_met:
+                    reasons.append(f"WNS target met ({current_best_wns:.3f} ns >= {self.WNS_TARGET_THRESHOLD:.1f} ns)")
+                if max_iterations_reached:
+                    reasons.append(f"Hard limit reached ({self.global_no_improvement} consecutive no improvements)")
+                logger.info(f"Optimization ending - Reasons: {'; '.join(reasons)}")
+                print(f"\n*** Optimization completion judgment ***")
+                for reason in reasons:
+                    print(f"  [OK] {reason}")
+            
+            # At the end of get_completion(), before the return statement:
+            if self.current_task_type:
+                task_category = self.classify_task(self.current_task_type)
+                improved = False
+                tool_error = len(self.iteration_tool_errors) > 0
+
+                if task_category != TaskCategory.INFORMATION:
+                    # OPTIMIZATION tasks: check WNS improvement
+                    if self.iteration > 1:
+                        prev_best = getattr(self, '_prev_best_wns', None)
+                        if prev_best is not None and self.best_wns > float('-inf'):
+                            improved = self.best_wns > prev_best
+                else:
+                    # INFORMATION tasks: success = no tool error (improved=True means success)
+                    improved = not tool_error
+
+                # Determine failure type if not successful
+                failure_type = ""
+                if not improved and tool_error and self.iteration_tool_errors:
+                    err_info = self.iteration_tool_errors[0]
+                    err_lower = err_info["result"].lower()
+                    if "timeout" in err_lower or "timed out" in err_lower:
+                        failure_type = "recoverable_timeout"
+                    elif any(phrase in err_lower for phrase in [
+                        "routing failed", "route error", "cannot route",
+                        "unroutable", "exceeds", "congestion"
+                    ]):
+                        failure_type = "routing_failure"
+                    else:
+                        failure_type = "tool_error"
+
+                self._record_task_outcome(
+                    task_type=self.current_task_type,
+                    model_used=self.last_used_model,
+                    improved=improved,
+                    tool_error=tool_error,
+                    failure_type=failure_type
+                )
+
+            return content, is_done
+
+    # === Section 7.7: Optimization Workflow ===
+
+    async def optimize(self, input_dcp: Path, output_dcp: Path) -> bool:
+        """Run the optimization workflow."""
+        # Start timing the optimization process
+        self.start_time = time.time()
+        
+        # Perform initial analysis without LLM
+        try:
+            initial_analysis = await self.perform_initial_analysis(input_dcp)
+        except Exception as e:
+            logger.exception(f"Initial analysis failed: {e}")
+            print(f"\n✗ Initial analysis failed: {e}\n")
+            self.end_time = time.time()
+            return False
+        
+        # Check if timing is already met
+        if self.initial_wns is not None and self.initial_wns >= 0:
+            print("✓ Design already meets timing! No optimization needed.\n")
+            logger.info("Design already meets timing")
+            # Save the design as-is
+            result = await self.call_tool("vivado_write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()),
+                "force": True
+            })
+            print(f"Saved design to: {output_dcp}\n")
+            
+            # End timing
+            self.end_time = time.time()
+            total_runtime = self.end_time - self.start_time
+            
+            # Print summary even for early exit
+            print("\n=== No Optimization Required ===")
+            initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+            if initial_fmax is not None:
+                print(f"Design already meets timing - Fmax: {initial_fmax:.2f} MHz (WNS: {self.initial_wns:.3f} ns)")
+            else:
+                print(f"Design already meets timing (WNS: {self.initial_wns:.3f} ns)")
+            print(f"Total runtime: {total_runtime:.2f} seconds ({total_runtime/60:.2f} minutes)")
+            print(f"LLM API calls: 0 (analysis performed without LLM)")
+            print(f"Estimated cost: $0.00")
+            print("="*70 + "\n")
+            return True
+        
+        # Load and fill in system prompt with temp directory and input DCP path
+        system_prompt_template = load_system_prompt()
+        system_prompt = system_prompt_template.format(
+            temp_dir=self.temp_dir,
+            input_dcp=input_dcp.resolve()
+        )
+        
+        # Initialize conversation with analysis results
+        self.messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"""Optimize this FPGA design for timing.
+
+PATHS:
+- Input DCP: {input_dcp.resolve()}
+- Output DCP (save final result here): {output_dcp.resolve()}
+- Run directory (for intermediate files): {self.temp_dir}
+
+CURRENT STATE:
+- Vivado has the input design ALREADY OPEN and analyzed
+- RapidWright has the input design ALREADY LOADED (from initial analysis)
+
+INITIAL ANALYSIS RESULTS:
+{initial_analysis}
+
+Proceed with optimization strategy based on the analysis above. Do NOT reload the design in either Vivado or RapidWright - both already have it loaded.
+
+CRITICAL OPTIMIZATION RULES:
+1. DATA-DRIVEN EVALUATION: After each physical optimization operation like `phys_opt_design`, you must evaluate the effect combined with timing reports (the system is configured to automatically append the latest timing results after phys_opt).
+2. AVOID BLIND OPERATIONS: Strictly decide next steps based on WNS changes before and after optimization. If WNS worsens or shows no significant improvement, proactively mark that operation as a failed strategy and find a new direction. Do not blindly and consecutively stack the same optimization commands."""
+            }
+        ]
+        
+        max_iterations = 50  # Safety limit
+        
+        print("=== Starting LLM-Driven Optimization ===\n")
+        
+        while self.iteration < max_iterations:
+            self.iteration += 1
+            self.iteration_tool_errors = []  # Reset tool error tracking for this iteration
+            logger.info(f"=== Iteration {self.iteration} ===")
+
+            try:
+                response_text, is_done = await self.get_completion()
+                print(f"\n{response_text}\n")
+
+                # Determine if this iteration had WNS improvement
+                current_best = self.best_wns if self.best_wns > float('-inf') else None
+                prev_best = getattr(self, '_prev_best_wns', None)
+                wns_improved = False
+                if current_best is not None and prev_best is not None:
+                    wns_improved = current_best > prev_best
+                elif current_best is not None and prev_best is None:
+                    wns_improved = True  # First valid WNS obtained is considered improvement
+
+                # Simplified iteration end processing: update counters
+                self._on_iteration_end(wns_improved, self.last_used_model)
+
+                # Save this iteration's best_wns for next iteration comparison
+                self._prev_best_wns = self.best_wns
+                # [NEW] Routing failure fault tolerance handling
+                # Avoid adding route_design to failed_strategies due to routing timeout
+                # Only consider it a strategy failure when "routing failure" (non-timeout) is clearly detected
+                # ================================================================
+                # Check if route_design is in recent tool calls
+                recent_routing_failure = None
+                for tool_detail in reversed(self.tool_call_details[-5:]):
+                    if tool_detail['tool_name'] == 'vivado_route_design':
+                        if tool_detail.get('error', False):
+                            error_msg = tool_detail.get('error_message', '').lower()
+                            # Check if it is a timeout error
+                            if 'timeout' in error_msg or 'timed out' in error_msg:
+                                logger.warning(f"route_design failed due to timeout (Iter {tool_detail['iteration']}), not counted as failed strategy")
+                                recent_routing_failure = 'timeout'
+                            # Check if it is a clear routing failure (non-timeout)
+                            elif any(phrase in error_msg for phrase in [
+                                'routing failed', 'route error',
+                                'cannot route', 'unroutable',
+                                'exceeds', 'congestion'
+                            ]):
+                                logger.warning(f"route_design clear routing failure (Iter {tool_detail['iteration']}): {error_msg[:100]}")
+                                recent_routing_failure = 'routing_failed'
+                            else:
+                                # Other errors, handle conservatively but don't fully mark as failure
+                                recent_routing_failure = 'unknown_error'
+                                logger.warning(f"route_design unknown error type: {error_msg[:100]}")
+                        else:
+                            # Completed successfully
+                            recent_routing_failure = 'success'
+                        break
+
+                # If it is a routing timeout, do not add to failed_strategies
+                if recent_routing_failure == 'timeout':
+                    logger.info("route_design timeout recorded, but does not restrict subsequent routing attempts")
+                    # Automatically trigger re-placement flow
+                    self.messages.append({
+                        "role": "user",
+                        "content": "Note: route_design failed due to timeout. The system will try re-placement (place_design -unplace then place_design) and retry routing. Please use phys_opt_design for load reduction optimization in subsequent steps."
+                    })
+                
+                if is_done:
+                    logger.info("Optimization workflow completed")
+                    self.end_time = time.time()
+                    self._print_optimization_summary()
+                    return True
+                    
+            except Exception as e:
+                logger.exception(f"Error during optimization: {e}")
+                # Add error context to conversation
+                self.messages.append({
+                    "role": "user",
+                    "content": f"An error occurred: {e}. Please verify your approach and continue or report if unrecoverable."
+                })
+        
+        logger.warning("Reached maximum iterations")
+        self.end_time = time.time()
+        self._print_optimization_summary(max_iterations_reached=True)
+        return False
+
+    # === Section 7.8: Reporting & Telemetry ===
+
+    def save_token_usage_report(self, output_path: Path):
+        """Save detailed token usage report to JSON file."""
+        # Calculate total cached and reasoning tokens
+        total_cached = sum(detail.get('cached_tokens', 0) for detail in self.api_call_details)
+        total_reasoning = sum(detail.get('reasoning_tokens', 0) for detail in self.api_call_details)
+        
+        # Calculate tool call statistics
+        total_tool_time = sum(detail['elapsed_time'] for detail in self.tool_call_details)
+        tool_counts = {}
+        for detail in self.tool_call_details:
+            tool_name = detail['tool_name']
+            if tool_name not in tool_counts:
+                tool_counts[tool_name] = 0
+            tool_counts[tool_name] += 1
+        
+        # Calculate total runtime
+        total_runtime = None
+        if self.start_time is not None:
+            total_runtime = (self.end_time or time.time()) - self.start_time
+        
+        # Calculate fmax values
+        initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+        best_fmax = self.calculate_fmax(self.best_wns, self.clock_period) if self.best_wns > float('-inf') else None
+        fmax_improvement = (best_fmax - initial_fmax) if (initial_fmax is not None and best_fmax is not None) else None
+        
+        report = {
+            "models": {
+                "planner": self.model_planner,
+                "worker": self.model_worker
+            },
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {
+                "total_runtime_seconds": total_runtime,
+                "total_llm_calls": self.llm_call_count,
+                "total_iterations": self.iteration,
+                "total_prompt_tokens": self.total_prompt_tokens,
+                "total_completion_tokens": self.total_completion_tokens,
+                "total_tokens": self.total_tokens,
+                "total_cached_tokens": total_cached,
+                "total_reasoning_tokens": total_reasoning,
+                "total_cost": self.total_cost,
+                "clock_period_ns": self.clock_period,
+                "initial_wns": self.initial_wns,
+                "best_wns": self.best_wns,
+                "wns_improvement": self.best_wns - self.initial_wns if self.initial_wns is not None else None,
+                "initial_fmax_mhz": initial_fmax,
+                "best_fmax_mhz": best_fmax,
+                "fmax_improvement_mhz": fmax_improvement,
+                "total_tool_calls": len(self.tool_call_details),
+                "total_tool_time_seconds": total_tool_time,
+                "tool_call_counts": tool_counts
+            },
+            "per_llm_call_details": self.api_call_details,
+            "per_tool_call_details": self.tool_call_details
+        }
+        
+        with open(output_path, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        logger.info(f"Token usage report saved to {output_path}")
+    
+    def _print_optimization_summary(self, max_iterations_reached: bool = False):
+        """Print detailed optimization summary including token usage and costs."""
+        title = "Optimization Summary (Max Iterations Reached)" if max_iterations_reached else "Optimization Summary"
+        print(f"\n{'='*70}")
+        print(f"{title}")
+        print(f"{'='*70}")
+        
+        # Calculate total runtime
+        if self.start_time is not None:
+            total_runtime = (self.end_time or time.time()) - self.start_time
+            print(f"\nTOTAL RUNTIME: {total_runtime:.2f} seconds ({total_runtime/60:.2f} minutes)")
+        
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        result_lines = self._format_fmax_results(
+            self.clock_period, self.initial_wns, best_wns, result_label="Best"
+        )
+        if result_lines:
+            print(f"\nFMAX RESULTS:")
+            print("\n".join(result_lines))
+        
+        # Iteration stats
+        print(f"\nITERATION STATS:")
+        print(f"  Total iterations:    {self.iteration}")
+        print(f"  LLM API calls:       {self.llm_call_count}")
+        
+        # Token usage
+        print(f"\nTOKEN USAGE:")
+        print(f"  Prompt tokens:       {self.total_prompt_tokens:,}")
+        print(f"  Completion tokens:   {self.total_completion_tokens:,}")
+        print(f"  Total tokens:        {self.total_tokens:,}")
+        
+        # Calculate total cached and reasoning tokens
+        total_cached = sum(detail.get('cached_tokens', 0) for detail in self.api_call_details)
+        total_reasoning = sum(detail.get('reasoning_tokens', 0) for detail in self.api_call_details)
+        
+        if total_cached > 0:
+            print(f"  Cached tokens:       {total_cached:,} (saved cost)")
+        if total_reasoning > 0:
+            print(f"  Reasoning tokens:    {total_reasoning:,}")
+        
+        # Cost
+        print(f"\nCOST:")
+        print(f"  Planner Model:       {self.model_planner}")
+        print(f"  Worker Model:        {self.model_worker}")
+        if self.total_cost > 0:
+            print(f"  Total cost:          ${self.total_cost:.4f}")
+        else:
+            print(f"  Total cost:          Not available")
+        
+        # Tool call summary
+        if self.tool_call_details:
+            print(f"\nTOOL CALLS SUMMARY:")
+            print(f"  Total tool calls:    {len(self.tool_call_details)}")
+            
+            # Calculate total time spent in tool calls
+            total_tool_time = sum(detail['elapsed_time'] for detail in self.tool_call_details)
+            print(f"  Total tool time:     {total_tool_time:.2f}s")
+            
+            # Count by tool type
+            tool_counts = {}
+            for detail in self.tool_call_details:
+                tool_name = detail['tool_name']
+                if tool_name not in tool_counts:
+                    tool_counts[tool_name] = 0
+                tool_counts[tool_name] += 1
+            
+            print(f"\n  Tool call breakdown:")
+            for tool_name, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
+                print(f"    {tool_name}: {count}")
+            
+            # Detailed tool call list
+            print(f"\n  Detailed tool call log:")
+            print(f"  {'#':<5} {'Iter':<6} {'Tool':<40} {'Time (s)':<12} {'WNS (ns)':<12} {'Status':<10}")
+            print(f"  {'-'*5} {'-'*6} {'-'*40} {'-'*12} {'-'*12} {'-'*10}")
+            
+            for i, detail in enumerate(self.tool_call_details, 1):
+                tool_name = detail['tool_name']
+                iteration = detail.get('iteration', 0)
+                elapsed = detail['elapsed_time']
+                wns = detail.get('wns')
+                error = detail.get('error', False)
+                
+                # Format WNS column
+                wns_str = f"{wns:.3f}" if wns is not None else "-"
+                
+                # Format status
+                status_str = "ERROR" if error else "OK"
+                
+                print(f"  {i:<5} {iteration:<6} {tool_name:<40} {elapsed:<12.2f} {wns_str:<12} {status_str:<10}")
+                
+                # If error, show error message on next line
+                if error and 'error_message' in detail:
+                    print(f"        Error: {detail['error_message'][:80]}")
+        
+        # Per-call breakdown if debug mode
+        if self.debug and self.api_call_details:
+            print(f"\nPER-CALL BREAKDOWN:")
+            
+            # Check if we have cached or reasoning tokens to display
+            has_cached = any(detail.get('cached_tokens', 0) > 0 for detail in self.api_call_details)
+            has_reasoning = any(detail.get('reasoning_tokens', 0) > 0 for detail in self.api_call_details)
+            has_cost = any(detail.get('cost', 0) > 0 for detail in self.api_call_details)
+            
+            # Build header
+            header = f"  {'Call':<6} {'Iter':<6} {'Role':<8} {'Prompt':<10} {'Completion':<12}"
+            if has_cached:
+                header += f" {'Cached':<10}"
+            if has_reasoning:
+                header += f" {'Reasoning':<10}"
+            header += f" {'Total':<10}"
+            if has_cost:
+                header += f" {'Cost':<12}"
+            print(header)
+            
+            # Build separator
+            separator = f"  {'-'*6} {'-'*6} {'-'*8} {'-'*10} {'-'*12}"
+            if has_cached:
+                separator += f" {'-'*10}"
+            if has_reasoning:
+                separator += f" {'-'*10}"
+            separator += f" {'-'*10}"
+            if has_cost:
+                separator += f" {'-'*12}"
+            print(separator)
+            
+            # Print details
+            for detail in self.api_call_details:
+                role = "Planner" if detail.get('model') == self.model_planner else "Worker"
+                line = (f"  {detail['call_number']:<6} {detail['iteration']:<6} {role:<8} "
+                       f"{detail['prompt_tokens']:<10,} {detail['completion_tokens']:<12,}")
+                if has_cached:
+                    line += f" {detail.get('cached_tokens', 0):<10,}"
+                if has_reasoning:
+                    line += f" {detail.get('reasoning_tokens', 0):<10,}"
+                line += f" {detail['total_tokens']:<10,}"
+                if has_cost:
+                    cost = detail.get('cost', 0)
+                    line += f" ${cost:<11.4f}" if cost > 0 else f" {'N/A':<12}"
+                print(line)
+        
+        print(f"\n{'='*70}\n")
+        
+        # Save detailed report to JSON in run directory
+        try:
+            report_path = self.run_dir / "token_usage.json"
+            self.save_token_usage_report(report_path)
+            print(f"Detailed token usage report saved to: {report_path}\n")
+        except Exception as e:
+            logger.warning(f"Failed to save token usage report: {e}")
+    
+
+
+# === Section 8: FPGAOptimizerTest — Deterministic Test Mode ===
+
+class FPGAOptimizerTest(DCPOptimizerBase):
+    """
+    Test mode for FPGA Design Optimization - hardcodes all tool calls to diagnose issues.
+    
+    This class runs a deterministic optimization flow without using any LLM, 
+    making it easier to identify where MCP servers or Vivado might hang.
+    """
+    
+    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None):
+        super().__init__(debug=debug, run_dir=run_dir)
+        self.final_wns = None
+    
+    async def start_servers(self):
+        """Start and connect to both MCP servers."""
+        await super().start_servers(log_prefix="[TEST]")
+    
+    async def call_vivado_tool(self, tool_name: str, arguments: dict, timeout: float = 300.0) -> str:
+        """Execute a Vivado tool call with timing and logging."""
+        logger.info(f"[VIVADO] Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
+        print(f"[TEST] Calling vivado_{tool_name}...")
+        start_time = time.time()
+        
+        try:
+            result = await asyncio.wait_for(
+                self.vivado_session.call_tool(tool_name, arguments),
+                timeout=timeout
+            )
+            
+            elapsed = time.time() - start_time
+            logger.info(f"[VIVADO] {tool_name} completed in {elapsed:.2f}s")
+            print(f"[TEST] vivado_{tool_name} completed in {elapsed:.2f}s")
+            
+            # Extract text content from result
+            if result.content:
+                text_parts = [c.text for c in result.content if hasattr(c, 'text')]
+                return "\n".join(text_parts)
+            return "(no output)"
+            
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"[VIVADO] {tool_name} TIMED OUT after {elapsed:.2f}s")
+            print(f"[TEST] ERROR: vivado_{tool_name} TIMED OUT after {elapsed:.2f}s")
+            raise
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[VIVADO] {tool_name} FAILED after {elapsed:.2f}s: {e}")
+            print(f"[TEST] ERROR: vivado_{tool_name} failed after {elapsed:.2f}s: {e}")
+            raise
+    
+    async def call_rapidwright_tool(self, tool_name: str, arguments: dict, timeout: float = 300.0) -> str:
+        """Execute a RapidWright tool call with timing and logging."""
+        logger.info(f"[RAPIDWRIGHT] Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
+        print(f"[TEST] Calling rapidwright_{tool_name}...")
+        start_time = time.time()
+        
+        try:
+            result = await asyncio.wait_for(
+                self.rapidwright_session.call_tool(tool_name, arguments),
+                timeout=timeout
+            )
+            
+            elapsed = time.time() - start_time
+            logger.info(f"[RAPIDWRIGHT] {tool_name} completed in {elapsed:.2f}s")
+            print(f"[TEST] rapidwright_{tool_name} completed in {elapsed:.2f}s")
+            
+            # Extract text content from result
+            if result.content:
+                text_parts = [c.text for c in result.content if hasattr(c, 'text')]
+                return "\n".join(text_parts)
+            return "(no output)"
+            
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(f"[RAPIDWRIGHT] {tool_name} TIMED OUT after {elapsed:.2f}s")
+            print(f"[TEST] ERROR: rapidwright_{tool_name} TIMED OUT after {elapsed:.2f}s")
+            raise
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[RAPIDWRIGHT] {tool_name} FAILED after {elapsed:.2f}s: {e}")
+            print(f"[TEST] ERROR: rapidwright_{tool_name} failed after {elapsed:.2f}s: {e}")
+            raise
+    
+    def parse_wns_from_timing_report(self, timing_report: str) -> Optional[float]:
+        """Extract WNS from timing report using shared parsing logic."""
+        return parse_timing_summary_static(timing_report)["wns"]
+    
+    async def _call_vivado_for_clock(self, tool_name: str, arguments: dict) -> str:
+        """Helper to call Vivado tools for clock period query."""
+        return await self.call_vivado_tool(tool_name, arguments, timeout=60.0)
+    
+    async def fetch_clock_period(self) -> Optional[float]:
+        """Query clock period with test-mode logging."""
+        period = await super().get_clock_period(self._call_vivado_for_clock)
+        if period is not None:
+            print(f"[TEST] Clock period: {period:.3f} ns")
+        else:
+            print("[TEST] WARNING: Could not parse clock period from Vivado")
+        return period
+    
+    async def run_test(self, input_dcp: Path, output_dcp: Path, max_nets_to_optimize: int = 5) -> bool:
+        """
+        Run the deterministic test optimization flow.
+        
+        Steps:
+        1. Open the input DCP in Vivado
+        2. Report timing in Vivado
+        3. Get the critical high fan out nets from Vivado
+        4. Open the DCP in RapidWright
+        5. Apply the fanout optimization for each high fanout net
+        6. Write a DCP out from RapidWright
+        7. Read the RapidWright generated DCP into Vivado
+        8. Route the design in Vivado
+        9. Report timing and compare WNS
+        """
+        print("\n" + "="*70)
+        print("FPGA OPTIMIZER TEST MODE")
+        print("="*70)
+        print(f"Input DCP:  {input_dcp}")
+        print(f"Output DCP: {output_dcp}")
+        print(f"Temp dir:   {self.temp_dir}")
+        print(f"Max nets to optimize: {max_nets_to_optimize}")
+        print("="*70 + "\n")
+        
+        overall_start = time.time()
+        
+        try:
+            # ================================================================
+            # Step 0: Initialize RapidWright (Vivado starts automatically)
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 0: Initialize RapidWright")
+            print("-"*60)
+            
+            # Initialize RapidWright (Vivado will auto-start when first used)
+            result = await self.call_rapidwright_tool("initialize_rapidwright", {
+                "jvm_max_memory": "8G"
+            }, timeout=120.0)
+            print(f"RapidWright init result:\n{result[:500]}...")
+            logger.info(f"RapidWright init result: {result}")
+            
+            # ================================================================
+            # Step 1: Open the input DCP in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 1: Open input DCP in Vivado")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Open checkpoint result:\n{result}")
+            logger.info(f"Open checkpoint result: {result}")
+            
+            # ================================================================
+            # Step 2: Report timing in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 2: Report timing in Vivado")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            print(f"Timing summary (first 2000 chars):\n{result[:2000]}...")
+            logger.info(f"Initial timing summary: {result}")
+            
+            # Parse initial WNS
+            self.initial_wns = self.parse_wns_from_timing_report(result)
+            print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
+            logger.info(f"Initial WNS: {self.initial_wns} ns")
+            
+            # Get clock period for fmax calculation
+            self.clock_period = await self.fetch_clock_period()
+            if self.clock_period is not None:
+                target_fmax = 1000.0 / self.clock_period
+                print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
+                
+                initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                if initial_fmax is not None:
+                    print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
+            print()
+            
+            # ================================================================
+            # Step 3: Get critical high fanout nets
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 3: Get critical high fanout nets")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("get_critical_high_fanout_nets", {
+                "num_paths": 50,
+                "min_fanout": 100,
+                "exclude_clocks": True
+            }, timeout=600.0)
+            print(f"High fanout nets report:\n{result}")
+            logger.info(f"High fanout nets: {result}")
+            
+            # Parse the nets
+            self.high_fanout_nets = self.parse_high_fanout_nets(result)
+            print(f"\nParsed {len(self.high_fanout_nets)} high fanout nets")
+            
+            if not self.high_fanout_nets:
+                print("WARNING: No high fanout nets found to optimize!")
+                logger.warning("No high fanout nets found to optimize")
+            
+            # Select top nets to optimize
+            nets_to_optimize = self.high_fanout_nets[:max_nets_to_optimize]
+            print(f"Will optimize {len(nets_to_optimize)} nets:")
+            for net_name, fanout, path_count in nets_to_optimize:
+                print(f"  - {net_name} (fanout={fanout}, paths={path_count})")
+            
+            # ================================================================
+            # Step 4: Open the DCP in RapidWright
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 4: Open DCP in RapidWright")
+            print("-"*60)
+            
+            result = await self.call_rapidwright_tool("read_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"RapidWright read checkpoint result:\n{result}")
+            logger.info(f"RapidWright read checkpoint: {result}")
+            
+            # ================================================================
+            # Step 5: Apply fanout optimization for each high fanout net
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 5: Apply fanout optimizations in RapidWright")
+            print("-"*60)
+            
+            successful_optimizations = 0
+            for i, (net_name, fanout, path_count) in enumerate(nets_to_optimize):
+                print(f"\n[{i+1}/{len(nets_to_optimize)}] Optimizing net: {net_name}")
+                print(f"    Fanout: {fanout}, Critical paths: {path_count}")
+                
+                # Calculate split factor: fanout/100, min 2, max 8
+                split_factor = max(2, min(8, fanout // 100))
+                print(f"    Split factor: {split_factor}")
+                
+                try:
+                    result = await self.call_rapidwright_tool("optimize_fanout", {
+                        "net_name": net_name,
+                        "split_factor": split_factor
+                    }, timeout=300.0)
+                    print(f"    Result: {result[:500]}...")
+                    logger.info(f"Optimize fanout {net_name}: {result}")
+                    
+                    # Check if successful
+                    if "error" not in result.lower() or "success" in result.lower():
+                        successful_optimizations += 1
+                except Exception as e:
+                    print(f"    FAILED: {e}")
+                    logger.error(f"Failed to optimize {net_name}: {e}")
+            
+            print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
+            
+            # ================================================================
+            # Step 6: Write DCP from RapidWright
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 6: Write DCP from RapidWright")
+            print("-"*60)
+            
+            rapidwright_dcp = Path(self.temp_dir) / "rapidwright_optimized.dcp"
+            result = await self.call_rapidwright_tool("write_checkpoint", {
+                "dcp_path": str(rapidwright_dcp),
+                "overwrite": True
+            }, timeout=600.0)
+            print(f"Write checkpoint result:\n{result}")
+            logger.info(f"RapidWright write checkpoint: {result}")
+            
+            # Check if the file was created
+            if rapidwright_dcp.exists():
+                print(f"DCP file created: {rapidwright_dcp} ({rapidwright_dcp.stat().st_size} bytes)")
+            else:
+                print("WARNING: DCP file was not created!")
+                logger.warning("RapidWright DCP file not created")
+            
+            # ================================================================
+            # Step 7: Read RapidWright DCP into Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 7: Read RapidWright DCP into Vivado")
+            print("-"*60)
+            
+            # Note: Opening a RapidWright-generated DCP takes MUCH longer than
+            # opening the original DCP because:
+            # 1. Vivado must reload encrypted IP blocks from disk
+            # 2. Vivado must reconstruct internal data structures
+            # For large designs, this can take 10-30 minutes
+            RAPIDWRIGHT_DCP_TIMEOUT = 300.0  # 5 minutes
+            
+            # Check if there's a Tcl script we need to source first (for encrypted IP)
+            tcl_script = rapidwright_dcp.with_suffix('.tcl')
+            if tcl_script.exists():
+                print(f"Found Tcl script for encrypted IP: {tcl_script}")
+                print(f"Note: This may take 10-30 minutes for large designs...")
+                # Source the Tcl script instead of directly opening the DCP
+                result = await self.call_vivado_tool("run_tcl", {
+                    "command": f"source {{{tcl_script}}}"
+                }, timeout=RAPIDWRIGHT_DCP_TIMEOUT)
+                print(f"Source Tcl script result:\n{result}")
+            else:
+                # Opening a RapidWright-generated DCP can take longer than original
+                # because Vivado needs to reconstruct some internal data structures
+                result = await self.call_vivado_tool("open_checkpoint", {
+                    "dcp_path": str(rapidwright_dcp)
+                }, timeout=RAPIDWRIGHT_DCP_TIMEOUT)
+                print(f"Open RapidWright DCP result:\n{result}")
+            logger.info(f"Open RapidWright DCP: {result}")
+            
+            # ================================================================
+            # Step 8: Route the design in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 8: Route design in Vivado")
+            print("-"*60)
+            
+            # First check route status
+            result = await self.call_vivado_tool("report_route_status", {
+                "show_unrouted": True,
+                "show_errors": True,
+                "max_nets": 20
+            }, timeout=300.0)
+            print(f"Route status before routing:\n{result[:1500]}...")
+            logger.info(f"Route status before routing: {result}")
+            
+            # ================================================================
+            # [NEW] Intermediate checkpoint: Pre-routing optimization
+            # If timing is still poor after placement, try phys_opt_design for load reduction
+            # ================================================================
+            # Get pre-routing timing state
+            pre_route_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            pre_route_info = parse_timing_summary_static(pre_route_timing)
+            pre_route_wns = pre_route_info.get("wns")
+            
+            if pre_route_wns is not None and pre_route_wns < -0.5:
+                print(f"\nPre-routing WNS is poor ({pre_route_wns:.3f} ns), trying phys_opt_design for load reduction...")
+                logger.info(f"Pre-route WNS poor ({pre_route_wns:.3f} ns), attempting phys_opt_design...")
+
+                # Try phys_opt_design to optimize high fanout nets and retiming
+                phys_opt_result = await self.call_vivado_tool("phys_opt_design", {
+                    "directive": "aggressive_preroute_optimization"
+                }, timeout=3600.0)
+                print(f"phys_opt_design result:\n{phys_opt_result[:1500]}...")
+                logger.info(f"phys_opt_design: {phys_opt_result}")
+
+                # Recheck timing
+                post_phys_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+                post_phys_info = parse_timing_summary_static(post_phys_timing)
+                post_phys_wns = post_phys_info.get("wns")
+
+                if post_phys_wns is not None and post_phys_wns > pre_route_wns:
+                    print(f"phys_opt_design improved timing: {pre_route_wns:.3f} -> {post_phys_wns:.3f} ns")
+                else:
+                    print(f"phys_opt_design did not significantly improve timing, continuing with routing")
+
+            # Route the design with extended timeout (6 hours)
+            ROUTE_TIMEOUT = 21600.0  # 6 hours = 6 * 60 * 60 = 21600 seconds
+            print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
+            result = await self.call_vivado_tool("route_design", {
+                "directive": "Default",
+            }, timeout=ROUTE_TIMEOUT)
+            print(f"Route design result:\n{result}")
+            logger.info(f"Route design: {result}")
+            
+            # Check route status again
+            result = await self.call_vivado_tool("report_route_status", {
+                "show_unrouted": True,
+                "show_errors": True,
+                "max_nets": 20
+            }, timeout=300.0)
+            print(f"Route status after routing:\n{result[:1500]}...")
+            logger.info(f"Route status after routing: {result}")
+            
+            # ================================================================
+            # Step 9: Report timing and compare WNS
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 9: Report final timing")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            print(f"Final timing summary (first 2000 chars):\n{result[:2000]}...")
+            logger.info(f"Final timing summary: {result}")
+            
+            # Parse final WNS
+            self.final_wns = self.parse_wns_from_timing_report(result)
+            print(f"\n*** Final WNS: {self.final_wns} ns ***")
+            logger.info(f"Final WNS: {self.final_wns} ns")
+            
+            # Calculate final fmax
+            final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
+            if final_fmax is not None:
+                print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
+            print()
+            
+            # ================================================================
+            # Write final DCP and report results
+            # ================================================================
+            self.print_wns_change(self.initial_wns, self.final_wns, self.clock_period)
+            
+            # Always write the final checkpoint (regardless of improvement)
+            print(f"\nWriting final DCP to: {output_dcp}")
+            result = await self.call_vivado_tool("write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()),
+                "force": True
+            }, timeout=600.0)
+            print(f"Write final DCP result:\n{result}")
+            
+            # ================================================================
+            # Summary
+            # ================================================================
+            elapsed = time.time() - overall_start
+            self.print_test_summary(
+                title="TEST SUMMARY",
+                elapsed_seconds=elapsed,
+                initial_wns=self.initial_wns,
+                final_wns=self.final_wns,
+                clock_period=self.clock_period,
+                extra_info=f"Nets optimized: {successful_optimizations}/{len(nets_to_optimize)}"
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.exception(f"Test failed with exception: {e}")
+            print(f"\n*** TEST FAILED ***")
+            print(f"Exception: {type(e).__name__}: {e}")
+            return False
+    
+    async def run_test_logicnets(self, input_dcp: Path, output_dcp: Path) -> bool:
+        """
+        Run the pblock-based optimization flow for LogicNets designs.
+        
+        Steps:
+        1. Open the input DCP in Vivado
+        2. Report timing in Vivado (Initialize WNS)
+        3. Run the Vivado tool extract_critical_path_cells
+        4. Run the RapidWright tool analyze_critical_path_spread
+        5. Use known-optimal pblock range for LogicNets (SLICE_X55Y60:SLICE_X111Y254)
+        6. Unplace the design in Vivado
+        7. Create and apply pblock to entire design
+        8. Place the design in Vivado
+        9. Route the design in Vivado
+        10. Report timing in Vivado (compare against initial WNS)
+        """
+        print("\n" + "="*70)
+        print("FPGA OPTIMIZER TEST MODE - LOGICNETS PBLOCK FLOW")
+        print("="*70)
+        print(f"Input DCP:  {input_dcp}")
+        print(f"Output DCP: {output_dcp}")
+        print(f"Temp dir:   {self.temp_dir}")
+        print("="*70 + "\n")
+        
+        overall_start = time.time()
+        
+        try:
+            # ================================================================
+            # Step 0: Initialize RapidWright (Vivado starts automatically)
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 0: Initialize RapidWright")
+            print("-"*60)
+            
+            result = await self.call_rapidwright_tool("initialize_rapidwright", {
+                "jvm_max_memory": "8G"
+            }, timeout=120.0)
+            print(f"RapidWright init result:\n{result[:500]}...")
+            logger.info(f"RapidWright init result: {result}")
+            
+            # ================================================================
+            # Step 1: Open the input DCP in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 1: Open input DCP in Vivado")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Open checkpoint result:\n{result}")
+            logger.info(f"Open checkpoint result: {result}")
+            
+            # ================================================================
+            # Step 2: Report timing in Vivado (Initialize WNS)
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 2: Report initial timing in Vivado")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            print(f"Timing summary (first 2000 chars):\n{result[:2000]}...")
+            logger.info(f"Initial timing summary: {result}")
+            
+            # Parse initial WNS
+            self.initial_wns = self.parse_wns_from_timing_report(result)
+            print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
+            logger.info(f"Initial WNS: {self.initial_wns} ns")
+            
+            # Get clock period for fmax calculation
+            self.clock_period = await self.fetch_clock_period()
+            if self.clock_period is not None:
+                target_fmax = 1000.0 / self.clock_period
+                print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
+                
+                initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                if initial_fmax is not None:
+                    print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
+            print()
+            
+            # ================================================================
+            # Step 3: Extract critical path cells from Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 3: Extract critical path cells")
+            print("-"*60)
+            
+            # Write to a file for efficient data transfer
+            critical_paths_file = Path(self.temp_dir) / "critical_paths.json"
+            result = await self.call_vivado_tool("extract_critical_path_cells", {
+                "num_paths": 50,
+                "output_file": str(critical_paths_file)
+            }, timeout=600.0)
+            print(f"Extract critical paths result:\n{result[:2000]}...")
+            logger.info(f"Extract critical paths: {result}")
+            
+            # ================================================================
+            # Step 4: Open DCP in RapidWright and analyze critical path spread
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 4: Analyze critical path spread in RapidWright")
+            print("-"*60)
+            
+            # First, open the DCP in RapidWright
+            result = await self.call_rapidwright_tool("read_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"RapidWright read checkpoint result:\n{result}")
+            logger.info(f"RapidWright read checkpoint: {result}")
+            
+            # Analyze critical path spread
+            result = await self.call_rapidwright_tool("analyze_critical_path_spread", {
+                "input_file": str(critical_paths_file)
+            }, timeout=300.0)
+            print(f"Critical path spread analysis:\n{result[:3000] if isinstance(result, str) else str(result)[:3000]}...")
+            logger.info(f"Critical path spread: {result}")
+            
+            # Parse the spread analysis result to check if pblock is recommended
+            spread_result = result if isinstance(result, str) else str(result)
+            pblock_recommended = "spread-out" in spread_result.lower() or "pblock" in spread_result.lower()
+            print(f"\n*** Pblock optimization {'RECOMMENDED' if pblock_recommended else 'may not be needed'} ***")
+            
+            # ================================================================
+            # Step 5: Use known-optimal pblock for LogicNets design
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 5: Use known-optimal pblock for LogicNets")
+            print("-"*60)
+            
+            # For the LogicNets test design, we use a known-optimal pblock range
+            # that was determined through empirical testing to achieve timing closure.
+            # This pblock constrains the design to a contiguous region that minimizes
+            # routing delays by keeping cells close together.
+            #
+            # The LogicNets design characteristics:
+            # - ~24K LUTs, ~1.6K FFs
+            # - Neural network with 4 layer stages
+            # - Critical paths span multiple layers with high fanout
+            #
+            # Optimal pblock: SLICE_X55Y60:SLICE_X111Y254
+            # - Width: 57 SLICE columns (adequate for ~24K LUTs)
+            # - Height: 195 SLICE rows (covers the layer pipeline)
+            # - Position: Centered in a good fabric region avoiding I/O columns
+            
+            pblock_ranges = "SLICE_X55Y60:SLICE_X111Y254"
+            
+            print(f"Using known-optimal pblock range for LogicNets design:")
+            print(f"  Pblock: {pblock_ranges}")
+            print(f"  Width:  57 SLICE columns (X55 to X111)")
+            print(f"  Height: 195 SLICE rows (Y60 to Y254)")
+            print(f"\nThis pblock was empirically determined to achieve timing closure")
+            print(f"by constraining the spread-out design to a compact region.")
+            
+            # ================================================================
+            # Step 6: Unplace the design in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 6: Unplace the design in Vivado")
+            print("-"*60)
+            
+            # Use place_design -unplace to remove all placement
+            result = await self.call_vivado_tool("run_tcl", {
+                "command": "place_design -unplace"
+            }, timeout=300.0)
+            print(f"Unplace result:\n{result}")
+            logger.info(f"Unplace result: {result}")
+            
+            # ================================================================
+            # Step 7: Create and apply pblock to entire design
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 7: Create and apply pblock to entire design")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("create_and_apply_pblock", {
+                "pblock_name": "pblock_opt",
+                "ranges": pblock_ranges,
+                "apply_to": "current_design",  # Apply to entire design
+                "is_soft": False  # Hard constraint
+            }, timeout=300.0)
+            print(f"Create and apply pblock result:\n{result}")
+            logger.info(f"Create pblock result: {result}")
+            
+            # ================================================================
+            # Step 8: Place the design in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 8: Place the design in Vivado")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("place_design", {
+                "directive": "Default"
+            }, timeout=3600.0)  # 1 hour timeout for placement
+            print(f"Place design result:\n{result}")
+            logger.info(f"Place design: {result}")
+            
+            # ================================================================
+            # Step 9: Route the design in Vivado
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 9: Route the design in Vivado")
+            print("-"*60)
+            
+            # ================================================================
+            # [NEW] Intermediate checkpoint: Pre-routing optimization
+            # Perform phys_opt_design before routing to reduce congestion
+            # ================================================================
+            pre_route_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            pre_route_info = parse_timing_summary_static(pre_route_timing)
+            pre_route_wns = pre_route_info.get("wns")
+
+            if pre_route_wns is not None:
+                print(f"Pre-routing WNS: {pre_route_wns:.3f} ns")
+
+                # If timing is poor, try phys_opt_design for load reduction
+                if pre_route_wns < -0.3:
+                    print(f"Pre-routing timing is poor, trying phys_opt_design optimization...")
+
+                    # Try multiple directives
+                    directives_to_try = [
+                        "aggressive_preroute_optimization",
+                        "directive",  # Default
+                        "add_physical_constraints"
+                    ]
+
+                    best_wns_after_physopt = pre_route_wns
+                    best_physopt_result = None
+                    best_directive = None
+
+                    for directive in directives_to_try:
+                        print(f"\nTrying phys_opt_design -directive {directive}...")
+                        try:
+                            phys_opt_result = await self.call_vivado_tool("phys_opt_design", {
+                                "directive": directive
+                            }, timeout=3600.0)
+
+                            # Check results
+                            check_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+                            check_info = parse_timing_summary_static(check_timing)
+                            check_wns = check_info.get("wns")
+
+                            if check_wns is not None and check_wns > best_wns_after_physopt:
+                                best_wns_after_physopt = check_wns
+                                best_physopt_result = phys_opt_result
+                                best_directive = directive
+                                print(f"Improved: {pre_route_wns:.3f} -> {check_wns:.3f} ns")
+                            else:
+                                print(f"No improvement, keeping {check_wns:.3f} ns")
+
+                        except Exception as e:
+                            print(f"Failed: {e}")
+                            continue
+                    
+                    if best_physopt_result is not None:
+                        print(f"\nUsing {best_directive} achieved best phys_opt effect")
+                        print(f"   phys_opt post WNS: {best_wns_after_physopt:.3f} ns")
+                    else:
+                        print(f"\nNo phys_opt_design improved, continuing with routing")
+
+            # Route the design with extended timeout (6 hours)
+            ROUTE_TIMEOUT = 21600.0  # 6 hours
+            print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
+            result = await self.call_vivado_tool("route_design", {
+                "directive": "Default"
+            }, timeout=ROUTE_TIMEOUT)
+            print(f"Route design result:\n{result}")
+            logger.info(f"Route design: {result}")
+            
+            # Check route status
+            result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
+            print(f"Route status after routing:\n{result[:1500]}...")
+            logger.info(f"Route status after routing: {result}")
+            
+            # ================================================================
+            # Step 10: Report timing and compare WNS
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 10: Report final timing")
+            print("-"*60)
+            
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            print(f"Final timing summary (first 2000 chars):\n{result[:2000]}...")
+            logger.info(f"Final timing summary: {result}")
+            
+            # Parse final WNS
+            self.final_wns = self.parse_wns_from_timing_report(result)
+            print(f"\n*** Final WNS: {self.final_wns} ns ***")
+            logger.info(f"Final WNS: {self.final_wns} ns")
+            
+            # Calculate final fmax
+            final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
+            if final_fmax is not None:
+                print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
+            print()
+            
+            # ================================================================
+            # Write final DCP and report results
+            # ================================================================
+            self.print_wns_change(self.initial_wns, self.final_wns, self.clock_period)
+            
+            # Always write the final checkpoint
+            print(f"\nWriting final DCP to: {output_dcp}")
+            result = await self.call_vivado_tool("write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()),
+                "force": True
+            }, timeout=600.0)
+            print(f"Write final DCP result:\n{result}")
+            
+            # ================================================================
+            # Summary
+            # ================================================================
+            elapsed = time.time() - overall_start
+            self.print_test_summary(
+                title="TEST SUMMARY - LOGICNETS PBLOCK OPTIMIZATION",
+                elapsed_seconds=elapsed,
+                initial_wns=self.initial_wns,
+                final_wns=self.final_wns,
+                clock_period=self.clock_period,
+                extra_info=f"Pblock applied: {pblock_ranges}"
+            )
+            
+            return True
+            
+        except Exception as e:
+            logger.exception(f"LogicNets test failed with exception: {e}")
+            print(f"\n*** TEST FAILED ***")
+            print(f"Exception: {type(e).__name__}: {e}")
+            return False
+
+    async def cleanup(self):
+        """Clean up resources."""
+        print("\n[TEST] Cleaning up...")
+        await super().cleanup()
+        print(f"[TEST] Run directory preserved at: {self.run_dir}")
+
+
+async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, max_nets: int = 5, run_dir: Optional[Path] = None):
+    """Run the test mode optimization.
+    
+    Detects which example DCP is being used and applies the appropriate optimization flow:
+    - demo_corundum_25g_misses_timing.dcp: High fanout net optimization flow
+    - logicnets_jscl.dcp: Pblock-based placement optimization flow
+    """
+    # Detect which DCP is being used based on filename
+    dcp_name = input_dcp.name.lower()
+    
+    if "corundum" in dcp_name or dcp_name == "demo_corundum_25g_misses_timing.dcp":
+        design_type = "corundum"
+        print(f"[TEST] Detected Corundum design - using high fanout optimization flow")
+    elif "logicnets" in dcp_name or dcp_name == "logicnets_jscl.dcp":
+        design_type = "logicnets"
+        print(f"[TEST] Detected LogicNets design - using pblock optimization flow")
+    else:
+        print(f"\n[TEST] ERROR: Unsupported DCP file: {input_dcp.name}")
+        print(f"[TEST] Test mode requires one of the two example DCPs:")
+        print(f"[TEST]   - demo_corundum_25g_misses_timing.dcp")
+        print(f"[TEST]   - logicnets_jscl.dcp")
+        print(f"[TEST]")
+        print(f"[TEST] For custom DCPs, run without --test to use the LLM-guided optimizer.")
+        return 1
+    
+    tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir)
+    
+    try:
+        await tester.start_servers()
+        
+        if design_type == "corundum":
+            success = await tester.run_test(input_dcp, output_dcp, max_nets_to_optimize=max_nets)
+        else:  # logicnets
+            success = await tester.run_test_logicnets(input_dcp, output_dcp)
+        
+        if success:
+            print("\n[TEST] Test completed successfully")
+            print(f"\n[TEST] Output files:")
+            print(f"[TEST]   Optimized DCP: {output_dcp}")
+            print(f"[TEST]   Run directory: {tester.run_dir}")
+            return 0
+        else:
+            print("\n[TEST] Test failed")
+            print(f"[TEST] Run directory: {tester.run_dir}")
+            return 1
+            
+    except KeyboardInterrupt:
+        print("\n[TEST] Interrupted by user")
+        print(f"[TEST] Run directory: {tester.run_dir}")
+        return 130
+    except Exception as e:
+        logger.exception(f"Test mode fatal error: {e}")
+        print(f"\n[TEST] Fatal error: {e}")
+        print(f"[TEST] Run directory: {tester.run_dir}")
+        return 1
+    finally:
+        await tester.cleanup()
+
+
+# === Section 9: Entry Point ===
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description="FPGA Design Optimization Agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python dcp_optimizer.py input.dcp
+  python dcp_optimizer.py input.dcp --output output.dcp
+  python dcp_optimizer.py input.dcp --model anthropic/claude-sonnet-4
+  python dcp_optimizer.py input.dcp --debug
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test  # High fanout optimization
+  python dcp_optimizer.py logicnets_jscl.dcp --test  # Pblock optimization
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
+        """
+    )
+    parser.add_argument("input_dcp", type=Path, help="Input design checkpoint (.dcp)")
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        dest="output_dcp",
+        help="Output optimized checkpoint (.dcp). Default: <input_name>_optimized-<timestamp>.dcp in same directory as input"
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=os.environ.get("OPENROUTER_API_KEY"),
+        help="OpenRouter API key (default: OPENROUTER_API_KEY env var)"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=DEFAULT_MODEL_PLANNER,
+        help=f"Planner LLM model to use (default: {DEFAULT_MODEL_PLANNER})"
+    )
+    parser.add_argument(
+        "--model-worker",
+        type=str,
+        default=DEFAULT_MODEL_WORKER,
+        help=f"Worker LLM model for routine optimization steps (default: {DEFAULT_MODEL_WORKER})"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode (verbose logging, save intermediate checkpoints)"
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Test mode: run hardcoded optimization flow without LLM. Detects DCP type and applies appropriate optimization: high fanout for Corundum, pblock for LogicNets."
+    )
+    parser.add_argument(
+        "--max-nets",
+        type=int,
+        default=5,
+        help="Maximum number of high fanout nets to optimize in test mode (default: 5)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate inputs
+    if not args.input_dcp.exists():
+        print(f"Error: Input file not found: {args.input_dcp}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Generate default output DCP name if not provided
+    if args.output_dcp is None:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        input_stem = args.input_dcp.stem  # Filename without extension
+        input_dir = args.input_dcp.parent  # Directory of input file
+        args.output_dcp = input_dir / f"{input_stem}_optimized-{timestamp}.dcp"
+    
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Create output directory if needed
+    args.output_dcp.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Test mode - run without LLM
+    if args.test:
+        # Create run directory with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+        
+        print(f"FPGA Design Optimization - TEST MODE")
+        print(f"=====================================")
+        print(f"Input:       {args.input_dcp.resolve()}")
+        print(f"Output:      {args.output_dcp.resolve()}")
+        print(f"Run dir:     {run_dir}")
+        print(f"Max nets to optimize: {args.max_nets}")
+        print()
+        
+        exit_code = await run_test_mode(
+            args.input_dcp, 
+            args.output_dcp, 
+            debug=args.debug,
+            max_nets=args.max_nets,
+            run_dir=run_dir
+        )
+        sys.exit(exit_code)
+    
+    # Normal mode - requires API key and LLM
+    if not args.api_key:
+        print("Error: OpenRouter API key required. Set OPENROUTER_API_KEY or use --api-key", file=sys.stderr)
+        print("       Use --test flag to run in test mode without LLM", file=sys.stderr)
+        sys.exit(1)
+    
+    
+    # Create run directory with timestamp (before creating optimizer so we can show it)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+    
+    print(f"FPGA Design Optimization Agent")
+    print(f"================================")
+    print(f"Input:       {args.input_dcp.resolve()}")
+    print(f"Output:      {args.output_dcp.resolve()}")
+    print(f"Run dir:     {run_dir}")
+    print(f"Planner Model: {args.model}")
+    print(f"Worker Model:  {args.model_worker}")
+    print()
+    
+    optimizer = DCPOptimizer(
+        api_key=args.api_key,
+        model_planner=args.model,        # Strategy planning model
+        model_worker=args.model_worker,  # Routine execution model
+        debug=args.debug,
+        run_dir=run_dir
+    )
+    
+    try:
+        await optimizer.start_servers()
+        success = await optimizer.optimize(args.input_dcp, args.output_dcp)
+        
+        if success:
+            print("\n✓ Optimization completed successfully")
+            print(f"\nOutput files:")
+            print(f"  Optimized DCP: {args.output_dcp}")
+            print(f"  Run directory: {run_dir}")
+            sys.exit(0)
+        else:
+            print("\n✗ Optimization did not complete successfully")
+            print(f"\nRun directory: {run_dir}")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        print(f"Run directory: {run_dir}")
+        sys.exit(130)
+    except Exception as e:
+        logger.exception(f"Fatal error: {e}")
+        print(f"Run directory: {run_dir}")
+        sys.exit(1)
+    finally:
+        await optimizer.cleanup()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
