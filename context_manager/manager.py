@@ -106,28 +106,35 @@ class MemoryManager:
 
     def _compress(self, compression_type: str, context: CompressionContext) -> None:
         """Execute compression."""
-        messages = self._working_memory.get_all()
-        compressed = self._compression_strategy.compress(messages, context)
+        # Prevent re-entrancy: if compression is already in progress, skip
+        if getattr(self, '_compressing', False):
+            return
+        self._compressing = True
+        try:
+            all_messages = self._working_memory.get_all()
+            compressed = self._compression_strategy.compress(all_messages, context)
 
-        summary = self._create_summary_from_messages(messages)
-        self._historical_memory.add(
-            content=summary,
-            importance=0.8,
-            task_type="compression_snapshot"
-        )
+            summary = self._create_summary_from_messages(all_messages)
+            self._historical_memory.add(
+                content=summary,
+                importance=0.8,
+                task_type="compression_snapshot"
+            )
 
-        self._working_memory.clear()
-        for msg in compressed:
-            self._working_store.add(msg)
+            self._working_memory.clear()
+            for msg in compressed:
+                self._working_store.add(msg)
 
-        self._event_bus.emit(ContextEvent(
-            event_type=EventType.CONTEXT_COMPRESSED,
-            data={
-                "compression_type": compression_type,
-                "original_count": len(messages),
-                "compressed_count": len(compressed)
-            }
-        ))
+            self._event_bus.emit(ContextEvent(
+                event_type=EventType.CONTEXT_COMPRESSED,
+                data={
+                    "compression_type": compression_type,
+                    "original_count": len(all_messages),
+                    "compressed_count": len(compressed)
+                }
+            ))
+        finally:
+            self._compressing = False
 
     def _create_summary_from_messages(self, messages: list[Message]) -> str:
         """Create summary from messages for archival."""

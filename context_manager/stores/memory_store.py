@@ -42,6 +42,12 @@ class InMemoryContextStore(ContextStore):
         )
 
     def restore(self, snapshot: ContextSnapshot) -> None:
+        """Restore state from snapshot.
+
+        Note: ContextSnapshot only stores metadata (count, timestamps), not actual messages.
+        Full state restoration would require storing the message list itself, which is not
+        currently implemented. This method is a no-op.
+        """
         pass
 
     def clear(self) -> None:

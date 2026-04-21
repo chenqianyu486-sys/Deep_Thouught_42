@@ -9,6 +9,9 @@ class AggressiveCompressionStrategy(BaseCompressionStrategy):
 
     def compress(self, messages: list[Message], context: CompressionContext) -> list[Message]:
         """Execute aggressive compression."""
+        if not messages:
+            return []
+
         current_wns = self._get_latest_wns(context.tool_call_details)
 
         summary_lines = [

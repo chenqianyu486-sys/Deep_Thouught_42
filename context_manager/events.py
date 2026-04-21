@@ -1,8 +1,10 @@
 """Event system for Context Manager."""
 
+import logging
 from typing import Callable
 from .interfaces import ContextEvent, EventType
 
+logger = logging.getLogger(__name__)
 EventHook = Callable[[ContextEvent], None]
 
 
@@ -35,13 +37,13 @@ class EventBus:
             try:
                 handler(event)
             except Exception:
-                pass
+                logger.exception(f"Event handler failed for {event.event_type}: {handler}")
 
         for handler in self._global_handlers:
             try:
                 handler(event)
             except Exception:
-                pass
+                logger.exception(f"Global event handler failed: {handler}")
 
     def get_history(self, event_type: EventType = None, limit: int = 100) -> list[ContextEvent]:
         """Get recent event history."""
