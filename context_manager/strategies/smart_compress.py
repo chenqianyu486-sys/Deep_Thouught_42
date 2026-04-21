@@ -39,7 +39,7 @@ class SmartCompressionStrategy(BaseCompressionStrategy):
 
         for call in merged_calls[-30:]:
             status = self._format_call_status(call)
-            summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
+            summary_lines.append(f"  Iter {call.get('iteration', '?')}: {call.get('tool_name', 'unknown')} -> {status}")
 
         new_messages = [messages[0], messages[1]]
         new_messages.append(Message(
@@ -62,7 +62,7 @@ class SmartCompressionStrategy(BaseCompressionStrategy):
         seen = set()
         merged = []
         for call in tool_calls[-40:]:
-            if call["iteration"] not in seen:
-                seen.add(call["iteration"])
+            if call.get("iteration") not in seen:
+                seen.add(call.get("iteration", None))
                 merged.append(call)
         return merged

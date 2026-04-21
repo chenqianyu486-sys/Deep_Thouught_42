@@ -35,13 +35,13 @@ class AggressiveCompressionStrategy(BaseCompressionStrategy):
         recent_iters = set()
         count = 0
         for call in reversed(context.tool_call_details):
-            if call["iteration"] not in recent_iters and count < 5:
+            if call.get("iteration") not in recent_iters and count < 5:
                 recent_iters.add(call["iteration"])
                 count += 1
                 status = "[FAIL] Failed" if call.get("error") else (
                     f"[WNS] {call['wns']:.3f} ns" if call.get("wns") else "[OK]"
                 )
-                summary_lines.append(f"  Iter {call['iteration']}: {call['tool_name']} -> {status}")
+                summary_lines.append(f"  Iter {call.get('iteration', '?')}: {call.get('tool_name', 'unknown')} -> {status}")
 
         new_messages = [messages[0]]
         new_messages.append(Message(

@@ -19,6 +19,7 @@ from .manager import MemoryManager
 from .agent_context import AgentContext, AgentContextManager
 from .strategies.smart_compress import SmartCompressionStrategy
 from .strategies.aggressive_compress import AggressiveCompressionStrategy
+from .formatters import XMLMessageFormatter, XMLResponseParser
 
 __all__ = [
     "Message",
@@ -40,4 +41,6 @@ __all__ = [
     "AgentContextManager",
     "SmartCompressionStrategy",
     "AggressiveCompressionStrategy",
+    "XMLMessageFormatter",
+    "XMLResponseParser",
 ]

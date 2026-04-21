@@ -736,22 +736,14 @@ class DCPOptimizer(DCPOptimizerBase):
             clock_period=self.clock_period
         )
 
-    def _pull_compressed_messages_from_memory_manager(self) -> None:
-        """Pull compressed messages from MemoryManager back into self.messages."""
-        from context_manager.interfaces import MessageRole
-        compressed = self._memory_manager.get_context()
-        self.messages = [
-            {"role": m.role.value, "content": m.content, **m.metadata}
-            for m in compressed
-        ]
-
     def _compress_context(self):
-        """Multi-level context compression strategy - delegates to MemoryManager."""
+        """Multi-level context compression strategy - delegates to MemoryManager.
+
+        NOTE: MemoryManager._compress() already replaces working memory with compressed
+        messages internally. No additional message replacement is needed after compression.
+        """
         # Sync optimizer state to MemoryManager
         self._sync_state_to_memory_manager()
-
-        # Note: self.messages is now a property proxying to MemoryManager via compat.
-        # No need to reload - messages are already in MemoryManager.
 
         current_tokens = self._estimate_tokens()
 
@@ -760,7 +752,6 @@ class DCPOptimizer(DCPOptimizerBase):
             logger.warning(f"[WARNING] Context hard limit exceeded (~{current_tokens:,} tokens). Triggering aggressive compression...")
             context = self._build_compression_context(current_tokens)
             self._memory_manager._compress("aggressive", context)
-            self._pull_compressed_messages_from_memory_manager()
             return
 
         # Soft threshold: light compression
@@ -768,7 +759,6 @@ class DCPOptimizer(DCPOptimizerBase):
             logger.info(f"[WARNING] Context threshold exceeded (~{current_tokens:,} tokens). Triggering smart compression...")
             context = self._build_compression_context(current_tokens)
             self._memory_manager._compress("smart", context)
-            self._pull_compressed_messages_from_memory_manager()
             return
 
     def _smart_compress(self):
@@ -919,9 +909,11 @@ class DCPOptimizer(DCPOptimizerBase):
             # Improved: reset failure count, clear historical failure accumulation
             self.worker_consecutive_failures = 0
             self.global_no_improvement = 0
-            # Only count consecutive success for Worker
+            # Only count consecutive success for Worker on OPTIMIZATION tasks
+            # (INFORMATION tasks should not affect model downgrade decisions)
             if model_used == self.model_worker:
-                self.worker_consecutive_success += 1
+                if self.classify_task(self.current_task_type) == TaskCategory.OPTIMIZATION:
+                    self.worker_consecutive_success += 1
         else:
             # Not improved: reset success count
             self.worker_consecutive_success = 0
@@ -1353,6 +1345,21 @@ class DCPOptimizer(DCPOptimizerBase):
         self.initial_tns = timing_info["tns"]
         self.initial_failing_endpoints = timing_info["failing_endpoints"]
         self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
+
+        # NOTE (Issue 7): _sync_state_to_memory_manager() is NOT called here.
+        # MemoryManager._initial_wns/_best_wns remain at default values (None/-inf).
+        # This is intentional because:
+        #   1. DCPOptimizer's own self.initial_wns/self.best_wns are the canonical values
+        #      used for all business decisions (model selection, WNS comparison, etc.)
+        #   2. _build_compression_context() reads from DCPOptimizer attributes directly,
+        #      not from MemoryManager state
+        #   3. MemoryManager's auto-trigger via MESSAGE_ADDED has been disabled.
+        #      Compression is now triggered exclusively by DCPOptimizer._compress_context()
+        #   4. _sync_state_to_memory_manager() is called at the start of _compress_context()
+        #      in get_completion(), before any compression decisions are made
+        #   5. If design meets timing initially, optimize() returns early without calling
+        #      get_completion(), but no compression is needed in that path anyway
+        # Therefore: no functional issue, no fix required
         
         # Get clock period for fmax calculation
         self.clock_period = await super().get_clock_period(self._call_vivado_tool)
@@ -1506,8 +1513,13 @@ class DCPOptimizer(DCPOptimizerBase):
         wns_at_start = self.best_wns
         logger.info(f"Iteration {self.iteration}: Using {current_model} (complexity={context_complexity}, task={self.current_task_type})...")
         while True:
-            # [Phase 2] Disable automatic compression during tool-call loop
-            # It will be re-enabled before the LLM API call
+            # Capture WNS at the start of this iteration for improvement comparison
+            iteration_start_wns = self.best_wns
+
+            # [Legacy Safeguard] Disable compression strategy during tool-call loop.
+            # NOTE: _check_compression() is dead code (MESSAGE_ADDED subscription disabled),
+            # but this safeguard remains as a defensive measure.
+            # Will be re-enabled before the LLM API call.
             saved_compression_strategy = self._memory_manager._compression_strategy
             self._memory_manager._compression_strategy = None
 
@@ -1648,11 +1660,11 @@ class DCPOptimizer(DCPOptimizerBase):
             # [FIX] Only take WNS generated within this iteration, avoid cross-iteration misuse of historical records
             current_iter_wns_list = [
                 t["wns"] for t in self.tool_call_details
-                if t["iteration"] == self.iteration and t["wns"] is not None
+                if t.get("iteration") == self.iteration and t.get("wns") is not None
             ]
             if current_iter_wns_list:
                 current_wns = current_iter_wns_list[-1]   # Take latest WNS from this iteration
-                if current_wns > wns_at_start:            # Compare with entry snapshot
+                if current_wns > iteration_start_wns:     # Compare with this iteration's start WNS
                     self.global_no_improvement = 0
                     self._compat.failed_strategies.clear()
                 else:

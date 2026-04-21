@@ -12,6 +12,8 @@ from .events import EventBus
 from .stores.memory_store import InMemoryContextStore
 from .memory.working_memory import WorkingMemory, WorkingMemoryConfig
 from .memory.historical_memory import HistoricalMemory, HistoricalMemoryConfig
+from .strategies.smart_compress import SmartCompressionStrategy
+from .strategies.aggressive_compress import AggressiveCompressionStrategy
 
 
 @dataclass
@@ -56,14 +58,24 @@ class MemoryManager:
             event_bus=self._event_bus
         )
 
+        # NOTE: Automatic compression subscription DISABLED.
+        # Compression is now triggered exclusively by DCPOptimizer._compress_context().
+        # Benefits:
+        # 1. Eliminates implicit behavior - compression timing is fully controllable
+        # 2. Avoids conflicts with DCPOptimizer's explicit compression calls
+        # 3. Dual-trigger mechanism (auto + explicit) was confirmed to cause duplicate compressions
+        # To re-enable automatic compression, uncomment the following:
+        # self._event_bus.subscribe(
+        #     EventType.MESSAGE_ADDED,
+        #     lambda event: self._check_compression(event)
+        # )
+
         self._failed_strategies: list[str] = []
         self._tool_call_details: list[dict] = []
         self._best_wns: float = float('-inf')
         self._initial_wns: Optional[float] = None
         self._iteration: int = 0
         self._clock_period: Optional[float] = None
-
-        self._event_bus.subscribe(EventType.MESSAGE_ADDED, self._check_compression)
 
     def add_message(self, role: MessageRole, content: str, metadata: dict = None) -> ContextSnapshot:
         """Add message to working memory."""
@@ -78,8 +90,27 @@ class MemoryManager:
         """Get context formatted for LLM API call."""
         return self._working_memory.get_context_for_model(system_prompt or "", include_history=True)
 
+    def replace_all_messages(self, messages: list[Message]) -> None:
+        """
+        Replace all working memory messages in a single batch operation.
+
+        This is more efficient than clearing and re-adding messages one by one,
+        as it avoids triggering N MESSAGE_ADDED events.
+
+        Args:
+            messages: List of Message objects to set as the new working memory
+        """
+        self._working_store.clear()
+        for msg in messages:
+            self._working_store.add(msg)
+
     def _check_compression(self, event: ContextEvent) -> None:
-        """Check if compression is needed after message added."""
+        """Check if compression is needed after message added.
+
+        DISABLED: This method is dead code since MESSAGE_ADDED auto-subscription was removed.
+        It is retained for documentation purposes and potential future re-activation.
+        Compression is now exclusively triggered by DCPOptimizer._compress_context().
+        """
         if not self._compression_strategy:
             return
 
@@ -105,14 +136,43 @@ class MemoryManager:
             self._compress("smart", context)
 
     def _compress(self, compression_type: str, context: CompressionContext) -> None:
-        """Execute compression."""
-        # Prevent re-entrancy: if compression is already in progress, skip
+        """Execute compression with system message protection."""
         if getattr(self, '_compressing', False):
             return
         self._compressing = True
         try:
+            if compression_type == "aggressive":
+                strategy = AggressiveCompressionStrategy()
+            elif compression_type == "smart":
+                strategy = SmartCompressionStrategy()
+            elif compression_type == "xml_structured":
+                from .strategies.xml_structured_compress import XMLStructuredCompressor
+                strategy = XMLStructuredCompressor()
+            else:
+                strategy = self._compression_strategy
+
             all_messages = self._working_memory.get_all()
-            compressed = self._compression_strategy.compress(all_messages, context)
+
+            # Separate system messages (never compressed) from others
+            system_messages = [
+                m for m in all_messages
+                if m.role == MessageRole.SYSTEM or
+                (m.metadata and m.metadata.get('protected'))
+            ]
+            non_system_messages = [
+                m for m in all_messages
+                if m.role != MessageRole.SYSTEM and
+                not (m.metadata and m.metadata.get('protected'))
+            ]
+
+            # Only compress non-system messages
+            if non_system_messages:
+                compressed_non_system = strategy.compress(non_system_messages, context)
+            else:
+                compressed_non_system = []
+
+            # Rebuild: system messages + compressed non-system messages
+            compressed = system_messages + compressed_non_system
 
             summary = self._create_summary_from_messages(all_messages)
             self._historical_memory.add(
