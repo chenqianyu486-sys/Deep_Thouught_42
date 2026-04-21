@@ -59,19 +59,25 @@ fpl26_optimization_contest/
 │                              DCPOptimizer                                     │
 │                         (dcp_optimizer.py)                                   │
 │                                                                               │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                       │
-│  │ RapidWright │    │   Vivado    │    │   Memory    │                       │
-│  │    MCP      │    │    MCP      │    │  Manager    │                       │
-│  │  Session    │    │   Session   │    │             │                       │
-│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘                       │
-│         │                   │                   │                              │
-│         └───────────────────┼───────────────────┘                              │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────────────┐  │
+│  │ RapidWright │    │   Vivado    │    │   Memory    │    │ AgentContext │  │
+│  │    MCP      │    │    MCP      │    │  Manager    │    │   Manager     │  │
+│  │  Session    │    │   Session   │    │             │    │  (branching)  │  │
+│  └──────┬──────┘    └──────┬──────┘    └──────┬──────┘    └──────┬───────┘  │
+│         │                   │                   │                   │         │
+│         └───────────────────┼───────────────────┼───────────────────┘         │
 │                             │                                                  │
 │                      ┌──────▼──────┐                                          │
 │                      │  Tool Call  │                                          │
 │                      │   Results   │                                          │
 │                      └─────────────┘                                          │
 └─────────────────────────────────────────────────────────────────────────────┘
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │   Shared EventBus         │
+                    │   (MemoryManager +        │
+                    │    AgentContextManager)   │
+                    └───────────────────────────┘
 ```
 
 ### 2.2 Context Manager Data Flow
@@ -85,53 +91,38 @@ fpl26_optimization_contest/
 │         │                                                                     │
 │         ▼                                                                     │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                        EventBus.subscribe()                             │  │
-│  │                     (MESSAGE_ADDED → _check_compression)                 │  │
+│  │                        EventBus.emit(MESSAGE_ADDED)                      │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │         │                                                                     │
 │         ▼                                                                     │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                     ContextEstimator.estimate_from_messages()            │  │
-│  │                        Returns: token count                             │  │
+│  │                  _check_compression(event) [SUBSCRIBED]                   │  │
+│  │   - Returns early if _compression_strategy is None                      │  │
+│  │   - If hard_limit exceeded → triggers aggressive compression immediately│  │
+│  │   - If soft_threshold exceeded → triggers smart compression immediately │  │
+│  │   Note: compression_type parameter passed to _compress() is not used;   │  │
+│  │         actual strategy is determined by self._compression_strategy      │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│         │                                                                     │
+│         ▼                                                                     │
+│  (Later, before LLM call)                                                    │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                  dcp_optimizer._compress_context()                       │  │
+│  │   - Sync state via _sync_state_to_memory_manager()                      │  │
+│  │   - Build CompressionContext via _build_compression_context()            │  │
+│  │   - Call _memory_manager._compress(context) [type param is ignored]    │  │
+│  │     Note: the compression type string is passed but not used internally; │  │
+│  │           the actual strategy comes from self._compression_strategy       │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │         │                                                                     │
 │         ▼                                                                     │
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
-│  │                         CompressionContext                                │  │
-│  │   current_tokens, threshold_tokens, hard_limit_tokens,                  │  │
-│  │   failed_strategies, tool_call_details, best_wns, iteration, etc.        │  │
+│  │                         _compress(context)                                │  │
+│  │   1. Archive summary to HistoricalMemory                                 │  │
+│  │   2. Clear WorkingMemory                                                  │  │
+│  │   3. Repopulate with compressed messages                                  │  │
+│  │   4. Emit CONTEXT_COMPRESSED event                                        │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
-│         │                                                                     │
-│         ├──────────────────────┬──────────────────────┐                       │
-│         ▼                      ▼                      ▼                       │
-│  ┌─────────────┐      ┌─────────────┐        ┌─────────────┐                 │
-│  │ tokens <=   │      │ tokens >    │        │ tokens >    │                 │
-│  │ soft_thresh │ NO   │ soft_thresh │  NO    │ hard_limit  │                 │
-│  │   (OK)      │      │             │        │(COMPRESS!)  │                 │
-│  └─────────────┘      └──────┬──────┘        └──────┬──────┘                 │
-│                              │                      │                         │
-│                              ▼                      │                         │
-│                     ┌────────────────┐              │                         │
-│                     │ _compress()    │              │                         │
-│                     │ "smart"        │              │                         │
-│                     └───────┬────────┘              │                         │
-│                             │                       │                         │
-│                             └───────────┬───────────┘                         │
-│                                         │                                     │
-│                                         ▼                                     │
-│                              ┌────────────────────────┐                       │
-│                              │  CompressionStrategy   │                       │
-│                              │  .compress(messages,   │                       │
-│                              │   context)            │                       │
-│                              └───────────┬────────────┘                       │
-│                                          │                                    │
-│         ┌────────────────────────────────┼────────────────────────────────┐  │
-│         │                                │                                │  │
-│         ▼                                ▼                                ▼  │
-│  ┌─────────────────┐         ┌─────────────────────┐         ┌────────────┐  │
-│  │WorkingMemory    │         │ HistoricalMemory   │         │  EventBus  │  │
-│  │(short-term msgs)│         │(archived summaries)│         │  (notify)   │  │
-│  └─────────────────┘         └─────────────────────┘         └────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -157,7 +148,7 @@ fpl26_optimization_contest/
   │                  │      - get_context_for_model()
   └────────┬─────────┘      - estimate_tokens()
            │
-           │  (when threshold exceeded)
+           │  (when compression triggered by dcp_optimizer._compress_context())
            ▼
   ┌──────────────────┐
   │  Compression     │  ◄── Two strategies:
@@ -165,13 +156,15 @@ fpl26_optimization_contest/
   │  .compress()     │      - AggressiveCompressionStrategy (hard limit)
   └────────┬─────────┘
            │
-           ├──────────────────┬──────────────────┐
-           ▼                  ▼                  ▼
-  ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-  │ WorkingMemory   │ │ HistoricalMem   │ │    EventBus    │
-  │ .clear()       │ │ .add(summary)   │ │ CONTEXT_       │
-  │ + new messages │ │ importance=0.8  │ │ COMPRESSED     │
-  └─────────────────┘ └─────────────────┘ └─────────────────┘
+           ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                      SEQUENTIAL Operations:                              │
+  │  1. Create summary from all messages                                    │
+  │  2. HistoricalMemory.add(summary, importance=0.8)  ← Archive first       │
+  │  3. WorkingMemory.clear()                        ← Then clear           │
+  │  4. Add compressed messages back to store        ← Then repopulate      │
+  │  5. EventBus.emit(CONTEXT_COMPRESSED)            ← Finally notify       │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.4 Tool Call Result Tracking Flow
@@ -274,15 +267,23 @@ fpl26_optimization_contest/
   ├── _global_handlers: list[Callable]
   └── _event_history: list[ContextEvent]
 
+  Methods:
+  ├── subscribe(event_type, handler)           # Register handler for event type
+  ├── unsubscribe(event_type, handler)        # Unregister handler (prevents memory leaks)
+  ├── subscribe_global(handler)               # Register handler for all events
+  ├── unsubscribe_global(handler)             # Unregister global handler
+  ├── emit(event)                             # Fire event synchronously
+  └── get_history(event_type, limit)          # Retrieve recent events
+
   Event Types:
-  ├── MESSAGE_ADDED       → _check_compression() in MemoryManager
+  ├── MESSAGE_ADDED       → _check_compression() in MemoryManager (triggers compression when threshold exceeded)
   ├── CONTEXT_COMPRESSED  → Listeners notified after compression
-  ├── LAYER_PROMOTED     → HistoricalMemory entry added
-  ├── LAYER_ARCHIVED     → Long-term archival
-  ├── BRANCH_CREATED      → New agent branch created
-  ├── BRANCH_MERGED       → Branch merged into parent
-  ├── SNAPSHOT_CREATED    → Context snapshot taken
-  └── RETRIEVAL_COMPLETED → Historical retrieval done
+  ├── LAYER_PROMOTED     → Emitted by HistoricalMemory.add() after archiving an entry
+  ├── LAYER_ARCHIVED     → (Defined but never emitted - no callers exist)
+  ├── BRANCH_CREATED      → New agent branch created (AgentContextManager)
+  ├── BRANCH_MERGED       → Branch merged into parent (AgentContextManager)
+  ├── SNAPSHOT_CREATED    → (Defined but never emitted - no callers exist)
+  └── RETRIEVAL_COMPLETED → (Defined but never emitted - no callers exist)
 
   emit(event):
          │
@@ -292,6 +293,16 @@ fpl26_optimization_contest/
   │  2. Call type-specific handlers (_sync_handlers[event_type])           │
   │  3. Call global handlers (_global_handlers)                            │
   │  4. Log any handler exceptions (non-fatal)                             │
+  └────────────────────────────────────────────────────────────────────────┘
+
+  Shared EventBus in DCPOptimizer:
+         │
+         ▼
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │  self._event_bus  ──►  MemoryManager                                  │
+  │                  ──►  AgentContextManager                             │
+  │  Both components share the same EventBus instance, so branch events  │
+  │  (BRANCH_CREATED, BRANCH_MERGED) can trigger MemoryManager reactions  │
   └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -327,17 +338,17 @@ HistoricalMemoryConfig    # max_entries (10K), relevance_threshold (0.5),
 
 | File | Responsibility |
 |------|---------------|
-| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection |
+| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection; owns shared EventBus + AgentContextManager |
 | `validate_dcps.py` | DCP equivalence validation (Phase1: structural, Phase2: simulation) |
 | `context_manager/manager.py` | Central memory orchestration, compression decisions |
-| `context_manager/events.py` | Event bus for publish/subscribe notifications |
-| `context_manager/estimator.py` | Token estimation (~4 chars/token) |
+| `context_manager/events.py` | Event bus: subscribe/unsubscribe/emit; shared by MemoryManager and AgentContextManager |
+| `context_manager/estimator.py` | Token estimation using content-type-aware method (Chinese: 1.5 chars/token, English: 3.5, Code: 2.5, Digits: 4.0, Whitespace: 5.0); `estimate_context_complexity` integrated into `DCPOptimizer._estimate_context_complexity` for model routing |
 | `context_manager/memory/working_memory.py` | Short-term message storage |
 | `context_manager/memory/historical_memory.py` | Long-term archive with retrieval |
 | `context_manager/stores/memory_store.py` | In-memory message store implementation |
 | `context_manager/strategies/*.py` | Compression algorithms |
 | `context_manager/compat.py` | Legacy adapter for DCPOptimizerCompat |
-| `context_manager/agent_context.py` | Multi-agent branching support |
+| `context_manager/agent_context.py` | Multi-agent branching; shares EventBus with MemoryManager via DCPOptimizer |
 | `RapidWrightMCP/server.py` | RapidWright MCP server |
 | `VivadoMCP/vivado_mcp_server.py` | Vivado MCP server |
 
@@ -353,16 +364,22 @@ add_message() ──────────────────────
 EventBus.emit(MESSAGE_ADDED)                          CompressionContext
          │                                                     │
          ▼                                                     ▼
-_check_compression() ──────────────────────────────► Compress if needed
+_check_compression()                               (created but used
+ triggers compression when threshold exceeded)     only by dcp_optimizer)
          │                                                     │
-         ├──────────────────┐                                  │
-         ▼                  ▼                                  ▼
-WorkingMemory      HistoricalMemory              CompressionStrategy
-.clear()           .add(summary)                 .compress()
-         │                  │                            │
-         │                  │                            ├───────────────┐
-         ▼                  ▼                            ▼               ▼
-New compressed      EventBus.emit               Smart           Aggressive
-messages stored     LAYER_PROMOTED              Compression     Compression
-                                                              (more aggressive)
+         │                                            ┌──────┴──────┐
+         │                                            ▼             ▼
+         │                                   dcp_optimizer      Compression
+         │                                   ._compress_context() Strategy.compress()
+         │                                            │             │
+         │                                            └──────┬──────┘
+         │                                                   │
+         │                                                   ▼
+         │                                   ┌─────────────────────────────────────┐
+         │                                   │     SEQUENTIAL COMPRESSION:       │
+         │                                   │  1. HistoricalMemory.add(summary)   │
+         │                                   │  2. WorkingMemory.clear()          │
+         │                                   │  3. Add compressed msgs back        │
+         │                                   │  4. EventBus.emit(CONTEXT_COMPRESSED)
+         │                                   └─────────────────────────────────────┘
 ```

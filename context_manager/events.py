@@ -23,9 +23,24 @@ class EventBus:
             self._sync_handlers[event_type] = []
         self._sync_handlers[event_type].append(handler)
 
+    def unsubscribe(self, event_type: EventType, handler: Callable) -> None:
+        """Unsubscribe a specific handler from an event type."""
+        if event_type in self._sync_handlers:
+            try:
+                self._sync_handlers[event_type].remove(handler)
+            except ValueError:
+                pass  # Handler not found, ignore
+
     def subscribe_global(self, handler: Callable) -> None:
         """Subscribe to all events."""
         self._global_handlers.append(handler)
+
+    def unsubscribe_global(self, handler: Callable) -> None:
+        """Unsubscribe a specific global handler."""
+        try:
+            self._global_handlers.remove(handler)
+        except ValueError:
+            pass  # Handler not found, ignore
 
     def emit(self, event: ContextEvent) -> None:
         """Emit event synchronously."""

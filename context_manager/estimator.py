@@ -1,15 +1,50 @@
 """Context estimation for token counting."""
 
+import re
 from .interfaces import Message
 
 
 class ContextEstimator:
     """Estimates token count for context management."""
 
+    # Character-to-token ratios by content type (more accurate than flat //4)
+    # Based on OpenAI's cl100k_base tokenizer behavior
+    CHINESE_CHARS_PER_TOKEN = 1.5      # ~1.5 Chinese chars ≈ 1 token
+    ENGLISH_CHARS_PER_TOKEN = 3.5      # ~3.5 English chars ≈ 1 token
+    DIGITS_CHARS_PER_TOKEN = 4.0       # digits compress well
+    WHITESPACE_CHARS_PER_TOKEN = 5.0    # whitespace-heavy content
+    CODE_CHARS_PER_TOKEN = 2.5         # code mixed with special chars
+
     @staticmethod
     def estimate_tokens(text: str) -> int:
-        """Estimate tokens using character-based method."""
-        return len(text) // 4
+        """Estimate tokens using content-type-aware method.
+
+        More accurate than simple len//4 as it accounts for:
+        - Chinese characters (higher token density)
+        - English words (lower token density)
+        - Code with special characters
+        - Digits and whitespace
+        """
+        if not text:
+            return 0
+
+        # Count character types for weighted estimation
+        chinese_chars = len(re.findall(r'[一-鿿]', text))
+        english_chars = len(re.findall(r'[a-zA-Z]', text))
+        digit_chars = len(re.findall(r'\d', text))
+        whitespace_chars = len(re.findall(r'\s', text))
+        special_chars = len(text) - chinese_chars - english_chars - digit_chars - whitespace_chars
+
+        # Weighted calculation based on character types
+        tokens = (
+            chinese_chars / ContextEstimator.CHINESE_CHARS_PER_TOKEN +
+            english_chars / ContextEstimator.ENGLISH_CHARS_PER_TOKEN +
+            digit_chars / ContextEstimator.DIGITS_CHARS_PER_TOKEN +
+            whitespace_chars / ContextEstimator.WHITESPACE_CHARS_PER_TOKEN +
+            special_chars / ContextEstimator.CODE_CHARS_PER_TOKEN
+        )
+
+        return max(1, int(tokens))
 
     def estimate_from_messages(self, messages: list[Message]) -> int:
         """Estimate total tokens from message list."""

@@ -35,7 +35,7 @@ except ImportError:
     sys.exit(1)
 
 # === Section 7.0: Context Manager Integration ===
-from context_manager import MemoryManager, SmartCompressionStrategy, AggressiveCompressionStrategy
+from context_manager import MemoryManager, SmartCompressionStrategy, AggressiveCompressionStrategy, AgentContextManager
 from context_manager.compat import DCPOptimizerCompat
 from context_manager.interfaces import CompressionContext as CMCompressionContext
 from context_manager.estimator import ContextEstimator
@@ -607,6 +607,9 @@ class DCPOptimizer(DCPOptimizerBase):
         self._compat = DCPOptimizerCompat(self._memory_manager)
         self._context_estimator = ContextEstimator()
 
+        # Initialize AgentContextManager for multi-agent branching (shares _event_bus with MemoryManager)
+        self._agent_context_manager = AgentContextManager(event_bus=self._event_bus)
+
         # === Phase 3: Subscribe to EventBus events ===
         self._event_bus.subscribe(CMEventType.CONTEXT_COMPRESSED, self._on_context_compressed)
         self._event_bus.subscribe(CMEventType.LAYER_PROMOTED, self._on_layer_promoted)
@@ -657,13 +660,21 @@ class DCPOptimizer(DCPOptimizerBase):
     def _estimate_context_complexity(self, task_type: str = "") -> int:
         """
         Estimate context complexity score (0-10).
-        Data-driven: uses historical task success rate instead of keyword matching.
+        Delegates token estimation to ContextEstimator for accuracy.
+        Data-driven: uses historical task success rate for task complexity.
 
         Args:
             task_type: Current task type, e.g., "place_design", "get_utilization", "optimize_placement"
         """
-        msg_count = len(self.messages)
-        token_est = self._estimate_tokens()
+        # Use ContextEstimator for accurate content-type-aware token estimation
+        from context_manager.interfaces import Message
+        msgs = [Message(role=m.get("role",""), content=m.get("content",""),
+                        name=m.get("name"), tool_calls=m.get("tool_calls"),
+                        tool_call_id=m.get("tool_call_id"), metadata=m.get("metadata",{}))
+                for m in self.messages]
+        token_est = self._context_estimator.estimate_from_messages(msgs)
+        msg_count = len(msgs)
+
         iteration_factor = min(self.iteration / 10, 2)
         failure_factor = min(len(self._compat.failed_strategies) / 5, 2)
 
@@ -673,8 +684,6 @@ class DCPOptimizer(DCPOptimizerBase):
             stats = self.task_type_stats[task_type]
             if stats['total'] >= 3:
                 success_rate = stats['success'] / stats['total']
-                # High success rate → simple/easy task → low factor
-                # Low success rate → hard task → high factor
                 if success_rate >= 0.8:
                     task_complexity_factor = 0
                 elif success_rate >= 0.6:
@@ -684,7 +693,6 @@ class DCPOptimizer(DCPOptimizerBase):
                 else:
                     task_complexity_factor = 3
         else:
-            # Unknown task type: neutral
             task_complexity_factor = 1
 
         # Base score: based on message count and token amount
