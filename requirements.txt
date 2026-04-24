@@ -11,3 +11,7 @@ rapidwright>=2025.2.1
 
 # Vivado MCP dependencies (pexpect for process control)
 pexpect>=4.8.0
+
+# Context Manager dependencies
+pyyaml>=6.0
+tiktoken>=0.5.0

@@ -165,8 +165,8 @@ class MemoryManager:
             for msg in compressed:
                 self._working_store.add(msg)
 
-            original_tokens = ContextEstimator.estimate_from_messages(all_messages)
-            compressed_tokens = ContextEstimator.estimate_from_messages(compressed)
+            original_tokens = self._estimator.estimate_from_messages(all_messages)
+            compressed_tokens = self._estimator.estimate_from_messages(compressed)
 
             self._event_bus.emit(ContextEvent(
                 event_type=EventType.CONTEXT_COMPRESSED,

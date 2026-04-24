@@ -184,6 +184,14 @@ def convert_mcp_tool_to_openai(tool, server_prefix: str) -> dict:
             "strict": False
         }
     }
+}
+
+
+# Shared constants for routing failure detection
+ROUTING_FAILURE_PHRASES = [
+    "routing failed", "route error", "cannot route",
+    "unroutable", "exceeds", "congestion"
+]
 
 
 # === Section 6: DCPOptimizerBase — Shared Base Class ===
@@ -222,7 +230,12 @@ class DCPOptimizerBase:
         # Log file handles
         self._rw_log_file = None
         self._v_log_file = None
-    
+
+    def _is_routing_failure(self, error_msg: str) -> bool:
+        """Check if error message indicates a routing failure."""
+        error_lower = error_msg.lower() if isinstance(error_msg, str) else str(error_msg).lower()
+        return any(phrase in error_lower for phrase in ROUTING_FAILURE_PHRASES)
+
     async def start_servers(self, log_prefix: str = ""):
         """Start and connect to both MCP servers."""
         script_dir = Path(__file__).parent.resolve()
@@ -243,7 +256,9 @@ class DCPOptimizerBase:
                 print(f"{log_prefix} Debug mode: MCP server output will be shown in console")
         else:
             self._rw_log_file = open(rapidwright_mcp_log, 'w')
+            await self.exit_stack.callback(self._rw_log_file.close)
             self._v_log_file = open(vivado_mcp_log, 'w')
+            await self.exit_stack.callback(self._v_log_file.close)
             logger.info(f"RapidWright Java output: {rapidwright_log}")
             logger.info(f"RapidWright MCP output: {rapidwright_mcp_log}")
             logger.info(f"Vivado output: {vivado_log}")
@@ -329,12 +344,15 @@ class DCPOptimizerBase:
     
     async def cleanup(self):
         """Clean up resources."""
-        await self.exit_stack.aclose()
-        
-        if self._rw_log_file:
-            self._rw_log_file.close()
-        if self._v_log_file:
-            self._v_log_file.close()
+        rw_file = self._rw_log_file
+        v_file = self._v_log_file
+        self._rw_log_file = None
+        self._v_log_file = None
+        try:
+            await self.exit_stack.aclose()
+        finally:
+            if rw_file: rw_file.close()
+            if v_file: v_file.close()
         
         logger.info(f"Run directory preserved at: {self.run_dir}")
 
@@ -563,6 +581,7 @@ class DCPOptimizer(DCPOptimizerBase):
         # Track optimization progress
         self.iteration = 0
         self.best_wns = float('-inf')
+        self.latest_wns: Optional[float] = None  # Cache for O(1) _get_current_wns()
         self.current_task_type = ""  # Current task type
         # Task type success rate tracking (task_type -> {success: int, total: int})
         self.task_type_stats: dict[str, dict[str, int]] = {}
@@ -727,11 +746,8 @@ class DCPOptimizer(DCPOptimizerBase):
         mm._iteration = self.iteration
 
     def _get_current_wns(self) -> Optional[float]:
-        """Get latest non-null WNS from tool_call_details via compat."""
-        for call in reversed(self._compat.tool_call_details):
-            if call.get("wns") is not None:
-                return call["wns"]
-        return None
+        """Get latest WNS - O(1) from cached instance variable."""
+        return self.latest_wns
 
     def _build_compression_context(self, current_tokens: int) -> CMCompressionContext:
         """Build CompressionContext from DCPOptimizer state for MemoryManager."""
@@ -1155,7 +1171,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     try:
                         data = json.loads(tool_result)
                         error_msg = str(data.get("error", ""))
-                    except:
+                    except Exception:
                         error_msg = tool_result[tool_result.lower().find("error"):][:200]
 
         # INFORMATION task: success = got valid data (no error)
@@ -1173,10 +1189,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 error_lower = error_msg.lower()
                 if "timeout" in error_lower or "timed out" in error_lower:
                     return False, "recoverable_timeout"
-                if any(phrase in error_lower for phrase in [
-                    "routing failed", "route error", "cannot route",
-                    "unroutable", "exceeds", "congestion"
-                ]):
+                if self._is_routing_failure(error_lower):
                     return False, "routing_failure"
                 return False, "unrecoverable_error"
 
@@ -1296,13 +1309,14 @@ class DCPOptimizer(DCPOptimizerBase):
                         if wns_match and hasattr(self, 'best_wns'):
                             try:
                                 current_wns = float(wns_match.group(1))
+                                self.latest_wns = current_wns  # Cache for _get_current_wns()
                                 if current_wns > self.best_wns:
                                     logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                     self.best_wns = current_wns
                                 else:
                                     logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
                             except ValueError:
-                                pass
+                                logger.warning(f"Auto-Eval: WNS regex matched but float conversion failed: '{wns_match.group(1)}'")
                 except Exception as eval_err:
                     logger.warning(f"Auto-eval timing failed: {eval_err}")
                     result_text += f"\n\n[Warning: Auto timing evaluation failed: {eval_err}]"
@@ -1313,36 +1327,47 @@ class DCPOptimizer(DCPOptimizerBase):
                 if timing_info["wns"] is not None:
                     current_wns = timing_info["wns"]
                     wns_measured = current_wns  # Store for tracking
+                    self.latest_wns = current_wns  # Cache for _get_current_wns()
                     current_fmax = self.calculate_fmax(current_wns, self.clock_period)
-                    
+
                     # Format fmax string if available
                     fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
-                    
+
                     if current_wns > self.best_wns:
                         logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                         self.best_wns = current_wns
                     else:
                         logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
-            
+                else:
+                    logger.warning(f"vivado_report_timing_summary: WNS parsing returned None. "
+                                   f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}. "
+                                   f"Tool output sample: {result_text[:200]}")
+                else:
+                    logger.warning(f"vivado_report_timing_summary: WNS parsing returned None. "
+                                   f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}. "
+                                   f"Tool output sample: {result_text[:200]}")
+
             # Also track WNS from get_wns tool (returns just the numeric WNS value)
             elif tool_name == "vivado_get_wns":
                 try:
                     # get_wns returns just a number like "-0.099" or "0.016"
                     current_wns = float(result_text.strip())
                     wns_measured = current_wns  # Store for tracking
+                    self.latest_wns = current_wns  # Cache for _get_current_wns()
                     current_fmax = self.calculate_fmax(current_wns, self.clock_period)
-                    
+
                     # Format fmax string if available
                     fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
-                    
+
                     if current_wns > self.best_wns:
                         logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                         self.best_wns = current_wns
                     else:
                         logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
-                except (ValueError, AttributeError):
+                except (ValueError, AttributeError) as e:
                     # Could not parse WNS from get_wns output
-                    logger.warning(f"Could not parse WNS from get_wns output: {result_text[:100]}")
+                    truncated_output = result_text.strip()[:500] if result_text else "(empty)"
+                    logger.warning(f"Could not parse WNS from get_wns output: {truncated_output}. Error: {e}")
             
             elapsed_time = time.time() - start_time
 
@@ -1935,11 +1960,7 @@ CRITICAL OPTIMIZATION RULES:
                                 logger.warning(f"route_design failed due to timeout (Iter {tool_detail['iteration']}), not counted as failed strategy")
                                 recent_routing_failure = 'timeout'
                             # Check if it is a clear routing failure (non-timeout)
-                            elif any(phrase in error_msg for phrase in [
-                                'routing failed', 'route error',
-                                'cannot route', 'unroutable',
-                                'exceeds', 'congestion'
-                            ]):
+                            elif self._is_routing_failure(error_msg):
                                 logger.warning(f"route_design clear routing failure (Iter {tool_detail['iteration']}): {error_msg[:100]}")
                                 recent_routing_failure = 'routing_failed'
                             else:

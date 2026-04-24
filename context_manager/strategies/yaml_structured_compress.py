@@ -333,10 +333,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
         sorted_msgs = sorted(messages, key=get_sort_key, reverse=True)
         return sorted_msgs[:count]
 
-    def _estimate_tokens(self, messages: List[Message]) -> int:
-        """Token estimation using ContextEstimator's content-type-aware approach."""
-        estimator = ContextEstimator()
-        return estimator.estimate_from_messages(messages)
+    def _estimate_tokens(self, messages: list[Message]) -> int:
+        """Token estimation using tiktoken."""
+        return ContextEstimator.estimate_from_messages(messages)
 
     def _build_yaml_structure(
         self,

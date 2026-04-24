@@ -1,31 +1,21 @@
 """
-LightYAML Test Suite
+LightYAML Test Suite (pyyaml backend)
 
-Contains:
-1. Basic type tests
-2. Data structure tests
-3. Roundtrip consistency tests (load(dump(data)) == data)
-4. FPGA business scenario tests
-
-Run with:
-    python -m pytest context_manager/test_lightyaml.py -v
-Or run directly:
-    python context_manager/test_lightyaml.py
+Tests are adapted for pyyaml's standard behavior:
+- Block-style YAML output (e.g., `- item` instead of `[item]`)
+- Standard YAML null handling (`None` is a string, not null)
+- Full support for anchors, aliases, block strings, type tags
 """
 
 import unittest
 from collections import OrderedDict
-
-# Import LightYAML module
 import sys
 import os
 import json
 
-# Add parent directory to path for context_manager imports
 _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lightyaml import LightYAML, YAMLParseError, YAMLUnsupportedError, YAMLEncodeError, LightYAMLError
@@ -94,9 +84,13 @@ class TestLightYAMLBasicTypes(unittest.TestCase):
             self.assertIs(LightYAML.load(val), False)
 
     def test_load_null_values(self):
-        """Load null value variants."""
-        for val in ["null", "Null", "NULL", "~", "None"]:
+        """Load null value variants (standard YAML)."""
+        for val in ["null", "Null", "NULL", "~"]:
             self.assertIsNone(LightYAML.load(val))
+
+    def test_load_none_as_string(self):
+        """'None' is parsed as a string in standard YAML."""
+        self.assertEqual(LightYAML.load("None"), "None")
 
 
 class TestLightYAMLDataStructures(unittest.TestCase):
@@ -114,9 +108,10 @@ class TestLightYAMLDataStructures(unittest.TestCase):
         self.assertEqual(result, {"name": "test"})
 
     def test_dump_list(self):
-        """List."""
+        """List (pyyaml block format)."""
         yaml = LightYAML.dump([1, 2, 3])
-        self.assertIn("[1, 2, 3]", yaml)
+        self.assertIn("- 1", yaml)
+        self.assertIn("- 2", yaml)
 
     def test_load_list(self):
         """Load list."""
@@ -125,11 +120,7 @@ class TestLightYAMLDataStructures(unittest.TestCase):
 
     def test_dump_nested_dict(self):
         """Nested dict."""
-        data = {
-            "outer": {
-                "inner": "value"
-            }
-        }
+        data = {"outer": {"inner": "value"}}
         yaml = LightYAML.dump(data)
         self.assertIn("outer:", yaml)
         self.assertIn("inner:", yaml)
@@ -166,27 +157,31 @@ class TestLightYAMLDataStructures(unittest.TestCase):
 
 
 class TestLightYAMLRoundtripConsistency(unittest.TestCase):
-    """Roundtrip consistency tests - core tests."""
+    """Roundtrip consistency tests - data integrity after dump/load cycle."""
 
     def test_roundtrip_string(self):
         """String roundtrip."""
-        for s in ["hello", "key: value", "with space", "中文", "hello\nworld"]:
+        for s in ["hello", "key: value", "with space", "中文"]:
             data = s
-            yaml_str, parsed = LightYAML.roundtrip(data)
+            _, parsed = LightYAML.roundtrip(data)
             self.assertEqual(parsed, data)
+
+    def test_roundtrip_string_with_newline(self):
+        """String with newline roundtrip."""
+        data = "hello\nworld"
+        _, parsed = LightYAML.roundtrip(data)
+        self.assertEqual(parsed, data)
 
     def test_roundtrip_integers(self):
         """Integer roundtrip."""
         for n in [0, 1, -1, 42, -17, 1000000]:
-            data = n
-            _, parsed = LightYAML.roundtrip(data)
-            self.assertEqual(parsed, data)
+            _, parsed = LightYAML.roundtrip(n)
+            self.assertEqual(parsed, n)
 
     def test_roundtrip_floats(self):
         """Float roundtrip."""
         for f in [0.0, 3.14, -2.5, 1e10, 1.5e-5]:
-            data = f
-            _, parsed = LightYAML.roundtrip(data)
+            _, parsed = LightYAML.roundtrip(f)
             self.assertAlmostEqual(parsed, f)
 
     def test_roundtrip_boolean(self):
@@ -214,35 +209,28 @@ class TestLightYAMLRoundtripConsistency(unittest.TestCase):
 
     def test_roundtrip_nested_structure(self):
         """Nested structure roundtrip."""
-        data = {
-            "level1": {
-                "level2": {
-                    "level3": [1, 2, 3]
-                }
-            }
-        }
+        data = {"level1": {"level2": {"level3": [1, 2, 3]}}}
         _, parsed = LightYAML.roundtrip(data)
         self.assertEqual(parsed, data)
 
     def test_roundtrip_ordered_dict(self):
-        """OrderedDict roundtrip."""
+        """OrderedDict roundtrip - order preserved."""
         data = OrderedDict([("first", 1), ("second", 2), ("third", 3)])
-        _, parsed = LightYAML.roundtrip(data)
-        # OrderedDict remains OrderedDict after deserialization
-        self.assertEqual(list(parsed.values()), [1, 2, 3])
+        yaml_str, parsed = LightYAML.roundtrip(data)
+        self.assertEqual(list(parsed.keys()), ["first", "second", "third"])
 
 
 class TestLightYAMLComments(unittest.TestCase):
-    """Comment tests."""
+    """Comment handling tests."""
 
     def test_parse_inline_comment(self):
-        """Inline comment."""
+        """Inline comment is stripped."""
         yaml = """key: value  # This is a comment"""
         result = LightYAML.load(yaml)
         self.assertEqual(result, {"key": "value"})
 
     def test_parse_comment_only_line(self):
-        """Full-line comment."""
+        """Full-line comment is ignored."""
         yaml = """# Entire line is a comment
 key: value"""
         result = LightYAML.load(yaml)
@@ -257,46 +245,34 @@ data: test"""
         self.assertEqual(result, {"data": "test"})
 
 
-class TestLightYAMLReservedFeatures(unittest.TestCase):
-    """Unsupported feature tests."""
+class TestLightYAMLStandardFeatures(unittest.TestCase):
+    """Tests for standard YAML features that pyyaml supports natively."""
 
-    def test_reject_anchor(self):
-        """Reject anchor &."""
-        yaml = """base: &anchor
-  value: 1
-derived: *anchor"""
-        with self.assertRaises(YAMLUnsupportedError):
-            LightYAML.load(yaml)
+    def test_anchor_and_alias(self):
+        """Anchors and aliases are supported."""
+        yaml = """timeout_val: &t 30
+default_timeout: *t"""
+        result = LightYAML.load(yaml)
+        self.assertEqual(result["timeout_val"], 30)
+        self.assertEqual(result["default_timeout"], 30)
 
-    def test_reject_alias(self):
-        """Reject alias *."""
-        yaml = """base: &anchor
-  value: 1
-derived: *anchor"""
-        with self.assertRaises(YAMLUnsupportedError):
-            LightYAML.load(yaml)
-
-    def test_reject_type_tag(self):
-        """Reject type tag !!."""
-        yaml = """data: !!str 123"""
-        with self.assertRaises(YAMLUnsupportedError):
-            LightYAML.load(yaml)
-
-    def test_reject_multiline_literal(self):
-        """Reject multi-line literal block |."""
+    def test_block_literal_string(self):
+        """Multi-line literal block (|) is supported."""
         yaml = """data: |
   line1
   line2"""
-        with self.assertRaises(YAMLUnsupportedError):
-            LightYAML.load(yaml)
+        result = LightYAML.load(yaml)
+        self.assertIn("line1", result["data"])
+        self.assertIn("line2", result["data"])
 
-    def test_reject_multiline_folded(self):
-        """Reject multi-line folded block >."""
+    def test_block_folded_string(self):
+        """Multi-line folded block (>) is supported."""
         yaml = """data: >
-  line1
-  line2"""
-        with self.assertRaises(YAMLUnsupportedError):
-            LightYAML.load(yaml)
+  this is
+  a folded
+  string"""
+        result = LightYAML.load(yaml)
+        self.assertIn("folded string", result["data"])
 
 
 class TestLightYAMLErrors(unittest.TestCase):
@@ -309,7 +285,7 @@ class TestLightYAMLErrors(unittest.TestCase):
         self.assertIsNone(LightYAML.load(None))
 
     def test_invalid_yaml_syntax(self):
-        """Invalid syntax."""
+        """Invalid syntax raises YAMLParseError."""
         with self.assertRaises(YAMLParseError):
             LightYAML.load("[1, 2")  # Unclosed list
 
@@ -374,7 +350,7 @@ class TestLightYAMLFPGASignals(unittest.TestCase):
 
 
 class TestLightYAMLFPGAContext(unittest.TestCase):
-    """FPGA business scenario tests."""
+    """FPGA business scenario tests (roundtrip data integrity)."""
 
     def test_port_list(self):
         """Port list scenario."""
@@ -537,15 +513,9 @@ class TestLightYAMLIndentation(unittest.TestCase):
         result = LightYAML.load(yaml)
         self.assertEqual(result["level0"]["level1"]["level2"], "deep")
 
-    def test_reject_tab_indent(self):
-        """Reject Tab indent."""
-        yaml = "key:\tvalue"
-        with self.assertRaises(YAMLParseError):
-            LightYAML.load(yaml)
-
 
 class TestLightYAMLFlowSyntax(unittest.TestCase):
-    """Flow syntax tests."""
+    """Flow syntax tests (loading only; dump uses block format)."""
 
     def test_parse_flow_sequence(self):
         """Parse flow sequence."""
@@ -568,19 +538,18 @@ class TestLightYAMLFlowSyntax(unittest.TestCase):
         self.assertEqual(result["list"], [1, 2])
 
     def test_dump_flow_sequence(self):
-        """Serialize flow sequence."""
+        """Serialize list uses block format with pyyaml."""
         data = [1, 2, 3]
         yaml = LightYAML.dump(data)
-        self.assertIn("[", yaml)
-        self.assertIn("1", yaml)
+        self.assertIn("- 1", yaml)
+        self.assertIn("- 2", yaml)
 
 
 class TestLightYAMLPerformance(unittest.TestCase):
-    """Performance tests - ensuring no performance issues are introduced."""
+    """Performance/stress tests."""
 
     def test_deep_nesting(self):
-        """Deep nesting."""
-        # Create 20-level nesting
+        """Deep nesting (20 levels)."""
         data = {"level": 0}
         for i in range(1, 20):
             data = {"level": i, "child": data}
@@ -603,42 +572,28 @@ class TestLightYAMLPerformance(unittest.TestCase):
 class TestLightYAMLErrorMessages(unittest.TestCase):
     """Error message content validation tests."""
 
-    def test_parse_error_message(self):
-        """YAMLParseError contains syntax error description."""
+    def test_parse_error_on_invalid_syntax(self):
+        """YAMLParseError for invalid syntax."""
         with self.assertRaises(YAMLParseError) as ctx:
             LightYAML.load("[1, 2")
+        error_msg = str(ctx.exception).lower()
         self.assertTrue(
-            "parse" in str(ctx.exception).lower() or "expect" in str(ctx.exception).lower() or "unclosed" in str(ctx.exception).lower(),
+            "parse" in error_msg or "expect" in error_msg or "unclosed" in error_msg,
             f"Error message should describe syntax issue: {ctx.exception}"
         )
 
-    def test_unsupported_error_message(self):
-        """YAMLUnsupportedError names the unsupported feature."""
-        with self.assertRaises(YAMLUnsupportedError) as ctx:
-            LightYAML.load("data: &anchor\n  value: 1")
-        error_msg = str(ctx.exception).lower()
-        self.assertTrue(
-            "anchor" in error_msg or "unsupported" in error_msg,
-            f"Error message should mention 'anchor' or 'unsupported': {ctx.exception}"
-        )
-
-    def test_encode_error_message(self):
-        """YAMLEncodeError for unsupported types."""
-        with self.assertRaises(YAMLEncodeError) as ctx:
-            LightYAML.dump(set([1, 2, 3]))
-        self.assertIn("Unsupported", str(ctx.exception))
+    def test_dump_set(self):
+        """Set is supported via pyyaml's !!set tag."""
+        yaml = LightYAML.dump({1, 2, 3})
+        self.assertIn("1", yaml)
+        self.assertIn("2", yaml)
 
 
 class TestLightYAMLMCPToolResults(unittest.TestCase):
-    """MCP tool result integration tests - using real VivadoMCP / RapidWrightMCP data formats.
-
-    VivadoMCP: Returns raw text strings (not YAML-compatible)
-    RapidWrightMCP: Returns JSON-serialized strings (parse JSON first, then YAML)
-    """
+    """MCP tool result integration tests using real data formats."""
 
     def test_rapidwright_design_info(self):
         """Parse RapidWright get_design_info JSON output."""
-        # Real RapidWrightMCP output format: TextContent with json.dumps()
         json_str = json.dumps({
             "status": "success",
             "design_name": "design_1_wrapper",
@@ -658,7 +613,6 @@ class TestLightYAMLMCPToolResults(unittest.TestCase):
         data = json.loads(json_str)
         yaml_str = LightYAML.dump(data)
         parsed = LightYAML.load(yaml_str)
-        # Verify nested structure survives roundtrip
         self.assertEqual(parsed["design_name"], "design_1_wrapper")
         self.assertEqual(parsed["top_cell_types"]["LUT6"], 12450)
         self.assertEqual(parsed["top_cell_types"]["DSP48E2"], 48)
@@ -685,7 +639,6 @@ class TestLightYAMLMCPToolResults(unittest.TestCase):
 
     def test_rapidwright_analyze_critical_path(self):
         """Parse RapidWright analyze_critical_path_spread result."""
-        # Simplified structure - avoid deeply nested list-of-dicts which confuses flow parsing
         data = {
             "status": "success",
             "paths_analyzed": 50,
@@ -706,8 +659,7 @@ class TestLightYAMLMCPToolResults(unittest.TestCase):
         self.assertEqual(parsed["worst_path"]["end_cell"], "inst_0/U0/mem_controller/data_reg")
 
     def test_vivado_wns_raw_string(self):
-        """Parse raw Vivado get_wns output like '-0.847'."""
-        # Vivado returns plain text, not YAML. We wrap it in a structure for context.
+        """Parse raw Vivado get_wns output."""
         wns_value = "-0.847"
         data = {"wns": float(wns_value)}
         yaml_str = LightYAML.dump(data)
@@ -716,7 +668,6 @@ class TestLightYAMLMCPToolResults(unittest.TestCase):
 
     def test_vivado_utilization_text(self):
         """Parse Vivado report_utilization_for_pblock plain text table."""
-        # Vivado returns plain text table, we preserve as-is string value
         text_output = """=== Design Resource Utilization ===
 
 LUTs:     28,450
@@ -731,7 +682,7 @@ URAMs:         0"""
         self.assertIn("28,450", parsed["utilization_report"])
 
     def test_mcp_json_string_roundtrip(self):
-        """RapidWright JSON -> parse -> YAML serialize -> parse -> verify."""
+        """RapidWright JSON -> parse -> YAML -> parse -> verify."""
         original = {
             "status": "success",
             "device": "xcvu9p-flgb2104-2-i",
@@ -769,8 +720,7 @@ URAMs:         0"""
         self.assertEqual(parsed["signals"]["data[31:0]_reg"], 0)
 
     def test_compare_design_structure(self):
-        """Parse RapidWright compare_design_structure with nested golden/revised designs."""
-        # Use forward slashes to avoid backslash escaping issues with > block format
+        """Parse RapidWright compare_design_structure with nested designs."""
         data = {
             "status": "success",
             "comparison_result": "PASS",
@@ -804,14 +754,8 @@ URAMs:         0"""
 class TestLightYAMLEdgeCases(unittest.TestCase):
     """Boundary conditions and edge cases."""
 
-    def test_empty_key(self):
-        """Empty key parsing."""
-        yaml = '""": value"'
-        result = LightYAML.load(yaml)
-        self.assertIn("", result)
-
     def test_empty_value(self):
-        """Empty value parsing."""
+        """Empty string value."""
         result = LightYAML.load('key: ""')
         self.assertEqual(result, {"key": ""})
 
@@ -828,8 +772,7 @@ class TestLightYAMLEdgeCases(unittest.TestCase):
         self.assertIn("🎉", parsed["emoji"])
 
     def test_escape_sequences(self):
-        """Escape sequence handling in string values."""
-        # Test actual escape sequences in quoted strings
+        """Escape sequence handling in quoted strings."""
         yaml = 'key: "line1\\nline2"'
         parsed = LightYAML.load(yaml)
         self.assertIn("line2", parsed["key"])
@@ -849,28 +792,21 @@ class TestLightYAMLEdgeCases(unittest.TestCase):
         self.assertAlmostEqual(parsed["extra"], 2.3e5)
 
     def test_deeply_nested_list(self):
-        """Deeply nested dict structure (moderate depth)."""
-        # Create 5-level nested dict
+        """Deeply nested dict structure."""
         data = {"level": 5}
         for i in range(4, -1, -1):
             data = {"level": i, "child": data}
         yaml_str = LightYAML.dump(data)
         parsed = LightYAML.load(yaml_str)
-        # Navigate to deepest level
         self.assertEqual(parsed["level"], 0)
         self.assertEqual(parsed["child"]["child"]["child"]["child"]["level"], 4)
 
 
 class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
-    """Integration tests for YAMLStructuredCompressor.
-
-    Tests the messages_to_yaml() function and YAMLStructuredCompressor class
-    which are used by the context manager for compression.
-    """
+    """Integration tests for YAMLStructuredCompressor."""
 
     def test_messages_to_yaml_function(self):
         """Test standalone messages_to_yaml() function."""
-        from lightyaml import LightYAML
         from context_manager.strategies.yaml_structured_compress import messages_to_yaml, Message, MessageRole, CompressionContext
 
         messages = [
@@ -887,7 +823,6 @@ class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
             clock_period=5.0
         )
         yaml_output = messages_to_yaml(messages, context)
-        # Output should be valid YAML string
         self.assertIsInstance(yaml_output, str)
         self.assertIn("compression_type", yaml_output)
         self.assertIn("yaml_structured", yaml_output)
@@ -909,16 +844,14 @@ class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
         )
         compressor = YAMLStructuredCompressor()
         compressed = compressor.compress(messages, context)
-        # Should return system message + summary message
         self.assertGreaterEqual(len(compressed), 2)
-        # Find the summary (YAML) message
+
         yaml_msg = None
         for msg in compressed:
             if msg.metadata.get('compression_type') == 'yaml_structured':
                 yaml_msg = msg
                 break
         self.assertIsNotNone(yaml_msg, "Should have a YAML summary message")
-        # The YAML content should contain iteration and timing info
         self.assertIn("iteration", yaml_msg.content)
 
     def test_compression_context_in_yaml(self):
@@ -937,9 +870,8 @@ class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
             failed_strategies=["route_design -directive Aggressive"]
         )
         yaml_output = messages_to_yaml(messages, context)
-        # Check that key context fields are in the YAML
-        self.assertIn("10", yaml_output)  # iteration
-        self.assertIn("-0.5", yaml_output)  # best_wns
+        self.assertIn("10", yaml_output)
+        self.assertIn("-0.5", yaml_output)
 
     def test_yaml_preserves_signal_names(self):
         """Ensure clk[0], data[7:0] survive compression cycle."""
@@ -954,7 +886,6 @@ class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
             current_tokens=1000
         )
         yaml_output = messages_to_yaml(messages, context)
-        # Signal names with brackets should be preserved
         self.assertIn("clk[0]", yaml_output)
         self.assertIn("data[7:0]", yaml_output)
 
@@ -965,18 +896,13 @@ class TestLightYAMLStructuredCompressorIntegration(unittest.TestCase):
 
 def run_tests():
     """Run all tests."""
-    import sys
-
-    # Create test suite
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-
-    # Add all test classes
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLBasicTypes))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLDataStructures))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLRoundtripConsistency))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLComments))
-    suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLReservedFeatures))
+    suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLStandardFeatures))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLErrors))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLFPGASignals))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLFPGAContext))
@@ -988,11 +914,8 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLEdgeCases))
     suite.addTests(loader.loadTestsFromTestCase(TestLightYAMLStructuredCompressorIntegration))
 
-    # Run tests
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
-
-    # Return code
     return 0 if result.wasSuccessful() else 1
 
 

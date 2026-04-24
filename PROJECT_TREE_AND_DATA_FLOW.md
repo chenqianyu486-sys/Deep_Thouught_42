@@ -7,23 +7,28 @@ fpl26_optimization_contest/
 ├── dcp_optimizer.py              # Main entry point: FPGA optimization agent
 ├── validate_dcps.py              # DCP equivalence validator
 ├── SYSTEM_PROMPT.TXT             # System prompt for LLM
+├── requirements.txt              # Python dependencies
+├── logicnets_jscl.dcp            # Sample DCP file
+├── .gitmodules                   # Git submodules config
+├── Makefile                      # Build automation
+├── LICENSE-APACHE-2.0.txt        # Apache 2.0 license
 │
 ├── context_manager/              # Context management module
 │   ├── __init__.py               # Module exports
-│   ├── lightyaml.py              # LightYAML - pure Python YAML parser/generator (zero dependencies)
-│   ├── test_lightyaml.py         # LightYAML test suite
+│   ├── lightyaml.py              # LightYAML - YAML parser/generator (pyyaml backend)
+│   ├── test_lightyaml.py        # LightYAML test suite
 │   ├── logging_config.py         # Logging configuration & utilities
-│   ├── interfaces.py             # Core interfaces & data classes
+│   ├── interfaces.py            # Core interfaces & data classes
 │   ├── manager.py                # MemoryManager - central orchestration
-│   ├── estimator.py              # ContextEstimator - token counting
+│   ├── estimator.py              # ContextEstimator - token counting (tiktoken)
 │   ├── events.py                 # EventBus - event system
 │   ├── compat.py                 # DCPOptimizerCompat - legacy adapter
 │   ├── agent_context.py          # AgentContextManager - multi-agent branching
 │   │
 │   ├── memory/
 │   │   ├── __init__.py           # Sub-package exports
-│   │   ├── working_memory.py     # WorkingMemory - short-term context
-│   │   └── historical_memory.py  # HistoricalMemory - long-term storage
+│   │   ├── working_memory.py      # WorkingMemory - short-term context
+│   │   └── historical_memory.py   # HistoricalMemory - long-term storage
 │   │
 │   ├── stores/
 │   │   ├── __init__.py           # Sub-package exports
@@ -31,27 +36,51 @@ fpl26_optimization_contest/
 │   │
 │   └── strategies/
 │       ├── __init__.py           # Sub-package exports
-│       └── yaml_structured_compress.py # YAMLStructuredCompressor - YAML format compression
+│       ├── base.py               # CompressionStrategy base class
+│       └── yaml_structured_compress.py  # YAMLStructuredCompressor - YAML format compression
 │
 ├── RapidWrightMCP/                # RapidWright MCP server
 │   ├── server.py                 # MCP server implementation
 │   ├── rapidwright_tools.py      # RapidWright tool wrappers
-│   └── test_server.py            # Server tests
+│   ├── test_server.py            # Server tests
+│   ├── requirements.txt          # MCP dependencies
+│   ├── setup.sh                  # Setup script
+│   ├── README.md                  # Documentation
+│   └── .gitignore                # Git ignore file
 │
 ├── VivadoMCP/                    # Vivado MCP server
 │   ├── vivado_mcp_server.py      # MCP server implementation
-│   └── test_vivado_mcp.py        # Server tests
+│   ├── test_vivado_mcp.py        # Server tests
+│   └── requirements.txt          # MCP dependencies
 │
-├── RapidWright/                  # RapidWright SDK (vendor)
+├── RapidWright/                  # RapidWright SDK (vendor) - Full Gradle project
 │   ├── python/                   # Python bindings
-│   └── interchange/              # Interchange format
+│   ├── interchange/              # Interchange format
+│   ├── src/                      # Source code
+│   ├── bin/                      # Executables
+│   ├── test/                     # Test files
+│   └── build/                    # Build artifacts
 │
 └── docs/                         # Documentation
     ├── index.md
     ├── FAQ.md
     ├── benchmarks.md
     ├── details.md
-    └── ...
+    ├── contact.md                # Contact information
+    ├── LOGGING_SPEC.md          # Logging specification
+    ├── alpha_submission.md      # Alpha submission guidelines
+    ├── beta_submission.md       # Beta submission guidelines
+    ├── final_submission.md      # Final submission guidelines
+    ├── runtime.md               # Runtime documentation
+    ├── score.md                 # Scoring documentation
+    ├── _config.yml              # Jekyll configuration
+    ├── _layouts/                # Jekyll layouts
+    │   └── default.html
+    └── assets/                  # Static assets
+        ├── css/
+        │   └── style.scss
+        ├── ContestPromo3.mp4
+        └── fpl26-contest-overview-flow.jpg
 ```
 
 ## 2. Data Flow Architecture
@@ -436,52 +465,49 @@ fpl26_optimization_contest/
   ├── Compression intensity via context.force_aggressive:
   │   ├── False (normal): preserve_turns=20, min_importance_threshold=0.3
   │   └── True (aggressive): preserve_turns=3, min_importance_threshold=0.8
-  └── Uses LightYAML (zero external dependencies)
+  └── Uses LightYAML (pyyaml backend, standard YAML)
 
 ### 2.9 LightYAML Module (lightyaml.py)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    LightYAML - Pure Python YAML Parser/Generator              │
+│              LightYAML - YAML Parser/Generator (pyyaml backend)              │
 │                    (context_manager/lightyaml.py)                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 
-  Design Goals:
-  ├── Zero dependencies: Uses only Python standard library (re, typing, collections)
-  ├── Lightweight subset: Supports basic types and nested structures only
-  ├── FPGA-friendly: Handles special characters in signal names ([, ], -, _)
-  └── Performance optimized: Pre-compiled regex, fast path for common cases
+  Design:
+  ├── Backward-compatible API: same class/method names as original zero-dep version
+  ├── pyyaml backend: Delegates all parsing and serialization to pyyaml>=6.0
+  ├── Custom exception hierarchy preserved: LightYAMLError, YAMLParseError,
+  │   YAMLEncodeError, YAMLUnsupportedError (for backward compatibility)
+  ├── OrderedDict preservation: Custom representer and OrderedDict-aware loader
+  └── FPGA-friendly: Signal names like clk[0], rst_n handled natively by pyyaml
 
-  Supported Features:
+  Supported Features (standard YAML via pyyaml):
   ├── Scalar types: strings (quoted/unquoted), integers, floats, booleans, null
-  ├── Data structures: Mappings (key-value pairs), Sequences (ordered lists)
-  ├── Nested structures: Arbitrary depth nesting
-  ├── Indentation: Space-based (default 2 spaces)
-  └── Comments: # inline comments (stripped during parsing)
-
-  Explicitly NOT Supported (raises YAMLUnsupportedError):
+  ├── Data structures: Mappings, Sequences, nested structures
   ├── Anchors (&) and aliases (*)
-  ├── Multi-line block strings (|, >)
-  └── Type tags (!!)
+  ├── Multi-line block strings (literal | / folded >)
+  ├── Type tags (!!)
+  ├── Flow syntax: [1, 2, 3] and {key: value}
+  └── Indentation: space-based (default 2 spaces)
 
-  API:
-  ├── LightYAML.dump(data, indent=2, trace_id=None) -> str  # Serialize to YAML
-  │   └─ Instr: timing/error logging, content size tracking
-  ├── LightYAML.load(yaml_str, trace_id=None) -> dict|list   # Parse YAML string
-  │   └─ Instr: parse duration logging, rich error context
-  ├── LightYAML.validate(yaml_str) -> (bool, str)            # Validate YAML syntax
-  ├── LightYAML.roundtrip(data) -> (str, Any)                # Dump + Load for verification
-  └── LightYAML._estimate_node_count(data) -> int            # Node count for complexity metrics
+  API (unchanged from original):
+  ├── LightYAML.dump(data, indent=2, trace_id=None) -> str
+  │   └─ Instr: timing/error logging, node count tracking
+  │   └─ Simple scalars (str/int/float/bool/None) handled directly
+  │   └─ Complex structures delegated to yaml.dump()
+  ├── LightYAML.load(yaml_str, trace_id=None) -> dict|list
+  │   └─ Delegated to yaml.load() with OrderedDict-aware SafeLoader
+  │   └─ Wraps yaml.YAMLError in YAMLParseError
+  ├── LightYAML.validate(yaml_str) -> (bool, str)
+  ├── LightYAML.roundtrip(data) -> (str, Any)
+  └── LightYAML._estimate_node_count(data) -> int
 
-  Performance Optimizations:
-  ├── Pre-compiled regex patterns as class attributes (_NUMERIC_RE, _HEX_RE, _INT_RE)
-  ├── Fast path in _unquote: skip processing when no backslashes present
-  └── Reduced string traversals in type detection
-
-  FPGA Signal Name Handling:
-  ├── Signal names like clk[0], rst_n, io_out[3:0] are parsed correctly
-  ├── Square brackets and hyphens in key names are allowed
-  └── Underscores preserved without quoting
+  Output Format Change (from original LightYAML):
+  ├── Collections: Block format by default (e.g., `- item` not `[item]`)
+  ├── Strings inside structures handled by pyyaml's quoting logic
+  └── Hex integers output as decimal (value-preserving)
 
   Example Usage:
   ```python
@@ -498,18 +524,7 @@ fpl26_optimization_contest/
 
   # Roundtrip verification
   yaml_str, parsed = LightYAML.roundtrip(original_data)
-  assert parsed == original_data
   ```
-
-  Implementation Details:
-  ├── Line-based recursive descent parser
-  ├── Preprocessing: inline comment removal, BOM stripping, line ending normalization
-  ├── Type inference: automatic detection of int/float/bool/string/null
-  ├── Tab rejection: any Tab character raises YAMLParseError
-  └── Roundtrip safety: strings starting with `-` or containing flow chars ([, {, }, ])
-     are quoted on dump; `_is_simple_sequence` prevents block-format ambiguity
-  └── Flow syntax support: [1, 2, 3] and {key: value} parsing
-```
 
 ### 2.10 Initial Analysis YAML Format
 
@@ -615,13 +630,13 @@ YAMLStructuredCompressor.__init__ params  # token_budget (80K), preserve_turns (
 
 | File | Responsibility |
 |------|-----------------|
-| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection; owns shared EventBus + AgentContextManager; triggers compression via `_compress_context()` (single compression trigger point); `_build_initial_analysis_yaml()` provides YAML-formatted initial analysis to LLM |
+| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection; owns shared EventBus + AgentContextManager; triggers compression via `_compress_context()` (single compression trigger point); `_build_initial_analysis_yaml()` provides YAML-formatted initial analysis to LLM; `_is_routing_failure()` helper for consistent routing failure detection; `latest_wns` cache for O(1) WNS lookup; file handles managed via `exit_stack.callback()` for leak prevention |
 | `SYSTEM_PROMPT.TXT` | System prompt with YAML format documentation for parsing initial analysis; `recommendation` field check replaces text-based PBLOCK detection |
 | `validate_dcps.py` | DCP equivalence validation (Phase1: structural, Phase2: simulation) |
 | `context_manager/manager.py` | Central memory orchestration; `_compress()` always uses "yaml_structured" (aggressive/light mode determined by `context.force_aggressive`); `retrieve_historical()` for historical memory queries; no auto-subscribes to MESSAGE_ADDED; `CONTEXT_COMPRESSED` event now includes token metrics (original_tokens, compressed_tokens, ratio) |
 | `context_manager/events.py` | Event bus: subscribe/unsubscribe (both reference and token-based); emit/get_history; shared by MemoryManager and AgentContextManager |
-| `context_manager/lightyaml.py` | LightYAML - pure Python YAML parser/generator; zero dependencies; supports basic types, nested structures, FPGA signal names; raises YAMLUnsupportedError for anchors, aliases, block strings, type tags; **performance optimized** with pre-compiled regex patterns; `dump()` now fully instrumented with timing, trace_id propagation, error logging, and node counting for observability (2026-04-25) |
-| `context_manager/estimator.py` | Token estimation using content-type-aware method (Chinese: 1.5 chars/token, English: 3.5, Code: 2.5, Digits: 4.0, Whitespace: 5.0); includes `estimate_tokens()`, `estimate_from_messages()`, and `estimate_context_complexity()` methods |
+| `context_manager/lightyaml.py` | LightYAML - YAML parser/generator with pyyaml backend; backward-compatible API preserving LightYAML class and exception hierarchy; wraps yaml.YAMLError in YAMLParseError/YAMLEncodeError; OrderedDict-aware loader; FPGA signal names handled natively; `dump()` instrumented with timing, trace_id, error logging, and node counting (2026-04-25) |
+| `context_manager/estimator.py` | Token estimation using tiktoken (cl100k_base encoding) replacing previous heuristic character-type ratios; `estimate_tokens()`, `estimate_from_messages()`, `estimate_context_complexity()` methods; both `estimate_tokens()` and `estimate_from_messages()` are classmethods for flexible calling (2026-04-24) |
 | `context_manager/memory/working_memory.py` | Short-term message storage |
 | `context_manager/memory/historical_memory.py` | Long-term archive with retrieval; uses indexes (_index_by_time, _index_by_importance, _index_by_task_type) for efficient lookups |
 | `context_manager/stores/memory_store.py` | In-memory message store; `__bool__` returns `len(messages) > 0`; `restore()` is a no-op (not an abstract method) |
@@ -632,6 +647,88 @@ YAMLStructuredCompressor.__init__ params  # token_budget (80K), preserve_turns (
 | `VivadoMCP/vivado_mcp_server.py` | Vivado MCP server |
 
 ## 5. Data Flow Summary
+
+```
+User Input / Tool Result
+         │
+         ▼
+add_message() ──────────────────────────────────────────────────┐
+         │                                                     │
+         ▼                                                     ▼
+WorkingMemory                  CompressionContext
+.add_message()                (built only when
+ (no auto-compression)          _compress_context() called)
+                                   │
+                          ┌──────┴──────┐
+                          ▼             ▼
+                 dcp_optimizer      YAMLStructuredCompressor
+                 ._compress_context()  .compress()
+                          │             │
+                          │             ▼
+                          │    ┌─────────────────────────────┐
+                          │    │  context.force_aggressive:   │
+                          │    │  False → preserve_turns=20  │
+                          │    │  True  → preserve_turns=3   │
+                          │    └─────────────────────────────┘
+                          │             │
+                          └──────┬──────┘
+                                 ▼
+                   ┌─────────────────────────────────────┐
+                   │  SEQUENTIAL COMPRESSION (inside MemoryManager._compress):      │
+                   │  1. Separate system messages (protected)                       │
+                   │  2. HistoricalMemory.add(summary)                             │
+                   │  3. WorkingMemory.clear()                                      │
+                   │  4. Add system + compressed non-system messages               │
+                   │  5. EventBus.emit(CONTEXT_COMPRESSED)                          │
+                   │  NOTE: System messages are NEVER compressed                    │
+                   │  NOTE: YAMLStructuredCompressor budget calculation (system_tokens │
+                   │        properly calculated before non-system budget)            │
+                   │  NOTE: Unified YAML only (unified YAML strategy, aggressive/smart removed) │
+└─────────────────────────────────────┘
+```
+
+## 6. Code Quality Improvements
+
+### 6.1 Resource Management Fixes
+
+**File Handle Leak Prevention (dcp_optimizer.py:245-252, 330-340)**
+- Log files registered with `exit_stack.callback()` for automatic cleanup
+- `cleanup()` uses `try/finally` to ensure files close even if `exit_stack.aclose()` throws
+- Prevents file descriptor leaks when exceptions occur during server startup
+
+### 6.2 Error Handling Improvements
+
+**Bare `except:` Replacement (dcp_optimizer.py:1163)**
+- Changed `except:` to `except Exception:` to avoid catching `SystemExit`, `KeyboardInterrupt`, and `asyncio.CancelledError`
+
+**WNS Parsing Failure Logging Enhanced (dcp_optimizer.py:1319-1321, 1344-1351, 1368-1371)**
+- Auto-Eval: Added warning when regex matches but float conversion fails
+- `vivado_report_timing_summary`: Added warning when WNS returns None with TNS/failing_endpoints context
+- `vivado_get_wns`: Extended error message from 100 to 500 chars, includes exception details
+
+### 6.3 Code Deduplication
+
+**Routing Failure Detection Unified (dcp_optimizer.py:191-194, 233-236)**
+- Extracted `ROUTING_FAILURE_PHRASES` constant and `_is_routing_failure()` helper method
+- Replaces 4 occurrences of inline duplicate logic (lines 1194, 1230, 1819, 1963)
+- Ensures consistent routing failure detection across all code paths
+
+**WNS Tracking Cache O(1) (dcp_optimizer.py:588, 1315, 1342, 1360)**
+- Added `self.latest_wns` instance variable to cache current WNS
+- `_get_current_wns()` now returns cached value instead of O(n) list traversal
+- Updated at all WNS extraction points (Auto-Eval, report_timing_summary, get_wns)
+
+### 6.4 Optimization Impact
+
+| Issue | Before | After | Impact |
+|-------|--------|-------|--------|
+| File handle leak | Possible on exception | Guaranteed cleanup | Reliability |
+| Bare except | Catches system-exit | Only catches Exception | Debuggability |
+| Routing detection | 4 inline duplicates | 1 shared constant | Maintainability |
+| WNS lookup | O(n) list search | O(1) cached | Performance |
+| WNS parse failure | Silent/pass | Warning with context | Debugging |
+
+## 7. Data Flow Summary
 
 ```
 User Input / Tool Result
