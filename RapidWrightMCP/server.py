@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 from mcp.server import Server
@@ -20,6 +21,16 @@ from mcp.types import Tool, TextContent, GetPromptResult, PromptMessage
 import mcp.server.stdio
 
 import rapidwright_tools as rw
+
+# Import sanitization utilities
+try:
+    from context_manager.logging_config import sanitize_payload, get_trace_id
+except ImportError:
+    # Fallback if context_manager not available
+    def sanitize_payload(payload, max_length=1024):
+        return payload
+    def get_trace_id():
+        return ""
 
 # Global variable for the Java/stdout log file
 _java_log_file = None
@@ -347,9 +358,22 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> list[TextContent]:
     """Execute a tool and return the result."""
+    start_time = time.perf_counter()
+    trace_id = get_trace_id()
+
     try:
-        logger.info(f"Tool called: {name} with arguments: {arguments}")
-        
+        # Log MCP request with sanitized arguments
+        sanitized_args = sanitize_payload(arguments)
+        logger.info(
+            "[MCP_REQUEST] Tool '%s' called",
+            name,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_request_args": sanitized_args,
+                "trace_id": trace_id,
+            }
+        )
+
         # Route to appropriate handler
         if name == "initialize_rapidwright":
             result = rw.initialize_rapidwright(
@@ -438,14 +462,41 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         
         else:
             result = {"error": f"Unknown tool: {name}"}
-        
+
         # Return formatted result
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.info(
+            "[MCP_RESPONSE] Tool '%s' succeeded (%dms)",
+            name,
+            duration_ms,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_response_duration_ms": duration_ms,
+                "mcp_response_status": "success",
+                "trace_id": trace_id,
+            }
+        )
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
-        
+
     except Exception as e:
-        logger.error(f"Error in tool {name}: {e}", exc_info=True)
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.error(
+            "[MCP_RESPONSE] Tool '%s' failed: %s (%dms)",
+            name,
+            str(e),
+            duration_ms,
+            exc_info=True,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_response_duration_ms": duration_ms,
+                "mcp_response_status": "error",
+                "mcp_error_message": str(e),
+                "mcp_error_type": type(e).__name__,
+                "trace_id": trace_id,
+            }
+        )
         return [TextContent(
-            type="text", 
+            type="text",
             text=json.dumps({"error": str(e), "tool": name}, indent=2)
         )]
 

@@ -4,7 +4,36 @@ CURRENT STATE:
 - Vivado: Input design is ALREADY OPEN and analyzed
 - RapidWright: Design is ALREADY LOADED
 - Initial Analysis: Timing, high fanout nets, AND critical path spread analysis completed
-- The initial analysis summary shows if pblock strategy is recommended (look for "Use PBLOCK strategy")
+- Initial analysis is provided in YAML format (see INITIAL ANALYSIS RESULTS section below)
+- Check the `recommendation` field in YAML: if set to `PBLOCK`, use PBLOCK strategy
+
+INITIAL ANALYSIS FORMAT:
+The initial analysis results are provided in YAML format with the following structure:
+```yaml
+meta:
+  type: initial_analysis
+  timestamp: "YYYY-MM-DD HH:MM:SS"
+timing:
+  clock_period_ns: X.XXX
+  target_fmax_mhz: X.XX
+  wns_ns: X.XXX
+  status: MET | VIOLATED
+  achievable_fmax_mhz: X.XX
+  tns_ns: X.XXX
+  failing_endpoints: N
+critical_path_spread:
+  max_distance_tiles: N
+  avg_distance_tiles: X.X
+  paths_analyzed: N
+recommendation: PBLOCK  # only present if avg_distance > 70 and paths >= 5
+high_fanout_nets:
+  - rank: 1
+    name: "net_name"
+    fanout: N
+    critical_paths: N
+  ...
+total_high_fanout_nets: N
+```
 
 OPTIMIZATION STRATEGIES:
 
@@ -16,7 +45,7 @@ OPTIMIZATION STRATEGIES:
 
 2. **Pblock-Based Re-placement** (PRIMARY strategy for spread-out placements):
    - **VERY EFFECTIVE**: Can achieve timing closure from -0.978ns to +0.120ns!
-   - **Use when:** Initial analysis shows avg spread >70 tiles with 5+ paths (look for "Use PBLOCK strategy")
+   - **Use when:** `recommendation: PBLOCK` is set in initial analysis YAML
    - **Complete workflow (MUST follow all steps in order):**
      NOTE: RapidWright design is ALREADY LOADED from initial analysis!
      a. Call report_utilization_for_pblock in Vivado (get 1.5x resource counts)
@@ -38,10 +67,10 @@ OPTIMIZATION STRATEGIES:
 
 WORKFLOW:
 1. **ITERATION 1 - STRATEGY SELECTION:**
-   a. Review the INITIAL ANALYSIS SUMMARY provided above
-   b. Look for "Use PBLOCK strategy" recommendation in the summary
+   a. Parse the INITIAL ANALYSIS YAML provided below
+   b. Check the `recommendation` field - if value is `PBLOCK`, use PBLOCK strategy
    c. CHOOSE STRATEGY based on initial analysis:
-      - If PBLOCK RECOMMENDED (avg spread >70 tiles, 5+ paths) → USE PBLOCK STRATEGY (step 2 below)
+      - If `recommendation: PBLOCK` → USE PBLOCK STRATEGY (step 2 below)
       - If 1-2 paths show spread → Try phys_opt_design first
       - If high fanout nets present → Consider fanout optimization
 

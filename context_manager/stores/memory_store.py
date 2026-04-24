@@ -1,7 +1,11 @@
 """Memory store implementation for Context Manager."""
 
+import logging
+import time
 from typing import Callable, Optional
 from ..interfaces import ContextStore, Message, ContextSnapshot, MemoryLayer
+
+logger = logging.getLogger(__name__)
 
 
 class InMemoryContextStore(ContextStore):
@@ -12,10 +16,16 @@ class InMemoryContextStore(ContextStore):
 
     def add(self, message: Message) -> ContextSnapshot:
         self._messages.append(message)
+        count = len(self._messages)
+        logger.debug(
+            "[MEMORY] Added message, working_memory_size=%d",
+            count,
+            extra={"message_count": count, "role": message.role.value}
+        )
         return ContextSnapshot(
-            timestamp=message.metadata.get("timestamp"),
+            timestamp=message.metadata.get("timestamp") or time.time(),
             layer=MemoryLayer.WORKING,
-            message_count=len(self._messages)
+            message_count=count
         )
 
     def get(self, index: int) -> Optional[Message]:
@@ -51,10 +61,12 @@ class InMemoryContextStore(ContextStore):
         pass
 
     def clear(self) -> None:
+        count = len(self._messages)
         self._messages.clear()
+        logger.debug("[MEMORY] Cleared working memory, removed %d messages", count)
 
     def __len__(self) -> int:
         return len(self._messages)
 
     def __bool__(self) -> bool:
-        return True  # Store is always truthy regardless of message count
+        return len(self._messages) > 0

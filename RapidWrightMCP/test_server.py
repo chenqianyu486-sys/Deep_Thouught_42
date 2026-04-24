@@ -51,15 +51,19 @@ def main():
     
     # Test 3: Get device info
     device_to_test = None
-    if result.get("devices"):
-        # Try to find a common device
-        devices = result["devices"]
+    device_tree = result.get("device_tree", {})
+    if device_tree:
+        # Extract all device names from nested tree: {Series: {Family: [devices]}}
+        all_devices = []
+        for families in device_tree.values():
+            for devices in families.values():
+                all_devices.extend(devices)
         for common in ["xcvu9p", "xcvu3p", "xcku040"]:
-            if common in devices:
+            if common in all_devices:
                 device_to_test = common
                 break
-        if not device_to_test:
-            device_to_test = devices[0]  # Use first available
+        if not device_to_test and all_devices:
+            device_to_test = all_devices[0]  # Use first available
     
     if device_to_test:
         print(f"\n[3/4] Getting device info for {device_to_test}...")

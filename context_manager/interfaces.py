@@ -58,6 +58,8 @@ class CompressionContext:
     iteration: int = 0
     clock_period: Optional[float] = None
     agent_id: Optional[str] = None
+    force_aggressive: bool = False  # True = use aggressive compression within YAML
+    retrieved_history: list = field(default_factory=list)  # Historical entries for context
 
 
 class EventType(Enum):
@@ -65,11 +67,11 @@ class EventType(Enum):
     MESSAGE_ADDED = "message_added"
     CONTEXT_COMPRESSED = "context_compressed"
     LAYER_PROMOTED = "layer_promoted"
-    LAYER_ARCHIVED = "layer_archived"
+    # LAYER_ARCHIVED - removed: defined but never emitted
     BRANCH_CREATED = "branch_created"
     BRANCH_MERGED = "branch_merged"
-    SNAPSHOT_CREATED = "snapshot_created"
-    RETRIEVAL_COMPLETED = "retrieval_completed"
+    # SNAPSHOT_CREATED - removed: defined but never emitted
+    # RETRIEVAL_COMPLETED - removed: defined but never emitted
 
 
 @dataclass
@@ -146,9 +148,12 @@ class ContextStore(ABC):
         """Create a snapshot of current state."""
         pass
 
-    @abstractmethod
     def restore(self, snapshot: ContextSnapshot) -> None:
-        """Restore state from snapshot."""
+        """Restore state from snapshot.
+
+        Default implementation is a no-op. Subclasses may override
+        with actual restoration logic if snapshot includes message data.
+        """
         pass
 
     @abstractmethod

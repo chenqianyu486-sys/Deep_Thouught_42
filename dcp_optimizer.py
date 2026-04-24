@@ -18,10 +18,9 @@ import json
 import logging
 import os
 import re
-import shutil
 import sys
-import tempfile
 import time
+from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Optional
@@ -35,21 +34,22 @@ except ImportError:
     sys.exit(1)
 
 # === Section 7.0: Context Manager Integration ===
-from context_manager import MemoryManager, SmartCompressionStrategy, AggressiveCompressionStrategy, AgentContextManager
+from context_manager import MemoryManager, AgentContextManager, YAMLStructuredCompressor
 from context_manager.compat import DCPOptimizerCompat
 from context_manager.interfaces import CompressionContext as CMCompressionContext
 from context_manager.estimator import ContextEstimator
 from context_manager.events import EventBus
-from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent
+from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent, RetrievalQuery as CMRetrievalQuery
+from context_manager.lightyaml import LightYAML
+from context_manager.logging_config import (
+    setup_logging, set_trace_id, get_trace_id, set_job_context,
+    sanitize_payload, DynamicLogLevelManager, HeartbeatLogger
+)
 
 # === Section 2: Logging & Constants ===
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stderr)]
-)
+# Configure logging with centralized setup
+setup_logging(level="INFO", use_json=False)  # use_json=False for readable console output
 logger = logging.getLogger(__name__)
 
 # Default model
@@ -588,6 +588,13 @@ class DCPOptimizer(DCPOptimizerBase):
         self.total_tokens = 0
         self.total_cost = 0.0
         self.api_call_details = []
+
+        # Track compression metrics for observability and tuning
+        self.compression_count = 0            # Total compressions triggered
+        self.compression_hard_count = 0        # Hard limit compressions
+        self.compression_soft_count = 0        # Soft threshold compressions
+        self.compression_skipped = 0           # Compressions skipped (under threshold)
+        self.compression_details = []         # Structured compression event log
         
         # Track all tool calls with timing and WNS (actual tracking done via _compat.add_tool_result())
         
@@ -601,13 +608,18 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Initialize MemoryManager for context compression
         self._memory_manager = MemoryManager(
-            compression_strategy=SmartCompressionStrategy(),
             event_bus=self._event_bus
         )
         self._compat = DCPOptimizerCompat(self._memory_manager)
         self._context_estimator = ContextEstimator()
 
         # Initialize AgentContextManager for multi-agent branching (shares _event_bus with MemoryManager)
+        # CURRENTLY_UNUSED: AgentContextManager is initialized but create_branch()/switch_branch() are not called.
+        # Rationale: Current FPGA optimization uses single-path iterative refinement; no parallel strategy exploration needed.
+        # Integration trigger: Would be used if/when optimization requires trying multiple strategies in parallel
+        # (e.g., route_directive variants, different pblock placements) and comparing outcomes.
+        # To activate: Implement branch creation when optimization reaches decision points (e.g., after failed_strategies
+        # accumulation exceeds threshold), and merge/select logic when branches complete.
         self._agent_context_manager = AgentContextManager(event_bus=self._event_bus)
 
         # === Phase 3: Subscribe to EventBus events ===
@@ -737,39 +749,83 @@ class DCPOptimizer(DCPOptimizerBase):
         )
 
     def _compress_context(self):
-        """Multi-level context compression strategy - delegates to MemoryManager.
+        """Context compression - unified YAML strategy with internal aggressive/light modes.
 
         NOTE: MemoryManager._compress() already replaces working memory with compressed
         messages internally. No additional message replacement is needed after compression.
+
+        Compression metrics are tracked for observability:
+        - compression_count: total compressions triggered
+        - compression_hard_count / compression_soft_count: by trigger reason
+        - compression_skipped: calls where token count was under threshold
+        - compression_details: structured log of each compression event
         """
         # Sync optimizer state to MemoryManager
         self._sync_state_to_memory_manager()
 
         current_tokens = self._estimate_tokens()
+        tokens_before = current_tokens
 
-        # Hard limit: must compress
+        # Hard limit: must compress aggressively
         if current_tokens > CONTEXT_HARD_LIMIT:
-            logger.warning(f"[WARNING] Context hard limit exceeded (~{current_tokens:,} tokens). Triggering aggressive compression...")
+            self.compression_hard_count += 1
+            self.compression_count += 1
+            logger.warning(f"[COMPRESSION] Hard limit triggered: ~{current_tokens:,} tokens > {CONTEXT_HARD_LIMIT:,} (aggressive mode)")
             context = self._build_compression_context(current_tokens)
-            self._memory_manager._compress("aggressive", context)
+            context.force_aggressive = True
+            # Retrieve high-importance historical entries for context
+            context.retrieved_history = self._memory_manager.retrieve_historical(
+                CMRetrievalQuery(min_importance=0.6, limit=5)
+            )
+            self._memory_manager._compress("yaml_structured", context)
+            # Record compression metrics
+            tokens_after = self._estimate_tokens()
+            self._record_compression_event("hard", tokens_before, tokens_after, iteration=self.iteration)
             return
 
-        # Soft threshold: light compression
+        # Soft threshold: normal YAML compression
         if current_tokens > CONTEXT_COMPRESSION_THRESHOLD:
-            logger.info(f"[WARNING] Context threshold exceeded (~{current_tokens:,} tokens). Triggering smart compression...")
+            self.compression_soft_count += 1
+            self.compression_count += 1
+            logger.info(f"[COMPRESSION] Soft threshold triggered: ~{current_tokens:,} tokens > {CONTEXT_COMPRESSION_THRESHOLD:,} (normal mode)")
             context = self._build_compression_context(current_tokens)
-            self._memory_manager._compress("smart", context)
+            context.force_aggressive = False
+            # Retrieve high-importance historical entries for context
+            context.retrieved_history = self._memory_manager.retrieve_historical(
+                CMRetrievalQuery(min_importance=0.6, limit=5)
+            )
+            self._memory_manager._compress("yaml_structured", context)
+            # Record compression metrics
+            tokens_after = self._estimate_tokens()
+            self._record_compression_event("soft", tokens_before, tokens_after, iteration=self.iteration)
             return
 
-    def _smart_compress(self):
-        """DEPRECATED: Delegated to MemoryManager._compress() via _compress_context()."""
-        logger.debug("_smart_compress() deprecated - using MemoryManager")
-        self._compress_context()
+        # Under threshold - record as skipped
+        self.compression_skipped += 1
 
-    def _aggressive_compress(self):
-        """DEPRECATED: Delegated to MemoryManager._compress() via _compress_context()."""
-        logger.debug("_aggressive_compress() deprecated - using MemoryManager")
-        self._compress_context()
+    def _record_compression_event(self, trigger: str, tokens_before: int, tokens_after: int, iteration: int = 0) -> None:
+        """Record structured compression event for observability.
+
+        Args:
+            trigger: "hard" (exceeded hard limit) or "soft" (exceeded soft threshold)
+            tokens_before: Token count before compression
+            tokens_after: Token count after compression
+            iteration: Current optimization iteration
+        """
+        compression_ratio = (tokens_before - tokens_after) / tokens_before if tokens_before > 0 else 0
+        event = {
+            "iteration": iteration,
+            "trigger": trigger,
+            "tokens_before": tokens_before,
+            "tokens_after": tokens_after,
+            "tokens_reduced": tokens_before - tokens_after,
+            "compression_ratio": round(compression_ratio, 3),
+            "llm_calls_at_compression": self.llm_call_count,
+        }
+        self.compression_details.append(event)
+        # Keep only last 100 compression events to prevent memory bloat
+        if len(self.compression_details) > 100:
+            self.compression_details.pop(0)
 
     # === Phase 3: EventBus event handlers ===
 
@@ -781,12 +837,19 @@ class DCPOptimizer(DCPOptimizerBase):
         compressed_count = data.get("compressed_count", 0)
         compression_ratio = (original_count - compressed_count) / original_count if original_count > 0 else 0
         logger.info(
-            f"[EventBus] CONTEXT_COMPRESSED: type={compression_type}, "
-            f"messages={original_count}->{compressed_count} (removed {compression_ratio:.0%}), "
-            f"agent={event.source_agent_id}"
+            "[COMPRESSION] Context compressed: type=%s, messages=%d->%d (removed %.0f%%)",
+            compression_type,
+            original_count,
+            compressed_count,
+            compression_ratio * 100,
+            extra={
+                "compression_type": compression_type,
+                "compression_original_count": original_count,
+                "compression_compressed_count": compressed_count,
+                "compression_ratio": round(compression_ratio, 4),
+                "trace_id": get_trace_id(),
+            }
         )
-        # Emit to standard logger for visibility
-        print(f"[CONTEXT COMPRESSED] {compression_type} - {original_count} messages -> {compressed_count} messages")
 
     def _on_layer_promoted(self, event: CMContextEvent) -> None:
         """Handle LAYER_PROMOTED events (messages archived to historical memory)."""
@@ -853,7 +916,6 @@ class DCPOptimizer(DCPOptimizerBase):
             r"compare.*approach|evaluate",
             r"implement.*logic|custom.*block"
         ]
-        import re
         for msg in recent_messages[-3:]:  # Only look at last 3 messages
             content = str(msg.get("content", "")).lower()
             for pattern in complex_patterns:
@@ -972,7 +1034,7 @@ class DCPOptimizer(DCPOptimizerBase):
     def _select_model(self, tool_name: str = "", context_complexity: int = 0,
                        arguments: dict = None, **kwargs) -> str:
         """
-        Scoring-based model selection across 7 dimensions.
+        Scoring-based model selection across 8 dimensions.
         Replaces the old 4-layer linear override logic with a weighted score system
         where each dimension contributes points; the model with the higher score wins.
         A margin (>=2) is required to switch models, preventing oscillation.
@@ -1033,6 +1095,22 @@ class DCPOptimizer(DCPOptimizerBase):
         if current_tokens >= WORKER_CONTEXT_WARN_TOKENS:
             planner_score += 2
 
+        # ── Dimension 8: WNS / timing state (urgency signal) ──────────────────
+        # Incorporate WNS trajectory into model selection to bias toward stronger
+        # model when timing is severely violated or deteriorating
+        if self.initial_wns is not None and self.best_wns != float('-inf'):
+            wns_improvement = self.best_wns - self.initial_wns
+            if wns_improvement < -2.0:
+                # Severe regression: strongly favor planner for complex reasoning
+                planner_score += 3
+            elif wns_improvement < -0.5:
+                # Moderate regression: moderately favor planner
+                planner_score += 2
+            elif wns_improvement < 0:
+                # Slight regression: slightly favor planner
+                planner_score += 1
+            # If wns_improvement >= 0 (improving or stable): no bias adjustment
+
         # ── Decision threshold ────────────────────────────────────────────────
         if planner_score > worker_score + 1:   # Margin of 2 required to switch, avoids thrashing
             return self.model_planner
@@ -1075,7 +1153,6 @@ class DCPOptimizer(DCPOptimizerBase):
                 has_error = True
                 if '"error"' in result_lower:
                     try:
-                        import json
                         data = json.loads(tool_result)
                         error_msg = str(data.get("error", ""))
                     except:
@@ -1180,9 +1257,20 @@ class DCPOptimizer(DCPOptimizerBase):
         start_time = time.time()
         wns_measured = None
         error_occurred = False
-        
+
+        # Log MCP request with sanitized arguments
+        sanitized_args = sanitize_payload(arguments)
+        logger.info(
+            "[MCP_REQUEST] Calling tool '%s'",
+            tool_name,
+            extra={
+                "mcp_tool_name": tool_name,
+                "mcp_request_args": sanitized_args,
+                "trace_id": get_trace_id(),
+            }
+        )
+
         try:
-            logger.info(f"Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
             result = await session.call_tool(actual_name, arguments)
 
             # Extract text content from result
@@ -1204,7 +1292,6 @@ class DCPOptimizer(DCPOptimizerBase):
                         result_text += "\n\n=== AUTO TIMING EVALUATION AFTER PHYS_OPT ===\n" + timing_text
 
                         # Try to extract WNS and print to terminal for human to observe progress
-                        import re
                         wns_match = re.search(r'WNS.*?([-\d.]+)', timing_text) or re.search(r'WNS\s*[=:]\s*([-\d.]+)', timing_text, re.IGNORECASE)
                         if wns_match and hasattr(self, 'best_wns'):
                             try:
@@ -1422,7 +1509,6 @@ class DCPOptimizer(DCPOptimizerBase):
             })
             
             # Parse spread results
-            import json
             try:
                 spread_data = json.loads(spread_result)
                 critical_path_spread_info = {
@@ -1439,62 +1525,66 @@ class DCPOptimizer(DCPOptimizerBase):
                 print(f"[WARNING] Could not parse spread results: {e}")
                 critical_path_spread_info = None
         
-        # Create concise summary for LLM
-        summary = []
-        summary.append("=== Initial Design Analysis ===\n")
-        
-        # Timing status
-        summary.append("TIMING STATUS:")
-        if self.clock_period is not None:
-            target_fmax = 1000.0 / self.clock_period
-            summary.append(f"  Clock period: {self.clock_period:.3f} ns (target fmax: {target_fmax:.2f} MHz)")
-        if self.initial_wns is not None:
-            if self.initial_wns >= 0:
-                summary.append(f"  WNS: {self.initial_wns:.3f} ns - TIMING MET ✓")
-            else:
-                summary.append(f"  WNS: {self.initial_wns:.3f} ns - TIMING VIOLATED")
-            # Add fmax information
-            initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
-            if initial_fmax is not None:
-                summary.append(f"  Achievable fmax: {initial_fmax:.2f} MHz")
-        if self.initial_tns is not None:
-            summary.append(f"  TNS: {self.initial_tns:.3f} ns")
-        if self.initial_failing_endpoints is not None:
-            summary.append(f"  Failing endpoints: {self.initial_failing_endpoints}")
-        summary.append("")
-        
-        # Critical path spread analysis
-        if critical_path_spread_info:
-            summary.append("CRITICAL PATH SPREAD ANALYSIS:")
-            summary.append(f"  Max cell distance: {critical_path_spread_info['max_distance']} tiles")
-            summary.append(f"  Avg cell distance: {critical_path_spread_info['avg_distance']:.1f} tiles")
-            summary.append(f"  Paths analyzed: {critical_path_spread_info['paths_analyzed']}")
-            
-            # Recommendation based on spread
-            if critical_path_spread_info['avg_distance'] > 70 and critical_path_spread_info['paths_analyzed'] >= 5:
-                summary.append(f"  [WARNING] RECOMMENDATION: Use PBLOCK strategy (high spread detected)")
-            summary.append("")
-        
-        # High fanout nets (show top 10)
-        if self.high_fanout_nets:
-            summary.append("CRITICAL HIGH FANOUT NETS (top 10):")
-            for i, (net_name, fanout, path_count) in enumerate(self.high_fanout_nets[:10]):
-                summary.append(f"  {i+1}. {net_name}")
-                summary.append(f"     Fanout: {fanout}, Critical paths: {path_count}")
-            if len(self.high_fanout_nets) > 10:
-                summary.append(f"  ... and {len(self.high_fanout_nets) - 10} more nets")
-        else:
-            summary.append("CRITICAL HIGH FANOUT NETS: None found")
-        
-        summary.append("")
-        summary.append(f"Total nets available for optimization: {len(self.high_fanout_nets)}")
-        
-        summary_text = "\n".join(summary)
+        # Build YAML summary for LLM
+        summary_text = self._build_initial_analysis_yaml(critical_path_spread_info)
         print(summary_text)
         print()
 
         self._prev_best_wns = self.best_wns
         return summary_text
+
+    def _build_initial_analysis_yaml(self, critical_path_spread_info: Optional[dict]) -> str:
+        """Build initial analysis summary in YAML format."""
+        data = OrderedDict()
+
+        # meta
+        data['meta'] = OrderedDict([
+            ('type', 'initial_analysis'),
+            ('timestamp', time.strftime("%Y-%m-%d %H:%M:%S")),
+        ])
+
+        # timing
+        timing = OrderedDict()
+        if self.clock_period is not None:
+            timing['clock_period_ns'] = round(self.clock_period, 3)
+            timing['target_fmax_mhz'] = round(1000.0 / self.clock_period, 2)
+        if self.initial_wns is not None:
+            timing['wns_ns'] = round(self.initial_wns, 3)
+            timing['status'] = 'MET' if self.initial_wns >= 0 else 'VIOLATED'
+            fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+            if fmax is not None:
+                timing['achievable_fmax_mhz'] = round(fmax, 2)
+        if self.initial_tns is not None:
+            timing['tns_ns'] = round(self.initial_tns, 3)
+        if self.initial_failing_endpoints is not None:
+            timing['failing_endpoints'] = self.initial_failing_endpoints
+        data['timing'] = timing
+
+        # critical_path_spread
+        if critical_path_spread_info:
+            data['critical_path_spread'] = OrderedDict([
+                ('max_distance_tiles', critical_path_spread_info.get('max_distance', 0)),
+                ('avg_distance_tiles', round(critical_path_spread_info.get('avg_distance', 0), 1)),
+                ('paths_analyzed', critical_path_spread_info.get('paths_analyzed', 0)),
+            ])
+            # Recommendation based on spread
+            if critical_path_spread_info.get('avg_distance', 0) > 70 and critical_path_spread_info.get('paths_analyzed', 0) >= 5:
+                data['recommendation'] = 'PBLOCK'
+
+        # high_fanout_nets (top 10)
+        if self.high_fanout_nets:
+            nets_list = []
+            for i, (net_name, fanout, path_count) in enumerate(self.high_fanout_nets[:10]):
+                nets_list.append(OrderedDict([
+                    ('rank', i + 1),
+                    ('name', net_name),
+                    ('fanout', fanout),
+                    ('critical_paths', path_count),
+                ]))
+            data['high_fanout_nets'] = nets_list
+            data['total_high_fanout_nets'] = len(self.high_fanout_nets)
+
+        return "---\n" + LightYAML.dump(data, trace_id=get_trace_id()) + "..."
 
     # === Section 7.6: LLM Completion Loop ===
 
@@ -1516,13 +1606,6 @@ class DCPOptimizer(DCPOptimizerBase):
             # Capture WNS at the start of this iteration for improvement comparison
             iteration_start_wns = self.best_wns
 
-            # [Legacy Safeguard] Disable compression strategy during tool-call loop.
-            # NOTE: _check_compression() is dead code (MESSAGE_ADDED subscription disabled),
-            # but this safeguard remains as a defensive measure.
-            # Will be re-enabled before the LLM API call.
-            saved_compression_strategy = self._memory_manager._compression_strategy
-            self._memory_manager._compression_strategy = None
-
             # 1. Inject failed strategies via compat
             if self._compat.failed_strategies:
                 last_msg = self.messages[-1] if self.messages else None
@@ -1534,9 +1617,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     )
 
             # Re-enable compression and compress before LLM call
-            self._memory_manager._compression_strategy = saved_compression_strategy
-            if saved_compression_strategy is not None:
-                self._compress_context()
+            self._compress_context()
 
             # 2. Async call LLM
             self.llm_call_count += 1
@@ -1950,10 +2031,16 @@ CRITICAL OPTIMIZATION RULES:
                 "fmax_improvement_mhz": fmax_improvement,
                 "total_tool_calls": len(self.tool_call_details),
                 "total_tool_time_seconds": total_tool_time,
-                "tool_call_counts": tool_counts
+                "tool_call_counts": tool_counts,
+                # Compression metrics
+                "compression_total": self.compression_count,
+                "compression_hard": self.compression_hard_count,
+                "compression_soft": self.compression_soft_count,
+                "compression_skipped": self.compression_skipped,
             },
             "per_llm_call_details": self.api_call_details,
-            "per_tool_call_details": self.tool_call_details
+            "per_tool_call_details": self.tool_call_details,
+            "per_compression_details": self.compression_details
         }
         
         with open(output_path, 'w') as f:
@@ -2474,12 +2561,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Route the design with extended timeout (6 hours)
             ROUTE_TIMEOUT = 21600.0  # 6 hours = 6 * 60 * 60 = 21600 seconds
             print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
-            result = await self.call_vivado_tool("route_design", {
-                "directive": "Default",
-            }, timeout=ROUTE_TIMEOUT)
-            print(f"Route design result:\n{result}")
-            logger.info(f"Route design: {result}")
-            
+
+            # Start heartbeat logger for long-running route_design
+            done_event = __import__('threading').Event()
+            heartbeat = HeartbeatLogger(
+                interval_seconds=60.0,
+                message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
+                done_event=done_event
+            )
+            heartbeat.start()
+
+            try:
+                result = await self.call_vivado_tool("route_design", {
+                    "directive": "Default",
+                }, timeout=ROUTE_TIMEOUT)
+                print(f"Route design result:\n{result}")
+                logger.info(f"Route design: {result}")
+            finally:
+                done_event.set()
+                heartbeat.stop()
+
             # Check route status again
             result = await self.call_vivado_tool("report_route_status", {
                 "show_unrouted": True,
@@ -2734,19 +2835,29 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("\n" + "-"*60)
             print("STEP 8: Place the design in Vivado")
             print("-"*60)
-            
-            result = await self.call_vivado_tool("place_design", {
-                "directive": "Default"
-            }, timeout=3600.0)  # 1 hour timeout for placement
-            print(f"Place design result:\n{result}")
-            logger.info(f"Place design: {result}")
-            
+
+            # Start heartbeat logger for long-running place_design
+            done_event = __import__('threading').Event()
+            heartbeat = HeartbeatLogger(
+                interval_seconds=60.0,
+                message="place_design in progress (timeout: 3600s)",
+                done_event=done_event
+            )
+            heartbeat.start()
+
+            try:
+                result = await self.call_vivado_tool("place_design", {
+                    "directive": "Default"
+                }, timeout=3600.0)  # 1 hour timeout for placement
+                print(f"Place design result:\n{result}")
+                logger.info(f"Place design: {result}")
+            finally:
+                done_event.set()
+                heartbeat.stop()
+
             # ================================================================
             # Step 9: Route the design in Vivado
             # ================================================================
-            print("\n" + "-"*60)
-            print("STEP 9: Route the design in Vivado")
-            print("-"*60)
             
             # ================================================================
             # [NEW] Intermediate checkpoint: Pre-routing optimization
@@ -2807,12 +2918,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Route the design with extended timeout (6 hours)
             ROUTE_TIMEOUT = 21600.0  # 6 hours
             print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
-            result = await self.call_vivado_tool("route_design", {
-                "directive": "Default"
-            }, timeout=ROUTE_TIMEOUT)
-            print(f"Route design result:\n{result}")
-            logger.info(f"Route design: {result}")
-            
+
+            # Start heartbeat logger for long-running route_design
+            done_event = __import__('threading').Event()
+            heartbeat = HeartbeatLogger(
+                interval_seconds=60.0,
+                message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
+                done_event=done_event
+            )
+            heartbeat.start()
+
+            try:
+                result = await self.call_vivado_tool("route_design", {
+                    "directive": "Default"
+                }, timeout=ROUTE_TIMEOUT)
+                print(f"Route design result:\n{result}")
+                logger.info(f"Route design: {result}")
+            finally:
+                done_event.set()
+                heartbeat.stop()
+
             # Check route status
             result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
             print(f"Route status after routing:\n{result[:1500]}...")

@@ -1,19 +1,21 @@
 """Memory Manager - Core orchestration for context management."""
 
+import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Literal
 from pathlib import Path
 from .interfaces import (
     Message, MessageRole, CompressionContext, EventType, ContextEvent,
-    MemoryLayer, ContextSnapshot, CompressionStrategy
+    MemoryLayer, ContextSnapshot
 )
 from .estimator import ContextEstimator
 from .events import EventBus
 from .stores.memory_store import InMemoryContextStore
 from .memory.working_memory import WorkingMemory, WorkingMemoryConfig
 from .memory.historical_memory import HistoricalMemory, HistoricalMemoryConfig
-from .strategies.smart_compress import SmartCompressionStrategy
-from .strategies.aggressive_compress import AggressiveCompressionStrategy
+from .logging_config import get_trace_id
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,12 +33,10 @@ class MemoryManager:
     def __init__(
         self,
         config: Optional[MemoryManagerConfig] = None,
-        compression_strategy: Optional[CompressionStrategy] = None,
         event_bus: Optional[EventBus] = None,
         persistence_path: Optional[Path] = None
     ):
         self._config = config or MemoryManagerConfig()
-        self._compression_strategy = compression_strategy
         self._event_bus = event_bus or EventBus()
         self._persistence_path = persistence_path
 
@@ -76,6 +76,7 @@ class MemoryManager:
         self._initial_wns: Optional[float] = None
         self._iteration: int = 0
         self._clock_period: Optional[float] = None
+        self._compressing: bool = False  # Explicitly initialized
 
     def add_message(self, role: MessageRole, content: str, metadata: dict = None) -> ContextSnapshot:
         """Add message to working memory."""
@@ -104,52 +105,31 @@ class MemoryManager:
         for msg in messages:
             self._working_store.add(msg)
 
-    def _check_compression(self, event: ContextEvent) -> None:
-        """Check if compression is needed after message added.
+    def _compress(self, compression_type: Literal["yaml_structured"], context: CompressionContext) -> None:
+        """Execute compression with system message protection.
 
-        DISABLED: This method is dead code since MESSAGE_ADDED auto-subscription was removed.
-        It is retained for documentation purposes and potential future re-activation.
-        Compression is now exclusively triggered by DCPOptimizer._compress_context().
+        NOTE: Only yaml_structured is used. Aggressive/light compression levels
+        are handled internally by YAMLStructuredCompressor based on context.force_aggressive.
         """
-        if not self._compression_strategy:
-            return
-
-        messages = self._working_memory.get_all()
-        tokens = self._estimator.estimate_from_messages(messages)
-
-        context = CompressionContext(
-            current_tokens=tokens,
-            threshold_tokens=self._config.soft_threshold,
-            hard_limit_tokens=self._config.hard_limit,
-            failed_strategies=self._failed_strategies,
-            tool_call_details=self._tool_call_details,
-            best_wns=self._best_wns,
-            initial_wns=self._initial_wns,
-            current_wns=self._get_current_wns(),
-            iteration=self._iteration,
-            clock_period=self._clock_period
-        )
-
-        if tokens > self._config.hard_limit:
-            self._compress("aggressive", context)
-        elif tokens > self._config.soft_threshold:
-            self._compress("smart", context)
-
-    def _compress(self, compression_type: str, context: CompressionContext) -> None:
-        """Execute compression with system message protection."""
         if getattr(self, '_compressing', False):
+            logger.debug("Compression already in progress, skipping")
             return
         self._compressing = True
+        logger.info(
+            "[COMPRESSION] Starting compression: type=%s, force_aggressive=%s",
+            compression_type,
+            getattr(context, 'force_aggressive', False),
+            extra={
+                "compression_type": compression_type,
+                "compression_force_aggressive": getattr(context, 'force_aggressive', False),
+                "trace_id": get_trace_id(),
+            }
+        )
         try:
-            if compression_type == "aggressive":
-                strategy = AggressiveCompressionStrategy()
-            elif compression_type == "smart":
-                strategy = SmartCompressionStrategy()
-            elif compression_type == "xml_structured":
-                from .strategies.xml_structured_compress import XMLStructuredCompressor
-                strategy = XMLStructuredCompressor()
-            else:
-                strategy = self._compression_strategy
+            # Always use YAML structured compression
+            # Aggressive vs light mode determined by context.force_aggressive flag
+            from .strategies.yaml_structured_compress import YAMLStructuredCompressor
+            strategy = YAMLStructuredCompressor()
 
             all_messages = self._working_memory.get_all()
 
@@ -185,14 +165,38 @@ class MemoryManager:
             for msg in compressed:
                 self._working_store.add(msg)
 
+            original_tokens = ContextEstimator.estimate_from_messages(all_messages)
+            compressed_tokens = ContextEstimator.estimate_from_messages(compressed)
+
             self._event_bus.emit(ContextEvent(
                 event_type=EventType.CONTEXT_COMPRESSED,
                 data={
                     "compression_type": compression_type,
                     "original_count": len(all_messages),
-                    "compressed_count": len(compressed)
+                    "compressed_count": len(compressed),
+                    "original_tokens": original_tokens,
+                    "compressed_tokens": compressed_tokens,
+                    "compression_ratio_token": round(
+                        (original_tokens - compressed_tokens) / max(original_tokens, 1), 4
+                    ),
+                    "force_aggressive": getattr(context, 'force_aggressive', False),
+                    "iteration": context.iteration if hasattr(context, 'iteration') else None,
                 }
             ))
+            compression_ratio = (len(all_messages) - len(compressed)) / len(all_messages) if len(all_messages) > 0 else 0
+            logger.info(
+                "[COMPRESSION] Completed: %d messages -> %d messages (%d removed)",
+                len(all_messages),
+                len(compressed),
+                len(all_messages) - len(compressed),
+                extra={
+                    "compression_original_count": len(all_messages),
+                    "compression_compressed_count": len(compressed),
+                    "compression_removed_count": len(all_messages) - len(compressed),
+                    "compression_ratio": round(compression_ratio, 4),
+                    "trace_id": get_trace_id(),
+                }
+            )
         finally:
             self._compressing = False
 
@@ -245,6 +249,12 @@ class MemoryManager:
     def record_failure(self, strategy: str) -> None:
         if strategy not in self._failed_strategies:
             self._failed_strategies.append(strategy)
+            logger.warning(
+                "[FAILED_STRATEGY] Recorded: %s (total failed: %d)",
+                strategy, len(self._failed_strategies),
+                extra={"strategy": strategy, "failed_count": len(self._failed_strategies),
+                       "trace_id": get_trace_id()}
+            )
 
     def add_tool_result(self, tool_name: str, result: str, wns: float = None, error: bool = False, extra_fields: dict = None) -> None:
         entry = {
@@ -259,6 +269,19 @@ class MemoryManager:
         self._tool_call_details.append(entry)
         if wns is not None and wns > self._best_wns:
             self._best_wns = wns
+            logger.info(
+                "[TOOL_RESULT] New best WNS: %.3f",
+                wns,
+                extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,
+                       "trace_id": get_trace_id()}
+            )
+        elif error:
+            logger.warning(
+                "[TOOL_RESULT] Tool error: %s (iteration=%d)",
+                tool_name, self._iteration,
+                extra={"tool_name": tool_name, "error": error, "iteration": self._iteration,
+                       "trace_id": get_trace_id()}
+            )
 
     def set_initial_wns(self, wns: float) -> None:
         if self._initial_wns is None:
@@ -268,4 +291,11 @@ class MemoryManager:
         self._clock_period = period
 
     def advance_iteration(self) -> None:
+        old_iteration = self._iteration
         self._iteration += 1
+        logger.info(
+            "[ITERATION] Advanced from %d to %d",
+            old_iteration, self._iteration,
+            extra={"old_iteration": old_iteration, "iteration": self._iteration,
+                   "trace_id": get_trace_id()}
+        )

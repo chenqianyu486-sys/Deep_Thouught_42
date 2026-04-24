@@ -36,7 +36,23 @@ class HistoricalMemory:
         tags: list = None,
         embedding: Optional[list] = None
     ) -> str:
-        """Add entry to historical memory."""
+        """Add entry to historical memory. Evicts oldest entries if at max_entries."""
+        if len(self._entries) >= self._config.max_entries:
+            # Evict oldest entry (first in time index)
+            oldest_id = self._index_by_time[0]
+            old_entry = self._entries.get(oldest_id)
+            self._entries.pop(oldest_id, None)
+            self._index_by_time.pop(0)
+            # Remove from importance index
+            if oldest_id in self._index_by_importance:
+                self._index_by_importance.remove(oldest_id)
+            # Remove from task type index
+            if old_entry and old_entry.task_type and old_entry.task_type in self._index_by_task_type:
+                try:
+                    self._index_by_task_type[old_entry.task_type].remove(oldest_id)
+                except ValueError:
+                    pass
+
         entry_id = str(uuid.uuid4())
         entry = HistoricalEntry(
             id=entry_id,
@@ -62,9 +78,20 @@ class HistoricalMemory:
 
     def retrieve(self, query: RetrievalQuery) -> list[HistoricalEntry]:
         """Retrieve entries matching query criteria."""
-        results = []
+        # If no text search and no agent_id filter, use importance index for efficiency
+        if not query.text and not query.agent_id and query.task_type:
+            # Use task_type index + importance index
+            candidate_ids = self._index_by_task_type.get(query.task_type, [])
+            candidates = [self._entries[eid] for eid in candidate_ids if eid in self._entries]
+        elif not query.text and not query.agent_id and not query.task_type:
+            # Use importance index only (reverse it for descending order)
+            candidates = [self._entries[eid] for eid in reversed(self._index_by_importance) if eid in self._entries]
+        else:
+            # Fall back to full scan for complex queries
+            candidates = list(self._entries.values())
 
-        for entry in self._entries.values():
+        results = []
+        for entry in candidates:
             if query.time_range:
                 start, end = query.time_range
                 if not (start <= entry.timestamp <= end):
@@ -85,7 +112,10 @@ class HistoricalMemory:
 
             results.append(entry)
 
-        results.sort(key=lambda e: e.importance_score, reverse=True)
+        # Only sort if we didn't use the importance index (which is already sorted)
+        if query.text or query.agent_id:
+            results.sort(key=lambda e: e.importance_score, reverse=True)
+
         return results[:query.limit] if query.limit else results
 
     def _reindex_entry(self, entry_id: str) -> None:

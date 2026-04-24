@@ -115,11 +115,15 @@ class AgentContextManager:
             for msg in source_store.get_all():
                 target_store.add(msg)
 
+        # Capture branch info before deletion for event
+        source_branch = self._branches.get(source_branch_id)
+        target_branch = self._branches.get(target_id)
+
         self._event_bus.emit(ContextEvent(
             event_type=EventType.BRANCH_MERGED,
             data={
-                "source_branch": source_branch_id,
-                "target_branch": target_id,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
                 "strategy": strategy
             }
         ))

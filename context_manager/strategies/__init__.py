@@ -1,13 +1,9 @@
 """Compression strategy implementations."""
 
-from .base import CompressionStrategy
-from .smart_compress import SmartCompressionStrategy
-from .aggressive_compress import AggressiveCompressionStrategy
-from .xml_structured_compress import XMLStructuredCompressor
+from ..interfaces import CompressionStrategy
+from .yaml_structured_compress import YAMLStructuredCompressor
 
 __all__ = [
     "CompressionStrategy",
-    "SmartCompressionStrategy",
-    "AggressiveCompressionStrategy",
-    "XMLStructuredCompressor",
+    "YAMLStructuredCompressor",
 ]

@@ -18,12 +18,23 @@ import re
 import signal
 import shutil
 import sys
+import time
 from typing import Optional, Dict, Any
 
 import pexpect
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+
+# Import sanitization utilities
+try:
+    from context_manager.logging_config import sanitize_payload, get_trace_id
+except ImportError:
+    # Fallback if context_manager not available
+    def sanitize_payload(payload, max_length=1024):
+        return payload
+    def get_trace_id():
+        return ""
 
 # Configure logging
 logging.basicConfig(
@@ -1411,9 +1422,22 @@ async def list_tools():
 async def call_tool(name: str, arguments: dict):
     """Handle tool calls."""
     global _design_open
-    
-    logger.info(f"Tool called: {name}")
-    
+
+    start_time = time.perf_counter()
+    trace_id = get_trace_id()
+
+    # Log MCP request with sanitized arguments
+    sanitized_args = sanitize_payload(arguments)
+    logger.info(
+        "[MCP_REQUEST] Tool '%s' called",
+        name,
+        extra={
+            "mcp_tool_name": name,
+            "mcp_request_args": sanitized_args,
+            "trace_id": trace_id,
+        }
+    )
+
     try:
         if name == "open_checkpoint":
             dcp_path = arguments["dcp_path"]
@@ -1582,21 +1606,62 @@ async def call_tool(name: str, arguments: dict):
             
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Physical optimization complete.\n\n{output}")]
-        
+
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
-    
+
     except pexpect.TIMEOUT:
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.error(
+            "[MCP_RESPONSE] Tool '%s' timed out (%dms)",
+            name,
+            duration_ms,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_response_duration_ms": duration_ms,
+                "mcp_response_status": "timeout",
+                "trace_id": trace_id,
+            }
+        )
         return [TextContent(
-            type="text", 
+            type="text",
             text=f"Error: Command timed out. Vivado may be stuck. Use restart_vivado to recover."
         )]
     except pexpect.EOF:
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.error(
+            "[MCP_RESPONSE] Tool '%s' failed: Vivado process terminated (%dms)",
+            name,
+            duration_ms,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_response_duration_ms": duration_ms,
+                "mcp_response_status": "error",
+                "mcp_error_type": "EOF",
+                "trace_id": trace_id,
+            }
+        )
         return [TextContent(
             type="text",
             text="Error: Vivado process terminated unexpectedly. Use restart_vivado to restart."
         )]
     except Exception as e:
+        duration_ms = int((time.perf_counter() - start_time) * 1000)
+        logger.error(
+            "[MCP_RESPONSE] Tool '%s' failed: %s (%dms)",
+            name,
+            str(e),
+            duration_ms,
+            exc_info=True,
+            extra={
+                "mcp_tool_name": name,
+                "mcp_response_duration_ms": duration_ms,
+                "mcp_response_status": "error",
+                "mcp_error_message": str(e),
+                "mcp_error_type": type(e).__name__,
+                "trace_id": trace_id,
+            }
+        )
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 

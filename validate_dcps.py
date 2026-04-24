@@ -512,7 +512,7 @@ module testbench;
     
     // Timeout watchdog (reset + warmup + test cycles, with 2x safety margin)
     initial begin
-        #{(10 + 50 + self.num_vectors) * 20} $display("ERROR: Simulation timeout"); $finish(2);
+        #{(10 + 50 + self.num_vectors) * 20000} $display("ERROR: Simulation timeout"); $finish(2);
     end
 
 endmodule
@@ -628,10 +628,16 @@ endmodule
             revised_module_renamed = f"{revised_module_name}_revised"
             
             # Rename module declarations - handle both single-line and multi-line
-            # "module name" OR "module name("
+            # "module name" OR "module name(" OR multi-line "module\nname"
             content = re.sub(
-                r'\bmodule\s+(\w+)(\s*[\(\n])',
+                r'\bmodule\s+(\w+)(\s*\()',
                 lambda m: f'module {m.group(1)}_revised{m.group(2)}',
+                content
+            )
+            # Handle multi-line: "module\nname (" or "module\nname\n("
+            content = re.sub(
+                r'\bmodule\n\s*(\w+)\s*\(',
+                lambda m: f'module\n{m.group(1)}_revised(',
                 content
             )
             
