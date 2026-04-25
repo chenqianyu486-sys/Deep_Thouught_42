@@ -4,7 +4,7 @@
 
 flash:
   model_tier: "flash"
-  model_name: "xiaomi/mimo-v2-flash"  # Default Flash model name
+  model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
   max_tokens: 500000
   soft_threshold: 400000      # 80% of max_tokens - triggers soft compression
   hard_limit: 450000         # 90% of max_tokens - triggers aggressive compression
@@ -18,7 +18,7 @@ flash:
 
 pro:
   model_tier: "pro"
-  model_name: "xiaomi/mimo-v2-pro"    # Default Pro model name
+  model_name: "xiaomi/mimo-v2.5-pro"    # Default Pro model name
   max_tokens: 1000000
   soft_threshold: 800000      # 80% of max_tokens - triggers soft compression
   hard_limit: 900000         # 90% of max_tokens - triggers aggressive compression
