@@ -298,9 +298,9 @@ class DCPOptimizerBase:
                 print(f"{log_prefix} Debug mode: MCP server output will be shown in console")
         else:
             self._rw_log_file = open(rapidwright_mcp_log, 'w')
-            await self.exit_stack.callback(self._rw_log_file.close)
+            self.exit_stack.callback(self._rw_log_file.close)
             self._v_log_file = open(vivado_mcp_log, 'w')
-            await self.exit_stack.callback(self._v_log_file.close)
+            self.exit_stack.callback(self._v_log_file.close)
             logger.info(f"RapidWright Java output: {rapidwright_log}")
             logger.info(f"RapidWright MCP output: {rapidwright_mcp_log}")
             logger.info(f"Vivado output: {vivado_log}")
