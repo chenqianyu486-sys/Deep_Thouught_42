@@ -155,22 +155,51 @@ class YAMLStructuredCompressor(CompressionStrategy):
     def compress(self, messages: List[Message], context: CompressionContext) -> List[Message]:
         """Compress messages into YAML format with FPGA design state.
 
-        Compression intensity is determined by context.force_aggressive:
+        Compression intensity is determined by:
+        - context.force_aggressive: aggressive vs normal mode
+        - context.model_context_config: model-specific parameters
+        - context.model_switch_detected: adjusts strategy on model tier switch
+
+        Model-aware defaults:
         - False (normal): preserve_turns=20, min_importance_threshold=0.3
         - True (aggressive): preserve_turns=3, min_importance_threshold=0.8
+        - With model_config: uses model-specific thresholds
         """
         if not messages:
             logger.debug("[COMPRESS] No messages to compress")
             return []
 
-        # Determine compression intensity based on force_aggressive flag
+        # Get model-aware configuration
+        model_config = getattr(context, 'model_context_config', None)
+        model_switched = getattr(context, 'model_switch_detected', False)
+        previous_tier = getattr(context, 'previous_model_tier', None)
+
+        # Determine compression intensity based on force_aggressive flag and model config
         is_aggressive = getattr(context, 'force_aggressive', False)
         if is_aggressive:
-            preserve_turns = 3
-            min_importance_threshold = 0.8
+            preserve_turns = model_config.preserve_turns_aggressive if model_config else 3
+            min_importance_threshold = model_config.min_importance_threshold_aggressive if model_config else 0.8
         else:
-            preserve_turns = 20
-            min_importance_threshold = 0.3
+            preserve_turns = model_config.preserve_turns if model_config else 20
+            min_importance_threshold = model_config.min_importance_threshold if model_config else 0.3
+
+        # Adjust parameters based on model tier switch
+        if model_switched and previous_tier and model_config:
+            # Planner -> Flash: Worker needs more condensed summary
+            if previous_tier == "pro" and model_config.model_tier == "flash":
+                min_importance_threshold = max(min_importance_threshold, 0.35)
+                preserve_turns = max(preserve_turns - 5, 20)
+                logger.info("[COMPRESS] Model switch detected: pro->flash, adjusted threshold=%.2f, preserve_turns=%d",
+                           min_importance_threshold, preserve_turns)
+            # Flash -> Planner: Planner needs more comprehensive context
+            elif previous_tier == "flash" and model_config.model_tier == "pro":
+                min_importance_threshold = min(min_importance_threshold, 0.1)
+                preserve_turns = min(preserve_turns + 10, 60)
+                logger.info("[COMPRESS] Model switch detected: flash->pro, adjusted threshold=%.2f, preserve_turns=%d",
+                           min_importance_threshold, preserve_turns)
+
+        # Use model's token budget if available
+        effective_token_budget = model_config.token_budget if model_config else self.token_budget
 
         logger.info(
             "[COMPRESS] Starting compression: is_aggressive=%s, preserve_turns=%s, threshold=%s",
@@ -194,7 +223,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         # Calculate available budget (system messages take priority)
         system_tokens = self._estimate_tokens([m for m, _, _ in system_msgs])
-        available_budget = max(5000, self.token_budget - system_tokens - 2000)  # 2K buffer
+        available_budget = max(5000, effective_token_budget - system_tokens - 2000)  # 2K buffer
 
         # Select important messages within budget (use dynamic threshold)
         selected = self._select_messages(conversation_msgs, available_budget, context, min_importance_threshold)
@@ -231,12 +260,15 @@ class YAMLStructuredCompressor(CompressionStrategy):
             )
             raise
         _dump_duration_ms = (time.perf_counter() - _dump_start) * 1000
+        # Estimate tokens from yaml_str directly (summary_msg not yet created)
+        yaml_tokens_est = len(yaml_str) // 4  # Approximate for logging
         logger.debug(
-            "[COMPRESS_DUMP] YAML serialization: %d chars in %.2fms",
-            len(yaml_str), _dump_duration_ms,
+            "[COMPRESS_DUMP] YAML serialization: %d chars (~%d tokens) in %.2fms",
+            len(yaml_str), yaml_tokens_est, _dump_duration_ms,
             extra={
                 "compress_dump_duration_ms": round(_dump_duration_ms, 2),
                 "compress_dump_output_length": len(yaml_str),
+                "compress_dump_output_tokens_est": yaml_tokens_est,
                 "trace_id": trace_id,
             }
         )
@@ -268,15 +300,23 @@ class YAMLStructuredCompressor(CompressionStrategy):
         result = [msg for msg, _, _ in system_msgs]
         result.append(summary_msg)
 
+        # Calculate accurate token counts using tiktoken
+        input_tokens = self._estimate_tokens(messages)
+        output_tokens = self._estimate_tokens(result)
+
         logger.info(
-            "[COMPRESS] Completed: %d messages -> %d messages (YAML: %d chars, ~%d tokens)",
-            len(messages), len(result), len(yaml_str), len(yaml_str) // 4,
+            "[COMPRESS] Completed: %d messages, %d tokens -> %d messages, %d tokens (saved %d tokens, ratio: %.1f%%)",
+            len(messages), input_tokens, len(result), output_tokens,
+            input_tokens - output_tokens,
+            (1 - output_tokens / input_tokens) * 100 if input_tokens > 0 else 0,
             extra={
                 "compression_type": compression_label,
                 "input_count": len(messages),
+                "input_tokens": input_tokens,
                 "output_count": len(result),
-                "compress_output_chars": len(yaml_str),
-                "compress_output_estimated_tokens": len(yaml_str) // 4,
+                "output_tokens": output_tokens,
+                "tokens_saved": input_tokens - output_tokens,
+                "compression_ratio": round((1 - output_tokens / input_tokens) * 100, 1) if input_tokens > 0 else 0,
                 "trace_id": trace_id,
             }
         )

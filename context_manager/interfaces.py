@@ -45,6 +45,36 @@ class ContextSnapshot:
 
 
 @dataclass
+class ModelContextConfig:
+    """Model-specific context configuration for adaptive compression.
+
+    Attributes:
+        model_tier: Model tier identifier - "flash" or "pro"
+        max_context_tokens: Maximum context window for the model
+        soft_threshold: Token count to trigger soft compression (80% of max)
+        hard_limit: Token count that triggers aggressive compression (90% of max)
+        token_budget: Target token budget for compressed output
+        preserve_turns: Number of recent turns to preserve in normal compression
+        preserve_turns_aggressive: Number of recent turns in aggressive mode
+        min_importance_threshold: Minimum importance score to keep a message (normal)
+        min_importance_threshold_aggressive: Minimum importance threshold (aggressive)
+        history_retrieval_limit: Number of historical entries to retrieve
+        history_retrieval_min_importance: Minimum importance for historical retrieval
+    """
+    model_tier: str
+    max_context_tokens: int
+    soft_threshold: int
+    hard_limit: int
+    token_budget: int
+    preserve_turns: int = 20
+    preserve_turns_aggressive: int = 3
+    min_importance_threshold: float = 0.3
+    min_importance_threshold_aggressive: float = 0.8
+    history_retrieval_limit: int = 5
+    history_retrieval_min_importance: float = 0.6
+
+
+@dataclass
 class CompressionContext:
     """Context information for compression decisions."""
     current_tokens: int = 0
@@ -60,6 +90,10 @@ class CompressionContext:
     agent_id: Optional[str] = None
     force_aggressive: bool = False  # True = use aggressive compression within YAML
     retrieved_history: list = field(default_factory=list)  # Historical entries for context
+    # Model-aware compression fields
+    model_context_config: Optional[ModelContextConfig] = None  # Model-specific configuration
+    model_switch_detected: bool = False  # True if model tier switched since last compression
+    previous_model_tier: Optional[str] = None  # Previous model tier ("flash" or "pro")
 
 
 class EventType(Enum):

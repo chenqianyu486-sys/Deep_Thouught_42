@@ -36,7 +36,7 @@ except ImportError:
 # === Section 7.0: Context Manager Integration ===
 from context_manager import MemoryManager, AgentContextManager, YAMLStructuredCompressor
 from context_manager.compat import DCPOptimizerCompat
-from context_manager.interfaces import CompressionContext as CMCompressionContext
+from context_manager.interfaces import CompressionContext as CMCompressionContext, ModelContextConfig
 from context_manager.estimator import ContextEstimator
 from context_manager.events import EventBus
 from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent, RetrievalQuery as CMRetrievalQuery
@@ -45,6 +45,42 @@ from context_manager.logging_config import (
     setup_logging, set_trace_id, get_trace_id, set_job_context,
     sanitize_payload, DynamicLogLevelManager, HeartbeatLogger
 )
+from config_loader import get_model_config_loader, ModelConfigData
+
+
+def _create_model_context_config(data: ModelConfigData) -> ModelContextConfig:
+    """Create ModelContextConfig from ModelConfigData.
+
+    Args:
+        data: Model configuration data loaded from YAML
+
+    Returns:
+        ModelContextConfig instance
+    """
+    return ModelContextConfig(
+        model_tier=data.model_tier,
+        max_context_tokens=data.max_tokens,
+        soft_threshold=data.soft_threshold,
+        hard_limit=data.hard_limit,
+        token_budget=data.token_budget,
+        preserve_turns=data.preserve_turns,
+        preserve_turns_aggressive=data.preserve_turns_aggressive,
+        min_importance_threshold=data.min_importance_threshold,
+        min_importance_threshold_aggressive=data.min_importance_threshold_aggressive,
+        history_retrieval_limit=data.history_retrieval_limit,
+        history_retrieval_min_importance=data.history_retrieval_min_importance,
+    )
+
+
+# Load model configurations from YAML
+_loader = get_model_config_loader()
+_flash_data = _loader.get_flash_config()
+_pro_data = _loader.get_pro_config()
+
+FLASH_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_flash_data)
+PRO_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_pro_data)
+DEFAULT_MODEL_PLANNER: str = _pro_data.model_name
+DEFAULT_MODEL_WORKER: str = _flash_data.model_name
 
 # === Section 2: Logging & Constants ===
 
@@ -52,19 +88,26 @@ from context_manager.logging_config import (
 setup_logging(level="INFO", use_json=False)  # use_json=False for readable console output
 logger = logging.getLogger(__name__)
 
-# Default model
-DEFAULT_MODEL_PLANNER = "xiaomi/mimo-v2-pro"
-DEFAULT_MODEL_WORKER = "xiaomi/mimo-v2-flash"
+# === Section 2.1: Model Context Configurations (loaded from model_config.yaml) ===
+# Model tier to config mapping
+MODEL_CONTEXT_CONFIGS = {
+    "flash": FLASH_CONTEXT_CONFIG,
+    "pro": PRO_CONTEXT_CONFIG,
+}
 
-# Context Compression Configuration
-CONTEXT_COMPRESSION_THRESHOLD = 80_000   # token count threshold (~40% of flash limit)
-CONTEXT_HARD_LIMIT = 150_000             # hard limit; exceeds this value triggers aggressive compression
+# Derived constants from loaded config
+WORKER_MODEL_MAX_TOKENS = _flash_data.max_tokens
+PLANNER_MODEL_MAX_TOKENS = _pro_data.max_tokens
 
-# Model context window limits (tokens)
-WORKER_MODEL_MAX_TOKENS = 200_000       # mimo-v2-flash max context window
-PLANNER_MODEL_MAX_TOKENS = 1_000_000   # mimo-v2-pro max context window
-WORKER_CONTEXT_WARN_TOKENS = 120_000   # 60% of flash limit → bias toward planner
-WORKER_CONTEXT_FORCE_TOKENS = 170_000  # 85% of flash limit → hard override to planner
+# Worker thresholds based on flash model capacity
+WORKER_CONTEXT_WARN_TOKENS = int(_flash_data.max_tokens * 0.6)  # 60% of max
+WORKER_CONTEXT_FORCE_TOKENS = int(_flash_data.max_tokens * 0.8)  # 80% of max
+
+# Legacy constants for backward compatibility
+LEGACY_FLASH_MAX_TOKENS = 200_000
+CONTEXT_COMPRESSION_THRESHOLD = _flash_data.soft_threshold  # deprecated
+CONTEXT_HARD_LIMIT = _flash_data.hard_limit  # deprecated
+
 RECENT_TURNS_TO_KEEP = 20              # number of recent messages to keep during compression (maintains conversation continuity)
 TOOL_RESULT_TRUNCATE = 30000           # tool result truncation threshold (retains key info after type-based filtering)
 
@@ -184,7 +227,6 @@ def convert_mcp_tool_to_openai(tool, server_prefix: str) -> dict:
             "strict": False
         }
     }
-}
 
 
 # Shared constants for routing failure detection
@@ -587,6 +629,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.task_type_stats: dict[str, dict[str, int]] = {}
         self.llm_call_count = 0
         self.last_used_model = None
+        self._model_usage_history: list = []          # Track recent model selections for switch detection
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
 
         # === Section 7.1: Context Compression & Model Switching State ===
@@ -749,23 +792,92 @@ class DCPOptimizer(DCPOptimizerBase):
         """Get latest WNS - O(1) from cached instance variable."""
         return self.latest_wns
 
-    def _build_compression_context(self, current_tokens: int) -> CMCompressionContext:
-        """Build CompressionContext from DCPOptimizer state for MemoryManager."""
+    def _build_compression_context(
+        self,
+        current_tokens: int,
+        model_config: ModelContextConfig = None,
+        model_switched: bool = False
+    ) -> CMCompressionContext:
+        """Build CompressionContext with model awareness.
+
+        Args:
+            current_tokens: Current token count estimate
+            model_config: Model-specific configuration (uses FLASH_CONTEXT_CONFIG if None)
+            model_switched: True if model tier switched since last compression
+        """
+        config = model_config or FLASH_CONTEXT_CONFIG
         return CMCompressionContext(
             current_tokens=current_tokens,
-            threshold_tokens=CONTEXT_COMPRESSION_THRESHOLD,
-            hard_limit_tokens=CONTEXT_HARD_LIMIT,
+            threshold_tokens=config.soft_threshold,
+            hard_limit_tokens=config.hard_limit,
             failed_strategies=self._compat.failed_strategies,
             tool_call_details=self._compat.tool_call_details,
             best_wns=self.best_wns,
             initial_wns=self.initial_wns,
             current_wns=self._get_current_wns(),
             iteration=self.iteration,
-            clock_period=self.clock_period
+            clock_period=self.clock_period,
+            model_context_config=config,
+            model_switch_detected=model_switched,
+            previous_model_tier=self._get_previous_model_tier()
         )
 
+    def _infer_model_tier(self, model_name: str) -> str:
+        """Infer model tier from model name.
+
+        Args:
+            model_name: Model name string
+
+        Returns:
+            "flash" or "pro" based on model name
+        """
+        if not model_name:
+            return "flash"  # Default
+
+        model_lower = model_name.lower()
+        if "pro" in model_lower or "planner" in model_lower:
+            return "pro"
+        elif "flash" in model_lower or "worker" in model_lower:
+            return "flash"
+        else:
+            # Unknown model, use conservative default
+            return "flash"
+
+    def _get_previous_model_tier(self) -> Optional[str]:
+        """Get previous model tier from history.
+
+        Returns:
+            Previous model tier ("flash" or "pro"), or None if not available
+        """
+        if len(self._model_usage_history) >= 2:
+            previous_model = self._model_usage_history[-2]
+            return self._infer_model_tier(previous_model)
+        return None
+
+    def _get_active_model_config_with_switch_detection(self) -> tuple:
+        """Get model config and detect if model has switched.
+
+        Returns:
+            tuple: (ModelContextConfig, bool) - configuration and whether switch detected
+        """
+        # Determine current model type based on last_used_model
+        current_model = self.last_used_model if self.last_used_model else self.model_worker
+        current_tier = self._infer_model_tier(current_model)
+
+        # Detect model tier switch
+        model_switched = False
+        if self._model_usage_history and len(self._model_usage_history) >= 2:
+            previous_model = self._model_usage_history[-2]
+            previous_tier = self._infer_model_tier(previous_model)
+            if previous_tier != current_tier:
+                model_switched = True
+                logger.info(f"Model tier switch detected: {previous_tier} -> {current_tier}")
+
+        config = MODEL_CONTEXT_CONFIGS.get(current_tier, FLASH_CONTEXT_CONFIG)
+        return config, model_switched
+
     def _compress_context(self):
-        """Context compression - unified YAML strategy with internal aggressive/light modes.
+        """Context compression with model-aware intelligent strategy.
 
         NOTE: MemoryManager._compress() already replaces working memory with compressed
         messages internally. No additional message replacement is needed after compression.
@@ -782,36 +894,52 @@ class DCPOptimizer(DCPOptimizerBase):
         current_tokens = self._estimate_tokens()
         tokens_before = current_tokens
 
+        # Determine current model configuration and switch detection
+        active_config, model_switched = self._get_active_model_config_with_switch_detection()
+        hard_limit = active_config.hard_limit
+        soft_threshold = active_config.soft_threshold
+
+        # Determine historical retrieval parameters
+        # Model switch: retrieve more context for transition
+        if model_switched:
+            history_limit = max(active_config.history_retrieval_limit, 8)
+            history_min_importance = active_config.history_retrieval_min_importance * 0.9
+        else:
+            history_limit = active_config.history_retrieval_limit
+            history_min_importance = active_config.history_retrieval_min_importance
+
         # Hard limit: must compress aggressively
-        if current_tokens > CONTEXT_HARD_LIMIT:
+        if current_tokens > hard_limit:
             self.compression_hard_count += 1
             self.compression_count += 1
-            logger.warning(f"[COMPRESSION] Hard limit triggered: ~{current_tokens:,} tokens > {CONTEXT_HARD_LIMIT:,} (aggressive mode)")
-            context = self._build_compression_context(current_tokens)
+            logger.warning(
+                f"[COMPRESSION] Hard limit triggered: ~{current_tokens:,} tokens > {hard_limit:,} "
+                f"({active_config.model_tier} model, aggressive mode, switch={model_switched})"
+            )
+            context = self._build_compression_context(current_tokens, active_config, model_switched)
             context.force_aggressive = True
-            # Retrieve high-importance historical entries for context
             context.retrieved_history = self._memory_manager.retrieve_historical(
-                CMRetrievalQuery(min_importance=0.6, limit=5)
+                CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
             self._memory_manager._compress("yaml_structured", context)
-            # Record compression metrics
             tokens_after = self._estimate_tokens()
             self._record_compression_event("hard", tokens_before, tokens_after, iteration=self.iteration)
             return
 
         # Soft threshold: normal YAML compression
-        if current_tokens > CONTEXT_COMPRESSION_THRESHOLD:
+        if current_tokens > soft_threshold:
             self.compression_soft_count += 1
             self.compression_count += 1
-            logger.info(f"[COMPRESSION] Soft threshold triggered: ~{current_tokens:,} tokens > {CONTEXT_COMPRESSION_THRESHOLD:,} (normal mode)")
-            context = self._build_compression_context(current_tokens)
+            logger.info(
+                f"[COMPRESSION] Soft threshold triggered: ~{current_tokens:,} tokens > {soft_threshold:,} "
+                f"({active_config.model_tier} model, normal mode, switch={model_switched})"
+            )
+            context = self._build_compression_context(current_tokens, active_config, model_switched)
             context.force_aggressive = False
-            # Retrieve high-importance historical entries for context
             context.retrieved_history = self._memory_manager.retrieve_historical(
-                CMRetrievalQuery(min_importance=0.6, limit=5)
+                CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
             self._memory_manager._compress("yaml_structured", context)
-            # Record compression metrics
             tokens_after = self._estimate_tokens()
             self._record_compression_event("soft", tokens_before, tokens_after, iteration=self.iteration)
             return
@@ -839,6 +967,12 @@ class DCPOptimizer(DCPOptimizerBase):
             "llm_calls_at_compression": self.llm_call_count,
         }
         self.compression_details.append(event)
+        # Structured log for compression observability
+        logger.info(
+            f"[COMPRESSION_RESULT] [{trigger.upper()}] Iteration {iteration}: "
+            f"{tokens_before:,} tokens -> {tokens_after:,} tokens "
+            f"(saved {tokens_before - tokens_after:,} tokens, ratio: {compression_ratio*100:.1f}%)"
+        )
         # Keep only last 100 compression events to prevent memory bloat
         if len(self.compression_details) > 100:
             self.compression_details.pop(0)
@@ -1129,11 +1263,21 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # ── Decision threshold ────────────────────────────────────────────────
         if planner_score > worker_score + 1:   # Margin of 2 required to switch, avoids thrashing
-            return self.model_planner
+            selected_model = self.model_planner
         elif worker_score > planner_score:
-            return self.model_worker
+            selected_model = self.model_worker
         else:
-            return self.model_planner  # Default to safe choice
+            selected_model = self.model_planner  # Default to safe choice
+
+        # Track model usage history for switch detection
+        if self._model_usage_history and self._model_usage_history[-1] != selected_model:
+            logger.info(f"Model switch detected: {self._model_usage_history[-1]} -> {selected_model}")
+        self._model_usage_history.append(selected_model)
+        # Keep only recent 10 selections to prevent memory bloat
+        if len(self._model_usage_history) > 10:
+            self._model_usage_history.pop(0)
+
+        return selected_model
 
     def _get_task_capability_score(self, task_type: str) -> float:
         """
@@ -1322,7 +1466,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     result_text += f"\n\n[Warning: Auto timing evaluation failed: {eval_err}]"
 
             # Track WNS from timing reports and get_wns calls
-            if tool_name == "vivado_report_timing_summary":            
+            if tool_name == "vivado_report_timing_summary":
                 timing_info = parse_timing_summary_static(result_text)
                 if timing_info["wns"] is not None:
                     current_wns = timing_info["wns"]
@@ -1338,10 +1482,6 @@ class DCPOptimizer(DCPOptimizerBase):
                         self.best_wns = current_wns
                     else:
                         logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
-                else:
-                    logger.warning(f"vivado_report_timing_summary: WNS parsing returned None. "
-                                   f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}. "
-                                   f"Tool output sample: {result_text[:200]}")
                 else:
                     logger.warning(f"vivado_report_timing_summary: WNS parsing returned None. "
                                    f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}. "

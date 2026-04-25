@@ -1,0 +1,31 @@
+# LLM Model Configuration for Context Management
+# Flash models: optimized for speed, smaller context window (500K tokens)
+# Pro models: optimized for reasoning, larger context window (1M tokens)
+
+flash:
+  model_tier: "flash"
+  model_name: "xiaomi/mimo-v2-flash"  # Default Flash model name
+  max_tokens: 500000
+  soft_threshold: 400000      # 80% of max_tokens - triggers soft compression
+  hard_limit: 450000         # 90% of max_tokens - triggers aggressive compression
+  token_budget: 350000       # Target token count after compression
+  preserve_turns: 30         # Recent turns to preserve in normal mode
+  preserve_turns_aggressive: 3  # Recent turns to preserve in aggressive mode
+  min_importance_threshold: 0.2    # Minimum importance score (normal mode)
+  min_importance_threshold_aggressive: 0.8  # Minimum importance score (aggressive mode)
+  history_retrieval_limit: 5
+  history_retrieval_min_importance: 0.6
+
+pro:
+  model_tier: "pro"
+  model_name: "xiaomi/mimo-v2-pro"    # Default Pro model name
+  max_tokens: 1000000
+  soft_threshold: 800000      # 80% of max_tokens - triggers soft compression
+  hard_limit: 900000         # 90% of max_tokens - triggers aggressive compression
+  token_budget: 700000       # Target token count after compression
+  preserve_turns: 50         # Recent turns to preserve in normal mode
+  preserve_turns_aggressive: 3  # Recent turns to preserve in aggressive mode
+  min_importance_threshold: 0.15    # Minimum importance score (normal mode)
+  min_importance_threshold_aggressive: 0.8  # Minimum importance score (aggressive mode)
+  history_retrieval_limit: 8
+  history_retrieval_min_importance: 0.4
