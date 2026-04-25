@@ -80,7 +80,18 @@ class MemoryManager:
 
     def add_message(self, role: MessageRole, content: str, metadata: dict = None) -> ContextSnapshot:
         """Add message to working memory."""
-        message = Message(role=role, content=content, metadata=metadata or {})
+        metadata = metadata or {}
+        tool_call_id = metadata.pop("tool_call_id", None)
+        name = metadata.pop("name", None)
+        tool_calls = metadata.pop("tool_calls", None)
+        message = Message(
+            role=role,
+            content=content,
+            tool_call_id=tool_call_id,
+            name=name,
+            tool_calls=tool_calls,
+            metadata=metadata
+        )
         return self._working_memory.add_message(message)
 
     def get_context(self) -> list[Message]:
