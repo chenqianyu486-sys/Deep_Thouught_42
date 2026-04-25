@@ -36,7 +36,7 @@ except ImportError:
 # === Section 7.0: Context Manager Integration ===
 from context_manager import MemoryManager, AgentContextManager, YAMLStructuredCompressor
 from context_manager.compat import DCPOptimizerCompat
-from context_manager.interfaces import CompressionContext as CMCompressionContext, ModelContextConfig
+from context_manager.interfaces import CompressionContext as CMCompressionContext, ModelContextConfig, Message as CMMessage
 from context_manager.estimator import ContextEstimator
 from context_manager.events import EventBus
 from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent, RetrievalQuery as CMRetrievalQuery
@@ -276,6 +276,9 @@ class DCPOptimizerBase:
         # Log file handles
         self._rw_log_file = None
         self._v_log_file = None
+
+        # Token estimation using tiktoken (moved from DCPOptimizer for base class access)
+        self._context_estimator = ContextEstimator()
 
     def _is_routing_failure(self, error_msg: str) -> bool:
         """Check if error message indicates a routing failure."""
@@ -678,7 +681,7 @@ class DCPOptimizer(DCPOptimizerBase):
             event_bus=self._event_bus
         )
         self._compat = DCPOptimizerCompat(self._memory_manager)
-        self._context_estimator = ContextEstimator()
+        # _context_estimator initialized in DCPOptimizerBase.__init__()
 
         # Initialize AgentContextManager for multi-agent branching (shares _event_bus with MemoryManager)
         # CURRENTLY_UNUSED: AgentContextManager is initialized but create_branch()/switch_branch() are not called.
@@ -747,12 +750,20 @@ class DCPOptimizer(DCPOptimizerBase):
         return sum(len(str(msg.get("content", ""))) for msg in self.messages)
 
     def _estimate_tokens(self) -> int:
-        """Token estimation using character count (~4 chars/token for English)."""
-        total = 0
-        for msg in self.messages:
-            content = str(msg.get("content", ""))
-            total += _estimate_tokens_char_based(content)
-        return total
+        """Token estimation using tiktoken for accuracy.
+
+        Converts internal dict messages to CMMessage objects and delegates
+        to ContextEstimator for precise tiktoken-based counting.
+        """
+        msgs = [CMMessage(
+            role=m.get("role", ""),
+            content=m.get("content", ""),
+            name=m.get("name"),
+            tool_calls=m.get("tool_calls"),
+            tool_call_id=m.get("tool_call_id"),
+            metadata=m.get("metadata", {}))
+            for m in self.messages]
+        return self._context_estimator.estimate_from_messages(msgs)
 
     def _estimate_context_complexity(self, task_type: str = "") -> int:
         """
@@ -916,6 +927,18 @@ class DCPOptimizer(DCPOptimizerBase):
 
         current_tokens = self._estimate_tokens()
         tokens_before = current_tokens
+
+        # Diagnostic: also compute char-based count for comparison
+        if self.debug:
+            char_total = 0
+            for msg in self.messages:
+                content = str(msg.get("content", ""))
+                char_total += _estimate_tokens_char_based(content)
+            ratio = (char_total / current_tokens * 100) if current_tokens > 0 else 0
+            logger.info(
+                f"[TOKEN_DIAG] tiktoken={current_tokens:,}, char_est={char_total:,}, "
+                f"ratio={ratio:.1f}% (char/tiktoken)"
+            )
 
         # Determine current model configuration and switch detection
         active_config, model_switched = self._get_active_model_config_with_switch_detection()
@@ -1483,6 +1506,7 @@ class DCPOptimizer(DCPOptimizerBase):
                                     if current_wns > self.best_wns:
                                         logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                         self.best_wns = current_wns
+                                        wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
                                     else:
                                         logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
                             except ValueError:

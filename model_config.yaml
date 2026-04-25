@@ -6,26 +6,26 @@ flash:
   model_tier: "flash"
   model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
   max_tokens: 500000
-  soft_threshold: 400000      # 80% of max_tokens - triggers soft compression
-  hard_limit: 450000         # 90% of max_tokens - triggers aggressive compression
-  token_budget: 350000       # Target token count after compression
-  preserve_turns: 30         # Recent turns to preserve in normal mode
-  preserve_turns_aggressive: 3  # Recent turns to preserve in aggressive mode
-  min_importance_threshold: 0.2    # Minimum importance score (normal mode)
-  min_importance_threshold_aggressive: 0.8  # Minimum importance score (aggressive mode)
-  history_retrieval_limit: 5
-  history_retrieval_min_importance: 0.6
+  soft_threshold: 40000       # Trigger soft compression at 40K (~8% of max) to build cumulative summaries early
+  hard_limit: 100000         # Trigger aggressive compression at 100K (20% of max)
+  token_budget: 35000        # Target compressed output ~35K tokens (7% of max)
+  preserve_turns: 25         # Recent turns to preserve in normal mode
+  preserve_turns_aggressive: 5  # Recent turns to preserve in aggressive mode
+  min_importance_threshold: 0.15    # Minimum importance score (normal mode)
+  min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
+  history_retrieval_limit: 8
+  history_retrieval_min_importance: 0.5
 
 pro:
   model_tier: "pro"
   model_name: "xiaomi/mimo-v2.5-pro"    # Default Pro model name
   max_tokens: 1000000
-  soft_threshold: 800000      # 80% of max_tokens - triggers soft compression
-  hard_limit: 900000         # 90% of max_tokens - triggers aggressive compression
-  token_budget: 700000       # Target token count after compression
-  preserve_turns: 50         # Recent turns to preserve in normal mode
-  preserve_turns_aggressive: 3  # Recent turns to preserve in aggressive mode
-  min_importance_threshold: 0.15    # Minimum importance score (normal mode)
-  min_importance_threshold_aggressive: 0.8  # Minimum importance score (aggressive mode)
-  history_retrieval_limit: 8
-  history_retrieval_min_importance: 0.4
+  soft_threshold: 120000      # Trigger soft compression at 120K (12% of max)
+  hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
+  token_budget: 100000        # Target compressed output ~100K tokens (10% of max)
+  preserve_turns: 40         # Recent turns to preserve in normal mode
+  preserve_turns_aggressive: 5  # Recent turns to preserve in aggressive mode
+  min_importance_threshold: 0.1    # Minimum importance score (normal mode)
+  min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
+  history_retrieval_limit: 10
+  history_retrieval_min_importance: 0.3

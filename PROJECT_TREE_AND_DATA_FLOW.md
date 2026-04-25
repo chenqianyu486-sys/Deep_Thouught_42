@@ -194,13 +194,41 @@ fpl26_optimization_contest/
          │
          ▼
   ┌────────────────────────────────────────────────────────────────────────┐
-  │                    DCPOptimizer.add_tool_result()                         │
+  │                    DCPOptimizer._call_tool()                             │
+  │                                                                        │
+  │   WNS Capture Paths (3 independent routes):                             │
+  │                                                                        │
+  │   1. phys_opt Auto-Eval (after phys_opt_design):                       │
+  │      - Regex: WNS.*?([-\d.]+)                                          │
+  │      - Validates via _is_valid_wns()                                   │
+  │      - Updates: self.best_wns, self.latest_wns, wns_measured          │
+  │      - (Note: wns_measured sync added 2026-04-25)                      │
+  │                                                                        │
+  │   2. vivado_report_timing_summary:                                      │
+  │      - Parses via parse_timing_summary_static()                         │
+  │      - Validates via _is_valid_wns()                                    │
+  │      - Updates: self.best_wns, self.latest_wns, wns_measured           │
+  │                                                                        │
+  │   3. vivado_get_wns:                                                   │
+  │      - Direct float() conversion                                       │
+  │      - Validates via _is_valid_wns()                                   │
+  │      - Updates: self.best_wns, self.latest_wns, wns_measured           │
+  │                                                                        │
+  │   Validation: _is_valid_wns() checks:                                  │
+  │   - abs(wns) > clock_period * 10 → REJECT                              │
+  │   - wns < -999 → REJECT (parsing error)                                │
+  │   - wns == 0.0 from negative without optimization → WARNING           │
+  └────────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌────────────────────────────────────────────────────────────────────────┐
+  │                    DCPOptimizer._compat.add_tool_result()                │
   │                    (via DCPOptimizerCompat)                               │
   └────────────────────────────────────────────────────────────────────────┘
          │
          ▼
   ┌────────────────────────────────────────────────────────────────────────┐
-  │                       MemoryManager.add_tool_result()                    │
+  │                       MemoryManager.add_tool_result()                   │
   │                                                                        │
   │   entry = {                                                             │
   │       "tool_name": tool_name,                                           │
@@ -211,13 +239,16 @@ fpl26_optimization_contest/
   │   }                                                                     │
   │                                                                        │
   │   self._tool_call_details.append(entry)                                 │
-  │   if wns > self._best_wns: self._best_wns = wns                         │
+  │   if wns is not None and wns > self._best_wns:                         │
+  │       if abs(wns) > 1000 → REJECT (parsing error)                      │
+  │       elif unrealistic jump → REJECT                                   │
+  │       else → self._best_wns = wns                                      │
   └────────────────────────────────────────────────────────────────────────┘
          │
          ▼
   ┌────────────────────────────────────────────────────────────────────────┐
   │              CompressionContext.tool_call_details                        │
-  │              (used during compression decisions)                        │
+  │              (used during compression decisions)                          │
   └────────────────────────────────────────────────────────────────────────┘
 ```
 
