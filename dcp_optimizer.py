@@ -253,7 +253,11 @@ class DCPOptimizerBase:
         else:
             self.run_dir = run_dir
             self.run_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        # Re-configure logging with file output to run directory
+        # This is called after run_dir exists so logs are written alongside vivado.log etc.
+        setup_logging(level="INFO", use_json=False, log_dir=str(self.run_dir))
+
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
         self.vivado_session: Optional[ClientSession] = None
