@@ -16,6 +16,20 @@ logger = logging.getLogger(__name__)
 _initialized = False
 _current_design = None
 
+# Cache for device-level site enumeration (device_name -> list of site objects)
+_device_sites_cache: Dict[str, list] = {}
+
+# Cache for tile info (device_name:tile_name -> tile info dict)
+_tile_info_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _clear_caches() -> None:
+    """Clear all cached device/tile data when design changes."""
+    global _device_sites_cache, _tile_info_cache
+    _device_sites_cache.clear()
+    _tile_info_cache.clear()
+    logger.debug("Cleared site/tile caches")
+
 
 def initialize_rapidwright(jvm_max_memory: str = "4G") -> Dict[str, Any]:
     """
@@ -63,7 +77,8 @@ def initialize_rapidwright(jvm_max_memory: str = "4G") -> Dict[str, Any]:
         from com.xilinx.rapidwright.device import Device
         
         _initialized = True
-        
+        _clear_caches()
+
         logger.info("RapidWright initialized successfully")
         
         # Test that we can access basic functionality
@@ -191,9 +206,66 @@ def get_device_info(device_name: str) -> Dict[str, Any]:
             "tile_count": device.getAllTiles().size(),
             "site_count": device.getAllSites().length
         }
-        
+
     except Exception as e:
         logger.error(f"Error getting device info: {e}")
+        return {"error": str(e)}
+
+
+def get_device_topology(device_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get device topology including site type distribution.
+    Uses cached site list if available.
+
+    Args:
+        device_name: Device name (uses current design's device if not specified)
+
+    Returns:
+        Dictionary with device topology information
+    """
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    try:
+        from com.xilinx.rapidwright.device import Device
+
+        # Get device
+        if device_name:
+            device = Device.getDevice(device_name)
+        elif _current_design:
+            device = _current_design.getDevice()
+        else:
+            return {"error": "No device specified and no design loaded"}
+
+        device_name_str = str(device.getName())
+
+        # Use cached sites list if available
+        if device_name_str not in _device_sites_cache:
+            _device_sites_cache[device_name_str] = list(device.getAllSites())
+            logger.debug(f"Cached {len(_device_sites_cache[device_name_str])} sites for {device_name_str}")
+
+        sites = _device_sites_cache[device_name_str]
+
+        # Count site types
+        site_type_counts: Dict[str, int] = {}
+        for site in sites:
+            site_type_str = str(site.getSiteTypeEnum())
+            site_type_counts[site_type_str] = site_type_counts.get(site_type_str, 0) + 1
+
+        # Sort by count descending
+        site_types_sorted = sorted(site_type_counts.items(), key=lambda x: x[1], reverse=True)
+
+        return {
+            "status": "success",
+            "device": device_name_str,
+            "total_sites": len(sites),
+            "site_type_distribution": [
+                {"type": stype, "count": count} for stype, count in site_types_sorted
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting device topology: {e}")
         return {"error": str(e)}
 
 
@@ -224,7 +296,8 @@ def read_checkpoint(dcp_path: str) -> Dict[str, Any]:
         logger.info(f"Loading design from {dcp_file}")
         design = Design.readCheckpoint(str(dcp_file))
         _current_design = design
-        
+        _clear_caches()
+
         return {
             "status": "success",
             "message": f"Design loaded successfully from {dcp_file.name}",
@@ -454,7 +527,13 @@ def get_tile_info(tile_name: str, device_name: Optional[str] = None) -> Dict[str
         tile = device.getTile(tile_name)
         if tile is None:
             return {"error": f"Tile '{tile_name}' not found"}
-        
+
+        # Check tile cache first
+        device_name_str = str(device.getName())
+        cache_key = f"{device_name_str}:{tile_name}"
+        if cache_key in _tile_info_cache:
+            return _tile_info_cache[cache_key].copy()
+
         # Get sites in this tile
         sites = []
         if tile.getSites():
@@ -463,8 +542,8 @@ def get_tile_info(tile_name: str, device_name: Optional[str] = None) -> Dict[str
                     "name": str(site.getName()),
                     "type": str(site.getSiteTypeEnum())
                 })
-        
-        return {
+
+        result = {
             "status": "success",
             "name": str(tile.getName()),
             "type": str(tile.getTileTypeEnum()),
@@ -473,6 +552,10 @@ def get_tile_info(tile_name: str, device_name: Optional[str] = None) -> Dict[str
             "site_count": len(sites),
             "sites": sites
         }
+
+        # Cache before returning
+        _tile_info_cache[cache_key] = result
+        return result
         
     except Exception as e:
         logger.error(f"Error getting tile info: {e}")
@@ -508,8 +591,14 @@ def search_sites(site_type: Optional[str] = None,
             return {"error": "No device specified and no design loaded"}
         
         matching_sites = []
-        
-        for site in device.getAllSites():
+
+        # Use cached sites list for this device
+        device_name_str = str(device.getName())
+        if device_name_str not in _device_sites_cache:
+            _device_sites_cache[device_name_str] = list(device.getAllSites())
+            logger.debug(f"Cached {len(_device_sites_cache[device_name_str])} sites for {device_name_str}")
+
+        for site in _device_sites_cache[device_name_str]:
             if len(matching_sites) >= limit:
                 break
             
@@ -525,14 +614,27 @@ def search_sites(site_type: Optional[str] = None,
                 "type": site_type_str,
                 "tile": str(tile.getName()) if tile else "unknown"
             })
-        
+
+        # Build device overview for context (all site types, not just matching)
+        all_sites = _device_sites_cache[device_name_str]
+        site_type_counts: Dict[str, int] = {}
+        for site in all_sites:
+            st = str(site.getSiteTypeEnum())
+            site_type_counts[st] = site_type_counts.get(st, 0) + 1
+        site_types_sorted = sorted(site_type_counts.items(), key=lambda x: x[1], reverse=True)
+
         return {
             "status": "success",
             "count": len(matching_sites),
             "sites": matching_sites,
-            "truncated": len(matching_sites) >= limit
+            "truncated": len(matching_sites) >= limit,
+            "device_overview": {
+                "device": device_name_str,
+                "total_sites": len(all_sites),
+                "site_types": [{"type": t, "count": c} for t, c in site_types_sorted]
+            }
         }
-        
+
     except Exception as e:
         logger.error(f"Error searching sites: {e}")
         return {"error": str(e)}
@@ -1340,7 +1442,8 @@ def compare_design_structure(golden_dcp: str, revised_dcp: str) -> Dict[str, Any
         global _current_design
         if _current_design:
             _current_design = revised  # Keep revised loaded for potential further use
-        
+            _clear_caches()
+
         return result
         
     except Exception as e:

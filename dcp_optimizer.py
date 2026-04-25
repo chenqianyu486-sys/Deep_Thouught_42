@@ -271,6 +271,7 @@ class DCPOptimizerBase:
         self.initial_tns = None
         self.initial_failing_endpoints = None
         self.high_fanout_nets = []
+        self.device_topology = None
         self.clock_period = None
         
         # Log file handles
@@ -1714,8 +1715,31 @@ class DCPOptimizer(DCPOptimizerBase):
             print(f"[WARNING] Could not load design in RapidWright: {result}")
         else:
             print("✓ Design loaded in RapidWright\n")
-            
-            # Step 6: Extract critical path cells and analyze spread
+
+            # Step 6: Get device topology (site type distribution)
+            logger.info("Getting device topology...")
+            print("Getting device topology...")
+            topology_result = await self.call_tool("rapidwright_get_device_topology", {})
+            try:
+                topo_data = json.loads(topology_result)
+                if topo_data.get("status") == "success":
+                    self.device_topology = topo_data
+                    print(f"✓ Device topology loaded:")
+                    print(f"  - Device: {topo_data.get('device')}")
+                    print(f"  - Total sites: {topo_data.get('total_sites')}")
+                    # Print top 5 site types
+                    dist = topo_data.get('site_type_distribution', [])
+                    for i, st in enumerate(dist[:5]):
+                        print(f"  - {st['type']}: {st['count']}")
+                    if len(dist) > 5:
+                        print(f"  - ... and {len(dist) - 5} more site types")
+                    print()
+                else:
+                    print(f"[WARNING] Could not get device topology: {topology_result}")
+            except json.JSONDecodeError as e:
+                print(f"[WARNING] Could not parse topology result: {e}")
+
+            # Step 7: Extract critical path cells and analyze spread
             logger.info("Extracting and analyzing critical path spread...")
             print("Analyzing critical path spread...")
             
@@ -1806,6 +1830,17 @@ class DCPOptimizer(DCPOptimizerBase):
                 ]))
             data['high_fanout_nets'] = nets_list
             data['total_high_fanout_nets'] = len(self.high_fanout_nets)
+
+        # device_topology
+        if self.device_topology:
+            topo = self.device_topology
+            data['device_topology'] = OrderedDict([
+                ('device', topo.get('device', 'unknown')),
+                ('total_sites', topo.get('total_sites', 0)),
+                ('site_types', OrderedDict([
+                    (st['type'], st['count']) for st in topo.get('site_type_distribution', [])[:15]
+                ])),
+            ])
 
         return "---\n" + LightYAML.dump(data, trace_id=get_trace_id()) + "..."
 

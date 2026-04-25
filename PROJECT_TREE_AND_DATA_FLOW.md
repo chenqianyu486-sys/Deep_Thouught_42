@@ -594,6 +594,14 @@ fpl26_optimization_contest/
       critical_paths: N
     ...
   total_high_fanout_nets: N
+  device_topology:
+    device: xcvu3p
+    total_sites: 123456
+    site_types:
+      SLICEL: 54000
+      SLICEM: 18000
+      DSP48E2: 2400
+      ...
   ```
 
   Key Changes from Plain Text:
@@ -675,6 +683,7 @@ YAMLStructuredCompressor.__init__ params  # token_budget (80K), preserve_turns (
 | `context_manager/compat.py` | Legacy adapter for DCPOptimizerCompat |
 | `context_manager/agent_context.py` | Multi-agent branching; shares EventBus with MemoryManager via DCPOptimizer |
 | `RapidWrightMCP/server.py` | RapidWright MCP server |
+| `RapidWrightMCP/rapidwright_tools.py` | RapidWright tool wrappers; device-level site caching (`_device_sites_cache`) and tile info caching (`_tile_info_cache`) for `search_sites()` and `get_tile_info()`; cache invalidated on design load/change |
 | `VivadoMCP/vivado_mcp_server.py` | Vivado MCP server |
 
 ## 5. Data Flow Summary
@@ -758,6 +767,81 @@ WorkingMemory                  CompressionContext
 | Routing detection | 4 inline duplicates | 1 shared constant | Maintainability |
 | WNS lookup | O(n) list search | O(1) cached | Performance |
 | WNS parse failure | Silent/pass | Warning with context | Debugging |
+
+### 6.5 RapidWright API Caching (rapidwright_tools.py)
+
+**Problem:** `search_sites()` and `get_tile_info()` are高频调用接口, but each call re-iterated all sites on the device (100K+ sites on VU3P), causing redundant JVM boundary crossings.
+
+**Solution:** Device-level and tile-level caching.
+
+**Cache Data Structures:**
+```python
+# device_name -> list of site objects
+_device_sites_cache: Dict[str, list] = {}
+
+# device_name:tile_name -> tile info dict
+_tile_info_cache: Dict[str, Dict[str, Any]] = {}
+```
+
+**Cache Invalidation Triggers:**
+| Event | Location | Action |
+|-------|----------|--------|
+| RapidWright re-init | `initialize_rapidwright()` | `_clear_caches()` |
+| Design loaded | `read_checkpoint()` | `_clear_caches()` |
+| Revised design loaded | `compare_design_structure()` | `_clear_caches()` |
+
+**Performance Impact:**
+| Operation | Before | After (cached) |
+|-----------|--------|----------------|
+| `search_sites()` repeated | O(n) iterate all sites | O(1) dict lookup |
+| `get_tile_info()` repeated | 2 JVM calls | O(1) dict lookup |
+
+### 6.6 Proactive Device Context Injection
+
+**Goal:** Provide device topology information to LLM without requiring explicit tool calls.
+
+**Implementation A: Initial Analysis Enhancement (dcp_optimizer.py)**
+
+Added `device_topology` section to initial analysis YAML:
+```yaml
+device_topology:
+  device: xcvu3p
+  total_sites: 123456
+  site_types:
+    SLICEL: 54000
+    SLICEM: 18000
+    DSP48E2: 2400
+    RAMB36: 600
+    ...
+```
+
+- New tool: `rapidwright_get_device_topology` - returns site type distribution
+- Called during `perform_initial_analysis()` after design load
+- Stored in `self.device_topology`
+- Included in `_build_initial_analysis_yaml()` output
+
+**Implementation B: Tool Result Enrichment (rapidwright_tools.py)**
+
+`search_sites()` now returns `device_overview` field:
+```json
+{
+  "status": "success",
+  "count": 50,
+  "sites": [...],
+  "truncated": true,
+  "device_overview": {
+    "device": "xcvu3p",
+    "total_sites": 123456,
+    "site_types": [
+      {"type": "SLICEL", "count": 54000},
+      {"type": "SLICEM", "count": 18000},
+      ...
+    ]
+  }
+}
+```
+
+**Benefit:** LLM receives full device topology context on first `search_sites` call, reducing need for additional tool calls.
 
 ## 7. Data Flow Summary
 

@@ -82,6 +82,19 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="get_device_topology",
+            description="Get device topology including site type distribution (SLICEL, DSP48E2, RAMB36, etc.). Useful for planning pblock strategies.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "device_name": {
+                        "type": "string",
+                        "description": "FPGA device name (e.g., 'xcvu3p', 'xcvu9p', 'xcku040'). Uses current design's device if not specified."
+                    }
+                }
+            }
+        ),
+        Tool(
             name="read_checkpoint",
             description="Read a Vivado Design Checkpoint (.dcp) file for inspection and analysis.",
             inputSchema={
@@ -385,7 +398,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         
         elif name == "get_device_info":
             result = rw.get_device_info(arguments["device_name"])
-        
+
+        elif name == "get_device_topology":
+            result = rw.get_device_topology(arguments.get("device_name"))
+
         elif name == "read_checkpoint":
             result = rw.read_checkpoint(arguments["dcp_path"])
         
