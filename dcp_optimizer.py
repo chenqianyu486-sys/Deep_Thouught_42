@@ -28,7 +28,7 @@ from typing import Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 try:
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI, RateLimitError as OpenAIRateLimitError
 except ImportError:
     print("Error: openai package not installed. Please run: pip install openai", file=sys.stderr)
     sys.exit(1)
@@ -647,6 +647,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
         self.GLOBAL_NO_IMPROVEMENT_LIMIT = 5         # Global no-improvement limit
+        self.MAX_TOOL_ROUNDS_PER_ITERATION = 15      # Max tool-calling rounds per iteration
         
         # Track token usage and costs
         self.total_prompt_tokens = 0
@@ -715,6 +716,24 @@ class DCPOptimizer(DCPOptimizerBase):
             except ValueError:
                 role = MessageRole.USER
             mm._working_store.add(Message(role=role, content=content, metadata=metadata))
+
+    def _is_valid_wns(self, wns: float) -> bool:
+        """Validate WNS value to reject parsing errors and false positives."""
+        if wns is None:
+            return False
+        # WNS should not exceed 10x the clock period (would indicate a parsing error)
+        if self.clock_period and abs(wns) > self.clock_period * 10:
+            logger.warning(f"WNS sanity check failed: {wns:.3f} ns > {self.clock_period * 10:.1f} ns (10x clock period)")
+            return False
+        # Extreme negative values are usually parsing errors
+        if wns < -999:
+            logger.warning(f"WNS sanity check failed: {wns:.3f} ns < -999")
+            return False
+        # Jump from negative to exactly 0.0 without optimization is suspicious
+        best = self.best_wns if self.best_wns > float('-inf') else None
+        if wns == 0.0 and best is not None and best < -0.1:
+            logger.warning(f"WNS suspicious: 0.000 ns from {best:.3f} ns without visible optimization")
+        return True
 
     @property
     def tool_call_details(self) -> list[dict]:
@@ -1457,12 +1476,15 @@ class DCPOptimizer(DCPOptimizerBase):
                         if wns_match and hasattr(self, 'best_wns'):
                             try:
                                 current_wns = float(wns_match.group(1))
-                                self.latest_wns = current_wns  # Cache for _get_current_wns()
-                                if current_wns > self.best_wns:
-                                    logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
-                                    self.best_wns = current_wns
+                                if not self._is_valid_wns(current_wns):
+                                    logger.warning(f"Auto-Eval: WNS value {current_wns:.3f} ns rejected by sanity check")
                                 else:
-                                    logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
+                                    self.latest_wns = current_wns  # Cache for _get_current_wns()
+                                    if current_wns > self.best_wns:
+                                        logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
+                                        self.best_wns = current_wns
+                                    else:
+                                        logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
                             except ValueError:
                                 logger.warning(f"Auto-Eval: WNS regex matched but float conversion failed: '{wns_match.group(1)}'")
                 except Exception as eval_err:
@@ -1474,18 +1496,23 @@ class DCPOptimizer(DCPOptimizerBase):
                 timing_info = parse_timing_summary_static(result_text)
                 if timing_info["wns"] is not None:
                     current_wns = timing_info["wns"]
-                    wns_measured = current_wns  # Store for tracking
-                    self.latest_wns = current_wns  # Cache for _get_current_wns()
-                    current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                    if self._is_valid_wns(current_wns):
+                        wns_measured = current_wns  # Store for tracking
+                        self.latest_wns = current_wns  # Cache for _get_current_wns()
+                        current_fmax = self.calculate_fmax(current_wns, self.clock_period)
 
-                    # Format fmax string if available
-                    fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                        # Format fmax string if available
+                        fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
 
-                    if current_wns > self.best_wns:
-                        logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
-                        self.best_wns = current_wns
+                        if current_wns > self.best_wns:
+                            logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                            self.best_wns = current_wns
+                        else:
+                            logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                     else:
-                        logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                        logger.warning(f"report_timing_summary: WNS {current_wns:.3f} ns rejected by sanity check. "
+                                       f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}."
+                                       f"Tool output sample: {result_text[:200]}")
                 else:
                     logger.warning(f"vivado_report_timing_summary: WNS parsing returned None. "
                                    f"TNS={timing_info['tns']}, failing_endpoints={timing_info['failing_endpoints']}. "
@@ -1496,18 +1523,21 @@ class DCPOptimizer(DCPOptimizerBase):
                 try:
                     # get_wns returns just a number like "-0.099" or "0.016"
                     current_wns = float(result_text.strip())
-                    wns_measured = current_wns  # Store for tracking
-                    self.latest_wns = current_wns  # Cache for _get_current_wns()
-                    current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+                    if self._is_valid_wns(current_wns):
+                        wns_measured = current_wns  # Store for tracking
+                        self.latest_wns = current_wns  # Cache for _get_current_wns()
+                        current_fmax = self.calculate_fmax(current_wns, self.clock_period)
 
-                    # Format fmax string if available
-                    fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+                        # Format fmax string if available
+                        fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
 
-                    if current_wns > self.best_wns:
-                        logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
-                        self.best_wns = current_wns
+                        if current_wns > self.best_wns:
+                            logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                            self.best_wns = current_wns
+                        else:
+                            logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                     else:
-                        logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                        logger.warning(f"get_wns: WNS value {current_wns:.3f} ns rejected by sanity check")
                 except (ValueError, AttributeError) as e:
                     # Could not parse WNS from get_wns output
                     truncated_output = result_text.strip()[:500] if result_text else "(empty)"
@@ -1771,7 +1801,14 @@ class DCPOptimizer(DCPOptimizerBase):
         self.last_used_model = current_model
         wns_at_start = self.best_wns
         logger.info(f"Iteration {self.iteration}: Using {current_model} (complexity={context_complexity}, task={self.current_task_type})...")
+        tool_round = 0
         while True:
+            tool_round += 1
+            if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
+                logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
+                content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
+                is_done = False
+                break
             # Capture WNS at the start of this iteration for improvement comparison
             iteration_start_wns = self.best_wns
 
@@ -1808,6 +1845,16 @@ class DCPOptimizer(DCPOptimizerBase):
                     break  # Success, exit retry loop
                 except Exception as e:
                     last_exception = e
+                    # On rate limit (429), switch to pro model immediately
+                    if isinstance(e, OpenAIRateLimitError) or ("429" in str(e) and "rate" in str(e).lower()):
+                        logger.warning(f"Rate limit on {current_model}, switching to pro model: {self.model_planner}")
+                        current_model = self.model_planner
+                        self.last_used_model = current_model
+                        # Don't retry with flash, let the retry mechanism use the new model
+                        wait_time = retry_delay * (2 ** retry)
+                        logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
+                        await asyncio.sleep(wait_time)
+                        continue
                     if retry < max_retries - 1:
                         wait_time = retry_delay * (2 ** retry)  # Exponential backoff
                         logger.warning(f"API call failed, retry {retry+1}/{max_retries}, waiting {wait_time}s: {e}")
@@ -1915,10 +1962,8 @@ class DCPOptimizer(DCPOptimizerBase):
             if current_iter_wns_list:
                 current_wns = current_iter_wns_list[-1]   # Take latest WNS from this iteration
                 if current_wns > iteration_start_wns:     # Compare with this iteration's start WNS
-                    self.global_no_improvement = 0
+                    # Clear failed strategies on improvement so model can try new approaches
                     self._compat.failed_strategies.clear()
-                else:
-                    self.global_no_improvement += 1
             # else: Non-WNS iterations don't count (may be query operations only)
 
             # [FIX] Completion flag no longer depends on model output, changed to objective data judgment
@@ -1926,8 +1971,10 @@ class DCPOptimizer(DCPOptimizerBase):
             current_best_wns = self.best_wns if self.best_wns > float('-inf') else None
 
             # Condition 1: WNS target check (core completion condition)
+            # Must pass sanity check to prevent false positives from parsing errors
             wns_target_met = (current_best_wns is not None and
-                              current_best_wns >= self.WNS_TARGET_THRESHOLD)
+                              current_best_wns >= self.WNS_TARGET_THRESHOLD and
+                              self._is_valid_wns(current_best_wns))
 
             # Condition 2: Hard limit reached (consecutive no-improvement count exceeds threshold)
             max_iterations_reached = (self.global_no_improvement >= self.GLOBAL_NO_IMPROVEMENT_LIMIT)

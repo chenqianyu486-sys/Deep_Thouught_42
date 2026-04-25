@@ -278,9 +278,24 @@ class MemoryManager:
         if extra_fields:
             entry.update(extra_fields)
         self._tool_call_details.append(entry)
+        # Defensive WNS sanity check: reject values that are clearly parsing errors
         if wns is not None and wns > self._best_wns:
-            self._best_wns = wns
-            logger.info(
+            if abs(wns) > 1000:
+                logger.warning(
+                    "[TOOL_RESULT] WNS %.3f rejected (abs > 1000, likely parsing error)", wns,
+                    extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,
+                           "trace_id": get_trace_id()}
+                )
+            elif self._best_wns > float('-inf') and self._best_wns < -0.01 and wns > abs(self._best_wns) * 10:
+                logger.warning(
+                    "[TOOL_RESULT] WNS %.3f rejected (unrealistic jump from %.3f)",
+                    wns, self._best_wns,
+                    extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,
+                           "trace_id": get_trace_id()}
+                )
+            else:
+                self._best_wns = wns
+                logger.info(
                 "[TOOL_RESULT] New best WNS: %.3f",
                 wns,
                 extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,

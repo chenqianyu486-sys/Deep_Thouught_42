@@ -1479,11 +1479,27 @@ async def call_tool(name: str, arguments: dict):
             timeout = arguments.get("timeout", 60)
             # Flush buffer first
             run_tcl_command("puts {get_wns_start}", timeout=5)
-            # Get WNS directly from timing path slack property (single line to avoid buffer issues)
-            tcl_cmd = "set wns_path [get_timing_paths -max_paths 1 -slack_lesser_than 999]; if {[llength $wns_path] > 0} {get_property SLACK $wns_path} else {puts 0.0}"
-            output = run_tcl_command(tcl_cmd, timeout=timeout)
-            # Clean up the output to just return the number
-            wns_value = output.strip().split('\n')[-1].strip()
+            # Get WNS directly from the current design property (single line output)
+            output = run_tcl_command("puts [get_property WNS [current_design]]", timeout=timeout)
+            # Multi-strategy parsing to handle buffer artifacts
+            import re
+            raw = output.strip()
+            # Strategy 1: try parsing the last line directly
+            last_line = raw.split('\n')[-1].strip()
+            try:
+                wns_value = str(float(last_line))
+            except ValueError:
+                # Strategy 2: search entire output for a float pattern
+                float_match = re.search(r'-?\d+\.\d+', raw)
+                if float_match:
+                    wns_value = float_match.group(0)
+                else:
+                    # Strategy 3: search for integer
+                    int_match = re.search(r'-?\d+', raw)
+                    if int_match:
+                        wns_value = str(float(int_match.group(0)))
+                    else:
+                        wns_value = "PARSE_ERROR"
             return [TextContent(type="text", text=wns_value)]
         
         elif name == "place_design":
