@@ -2569,7 +2569,7 @@ CRITICAL OPTIMIZATION RULES:
             result = await self.call_tool("vivado_write_checkpoint", {
                 "dcp_path": str(ckpt_path.resolve()),
                 "force": True
-            }, timeout=600.0)
+            })
             logger.info(f"Saved intermediate checkpoint: {ckpt_path}")
             return ckpt_path
         except Exception as e:
