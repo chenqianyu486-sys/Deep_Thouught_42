@@ -12,6 +12,7 @@ Design: Zero external dependencies, uses only Python standard library.
 
 import logging
 import os
+import re
 import time
 from typing import List, Optional
 from collections import OrderedDict
@@ -78,6 +79,18 @@ PRESERVE_LINE_PATTERNS = [
     'WNS', 'TNS', 'Failing', 'Clock', 'Target', 'Frequency',
     '====', '----', '****', 'delay'
 ]
+
+
+def _detect_report_type(content: str) -> str:
+    """Detect report type for smart truncation."""
+    content_lower = content.lower()
+    if 'timing' in content_lower and ('wns' in content_lower or 'slack' in content_lower):
+        return 'timing'
+    if 'utilization' in content_lower or 'resource' in content_lower:
+        return 'utilization'
+    if 'route' in content_lower and 'net' in content_lower:
+        return 'routing'
+    return 'general'
 
 
 class ImportanceScorer:
@@ -174,14 +187,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
         model_switched = getattr(context, 'model_switch_detected', False)
         previous_tier = getattr(context, 'previous_model_tier', None)
 
-        # Determine compression intensity based on force_aggressive flag and model config
-        is_aggressive = getattr(context, 'force_aggressive', False)
-        if is_aggressive:
-            preserve_turns = model_config.preserve_turns_aggressive if model_config else 3
-            min_importance_threshold = model_config.min_importance_threshold_aggressive if model_config else 0.8
-        else:
-            preserve_turns = model_config.preserve_turns if model_config else 20
-            min_importance_threshold = model_config.min_importance_threshold if model_config else 0.3
+        # Unified compression parameters (no aggressive mode)
+        preserve_turns = model_config.preserve_turns if model_config else 25
+        min_importance_threshold = model_config.min_importance_threshold if model_config else 0.2
 
         # Adjust parameters based on model tier switch
         if model_switched and previous_tier and model_config:
@@ -202,9 +210,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
         effective_token_budget = model_config.token_budget if model_config else self.token_budget
 
         logger.info(
-            "[COMPRESS] Starting compression: is_aggressive=%s, preserve_turns=%s, threshold=%s",
-            is_aggressive, preserve_turns, min_importance_threshold,
-            extra={"is_aggressive": is_aggressive, "preserve_turns": preserve_turns,
+            "[COMPRESS] Starting compression: preserve_turns=%s, threshold=%s",
+            preserve_turns, min_importance_threshold,
+            extra={"preserve_turns": preserve_turns,
                   "threshold": min_importance_threshold, "trace_id": get_trace_id()}
         )
 
@@ -289,7 +297,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
                 )
 
         # Create summary message
-        compression_label = 'yaml_structured_aggressive' if is_aggressive else 'yaml_structured'
+        compression_label = 'yaml_structured'
         summary_msg = Message(
             role=MessageRole.SYSTEM,
             content=yaml_str,
@@ -446,8 +454,8 @@ class YAMLStructuredCompressor(CompressionStrategy):
             if topics:
                 turn['topics'] = topics
 
-            # Smart truncate long content
-            content = self._smart_truncate_content(msg.content, max_chars=2000)
+            # Smart truncate long content (adaptive max_chars based on content type)
+            content = self._smart_truncate_content(msg.content)
             turn['content'] = content
 
             conversation.append(turn)
@@ -456,24 +464,109 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         return data
 
-    def _smart_truncate_content(self, content: str, max_chars: int = 2000) -> str:
-        """
-        Intelligently truncate content while preserving critical information.
+    def _get_adaptive_max_chars(self, content: str) -> int:
+        """Calculate adaptive max_chars based on content type and structure.
 
         Strategy:
-        1. If content fits within max_chars, return as-is
-        2. Split content into lines
-        3. Identify critical lines (contain keywords like WNS, TNS, critical path)
-        4. Preserve: first N lines (summary) + critical lines + last M lines (details)
-        5. Add truncation marker with position info
+        - Timing reports: up to 8000 chars (critical path info is in middle)
+        - Utilization reports: 4000 chars
+        - Error messages: 6000 chars (preserve full context for debugging)
+        - Short messages: 2000 chars (already short)
+        - General: 4000 chars
+        """
+        content_len = len(content)
+        content_lower = content.lower()
+
+        # Short messages - don't need large budget
+        if content_len < 1000:
+            return min(content_len, 2000)
+
+        # Timing reports - need more space for critical path details
+        if ('timing' in content_lower and
+            ('wns' in content_lower or 'slack' in content_lower or 'critical' in content_lower)):
+            # Check if it has multi-line critical path info
+            if content.count('\n') > 20:
+                return 8000  # Long timing report - preserve middle sections
+            return 5000
+
+        # Utilization reports
+        if 'utilization' in content_lower or 'resource' in content_lower:
+            return 4000
+
+        # Routing reports
+        if 'route' in content_lower and ('net' in content_lower or 'wire' in content_lower):
+            return 4000
+
+        # Error messages - preserve full context for debugging
+        if 'error' in content_lower or 'failed' in content_lower:
+            return min(content_len, 6000)
+
+        # Default - moderate truncation
+        return min(content_len, 4000)
+
+    def _score_line(self, line: str, report_type: str) -> float:
+        """Score line importance based on content and report type."""
+        score = 0.0
+        line_upper = line.upper()
+        line_lower = line.lower()
+
+        if report_type == 'timing':
+            # Timing-specific scoring (highest weight)
+            if re.search(r'wns\s*[:=]\s*-?[\d.]+', line_lower):
+                score += 5.0
+            if re.search(r'tns\s*[:=]\s*-?[\d.]+', line_lower):
+                score += 4.0
+            if 'critical' in line_lower:
+                score += 3.5
+            if re.search(r'slack\s*[:=]\s*-[\d.]+', line_lower):
+                score += 4.0  # Negative slack is critical
+            if 'fmax' in line_lower:
+                score += 3.0
+            if 'endpoint' in line_lower:
+                score += 2.5
+            if 'path' in line_lower:
+                score += 1.5
+            if any(p in line_upper for p in ['WNS', 'TNS', 'FMAX', 'CRITICAL', 'VIOLATED']):
+                score += 2.0
+            # Data path lines
+            if 'data path' in line_lower or 'clock path' in line_lower:
+                score += 2.0
+        elif report_type == 'utilization':
+            if '%' in line and any(r in line_lower for r in ['lut', 'ff', 'bram', 'dsp']):
+                score += 2.5
+            if 'utilization' in line_lower or 'resource' in line_lower:
+                score += 1.5
+        else:
+            # General scoring - keyword match
+            for keyword in CRITICAL_KEYWORDS:
+                if keyword.lower() in line_lower:
+                    score += 1.0
+                    break
+
+        # Boost for complete logical units (key:value format)
+        if ':' in line or '=>' in line or '=' in line:
+            score *= 1.3
+
+        # Boost lines with numbers (likely contain values)
+        if re.search(r'[\d.]+', line):
+            score *= 1.1
+
+        # Boost header/summary lines (usually short)
+        if len(line) < 80 and any(c.isupper() for c in line):
+            score *= 1.2
+
+        return score
+
+    def _smart_truncate_content(self, content: str, max_chars: int = None) -> str:
+        """Intelligent truncation with priority-based line selection.
 
         Args:
-            content: The content string to truncate
-            max_chars: Maximum characters to preserve
-
-        Returns:
-            Truncated content with smart preservation of critical information
+            content: Content to truncate
+            max_chars: Maximum chars (if None, auto-calculated based on content type)
         """
+        if max_chars is None:
+            max_chars = self._get_adaptive_max_chars(content)
+
         if len(content) <= max_chars:
             return content
 
@@ -481,79 +574,33 @@ class YAMLStructuredCompressor(CompressionStrategy):
         if len(lines) <= 3:
             return content[:max_chars] + '...'
 
-        # Reserve space for truncation marker
-        marker_max_len = 80
-        available_chars = max_chars - marker_max_len
+        report_type = _detect_report_type(content)
 
-        # Identify critical lines (contain important keywords)
-        critical_line_indices = set()
+        # Score each line by importance
+        scored_lines = []
         for i, line in enumerate(lines):
-            line_upper = line.upper()
-            # Check for preserve patterns (headers, separators)
-            for pattern in PRESERVE_LINE_PATTERNS:
-                if pattern.upper() in line_upper:
-                    critical_line_indices.add(i)
-                    break
-            # Check for critical keywords
-            line_lower = line.lower()
-            for keyword in CRITICAL_KEYWORDS:
-                if keyword.lower() in line_lower:
-                    critical_line_indices.add(i)
-                    break
+            score = self._score_line(line, report_type)
+            scored_lines.append((i, score, line))
 
-        # Build smart truncation
-        # Strategy: Keep first lines (summary) + critical lines + last lines (details)
-        preserved_indices = set()
+        # Sort by score descending (highest importance first)
+        scored_lines.sort(key=lambda x: x[1], reverse=True)
 
-        # Always keep first 10 lines (summary/header)
-        for i in range(min(10, len(lines))):
-            preserved_indices.add(i)
+        # Greedily select lines within budget
+        selected_indices = []
+        current_len = 0
+        marker_len = 100  # Reserve space for marker
 
-        # Always keep last 5 lines (final details)
-        for i in range(max(0, len(lines) - 5), len(lines)):
-            preserved_indices.add(i)
+        for idx, score, line in scored_lines:
+            line_len = len(line) + 1
+            if current_len + line_len <= max_chars - marker_len:
+                selected_indices.append(idx)
+                current_len += line_len
 
-        # Add critical lines
-        critical_count = 0
-        max_critical = 15  # Limit critical lines to prevent overflow
-        for idx in sorted(critical_line_indices):
-            if idx not in preserved_indices and critical_count < max_critical:
-                preserved_indices.add(idx)
-                critical_count += 1
+        # Sort back to original order for readability
+        selected_indices.sort()
+        result_lines = [lines[i] for i in selected_indices]
 
-        # Sort and build result
-        preserved_indices = sorted(preserved_indices)
-        result_lines = [lines[i] for i in preserved_indices]
-
-        # Check if we need to truncate to fit
-        result = '\n'.join(result_lines)
-        if len(result) <= available_chars:
-            # We can fit all preserved lines
-            truncation_pos = sum(len(lines[i]) + 1 for i in preserved_indices if i < len(lines))
-            marker = f'\n... [truncated after line {preserved_indices[-1] if preserved_indices else 0}, original {len(content)} chars]'
-        else:
-            # Need to further truncate - use simpler strategy
-            # Keep: header lines + middle portion + footer
-            header_count = 8
-            footer_count = 3
-            middle_lines = available_chars // 80  # Rough estimate of lines that fit
-
-            result_lines = lines[:header_count]
-            result_lines.append(f'... [{len(lines) - header_count - footer_count} intermediate lines truncated] ...')
-            result_lines.extend(lines[-footer_count:])
-
-            truncation_pos = sum(len(l) + 1 for l in lines[:header_count]) + len(lines[-footer_count:])
-            marker = f'\n... [truncated, original {len(content)} chars in {len(lines)} lines]'
-
-        # Final check and trim
-        result = '\n'.join(result_lines)
-        if len(result) + len(marker) > max_chars:
-            # Emergency truncation: just take from front
-            result = content[:available_chars]
-            marker = f'\n... [truncated at position {available_chars}, original {len(content)} chars]'
-
-        result += marker
-        return result
+        return '\n'.join(result_lines) + f'\n... [preserved {len(selected_indices)}/{len(lines)} lines, original {len(content)} chars]'
 
 
 def messages_to_yaml(messages: List[Message], context: CompressionContext) -> str:

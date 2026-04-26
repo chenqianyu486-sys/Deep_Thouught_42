@@ -1477,27 +1477,29 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
-            # Flush buffer first
-            run_tcl_command("puts {get_wns_start}", timeout=5)
-            # Get WNS directly from the current design property (single line output)
+            run_tcl_command("puts {wns_flush}", timeout=5)
             output = run_tcl_command("puts [get_property WNS [current_design]]", timeout=timeout)
-            # Multi-strategy parsing to handle buffer artifacts
-            import re
             raw = output.strip()
-            # Strategy 1: try parsing the last line directly
-            last_line = raw.split('\n')[-1].strip()
-            try:
-                wns_value = str(float(last_line))
-            except ValueError:
-                # Strategy 2: search entire output for a float pattern
-                float_match = re.search(r'-?\d+\.\d+', raw)
-                if float_match:
-                    wns_value = float_match.group(0)
-                else:
-                    # Strategy 3: search for integer
-                    int_match = re.search(r'-?\d+', raw)
-                    if int_match:
-                        wns_value = str(float(int_match.group(0)))
+            lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
+            if not lines:
+                wns_value = "PARSE_ERROR"
+            else:
+                last_line = lines[-1]
+                try:
+                    parsed = float(last_line)
+                    # Normalize -0.0 to +0.0 to avoid downstream comparison issues
+                    if parsed == 0.0:
+                        parsed = abs(parsed)
+                    wns_value = str(parsed)
+                except ValueError:
+                    import re
+                    float_match = re.search(r'-?\d+\.?\d*', last_line)
+                    if float_match:
+                        raw_match = float_match.group(0)
+                        parsed = float(raw_match)
+                        if parsed == 0.0:
+                            parsed = abs(parsed)
+                        wns_value = str(parsed)
                     else:
                         wns_value = "PARSE_ERROR"
             return [TextContent(type="text", text=wns_value)]

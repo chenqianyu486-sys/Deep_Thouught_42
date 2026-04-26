@@ -549,3 +549,106 @@ class ProgressTracker:
                 "progress_elapsed_seconds": int(elapsed),
             }
         )
+
+
+# ============================================================================
+# Prompt Logger for LLM API Calls
+# ============================================================================
+
+class PromptLogger:
+    """
+    Dedicated logger for LLM prompts/提示词.
+    Logs prompts to a separate file with good readability and blank lines between call.
+    """
+
+    _instance = None
+    _lock = RLock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._logger = logging.getLogger("prompt_logger")
+        self._logger.setLevel(logging.DEBUG)
+        self._logger.propagate = False
+        self._call_count = 0
+        self._file_handler = None
+
+    def _ensure_file_handler(self, log_dir: str):
+        """Ensure file handler is configured."""
+        if self._file_handler is not None:
+            return
+        if not log_dir:
+            return
+        os.makedirs(log_dir, exist_ok=True)
+        self._file_handler = logging.FileHandler(
+            filename=os.path.join(log_dir, "fpl26-prompts.log"),
+            encoding="utf-8",
+            mode="a"
+        )
+        self._file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter("%(message)s")
+        self._file_handler.setFormatter(formatter)
+        self._logger.addHandler(self._file_handler)
+
+    def log_prompt(self, model: str, messages: list, iteration: int = 0, job_id: str = ""):
+        """
+        Log a prompt sent to LLM API.
+        """
+        self._call_count += 1
+        call_id = self._call_count
+
+        header = f"""
+================================================================================
+PROMPT LOG [call_id={call_id}, iteration={iteration}, job_id={job_id}]
+Model: {model}
+Messages: {len(messages)}
+================================================================================
+"""
+        self._logger.debug(header)
+
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+
+            if len(content) > 5000:
+                content = content[:2500] + f"\n... [TRUNCATED, total {len(content)} chars] ...\n" + content[-2500:]
+
+            tool_calls = msg.get("tool_calls")
+            if tool_calls:
+                msg_header = f"--- Message {i+1} [{role}] (with tool_calls) ---"
+                self._logger.debug(msg_header)
+                self._logger.debug(content)
+                for tc in tool_calls:
+                    func_name = tc.get("function", {}).get("name", "unknown")
+                    args = tc.get("function", {}).get("arguments", "")
+                    if isinstance(args, str) and len(args) > 2000:
+                        args = args[:1000] + f"\n... [TRUNCATED {len(args)} chars] ...\n" + args[-1000:]
+                    self._logger.debug(f"  tool_call: {func_name}")
+                    self._logger.debug(f"  arguments: {args}")
+            else:
+                msg_header = f"--- Message {i+1} [{role}] ---"
+                self._logger.debug(msg_header)
+                self._logger.debug(content)
+
+        footer = f"--- END OF PROMPT [call_id={call_id}] ---\n"
+        self._logger.debug(footer)
+
+    def setup(self, log_dir: str = None):
+        """Setup the prompt logger with a file handler."""
+        if log_dir is None:
+            log_dir = os.environ.get("LOG_DIR", "")
+        self._ensure_file_handler(log_dir)
+
+    @classmethod
+    def get_instance(cls) -> "PromptLogger":
+        """Get the singleton instance."""
+        return cls()

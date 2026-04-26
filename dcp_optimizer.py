@@ -43,7 +43,7 @@ from context_manager.interfaces import EventType as CMEventType, ContextEvent as
 from context_manager.lightyaml import LightYAML
 from context_manager.logging_config import (
     setup_logging, set_trace_id, get_trace_id, set_job_context,
-    sanitize_payload, DynamicLogLevelManager, HeartbeatLogger
+    sanitize_payload, DynamicLogLevelManager, HeartbeatLogger, PromptLogger
 )
 from config_loader import get_model_config_loader, ModelConfigData
 
@@ -638,6 +638,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.llm_call_count = 0
         self.last_used_model = None
         self._model_usage_history: list = []          # Track recent model selections for switch detection
+        self._previous_tier: Optional[str] = None   # Track previous tier for switch detection
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
 
         # === Section 7.X: DCP Validation ===
@@ -687,6 +688,10 @@ class DCPOptimizer(DCPOptimizerBase):
             event_bus=self._event_bus
         )
         self._compat = DCPOptimizerCompat(self._memory_manager)
+
+        # Initialize PromptLogger for LLM prompt observability
+        self._prompt_logger = PromptLogger.get_instance()
+        self._prompt_logger.setup(str(self.temp_dir) if self.temp_dir else "")
         # _context_estimator initialized in DCPOptimizerBase.__init__()
 
         # Initialize AgentContextManager for multi-agent branching (shares _event_bus with MemoryManager)
@@ -740,6 +745,7 @@ class DCPOptimizer(DCPOptimizerBase):
             return False
         # Jump from negative to exactly 0.0 without optimization is suspicious
         best = self.best_wns if self.best_wns > float('-inf') else None
+        # Note: -0.0 is normalized to 0.0 in get_wns, so this check only sees +0.0
         if wns == 0.0 and best is not None and best < -0.1:
             logger.warning(f"WNS suspicious: 0.000 ns from {best:.3f} ns without visible optimization")
         return True
@@ -904,14 +910,12 @@ class DCPOptimizer(DCPOptimizerBase):
         current_model = self.last_used_model if self.last_used_model else self.model_worker
         current_tier = self._infer_model_tier(current_model)
 
-        # Detect model tier switch
+        # Detect model tier switch by comparing current tier with previous tier
+        # previous_tier is set in get_completion() before _select_model() is called
         model_switched = False
-        if self._model_usage_history and len(self._model_usage_history) >= 2:
-            previous_model = self._model_usage_history[-2]
-            previous_tier = self._infer_model_tier(previous_model)
-            if previous_tier != current_tier:
-                model_switched = True
-                logger.info(f"Model tier switch detected: {previous_tier} -> {current_tier}")
+        if self._previous_tier is not None and self._previous_tier != current_tier:
+            model_switched = True
+            logger.info(f"Model tier switch detected: {self._previous_tier} -> {current_tier}")
 
         config = MODEL_CONTEXT_CONFIGS.get(current_tier, FLASH_CONTEXT_CONFIG)
         return config, model_switched
@@ -966,10 +970,9 @@ class DCPOptimizer(DCPOptimizerBase):
             self.compression_count += 1
             logger.warning(
                 f"[COMPRESSION] Hard limit triggered: ~{current_tokens:,} tokens > {hard_limit:,} "
-                f"({active_config.model_tier} model, aggressive mode, switch={model_switched})"
+                f"({active_config.model_tier} model, switch={model_switched})"
             )
             context = self._build_compression_context(current_tokens, active_config, model_switched)
-            context.force_aggressive = True
             context.retrieved_history = self._memory_manager.retrieve_historical(
                 CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
@@ -984,10 +987,9 @@ class DCPOptimizer(DCPOptimizerBase):
             self.compression_count += 1
             logger.info(
                 f"[COMPRESSION] Soft threshold triggered: ~{current_tokens:,} tokens > {soft_threshold:,} "
-                f"({active_config.model_tier} model, normal mode, switch={model_switched})"
+                f"({active_config.model_tier} model, switch={model_switched})"
             )
             context = self._build_compression_context(current_tokens, active_config, model_switched)
-            context.force_aggressive = False
             context.retrieved_history = self._memory_manager.retrieve_historical(
                 CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
@@ -1551,23 +1553,28 @@ class DCPOptimizer(DCPOptimizerBase):
             # Also track WNS from get_wns tool (returns just the numeric WNS value)
             elif tool_name == "vivado_get_wns":
                 try:
-                    # get_wns returns just a number like "-0.099" or "0.016"
-                    current_wns = float(result_text.strip())
-                    if self._is_valid_wns(current_wns):
-                        wns_measured = current_wns  # Store for tracking
-                        self.latest_wns = current_wns  # Cache for _get_current_wns()
-                        current_fmax = self.calculate_fmax(current_wns, self.clock_period)
-
-                        # Format fmax string if available
-                        fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
-
-                        if current_wns > self.best_wns:
-                            logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
-                            self.best_wns = current_wns
-                        else:
-                            logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                    # Check for PARSE_ERROR special value
+                    if result_text.strip() == "PARSE_ERROR":
+                        logger.warning("get_wns returned PARSE_ERROR, WNS not updated (fallback to report_timing_summary)")
+                        wns_measured = None
                     else:
-                        logger.warning(f"get_wns: WNS value {current_wns:.3f} ns rejected by sanity check")
+                        # get_wns returns just a number like "-0.099" or "0.016"
+                        current_wns = float(result_text.strip())
+                        if self._is_valid_wns(current_wns):
+                            wns_measured = current_wns  # Store for tracking
+                            self.latest_wns = current_wns  # Cache for _get_current_wns()
+                            current_fmax = self.calculate_fmax(current_wns, self.clock_period)
+
+                            # Format fmax string if available
+                            fmax_str = f", fmax: {current_fmax:.2f} MHz" if current_fmax is not None else ""
+
+                            if current_wns > self.best_wns:
+                                logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
+                                self.best_wns = current_wns
+                            else:
+                                logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
+                        else:
+                            logger.warning(f"get_wns: WNS value {current_wns:.3f} ns rejected by sanity check")
                 except (ValueError, AttributeError) as e:
                     # Could not parse WNS from get_wns output
                     truncated_output = result_text.strip()[:500] if result_text else "(empty)"
@@ -1858,6 +1865,8 @@ class DCPOptimizer(DCPOptimizerBase):
         self._compress_context()
         # Calculate context complexity for dynamic model routing (after compression for accurate token count)
         context_complexity = self._estimate_context_complexity(self.current_task_type)
+        # Track previous tier before model selection for accurate switch detection
+        self._previous_tier = self._infer_model_tier(self.last_used_model) if self.last_used_model else None
         current_model = self._select_model(
             tool_name=self.current_task_type,
             context_complexity=context_complexity,
@@ -1894,11 +1903,20 @@ class DCPOptimizer(DCPOptimizerBase):
             max_retries = 3
             retry_delay = 2  # Initial delay in seconds
             last_exception = None
+            # Get messages for logging and API call
+            api_messages = self._compat.get_formatted_for_api()
+            # Log prompt for observability
+            self._prompt_logger.log_prompt(
+                model=current_model,
+                messages=api_messages,
+                iteration=self.iteration,
+                job_id=self.run_dir.name
+            )
             for retry in range(max_retries):
                 try:
                     response = await self.openai.chat.completions.create(  # Async wait
                         model=current_model,
-                        messages=self._compat.get_formatted_for_api(),
+                        messages=api_messages,
                         tools=self.tools,
                         tool_choice="auto",
                         max_tokens=4096,
@@ -2522,7 +2540,7 @@ CRITICAL OPTIMIZATION RULES:
         self.validation_report_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            result = await self.call_vivado_tool("write_checkpoint", {
+            result = await self.call_tool("vivado_write_checkpoint", {
                 "dcp_path": str(ckpt_path.resolve()),
                 "force": True
             }, timeout=600.0)

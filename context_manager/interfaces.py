@@ -88,7 +88,6 @@ class CompressionContext:
     iteration: int = 0
     clock_period: Optional[float] = None
     agent_id: Optional[str] = None
-    force_aggressive: bool = False  # True = use aggressive compression within YAML
     retrieved_history: list = field(default_factory=list)  # Historical entries for context
     # Model-aware compression fields
     model_context_config: Optional[ModelContextConfig] = None  # Model-specific configuration
