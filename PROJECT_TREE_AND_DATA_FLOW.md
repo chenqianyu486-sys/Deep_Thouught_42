@@ -50,6 +50,7 @@ DCPOptimizer (dcp_optimizer.py)
     - PLANNER: xiaomi/mimo-v2.5-pro (1M context, complex reasoning)
     - WORKER: deepseek/deepseek-v4-flash (500K context, fast execution)
     - Threshold: margin of 2 for PLANNER, margin of 1 for WORKER, default=PLANNER
+    - **Intra-iteration switching**: When task category changes (INFORMATION↔OPTIMIZATION) during tool execution loop, model is re-evaluated and switched if needed
 ```
 
 ### 2.2 Message Flow
@@ -196,6 +197,7 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | -0.0 normalization | vivado_mcp_server.py normalizes to +0.0 |
 | RapidWright caching | device_sites_cache + tile_info_cache |
 | Device context | proactive injection via device_topology in initial analysis |
+| Intra-iteration model switch | Re-evaluate model when task category changes during tool execution loop |
 
 ## 10. Key Constants
 

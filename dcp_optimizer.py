@@ -639,6 +639,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.last_used_model = None
         self._model_usage_history: list = []          # Track recent model selections for switch detection
         self._previous_tier: Optional[str] = None   # Track previous tier for switch detection
+        self._iteration_model_switch_logged = False  # Track if model switch was logged in current iteration
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
 
         # === Section 7.X: DCP Validation ===
@@ -915,7 +916,10 @@ class DCPOptimizer(DCPOptimizerBase):
         model_switched = False
         if self._previous_tier is not None and self._previous_tier != current_tier:
             model_switched = True
-            logger.info(f"Model tier switch detected: {self._previous_tier} -> {current_tier}")
+            # Only log once per iteration (the first tool round that detects the switch)
+            if not self._iteration_model_switch_logged:
+                logger.info(f"Model tier switch detected: {self._previous_tier} -> {current_tier}")
+                self._iteration_model_switch_logged = True
 
         config = MODEL_CONTEXT_CONFIGS.get(current_tier, FLASH_CONTEXT_CONFIG)
         return config, model_switched
@@ -1872,7 +1876,11 @@ class DCPOptimizer(DCPOptimizerBase):
             context_complexity=context_complexity,
         )
         self.last_used_model = current_model
+        # Track task type at iteration start for intra-iteration model re-selection
+        self._iteration_start_task_type = self.current_task_type
         wns_at_start = self.best_wns
+        # Reset model switch logging flag at start of each iteration
+        self._iteration_model_switch_logged = False
         logger.info(f"Iteration {self.iteration}: Using {current_model} (complexity={context_complexity}, task={self.current_task_type})...")
         tool_round = 0
         while True:
@@ -2017,6 +2025,23 @@ class DCPOptimizer(DCPOptimizerBase):
                     result = self._filter_tool_result(tool_name, result)
                     # Update current task type for next iteration's model routing decision
                     self.current_task_type = effective_task_type
+
+                    # Intra-iteration model re-selection: check if task category changed
+                    current_category = self.classify_task(self.current_task_type)
+                    start_category = self.classify_task(self._iteration_start_task_type)
+                    if current_category != start_category:
+                        new_model = self._select_model(
+                            tool_name=self.current_task_type,
+                            context_complexity=context_complexity,
+                        )
+                        if new_model != current_model:
+                            logger.info(
+                                f"Intra-iteration model switch: {current_model} -> {new_model} "
+                                f"(task: {self._iteration_start_task_type} -> {self.current_task_type}, "
+                                f"category: {start_category} -> {current_category})"
+                            )
+                            current_model = new_model
+                            self.last_used_model = new_model
 
                     # Track tool errors for failure classification
                     result_lower = result.lower() if result else ""
@@ -2202,6 +2227,7 @@ CRITICAL OPTIMIZATION RULES:
         while self.iteration < max_iterations:
             self.iteration += 1
             self.iteration_tool_errors = []  # Reset tool error tracking for this iteration
+            print()
             logger.info(f"=== Iteration {self.iteration} ===")
 
             try:
