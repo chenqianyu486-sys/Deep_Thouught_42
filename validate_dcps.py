@@ -810,10 +810,14 @@ endmodule
             logger.exception("Simulation error")
             return False
     
-    async def validate(self) -> bool:
-        """Run complete validation (both phases)."""
+    async def validate(self, phase1_only: bool = False) -> bool:
+        """Run complete validation (both phases).
+
+        Args:
+            phase1_only: If True, skip Phase 2 simulation and return after Phase 1.
+        """
         start_time = time.time()
-        
+
         print("\n" + "="*70)
         print("DCP EQUIVALENCE VALIDATION")
         print("="*70)
@@ -821,16 +825,28 @@ endmodule
         print(f"Revised: {self.revised_dcp}")
         print(f"Vectors: {self.num_vectors}")
         print("="*70)
-        
+
         # Phase 1: Structural checks
         phase1_passed = await self.phase1_structural_checks()
-        
+
         if not phase1_passed:
             print("\n⚠ Skipping Phase 2 due to Phase 1 failures")
             elapsed = time.time() - start_time
             self.print_final_report(elapsed)
             return False
-        
+
+        # Phase 1 only mode - skip Phase 2
+        if phase1_only:
+            print("\n" + "="*70)
+            print("PHASE 2 SKIPPED (--phase1-only mode)")
+            print("="*70)
+            self.phase2_passed = True
+            self.phase2_skipped = True
+            self.phase2_skip_reason = "Phase 1 only mode"
+            elapsed = time.time() - start_time
+            self.print_final_report(elapsed)
+            return True
+
         # Phase 2: Functional simulation
         phase2_result = await self.phase2_functional_simulation()
         
@@ -934,7 +950,12 @@ Examples:
         action="store_true",
         help="Enable debug logging"
     )
-    
+    parser.add_argument(
+        "--phase1-only",
+        action="store_true",
+        help="Run only Phase 1 structural checks (skip simulation)"
+    )
+
     args = parser.parse_args()
     
     # Validate inputs
@@ -959,8 +980,8 @@ Examples:
     
     try:
         await validator.start_servers()
-        success = await validator.validate()
-        
+        success = await validator.validate(phase1_only=args.phase1_only)
+
         sys.exit(0 if success else 1)
         
     except KeyboardInterrupt:

@@ -640,6 +640,11 @@ class DCPOptimizer(DCPOptimizerBase):
         self._model_usage_history: list = []          # Track recent model selections for switch detection
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
 
+        # === Section 7.X: DCP Validation ===
+        self.validation_enabled = True          # Enable validation during optimization
+        self.validation_interval = 5            # Run Phase 1 every N iterations
+        self.validation_report_dir = self.temp_dir / "validation_reports"
+
         # === Section 7.1: Context Compression & Model Switching State ===
         # Simplified model switching mechanism - only uses two counters for model selection
         self.worker_consecutive_success = 0          # Worker consecutive success count (for downgrade)
@@ -2098,9 +2103,13 @@ class DCPOptimizer(DCPOptimizerBase):
 
     async def optimize(self, input_dcp: Path, output_dcp: Path) -> bool:
         """Run the optimization workflow."""
+        # Store paths for validation
+        self.input_dcp = input_dcp
+        self.output_dcp = output_dcp
+
         # Start timing the optimization process
         self.start_time = time.time()
-        
+
         # Perform initial analysis without LLM
         try:
             initial_analysis = await self.perform_initial_analysis(input_dcp)
@@ -2190,6 +2199,25 @@ CRITICAL OPTIMIZATION RULES:
                 elif current_best is not None and prev_best is None:
                     wns_improved = True  # First valid WNS obtained is considered improvement
 
+                # ================================================================
+                # [NEW] DCP Validation Integration - Phase 1 Only
+                # Run Phase 1 validation every N iterations or when WNS improves
+                # ================================================================
+                if self.validation_enabled and (self.iteration % self.validation_interval == 0 or wns_improved):
+                    intermediate_dcp = await self._save_intermediate_checkpoint(self.iteration)
+                    if intermediate_dcp and intermediate_dcp.exists():
+                        phase1_passed = await self._run_phase1_validation(intermediate_dcp, self.iteration)
+                        if not phase1_passed:
+                            logger.warning(f"Phase 1 validation failed at iteration {self.iteration}")
+                            self._compat.add_message(
+                                "user",
+                                f"Warning: Phase 1 structural validation failed at iteration {self.iteration}. "
+                                "Consider reviewing the optimization direction."
+                            )
+                # ================================================================
+                # End DCP Validation Integration
+                # ================================================================
+
                 # Simplified iteration end processing: update counters
                 self._on_iteration_end(wns_improved, self.last_used_model)
 
@@ -2234,6 +2262,16 @@ CRITICAL OPTIMIZATION RULES:
                 if is_done:
                     logger.info("Optimization workflow completed")
                     self.end_time = time.time()
+
+                    # [NEW] Final full validation (Phase 1 + Phase 2)
+                    if self.validation_enabled and hasattr(self, 'output_dcp') and self.output_dcp.exists():
+                        logger.info("Running final full validation on output DCP...")
+                        final_passed = await self._run_full_validation(self.output_dcp, label="final")
+                        if final_passed:
+                            print("\n✓ Final DCP validation PASSED")
+                        else:
+                            print("\n✗ Final DCP validation FAILED")
+
                     self._print_optimization_summary()
                     return True
                     
@@ -2468,7 +2506,88 @@ CRITICAL OPTIMIZATION RULES:
             print(f"Detailed token usage report saved to: {report_path}\n")
         except Exception as e:
             logger.warning(f"Failed to save token usage report: {e}")
-    
+
+    # === Section 7.X: DCP Validation Helpers ===
+
+    def _get_intermediate_checkpoint_path(self, iteration: int) -> Path:
+        """Get path for intermediate checkpoint with iteration number."""
+        return self.validation_report_dir / f"iteration_{iteration:03d}_checkpoint.dcp"
+
+    async def _save_intermediate_checkpoint(self, iteration: int) -> Optional[Path]:
+        """Save intermediate checkpoint for validation. Returns path or None on failure."""
+        if not self.validation_enabled:
+            return None
+
+        ckpt_path = self._get_intermediate_checkpoint_path(iteration)
+        self.validation_report_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            result = await self.call_vivado_tool("write_checkpoint", {
+                "dcp_path": str(ckpt_path.resolve()),
+                "force": True
+            }, timeout=600.0)
+            logger.info(f"Saved intermediate checkpoint: {ckpt_path}")
+            return ckpt_path
+        except Exception as e:
+            logger.warning(f"Failed to save intermediate checkpoint: {e}")
+            return None
+
+    async def _run_phase1_validation(self, intermediate_dcp: Path, iteration: int) -> bool:
+        """Run Phase 1 structural validation. Returns True if passed. Timeouts/errors don't block optimization."""
+        if not self.validation_enabled or not intermediate_dcp.exists():
+            return True
+
+        script_path = Path(__file__).parent / "validate_dcps.py"
+        validation_cmd = [
+            sys.executable, "-u",
+            str(script_path),
+            str(self.input_dcp),
+            str(intermediate_dcp),
+            "--phase1-only"
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *validation_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+
+            if proc.returncode == 0:
+                logger.info(f"Phase 1 validation PASSED for iteration {iteration}")
+                return True
+            else:
+                logger.warning(f"Phase 1 validation FAILED for iteration {iteration}")
+                return False
+        except asyncio.TimeoutExpired:
+            logger.warning(f"Phase 1 validation TIMEOUT for iteration {iteration}")
+            return True
+        except Exception as e:
+            logger.warning(f"Phase 1 validation ERROR for iteration {iteration}: {e}")
+            return True
+
+    async def _run_full_validation(self, dcp: Path, label: str = "final") -> bool:
+        """Run full Phase 1 + Phase 2 validation. Used for final DCP only."""
+        script_path = Path(__file__).parent / "validate_dcps.py"
+        validation_cmd = [
+            sys.executable, "-u",
+            str(script_path),
+            str(self.input_dcp),
+            str(dcp)
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *validation_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+            return proc.returncode == 0
+        except Exception as e:
+            logger.warning(f"Full validation ERROR ({label}): {e}")
+            return False
 
 
 # === Section 8: FPGAOptimizerTest — Deterministic Test Mode ===

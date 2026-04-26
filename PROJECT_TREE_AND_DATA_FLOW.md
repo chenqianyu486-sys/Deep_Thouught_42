@@ -669,9 +669,9 @@ YAMLStructuredCompressor.__init__ params  # token_budget (80K), preserve_turns (
 
 | File | Responsibility |
 |------|-----------------|
-| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection; owns shared EventBus + AgentContextManager; triggers compression via `_compress_context()` (single compression trigger point); `_build_initial_analysis_yaml()` provides YAML-formatted initial analysis to LLM; `_is_routing_failure()` helper for consistent routing failure detection; `latest_wns` cache for O(1) WNS lookup; file handles managed via `exit_stack.callback()` for leak prevention |
+| `dcp_optimizer.py` | Main agent: LLM orchestration, tool calls, model selection; owns shared EventBus + AgentContextManager; triggers compression via `_compress_context()` (single compression trigger point); `_build_initial_analysis_yaml()` provides YAML-formatted initial analysis to LLM; `_is_routing_failure()` helper for consistent routing failure detection; `latest_wns` cache for O(1) WNS lookup; file handles managed via `exit_stack.callback()` for leak prevention; DCP validation integration (Phase 1 every N iterations, full validation on completion) |
 | `SYSTEM_PROMPT.TXT` | System prompt with YAML format documentation for parsing initial analysis; `recommendation` field check replaces text-based PBLOCK detection |
-| `validate_dcps.py` | DCP equivalence validation (Phase1: structural, Phase2: simulation) |
+| `validate_dcps.py` | DCP equivalence validation (Phase1: structural, Phase2: simulation); `--phase1-only` mode for intermediate validation |
 | `context_manager/manager.py` | Central memory orchestration; `_compress()` always uses "yaml_structured" (aggressive/light mode determined by `context.force_aggressive`); `retrieve_historical()` for historical memory queries; no auto-subscribes to MESSAGE_ADDED; `CONTEXT_COMPRESSED` event now includes token metrics (original_tokens, compressed_tokens, ratio) |
 | `context_manager/events.py` | Event bus: subscribe/unsubscribe (both reference and token-based); emit/get_history; shared by MemoryManager and AgentContextManager |
 | `context_manager/lightyaml.py` | LightYAML - YAML parser/generator with pyyaml backend; backward-compatible API preserving LightYAML class and exception hierarchy; wraps yaml.YAMLError in YAMLParseError/YAMLEncodeError; OrderedDict-aware loader; FPGA signal names handled natively; `dump()` instrumented with timing, trace_id, error logging, and node counting (2026-04-25) |
@@ -843,7 +843,93 @@ device_topology:
 
 **Benefit:** LLM receives full device topology context on first `search_sites` call, reducing need for additional tool calls.
 
-## 7. Data Flow Summary
+## 7. DCP Validation Integration
+
+### 7.1 Overview
+
+During LLM-driven optimization iterations, intermediate DCPs are validated using `validate_dcps.py` to detect structural issues early rather than waiting for final results.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    DCP Validation Flow                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Iteration Loop
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  Every N iterations OR when WNS improves:                                │
+  │  1. Save intermediate checkpoint (write_checkpoint)                      │
+  │  2. Run Phase 1 validation (structural checks via RapidWright)           │
+  │  3. If Phase 1 fails → add warning to LLM context                         │
+  └─────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+  Optimization Complete (is_done)
+       │
+       ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  Final full validation:                                                  │
+  │  1. Phase 1 + Phase 2 (functional simulation)                             │
+  │  2. Report PASS/FAIL                                                    │
+  └─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Validation Configuration
+
+```python
+# dcp_optimizer.py - DCPOptimizer.__init__()
+self.validation_enabled = True          # Enable validation
+self.validation_interval = 5            # Run Phase 1 every 5 iterations
+self.validation_report_dir = self.temp_dir / "validation_reports"
+```
+
+### 7.3 Validation Trigger Logic
+
+| Trigger | Action |
+|---------|--------|
+| `iteration % 5 == 0` | Phase 1 (structural check) |
+| `wns_improved == True` | Phase 1 (structural check) |
+| `is_done == True` | Phase 1 + Phase 2 (full validation) |
+
+### 7.4 validate_dcps.py Changes
+
+**New CLI flag:** `--phase1-only`
+- Skips Phase 2 simulation
+- Returns after Phase 1 structural checks
+- Used for intermediate DCP validation (~30-60s vs 10-15min)
+
+**Modified methods:**
+- `validate(phase1_only: bool = False)` - accepts phase1_only parameter
+- `main()` - passes `phase1_only=args.phase1_only` to validator
+
+### 7.5 Helper Methods in DCPOptimizer
+
+```python
+# Path management
+_get_intermediate_checkpoint_path(iteration) → Path
+
+# Checkpoint operations
+_save_intermediate_checkpoint(iteration) → Optional[Path]
+_run_phase1_validation(intermediate_dcp, iteration) → bool
+_run_full_validation(dcp, label="final") → bool
+```
+
+### 7.6 Timing Estimates
+
+| Operation | Duration |
+|-----------|----------|
+| Save intermediate checkpoint | ~10-20s |
+| Phase 1 (structural check) | ~30-60s |
+| Phase 2 (full simulation) | ~10-15 min (final only) |
+
+### 7.7 Non-blocking Design
+
+- Phase 1 failures add warning to LLM context but **do not halt** optimization
+- Timeouts/errors during validation return `True` (validation inconclusive → continue)
+- LLM can self-correct based on structural warnings in subsequent iterations
+
+## 8. Data Flow Summary
 
 ```
 User Input / Tool Result
