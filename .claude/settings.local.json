@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -m py_compile c:/Users/33237/Desktop/fpl26_optimization_contest/dcp_optimizer.py c:/Users/33237/Desktop/fpl26_optimization_contest/context_manager/manager.py c:/Users/33237/Desktop/fpl26_optimization_contest/context_manager/strategies/yaml_structured_compress.py c:/Users/33237/Desktop/fpl26_optimization_contest/context_manager/interfaces.py)",
-      "Bash(python -m py_compile c:/Users/33237/Desktop/fpl26_optimization_contest/PROJECT_TREE_AND_DATA_FLOW.md)"
-    ]
-  }
-}
