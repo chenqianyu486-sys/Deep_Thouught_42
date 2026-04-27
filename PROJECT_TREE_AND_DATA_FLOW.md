@@ -23,7 +23,7 @@ fpl26_optimization_contest/
 │   ├── stores/
 │   │   └── memory_store.py       # InMemoryContextStore
 │   └── strategies/
-│       └── yaml_structured_compress.py  # YAML compression (preserve_turns=20 or 3 via force_aggressive)
+│       └── yaml_structured_compress.py  # YAML compression, preserve_turns from model_config (40/60)
 │
 ├── RapidWrightMCP/               # RapidWright MCP server
 │   ├── server.py
@@ -69,8 +69,8 @@ MemoryManager._compress("yaml_structured", context)
          │
          ▼
 YAMLStructuredCompressor.compress()
-    - force_aggressive=False → preserve_turns=20, min_threshold=0.3
-    - force_aggressive=True  → preserve_turns=3, min_threshold=0.8
+    - force_aggressive=False → preserve_turns from model_config, min_threshold from model_config
+    - force_aggressive=True  → preserve_turns=10, min_importance=0.7
 ```
 
 ### 2.3 Sequential Compression (inside MemoryManager._compress)
@@ -144,7 +144,7 @@ flash:
   soft_threshold: 40K
   hard_limit: 100K
   token_budget: 35K
-  preserve_turns: 25 (normal) / 5 (aggressive)
+  preserve_turns: 40 (normal) / 10 (aggressive)
   min_importance: 0.15 (normal) / 0.7 (aggressive)
 
 # Pro (Planner): xiaomi/mimo-v2.5-pro, 1M max
@@ -152,7 +152,7 @@ pro:
   soft_threshold: 120K
   hard_limit: 300K
   token_budget: 100K
-  preserve_turns: 40 (normal) / 5 (aggressive)
+  preserve_turns: 60 (normal) / 10 (aggressive)
   min_importance: 0.1 (normal) / 0.7 (aggressive)
 ```
 
