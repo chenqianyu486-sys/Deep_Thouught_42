@@ -1478,7 +1478,8 @@ async def call_tool(name: str, arguments: dict):
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
             run_tcl_command("puts {wns_flush}", timeout=5)
-            output = run_tcl_command("puts [get_property WNS [current_design]]", timeout=timeout)
+            # Use format to ensure numeric output is properly captured
+            output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
             raw = output.strip()
             lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
             if not lines:
