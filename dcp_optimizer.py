@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -2899,6 +2900,10 @@ CRITICAL OPTIMIZATION RULES:
             "--vectors", str(num_vectors)
         ]
 
+        # Record existing validation directories before running
+        workspace_dir = Path(__file__).parent
+        before_dirs = set(workspace_dir.glob("dcp_validation_*"))
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *validation_cmd,
@@ -2906,6 +2911,12 @@ CRITICAL OPTIMIZATION RULES:
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+
+            # Clean up temp directory created during this validation
+            after_dirs = set(workspace_dir.glob("dcp_validation_*"))
+            for temp_dir in after_dirs - before_dirs:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
             return proc.returncode == 0
         except Exception as e:
             logger.warning(f"Full validation ERROR ({label}): {e}")
