@@ -1085,7 +1085,7 @@ class DCPOptimizer(DCPOptimizerBase):
             context.retrieved_history = self._memory_manager.retrieve_historical(
                 CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
-            self._memory_manager._compress("yaml_structured", context)
+            self._memory_manager._compress("yaml_structured", context, model_tier=active_config.model_tier)
             tokens_after = self._estimate_tokens()
             self._record_compression_event("hard", tokens_before, tokens_after, iteration=self.iteration)
             return
@@ -1102,7 +1102,7 @@ class DCPOptimizer(DCPOptimizerBase):
             context.retrieved_history = self._memory_manager.retrieve_historical(
                 CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
-            self._memory_manager._compress("yaml_structured", context)
+            self._memory_manager._compress("yaml_structured", context, model_tier=active_config.model_tier)
             tokens_after = self._estimate_tokens()
             self._record_compression_event("soft", tokens_before, tokens_after, iteration=self.iteration)
             return
@@ -1610,6 +1610,16 @@ class DCPOptimizer(DCPOptimizerBase):
         start_time = time.time()
         wns_measured = None
         error_occurred = False
+        heartbeat_count = 0
+
+        # Heartbeat logger for long-running tool calls (prints every 60 seconds)
+        async def heartbeat_logger():
+            nonlocal heartbeat_count
+            while True:
+                await asyncio.sleep(60)
+                heartbeat_count += 1
+                elapsed = time.time() - start_time
+                logger.warning(f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s")
 
         # Log MCP request with sanitized arguments
         sanitized_args = sanitize_payload(arguments)
@@ -1623,8 +1633,17 @@ class DCPOptimizer(DCPOptimizerBase):
             }
         )
 
+        heartbeat_task = None
         try:
+            # Start heartbeat task for long-running tools
+            heartbeat_task = asyncio.create_task(heartbeat_logger())
             result = await session.call_tool(actual_name, arguments)
+            # Cancel heartbeat task on completion
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
             # Extract text content from result
             if result.content:
@@ -1745,6 +1764,14 @@ class DCPOptimizer(DCPOptimizerBase):
         except Exception as e:
             error_occurred = True
             elapsed_time = time.time() - start_time
+
+            # Cancel heartbeat task on error
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
             # Record failed tool call via compat
             self._compat.add_tool_result(
@@ -2076,6 +2103,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     )
                     if response is None:
                         raise ValueError("API returned None response")
+                    last_exception = None  # [FIX] Clear stale exception after successful fallback
                     break  # Success, exit retry loop
                 except Exception as e:
                     last_exception = e
@@ -2419,25 +2447,6 @@ CRITICAL OPTIMIZATION RULES:
                 elif current_best is not None and prev_best is None:
                     wns_improved = True  # First valid WNS obtained is considered improvement
 
-                # ================================================================
-                # [NEW] DCP Validation Integration - Phase 1 Only
-                # Run Phase 1 validation every N iterations or when WNS improves
-                # ================================================================
-                if self.validation_enabled and (self.iteration % self.validation_interval == 0 or wns_improved):
-                    intermediate_dcp = await self._save_intermediate_checkpoint(self.iteration)
-                    if intermediate_dcp and intermediate_dcp.exists():
-                        phase1_passed = await self._run_phase1_validation(intermediate_dcp, self.iteration)
-                        if not phase1_passed:
-                            logger.warning(f"Phase 1 validation failed at iteration {self.iteration}")
-                            self._compat.add_message(
-                                "user",
-                                f"Warning: Phase 1 structural validation failed at iteration {self.iteration}. "
-                                "Consider reviewing the optimization direction."
-                            )
-                # ================================================================
-                # End DCP Validation Integration
-                # ================================================================
-
                 # Simplified iteration end processing: update counters
                 self._on_iteration_end(wns_improved, self.last_used_model)
 
@@ -2549,6 +2558,27 @@ CRITICAL OPTIMIZATION RULES:
                 if not (checkpoint_success and get_wns_success):
                     logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
                     continue  # Skip to next iteration without _on_iteration_end
+
+                # [NEW] Skip per-iteration validation if this is the final iteration
+                # (final validation will run after the is_done check below)
+                if self.validation_enabled and hasattr(self, 'output_dcp') and self.output_dcp.exists() and not is_done:
+                    logger.info(f"Running mandatory validation (500 vectors) for iteration {self.iteration}...")
+                    validation_passed = await self._run_full_validation(
+                        self.output_dcp,
+                        label=f"iteration_{self.iteration}",
+                        num_vectors=500
+                    )
+
+                    if not validation_passed:
+                        logger.warning(f"Iteration {self.iteration}: Full validation FAILED, rolling back...")
+                        # Rollback to best checkpoint
+                        best_iter = self._best_wns_iteration
+                        if best_iter is not None:
+                            rollback_path = self._get_intermediate_checkpoint_path(best_iter)
+                            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(rollback_path)})
+                            self.latest_wns = self.best_wns  # Restore best WNS
+                        # Skip this iteration (no counter update)
+                        continue
 
                 if is_done:
                     logger.info("Optimization workflow completed")
@@ -2858,14 +2888,15 @@ CRITICAL OPTIMIZATION RULES:
             logger.warning(f"Phase 1 validation ERROR for iteration {iteration}: {e}")
             return True
 
-    async def _run_full_validation(self, dcp: Path, label: str = "final") -> bool:
+    async def _run_full_validation(self, dcp: Path, label: str = "final", num_vectors: int = 10000) -> bool:
         """Run full Phase 1 + Phase 2 validation. Used for final DCP only."""
         script_path = Path(__file__).parent / "validate_dcps.py"
         validation_cmd = [
             sys.executable, "-u",
             str(script_path),
             str(self.input_dcp),
-            str(dcp)
+            str(dcp),
+            "--vectors", str(num_vectors)
         ]
 
         try:

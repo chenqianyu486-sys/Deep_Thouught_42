@@ -116,31 +116,49 @@ class MemoryManager:
         for msg in messages:
             self._working_store.add(msg)
 
-    def _compress(self, compression_type: Literal["yaml_structured"], context: CompressionContext) -> None:
+    def _compress(self, compression_type: Literal["yaml_structured"], context: CompressionContext, model_tier: str = None) -> None:
         """Execute compression with system message protection.
 
         NOTE: Only yaml_structured is used. Aggressive/light compression levels
         are handled internally by YAMLStructuredCompressor based on context.force_aggressive.
+
+        Args:
+            compression_type: Compression algorithm type (yaml_structured only)
+            context: CompressionContext with metadata for compression decisions
+            model_tier: Optional model tier ("planner" or "worker") to select strategy
         """
         if getattr(self, '_compressing', False):
             logger.debug("Compression already in progress, skipping")
             return
         self._compressing = True
+
+        # Select compression strategy based on model tier
+        if model_tier == "planner":
+            from .strategies.planner_compress import PlannerCompressor
+            strategy = PlannerCompressor()
+            strategy_name = "planner"
+        elif model_tier == "worker":
+            from .strategies.worker_compress import WorkerCompressor
+            strategy = WorkerCompressor()
+            strategy_name = "worker"
+        else:
+            from .strategies.yaml_structured_compress import YAMLStructuredCompressor
+            strategy = YAMLStructuredCompressor()
+            strategy_name = compression_type
+
         logger.info(
-            "[COMPRESSION] Starting compression: type=%s, force_aggressive=%s",
+            "[COMPRESSION] Starting compression: type=%s, model_tier=%s, force_aggressive=%s",
             compression_type,
+            model_tier,
             getattr(context, 'force_aggressive', False),
             extra={
                 "compression_type": compression_type,
+                "compression_model_tier": model_tier,
                 "compression_force_aggressive": getattr(context, 'force_aggressive', False),
                 "trace_id": get_trace_id(),
             }
         )
         try:
-            # Always use YAML structured compression
-            # Aggressive vs light mode determined by context.force_aggressive flag
-            from .strategies.yaml_structured_compress import YAMLStructuredCompressor
-            strategy = YAMLStructuredCompressor()
 
             all_messages = self._working_memory.get_all()
 
@@ -182,7 +200,7 @@ class MemoryManager:
             self._event_bus.emit(ContextEvent(
                 event_type=EventType.CONTEXT_COMPRESSED,
                 data={
-                    "compression_type": compression_type,
+                    "compression_type": strategy_name,
                     "original_count": len(all_messages),
                     "compressed_count": len(compressed),
                     "original_tokens": original_tokens,

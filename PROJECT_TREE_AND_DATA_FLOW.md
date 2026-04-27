@@ -25,7 +25,9 @@ fpl26_optimization_contest/
 │   ├── stores/
 │   │   └── memory_store.py       # InMemoryContextStore
 │   └── strategies/
-│       └── yaml_structured_compress.py  # YAML compression, preserve_turns from model_config (40/60)
+│       ├── yaml_structured_compress.py  # YAML compression base class with iteration/WNS trend scoring
+│       ├── planner_compress.py         # PlannerCompressor: token_budget=100K, preserve_turns=60, min_importance=0.1, max_chars_multiplier=1.0
+│       └── worker_compress.py          # WorkerCompressor: token_budget=35K, preserve_turns=20, min_importance=0.35, max_chars_multiplier=0.5
 │
 ├── RapidWrightMCP/               # RapidWright MCP server
 │   ├── server.py
@@ -68,10 +70,13 @@ WorkingMemory.add_message()  # No auto-compression
 DCPOptimizer._compress_context()  ← SINGLE trigger point (before LLM call)
          │
          ▼
-MemoryManager._compress("yaml_structured", context)
+MemoryManager._compress("yaml_structured", context, model_tier)
          │
-         ▼
-YAMLStructuredCompressor.compress()
+         ├─ model_tier="planner" → PlannerCompressor (preserve_turns=60, min_importance=0.1)
+         ├─ model_tier="worker" → WorkerCompressor (preserve_turns=20, min_importance=0.35)
+         └─ model_tier=None → YAMLStructuredCompressor (default fallback)
+
+YAMLStructuredCompressor (default):
     - force_aggressive=False → preserve_turns from model_config, min_threshold from model_config
     - force_aggressive=True  → preserve_turns=10, min_importance=0.7
 ```
@@ -106,7 +111,8 @@ CompressionContext(
     current_tokens, threshold_tokens, hard_limit_tokens,
     failed_strategies, tool_call_details,
     best_wns, initial_wns, current_wns, clock_period,
-    iteration, force_aggressive, retrieved_history, agent_id
+    iteration, force_aggressive, retrieved_history, agent_id,
+    model_context_config, model_switch_detected, previous_model_tier  # Model-aware compression
 )
 ```
 
@@ -172,20 +178,19 @@ pro:
 | `dcp_optimizer.py` | Main agent; owns EventBus + AgentContextManager; single compression trigger; `latest_wns` cache; file handles via exit_stack.callback() |
 | `config_loader.py` | ModelConfigLoader singleton; loads model_config.yaml; provides flash/pro config including fallback_models |
 | `SYSTEM_PROMPT.TXT` | System prompt with YAML format docs |
-| `validate_dcps.py` | DCP validation (--phase1-only for intermediate) |
+| `validate_dcps.py` | DCP validation (supports --vectors for custom vector count) |
 | `context_manager/manager.py` | `_compress()` only uses "yaml_structured"; no auto-MESSAGE_ADDED subscribe |
 | `context_manager/events.py` | EventBus with token-based unsubscribe |
 | `context_manager/lightyaml.py` | YAML parser (pyyaml backend), FPGA signal names |
 | `context_manager/estimator.py` | tiktoken token counting |
-| `context_manager/strategies/yaml_structured_compress.py` | YAML compression, roundtrip validation via YAML_ROUNDTRIP_VALIDATE env var |
+| `context_manager/strategies/yaml_structured_compress.py` | YAML compression base class with iteration-aware and WNS-trend scoring, O(1) message selection |
 | `RapidWrightMCP/rapidwright_tools.py` | Device/tile caching for search_sites/get_tile_info |
 
 ## 7. DCP Validation Integration
 
 ```
-Every N iterations (default 5): Phase 1 structural check
-On is_done: Phase 1 + Phase 2 (full simulation)
-Phase 1 failure → warning to LLM context (non-blocking)
+Every iteration end (except final): Validation (500 vectors) - failure triggers rollback + skip iteration
+On is_done: Final full validation (Phase 1 + Phase 2, 10000 vectors)
 ```
 
 ## 8. Prompt Logger
@@ -212,6 +217,12 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | Iteration checkpoint check | Mandatory checkpoint save + get_wns check before proceeding to next iteration |
 | WNS regression rollback | If WNS < 0 and worse than best, auto-rollback to best checkpoint; completion check uses `latest_wns` not `best_wns` |
 | 429 rate limit fallback | Separate fallback model lists per tier; correct log shows rate-limited model; mark both original and fallback as exhausted; _select_model() filters exhausted models |
+| Long tool heartbeat | Tool calls running >60s print `[HEARTBEAT #N] Tool 'xxx' still running after Xs` every minute |
+| Compression code duplication | PlannerCompressor/WorkerCompressor now inherit compress() from YAMLStructuredCompressor base class (~170 lines reduced) |
+| Compression O(n²) lookup | Replaced O(n) list membership with O(1) set for selected message IDs |
+| Iteration-aware scoring | Current iteration messages get 1.5x weight, previous iteration 1.2x |
+| WNS trend scoring | Tool results boosted 1.2x when WNS improving, 1.3x when degrading |
+| max_chars_multiplier | Planner=1.0 (full), Worker=0.5 (aggressive truncation) |
 
 ## 10. Iteration Exit Conditions
 
@@ -256,11 +267,12 @@ WNS_TARGET_THRESHOLD = 0.0           # WNS target (0.0 ns = timing converged)
 ```
 On 429 error:
 1. Save rate_limited_model BEFORE reassignment (fixes log showing wrong model)
-2. Mark rate_limited_model as exhausted (original model, not just fallback models)
+2. Mark rate_limited_model as exhausted
 3. Try next fallback model from current tier's list (round-robin)
-4. Mark next_fallback as exhausted too
-5. If all fallbacks exhausted → switch to model_planner
-6. Clear BOTH exhausted sets (flash and pro) for clean slate with planner
+4. [FIX] Only mark next_fallback as exhausted when it ACTUALLY hits 429
+5. [FIX] Clear last_exception on successful fallback to prevent stale exception
+6. If all fallbacks exhausted → switch to model_planner
+7. Clear BOTH exhausted sets (flash and pro) for clean slate with planner
 
 _select_model() also checks if model_worker is exhausted:
 - If model_worker in _exhausted_flash_fallbacks or _exhausted_pro_fallbacks → force planner
@@ -277,6 +289,7 @@ Model tier inference (_infer_model_tier):
 
 Example log after fix:
 "Rate limit on deepseek/deepseek-v4-flash, switching to fallback: qwen/qwen3.6-flash"
+"HTTP Request: POST ... 200 OK" ← qwen/qwen3.6-flash succeeds, last_exception cleared
 ```
 
 ## 13. Console Exit Intervention

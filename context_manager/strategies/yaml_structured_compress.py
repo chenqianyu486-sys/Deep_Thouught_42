@@ -142,6 +142,34 @@ class ImportanceScorer:
 
         return topics if topics else ['general']
 
+    @staticmethod
+    def apply_iteration_weight(score: float, message: Message, current_iteration: int) -> float:
+        """Apply iteration-based weight boost.
+
+        Current iteration messages get 1.5x boost (most relevant).
+        Previous iteration gets 1.2x boost.
+        Older messages retain original score.
+        """
+        msg_iteration = message.metadata.get('iteration', 0)
+        if msg_iteration == current_iteration:
+            return score * 1.5
+        elif msg_iteration == current_iteration - 1:
+            return score * 1.2
+        return score
+
+    @staticmethod
+    def apply_wns_trend_weight(score: float, wns_trend: str) -> float:
+        """Apply WNS trend weight boost.
+
+        Improving WNS (better timing): 1.2x boost for tool results.
+        Degrading WNS (worse timing): 1.3x boost (need to remember failures).
+        """
+        if wns_trend == 'improving':
+            return score * 1.2
+        elif wns_trend == 'degrading':
+            return score * 1.3
+        return score
+
 
 class YAMLStructuredCompressor(CompressionStrategy):
     """Compress messages using YAML format with FPGA-aware structure."""
@@ -153,17 +181,20 @@ class YAMLStructuredCompressor(CompressionStrategy):
         self,
         token_budget: int = 80_000,
         preserve_turns: int = 20,
-        min_importance_threshold: float = 0.3
+        min_importance_threshold: float = 0.3,
+        max_chars_multiplier: float = 1.0
     ):
         """
         Args:
             token_budget: Maximum tokens for compressed output
             preserve_turns: Number of recent turns to preserve
             min_importance_threshold: Minimum importance score to keep a message
+            max_chars_multiplier: Multiplier for adaptive max_chars (0.5=aggressive, 1.0=normal)
         """
         self.token_budget = token_budget
         self.preserve_turns = preserve_turns
         self.min_importance_threshold = min_importance_threshold
+        self.max_chars_multiplier = max_chars_multiplier
 
     def compress(self, messages: List[Message], context: CompressionContext) -> List[Message]:
         """Compress messages into YAML format with FPGA design state.
@@ -187,9 +218,11 @@ class YAMLStructuredCompressor(CompressionStrategy):
         model_switched = getattr(context, 'model_switch_detected', False)
         previous_tier = getattr(context, 'previous_model_tier', None)
 
-        # Unified compression parameters (no aggressive mode)
-        preserve_turns = model_config.preserve_turns if model_config else 25
-        min_importance_threshold = model_config.min_importance_threshold if model_config else 0.2
+        # Get tier-aware parameters from instance attributes (set by subclasses)
+        # These can be overridden by model_config if available
+        preserve_turns = getattr(self, 'preserve_turns', 25)
+        min_importance_threshold = getattr(self, 'min_importance_threshold', 0.2)
+        max_chars_multiplier = getattr(self, 'max_chars_multiplier', 1.0)
 
         # Adjust parameters based on model tier switch
         if model_switched and previous_tier and model_config:
@@ -219,6 +252,28 @@ class YAMLStructuredCompressor(CompressionStrategy):
         # Score and classify all messages
         scored = ImportanceScorer.classify_and_score(messages, context)
 
+        # Apply iteration-aware weight boost
+        current_iteration = getattr(context, 'iteration', 0)
+        scored = [
+            (msg, ImportanceScorer.apply_iteration_weight(importance, msg, current_iteration), topic)
+            for msg, importance, topic in scored
+        ]
+
+        # Determine WNS trend for scoring
+        wns_trend = 'stable'
+        if context.best_wns is not None and context.current_wns is not None:
+            if context.current_wns < context.best_wns:
+                wns_trend = 'improving'
+            elif context.current_wns > context.best_wns:
+                wns_trend = 'degrading'
+
+        # Apply WNS trend weight to tool results
+        scored = [
+            (msg, ImportanceScorer.apply_wns_trend_weight(importance, wns_trend), topic)
+            if msg.role == MessageRole.TOOL else (msg, importance, topic)
+            for msg, importance, topic in scored
+        ]
+
         # Separate system messages (protected) from conversation
         system_msgs = []
         conversation_msgs = []
@@ -237,10 +292,13 @@ class YAMLStructuredCompressor(CompressionStrategy):
         selected = self._select_messages(conversation_msgs, available_budget, context, min_importance_threshold)
 
         # Also preserve recent turns regardless of importance (use dynamic preserve_turns)
+        # Use O(1) set lookup instead of O(n) list comprehension
+        selected_ids = set(id(m) for m, _, _ in selected)
         recent = self._get_recent_turns(conversation_msgs, preserve_turns)
         for msg, importance, topic in recent:
-            if msg not in [m for m, _, _ in selected]:
+            if id(msg) not in selected_ids:
                 selected.append((msg, importance, topic))
+                selected_ids.add(id(msg))
 
         # Sort by iteration/position to maintain order
         selected.sort(key=lambda x: x[0].metadata.get('index', 0))
@@ -562,10 +620,11 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         Args:
             content: Content to truncate
-            max_chars: Maximum chars (if None, auto-calculated based on content type)
+            max_chars: Maximum chars (if None, auto-calculated based on content type and multiplier)
         """
         if max_chars is None:
-            max_chars = self._get_adaptive_max_chars(content)
+            base_max = self._get_adaptive_max_chars(content)
+            max_chars = int(base_max * self.max_chars_multiplier)
 
         if len(content) <= max_chars:
             return content
