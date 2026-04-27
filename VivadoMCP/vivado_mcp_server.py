@@ -1477,32 +1477,35 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
-            run_tcl_command("puts {wns_flush}", timeout=5)
-            # Use format to ensure numeric output is properly captured
-            output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
-            raw = output.strip()
-            lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
-            if not lines:
-                logger.warning(f"get_wns: empty output from Vivado. Raw: {repr(raw)}")
-                wns_value = "PARSE_ERROR"
+            # First try using report_timing_summary to get WNS (more reliable on Linux)
+            timing_output = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
+            wns_value = "PARSE_ERROR"
+
+            # Parse WNS from timing summary output
+            wns_match = re.search(r'^\s*(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s*$',
+                                  timing_output, re.MULTILINE)
+            if wns_match:
+                wns_candidate = float(wns_match.group(1))
+                if wns_candidate == 0.0:
+                    wns_candidate = abs(wns_candidate)
+                wns_value = str(wns_candidate)
+                logger.info(f"get_wns: parsed WNS={wns_value} from timing_summary")
             else:
-                last_line = lines[-1]
-                try:
-                    parsed = float(last_line)
-                    if parsed == 0.0:
-                        parsed = abs(parsed)
-                    wns_value = str(parsed)
-                except ValueError:
-                    logger.warning(f"get_wns: cannot parse '{last_line}' as float. Raw output: {repr(raw)}")
-                    float_match = re.search(r'-?\d+\.?\d*', last_line)
-                    if float_match:
-                        raw_match = float_match.group(0)
-                        parsed = float(raw_match)
+                # Fallback: try direct get_property
+                run_tcl_command("puts {wns_flush}", timeout=5)
+                output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
+                raw = output.strip()
+                lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
+                if lines:
+                    try:
+                        parsed = float(lines[-1])
                         if parsed == 0.0:
                             parsed = abs(parsed)
                         wns_value = str(parsed)
-                    else:
-                        wns_value = "PARSE_ERROR"
+                        logger.info(f"get_wns: parsed WNS={wns_value} from get_property")
+                    except ValueError:
+                        logger.warning(f"get_wns: cannot parse WNS from get_property output: {raw}")
+
             return [TextContent(type="text", text=wns_value)]
         
         elif name == "place_design":
