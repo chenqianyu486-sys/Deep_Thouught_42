@@ -2092,7 +2092,6 @@ class DCPOptimizer(DCPOptimizerBase):
                         next_fallback = self._get_next_fallback_model(current_tier)
 
                         if next_fallback:
-                            self._mark_fallback_exhausted(next_fallback)
                             logger.warning(f"Rate limit on {rate_limited_model}, switching to fallback: {next_fallback}")
                             current_model = next_fallback
                             self.last_used_model = current_model
