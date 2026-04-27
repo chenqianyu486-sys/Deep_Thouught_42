@@ -2325,20 +2325,25 @@ CRITICAL OPTIMIZATION RULES:
                     except Exception as e:
                         logger.warning(f"Iteration {self.iteration}: Checkpoint save exception: {e}, retry {retry_count}/{max_retries}")
 
-                    # Step 2: Get WNS
+                    # Step 2: Get WNS (corrected to handle string return)
                     try:
                         wns_result = await self.call_tool("vivado_get_wns", {})
-                        if wns_result and not wns_result.get("error"):
-                            wns_value = wns_result.get("wns")
-                            if wns_value is not None and self._is_valid_wns(wns_value):
-                                self.best_wns = wns_value
-                                get_wns_success = True
-                                logger.info(f"Iteration {self.iteration}: get_wns succeeded, WNS={wns_value}")
-                            else:
-                                logger.warning(f"Iteration {self.iteration}: get_wns returned invalid value: {wns_value}, retry {retry_count}/{max_retries}")
+                        # call_tool returns raw string like "0.016" or "PARSE_ERROR" or "(no output)"
+                        if wns_result and wns_result.strip() not in ("", "(no output)", "PARSE_ERROR"):
+                            try:
+                                wns_value = float(wns_result.strip())
+                                if self._is_valid_wns(wns_value):
+                                    self.best_wns = wns_value
+                                    get_wns_success = True
+                                    logger.info(f"Iteration {self.iteration}: get_wns succeeded, WNS={wns_value}")
+                                else:
+                                    logger.warning(f"Iteration {self.iteration}: get_wns invalid WNS: {wns_value}, retry {retry_count}/{max_retries}")
+                            except ValueError:
+                                logger.warning(f"Iteration {self.iteration}: get_wns parse error: {wns_result.strip()}, retry {retry_count}/{max_retries}")
+                        elif wns_result.strip() == "PARSE_ERROR":
+                            logger.warning(f"Iteration {self.iteration}: get_wns returned PARSE_ERROR, retry {retry_count}/{max_retries}")
                         else:
-                            err = wns_result.get("error", "unknown") if wns_result else "no result"
-                            logger.warning(f"Iteration {self.iteration}: get_wns failed: {err}, retry {retry_count}/{max_retries}")
+                            logger.warning(f"Iteration {self.iteration}: get_wns empty result, retry {retry_count}/{max_retries}")
                     except Exception as e:
                         logger.warning(f"Iteration {self.iteration}: get_wns exception: {e}, retry {retry_count}/{max_retries}")
 
@@ -3076,29 +3081,64 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=300.0)
             print(f"Route status after routing:\n{result[:1500]}...")
             logger.info(f"Route status after routing: {result}")
-            
+
             # ================================================================
             # Step 9: Report timing and compare WNS
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 9: Report final timing")
             print("-"*60)
-            
+
             result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
             print(f"Final timing summary (first 2000 chars):\n{result[:2000]}...")
             logger.info(f"Final timing summary: {result}")
-            
+
             # Parse final WNS
             self.final_wns = self.parse_wns_from_timing_report(result)
             print(f"\n*** Final WNS: {self.final_wns} ns ***")
             logger.info(f"Final WNS: {self.final_wns} ns")
-            
+
             # Calculate final fmax
             final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
             if final_fmax is not None:
                 print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
             print()
-            
+
+            # ================================================================
+            # Step 9.5: Verify get_wns tool
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 9.5: Verify get_wns tool")
+            print("-"*60)
+
+            try:
+                get_wns_result = await self.call_vivado_tool("get_wns", {}, timeout=60.0)
+                print(f"get_wns raw result: '{get_wns_result}'")
+
+                if get_wns_result.strip() == "PARSE_ERROR":
+                    print("*** get_wns returned PARSE_ERROR ***")
+                    logger.warning("get_wns returned PARSE_ERROR in test mode")
+                else:
+                    try:
+                        get_wns_value = float(get_wns_result.strip())
+                        print(f"*** get_wns WNS: {get_wns_value} ns ***")
+
+                        # Compare with timing_summary WNS
+                        if self.final_wns is not None:
+                            diff = abs(get_wns_value - self.final_wns)
+                            print(f"*** Timing summary WNS: {self.final_wns} ns, diff: {diff:.4f} ns ***")
+                            if diff < 0.01:
+                                print("✓ get_wns matches timing_summary (diff < 0.01 ns)")
+                            else:
+                                print(f"WARNING: get_wns differs from timing_summary by {diff:.4f} ns")
+                        logger.info(f"get_wns verification: {get_wns_value} ns (timing_summary: {self.final_wns} ns)")
+                    except ValueError as e:
+                        print(f"*** get_wns parse error: {e} ***")
+                        logger.warning(f"get_wns cannot parse '{get_wns_result}': {e}")
+            except Exception as e:
+                print(f"*** get_wns call failed: {e} ***")
+                logger.error(f"get_wns call failed in test mode: {e}")
+
             # ================================================================
             # Write final DCP and report results
             # ================================================================

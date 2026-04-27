@@ -1482,17 +1482,17 @@ async def call_tool(name: str, arguments: dict):
             raw = output.strip()
             lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
             if not lines:
+                logger.warning(f"get_wns: empty output from Vivado. Raw: {repr(raw)}")
                 wns_value = "PARSE_ERROR"
             else:
                 last_line = lines[-1]
                 try:
                     parsed = float(last_line)
-                    # Normalize -0.0 to +0.0 to avoid downstream comparison issues
                     if parsed == 0.0:
                         parsed = abs(parsed)
                     wns_value = str(parsed)
                 except ValueError:
-                    import re
+                    logger.warning(f"get_wns: cannot parse '{last_line}' as float. Raw output: {repr(raw)}")
                     float_match = re.search(r'-?\d+\.?\d*', last_line)
                     if float_match:
                         raw_match = float_match.group(0)
