@@ -30,7 +30,7 @@ from typing import Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 try:
-    from openai import AsyncOpenAI, RateLimitError as OpenAIRateLimitError
+    from openai import AsyncOpenAI, RateLimitError as OpenAIRateLimitError, NotFoundError as OpenAINotFoundError
 except ImportError:
     print("Error: openai package not installed. Please run: pip install openai", file=sys.stderr)
     sys.exit(1)
@@ -2143,6 +2143,37 @@ class DCPOptimizer(DCPOptimizerBase):
                             current_model = self.model_planner
                             self.last_used_model = current_model
                             # Reset fallback state for potential future use
+                            self._reset_fallbacks(current_tier)
+                            wait_time = retry_delay * (2 ** retry)
+                            logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
+                            await asyncio.sleep(wait_time)
+                            continue
+                    # On 404 "tool use not supported", switch to fallback model
+                    if isinstance(e, OpenAINotFoundError) or ("404" in str(e) and "tool use" in str(e).lower()):
+                        tool_unsupported_model = current_model
+                        current_tier = self._infer_model_tier(current_model)
+
+                        # Mark current model as exhausted (doesn't support tool use)
+                        self._mark_fallback_exhausted(tool_unsupported_model)
+
+                        # Try to get next fallback model for current tier
+                        next_fallback = self._get_next_fallback_model(current_tier)
+
+                        if next_fallback:
+                            logger.warning(f"Tool use not supported on {tool_unsupported_model}, switching to fallback: {next_fallback}")
+                            current_model = next_fallback
+                            self.last_used_model = current_model
+                            wait_time = retry_delay * (2 ** retry)
+                            logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            # All fallbacks exhausted, fallback to model_planner
+                            self._exhausted_flash_fallbacks.clear()
+                            self._exhausted_pro_fallbacks.clear()
+                            logger.warning(f"All {current_tier} fallback models exhausted (tool use unsupported), switching to model_planner: {self.model_planner}")
+                            current_model = self.model_planner
+                            self.last_used_model = current_model
                             self._reset_fallbacks(current_tier)
                             wait_time = retry_delay * (2 ** retry)
                             logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")

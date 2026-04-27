@@ -32,5 +32,5 @@ pro:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "writer/palmyra-x5"
+    - "google/gemini-3-flash-preview"
     - "xiaomi/mimo-v2.5-pro"

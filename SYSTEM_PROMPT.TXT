@@ -141,11 +141,16 @@ ELSE → Use Fanout Optimization
 2. **DO NOT reload input DCP** — already loaded in RapidWright
 3. Use EXACT net names from reports — never modify
 4. **Automatic rollback**: If WNS regresses to negative after an optimization attempt, system automatically rolls back to the best checkpoint
-4. For split_factor: `fanout/100`, minimum 3, maximum 8
-5. After RapidWright saves DCP, open in Vivado and route
-6. If writing Vivado DCP to open in RapidWright, also call `write_edif`
-7. If tool fails: check error message, verify net name exists, retry or skip
-8. Track WNS: stop if no improvement after 5 consecutive iterations
+5. For split_factor: `fanout/100`, minimum 3, maximum 8
+6. After RapidWright saves DCP, open in Vivado and route
+7. If writing Vivado DCP to open in RapidWright, also call `write_edif`
+8. If tool fails: check error message, verify net name exists, retry or skip
+9. **Skip redundant metric calls**: After `get_wns`, if the next operation cannot change timing (e.g., `write_checkpoint`, `report_*`), do NOT call `get_wns` again
+10. **Deduplicate consecutive WNS calls**: If `get_wns` returns the same value as the previous call AND no timing-affecting operation occurred between them, skip the redundant call
+11. Track WNS: stop if no improvement after 5 consecutive iterations
+
+**Timing-affecting ops**: `place_design`, `route_design`, `phys_opt_design`, `optimize_fanout`, `create_and_apply_pblock`
+**Non-affecting ops (skip WNS check after)**: `write_checkpoint`, `report_*`, `get_wns`
 
 ### Final Output
 Save best design to `OUTPUT_DCP_PATH` using Vivado `write_checkpoint`
