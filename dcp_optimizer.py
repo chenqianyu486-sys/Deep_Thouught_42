@@ -658,7 +658,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
         self.GLOBAL_NO_IMPROVEMENT_LIMIT = 5         # Global no-improvement limit
-        self.MAX_TOOL_ROUNDS_PER_ITERATION = 15      # Max tool-calling rounds per iteration
+        self.MAX_TOOL_ROUNDS_PER_ITERATION = 22      # Max tool-calling rounds per iteration
         
         # Track token usage and costs
         self.total_prompt_tokens = 0
@@ -2294,7 +2294,7 @@ CRITICAL OPTIMIZATION RULES:
                             recent_routing_failure = 'success'
                         break
 
-                # If it is a routing timeout, do not add to failed_strategies
+# If it is a routing timeout, do not add to failed_strategies
                 if recent_routing_failure == 'timeout':
                     logger.info("route_design timeout recorded, but does not restrict subsequent routing attempts")
                     # Automatically trigger re-placement flow
@@ -2302,7 +2302,60 @@ CRITICAL OPTIMIZATION RULES:
                         "user",
                         "Note: route_design failed due to timeout. The system will try re-placement (place_design -unplace then place_design) and retry routing. Please use phys_opt_design for load reduction optimization in subsequent steps."
                     )
-                
+
+                # [NEW] Mandatory checkpoint + get_wns check before proceeding to next iteration
+                checkpoint_success = False
+                get_wns_success = False
+                retry_count = 0
+                max_retries = 3
+
+                while retry_count < max_retries:
+                    retry_count += 1
+                    checkpoint_success = False
+                    get_wns_success = False
+
+                    # Step 1: Save checkpoint
+                    try:
+                        intermediate_dcp = await self._save_intermediate_checkpoint(self.iteration)
+                        if intermediate_dcp and intermediate_dcp.exists():
+                            checkpoint_success = True
+                            logger.info(f"Iteration {self.iteration}: Checkpoint saved successfully")
+                        else:
+                            logger.warning(f"Iteration {self.iteration}: Checkpoint save failed, retry {retry_count}/{max_retries}")
+                    except Exception as e:
+                        logger.warning(f"Iteration {self.iteration}: Checkpoint save exception: {e}, retry {retry_count}/{max_retries}")
+
+                    # Step 2: Get WNS
+                    try:
+                        wns_result = await self.call_tool("vivado_get_wns", {})
+                        if wns_result and not wns_result.get("error"):
+                            wns_value = wns_result.get("wns")
+                            if wns_value is not None and self._is_valid_wns(wns_value):
+                                self.best_wns = wns_value
+                                get_wns_success = True
+                                logger.info(f"Iteration {self.iteration}: get_wns succeeded, WNS={wns_value}")
+                            else:
+                                logger.warning(f"Iteration {self.iteration}: get_wns returned invalid value: {wns_value}, retry {retry_count}/{max_retries}")
+                        else:
+                            err = wns_result.get("error", "unknown") if wns_result else "no result"
+                            logger.warning(f"Iteration {self.iteration}: get_wns failed: {err}, retry {retry_count}/{max_retries}")
+                    except Exception as e:
+                        logger.warning(f"Iteration {self.iteration}: get_wns exception: {e}, retry {retry_count}/{max_retries}")
+
+                    # If both succeeded, proceed to next iteration
+                    if checkpoint_success and get_wns_success:
+                        logger.info(f"Iteration {self.iteration}: Checkpoint + get_wns check passed, proceeding to next iteration")
+                        break
+                    else:
+                        logger.warning(f"Iteration {self.iteration}: Checkpoint={checkpoint_success}, get_wns={get_wns_success}, retry {retry_count}/{max_retries}")
+                        if retry_count < max_retries:
+                            await asyncio.sleep(2)
+
+                # If check failed after all retries, do not count this iteration - skip to next round without updating counters
+                if not (checkpoint_success and get_wns_success):
+                    logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
+                    continue  # Skip to next iteration without _on_iteration_end
+
                 if is_done:
                     logger.info("Optimization workflow completed")
                     self.end_time = time.time()

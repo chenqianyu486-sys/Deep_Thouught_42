@@ -198,8 +198,26 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | RapidWright caching | device_sites_cache + tile_info_cache |
 | Device context | proactive injection via device_topology in initial analysis |
 | Intra-iteration model switch | Re-evaluate model when task category changes during tool execution loop |
+| Tool round limit | Increased from 15 to 22 per iteration |
+| Iteration checkpoint check | Mandatory checkpoint save + get_wns check before proceeding to next iteration |
 
-## 10. Key Constants
+## 10. Iteration Exit Conditions
+
+```
+Iteration proceeds to next round if ALL conditions met:
+1. iteration < 50 (safety limit)
+2. WNS < 0.0 ns (not timing-converged)
+3. global_no_improvement < 5 (not at hard limit)
+4. Tool rounds <= 22 (max tool-calling rounds per iteration)
+5. [NEW] Checkpoint saved successfully (via _save_intermediate_checkpoint)
+6. [NEW] get_wns returns valid WNS value
+
+Iteration ends when:
+- is_done = (wns_target_met OR max_iterations_reached)
+- Checkpoint + get_wns check FAILED → iteration skipped (continue, no counter update)
+```
+
+## 11. Key Constants
 
 ```python
 # From model_config.yaml
@@ -209,4 +227,9 @@ FLASH_HARD_LIMIT = 100K
 # Pro (Planner): xiaomi/mimo-v2.5-pro, 1M context
 PRO_SOFT_THRESHOLD = 120K
 PRO_HARD_LIMIT = 300K
+
+# Iteration control
+MAX_TOOL_ROUNDS_PER_ITERATION = 22  # Max tool-calling rounds per iteration
+GLOBAL_NO_IMPROVEMENT_LIMIT = 5      # Hard limit for consecutive no-improvement
+WNS_TARGET_THRESHOLD = 0.0           # WNS target (0.0 ns = timing converged)
 ```

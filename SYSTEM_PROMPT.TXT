@@ -41,7 +41,7 @@ Maximize WNS (Worst Negative Slack) timing improvement on the given FPGA design.
 **Success Criteria:**
 - Primary: WNS >= 0 (timing met)
 - Secondary: Best possible WNS after iterations
-- Stop condition: No improvement after 3 consecutive attempts
+- Stop condition: No improvement after 5 consecutive iterations (global_no_improvement >= 5)
 
 ## S - STYLE
 Technical, action-oriented, concise. Focus on:
@@ -117,7 +117,7 @@ ELSE → Use Fanout Optimization
 5. After RapidWright saves DCP, open in Vivado and route
 6. If writing Vivado DCP to open in RapidWright, also call `write_edif`
 7. If tool fails: check error message, verify net name exists, retry or skip
-8. Track WNS: stop if no improvement after 3 attempts
+8. Track WNS: stop if no improvement after 5 consecutive iterations
 
 ### Final Output
 Save best design to `OUTPUT_DCP_PATH` using Vivado `write_checkpoint`
