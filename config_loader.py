@@ -29,6 +29,11 @@ class ModelConfigData:
     min_importance_threshold_aggressive: float = 0.8  # Default for aggressive mode
     history_retrieval_limit: int = 5
     history_retrieval_min_importance: float = 0.6
+    fallback_models: list[str] = None  # Fallback models for 429 handling
+
+    def __post_init__(self):
+        if self.fallback_models is None:
+            self.fallback_models = []
 
 
 class ModelConfigLoader:
@@ -83,6 +88,7 @@ class ModelConfigLoader:
             min_importance_threshold_aggressive=config['flash'].get('min_importance_threshold_aggressive', 0.8),
             history_retrieval_limit=config['flash']['history_retrieval_limit'],
             history_retrieval_min_importance=config['flash']['history_retrieval_min_importance'],
+            fallback_models=config['flash'].get('fallback_models', []),
         )
 
         self._pro_config = ModelConfigData(
@@ -98,6 +104,7 @@ class ModelConfigLoader:
             min_importance_threshold_aggressive=config['pro'].get('min_importance_threshold_aggressive', 0.8),
             history_retrieval_limit=config['pro']['history_retrieval_limit'],
             history_retrieval_min_importance=config['pro']['history_retrieval_min_importance'],
+            fallback_models=config['pro'].get('fallback_models', []),
         )
 
     def get_flash_config(self) -> ModelConfigData:

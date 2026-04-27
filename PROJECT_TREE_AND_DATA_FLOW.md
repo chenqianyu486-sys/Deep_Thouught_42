@@ -5,6 +5,8 @@
 ```
 fpl26_optimization_contest/
 ├── dcp_optimizer.py              # Main agent: LLM orchestration, model selection, compression trigger
+├── config_loader.py             # Model configuration loader (singleton)
+├── model_config.yaml             # Model tier and fallback configuration
 ├── validate_dcps.py               # DCP equivalence validator (Phase1 structural, Phase2 simulation)
 ├── SYSTEM_PROMPT.TXT             # System prompt
 ├── requirements.txt
@@ -49,6 +51,7 @@ DCPOptimizer (dcp_optimizer.py)
     - 8-dimension weighted scoring
     - PLANNER: xiaomi/mimo-v2.5-pro (1M context, complex reasoning)
     - WORKER: deepseek/deepseek-v4-flash (500K context, fast execution)
+    - **429 Fallback**: Per-tier fallback model lists with round-robin and exhaustion tracking
     - Threshold: margin of 2 for PLANNER, margin of 1 for WORKER, default=PLANNER
     - **Intra-iteration switching**: When task category changes (INFORMATION↔OPTIMIZATION) during tool execution loop, model is re-evaluated and switched if needed
 ```
@@ -146,6 +149,9 @@ flash:
   token_budget: 35K
   preserve_turns: 40 (normal) / 10 (aggressive)
   min_importance: 0.15 (normal) / 0.7 (aggressive)
+  fallback_models:  # 429 rate limit fallback (priority order)
+    - "qwen/qwen3.6-flash"
+    - "xiaomi/mimo-v2-flash"
 
 # Pro (Planner): xiaomi/mimo-v2.5-pro, 1M max
 pro:
@@ -154,6 +160,9 @@ pro:
   token_budget: 100K
   preserve_turns: 60 (normal) / 10 (aggressive)
   min_importance: 0.1 (normal) / 0.7 (aggressive)
+  fallback_models:  # 429 rate limit fallback (priority order)
+    - "deepseek/deepseek-v4-pro"
+    - "qwen/qwen3.6-plus"
 ```
 
 ## 6. File Responsibilities
@@ -161,6 +170,7 @@ pro:
 | File | Responsibility |
 |------|-----------------|
 | `dcp_optimizer.py` | Main agent; owns EventBus + AgentContextManager; single compression trigger; `latest_wns` cache; file handles via exit_stack.callback() |
+| `config_loader.py` | ModelConfigLoader singleton; loads model_config.yaml; provides flash/pro config including fallback_models |
 | `SYSTEM_PROMPT.TXT` | System prompt with YAML format docs |
 | `validate_dcps.py` | DCP validation (--phase1-only for intermediate) |
 | `context_manager/manager.py` | `_compress()` only uses "yaml_structured"; no auto-MESSAGE_ADDED subscribe |
@@ -201,6 +211,7 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | Tool round limit | Increased from 15 to 22 per iteration |
 | Iteration checkpoint check | Mandatory checkpoint save + get_wns check before proceeding to next iteration |
 | WNS regression rollback | If WNS < 0 and worse than best, auto-rollback to best checkpoint; completion check uses `latest_wns` not `best_wns` |
+| 429 rate limit fallback | Separate fallback model lists per tier (flash/pro); round-robin with exhaustion tracking |
 
 ## 10. Iteration Exit Conditions
 
@@ -228,12 +239,28 @@ WNS regression (WNS < 0 and worse than best) triggers automatic rollback to best
 # Flash (Worker): deepseek/deepseek-v4-flash, 500K context
 FLASH_SOFT_THRESHOLD = 40K
 FLASH_HARD_LIMIT = 100K
+FLASH_FALLBACK_MODELS = ["qwen/qwen3.6-flash", "xiaomi/mimo-v2-flash"]
 # Pro (Planner): xiaomi/mimo-v2.5-pro, 1M context
 PRO_SOFT_THRESHOLD = 120K
 PRO_HARD_LIMIT = 300K
+PRO_FALLBACK_MODELS = ["deepseek/deepseek-v4-pro", "qwen/qwen3.6-plus"]
 
 # Iteration control
 MAX_TOOL_ROUNDS_PER_ITERATION = 22  # Max tool-calling rounds per iteration
 GLOBAL_NO_IMPROVEMENT_LIMIT = 5      # Hard limit for consecutive no-improvement
 WNS_TARGET_THRESHOLD = 0.0           # WNS target (0.0 ns = timing converged)
+```
+
+## 12. 429 Rate Limit Fallback Mechanism
+
+```
+On 429 error:
+1. Mark current model as exhausted (if it's a fallback model)
+2. Try next fallback model from current tier's list (round-robin)
+3. If all fallbacks exhausted → switch to model_planner
+4. Reset exhausted set after switching to model_planner
+
+Key state variables:
+- _flash_fallback_index / _pro_fallback_index: round-robin position
+- _exhausted_flash_fallbacks / _exhausted_pro_fallbacks: track exhausted models
 ```

@@ -270,7 +270,7 @@ class MemoryManager:
     def add_tool_result(self, tool_name: str, result: str, wns: float = None, error: bool = False, extra_fields: dict = None) -> None:
         entry = {
             "tool_name": tool_name,
-            "result": result[:500] if result else "",
+            "result": result if result else "",
             "wns": wns,
             "error": error,
             "iteration": self._iteration

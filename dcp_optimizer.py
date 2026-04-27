@@ -638,6 +638,13 @@ class DCPOptimizer(DCPOptimizerBase):
         self.task_type_stats: dict[str, dict[str, int]] = {}
         self.llm_call_count = 0
         self.last_used_model = None
+        # Fallback models for 429 rate limit (loaded from config)
+        self.flash_fallback_models = _flash_data.fallback_models
+        self.pro_fallback_models = _pro_data.fallback_models
+        self._flash_fallback_index = 0  # Round-robin index for flash fallback models
+        self._pro_fallback_index = 0     # Round-robin index for pro fallback models
+        self._exhausted_flash_fallbacks: set[str] = set()  # Track exhausted flash fallback models
+        self._exhausted_pro_fallbacks: set[str] = set()    # Track exhausted pro fallback models
         self._model_usage_history: list = []          # Track recent model selections for switch detection
         self._previous_tier: Optional[str] = None   # Track previous tier for switch detection
         self._iteration_model_switch_logged = False  # Track if model switch was logged in current iteration
@@ -902,6 +909,80 @@ class DCPOptimizer(DCPOptimizerBase):
             return self._infer_model_tier(previous_model)
         return None
 
+    def _get_fallback_for_tier(self, tier: str) -> tuple:
+        """Get fallback models and related state for a given tier.
+
+        Args:
+            tier: "flash" or "pro"
+
+        Returns:
+            Tuple of (fallback_models list, exhausted_set, fallback_index)
+        """
+        if tier == "flash":
+            return self.flash_fallback_models, self._exhausted_flash_fallbacks, self._flash_fallback_index
+        else:
+            return self.pro_fallback_models, self._exhausted_pro_fallbacks, self._pro_fallback_index
+
+    def _get_next_fallback_model(self, tier: str) -> Optional[str]:
+        """Get next available fallback model for the given tier.
+
+        Args:
+            tier: "flash" or "pro"
+
+        Returns:
+            Next fallback model name, or None if all are exhausted.
+        """
+        fallback_models, exhausted_set, fallback_index = self._get_fallback_for_tier(tier)
+
+        if not fallback_models:
+            return None
+
+        # Check if all fallbacks are exhausted
+        available = [m for m in fallback_models if m not in exhausted_set]
+        if not available:
+            return None
+
+        # Round-robin through available models
+        attempts = 0
+        start_index = fallback_index
+        while attempts < len(available):
+            model = available[(start_index + attempts) % len(available)]
+            if model not in exhausted_set:
+                # Update the index for the next call
+                if tier == "flash":
+                    self._flash_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
+                else:
+                    self._pro_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
+                return model
+            attempts += 1
+
+        return None
+
+    def _mark_fallback_exhausted(self, model: str) -> None:
+        """Mark a fallback model as exhausted (hit 429).
+
+        Args:
+            model: Model name that hit 429
+        """
+        tier = self._infer_model_tier(model)
+        if tier == "flash":
+            self._exhausted_flash_fallbacks.add(model)
+            logger.info(f"Fallback flash model {model} marked as exhausted due to 429")
+        else:
+            self._exhausted_pro_fallbacks.add(model)
+            logger.info(f"Fallback pro model {model} marked as exhausted due to 429")
+
+    def _reset_fallbacks(self, tier: str) -> None:
+        """Reset exhausted fallbacks for a tier.
+
+        Args:
+            tier: "flash" or "pro"
+        """
+        if tier == "flash":
+            self._exhausted_flash_fallbacks.clear()
+        else:
+            self._exhausted_pro_fallbacks.clear()
+
     def _get_active_model_config_with_switch_detection(self) -> tuple:
         """Get model config and detect if model has switched.
 
@@ -1080,13 +1161,14 @@ class DCPOptimizer(DCPOptimizerBase):
             kept_lines = []
             for line in lines:
                 # Retain key metric lines
-                if any(kw in line.lower() for kw in ['wns', 'tns', 'failing', 'clock', 'target', 'level']):
+                if any(kw in line.lower() for kw in ['wns', 'tns', 'failing', 'clock', 'target', 'level',
+                                              'slack', 'delay', 'path', 'endpoint', 'start', 'endpoint']):
                     kept_lines.append(line)
                 # Retain headers
                 elif line.strip().startswith('---') or line.strip().startswith('==='):
                     kept_lines.append(line)
             if kept_lines:
-                filtered = '\n'.join(kept_lines[:100])  # Keep at most 100 lines
+                filtered = '\n'.join(kept_lines[:200])  # Keep at most 200 lines
                 if len(result) > len(filtered):
                     return filtered + f"\n...[timing report truncated, original: {len(result)} chars]..."
             return result[:TOOL_RESULT_TRUNCATE]
@@ -1936,16 +2018,35 @@ class DCPOptimizer(DCPOptimizerBase):
                     break  # Success, exit retry loop
                 except Exception as e:
                     last_exception = e
-                    # On rate limit (429), switch to pro model immediately
+                    # On rate limit (429), switch to fallback model
                     if isinstance(e, OpenAIRateLimitError) or ("429" in str(e) and "rate" in str(e).lower()):
-                        logger.warning(f"Rate limit on {current_model}, switching to pro model: {self.model_planner}")
-                        current_model = self.model_planner
-                        self.last_used_model = current_model
-                        # Don't retry with flash, let the retry mechanism use the new model
-                        wait_time = retry_delay * (2 ** retry)
-                        logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
-                        await asyncio.sleep(wait_time)
-                        continue
+                        current_tier = self._infer_model_tier(current_model)
+                        # Mark current model as exhausted if it's a fallback
+                        if current_model in self.flash_fallback_models or current_model in self.pro_fallback_models:
+                            self._mark_fallback_exhausted(current_model)
+
+                        # Try to get next fallback model for current tier
+                        next_fallback = self._get_next_fallback_model(current_tier)
+
+                        if next_fallback:
+                            logger.warning(f"Rate limit on {current_model}, switching to fallback: {next_fallback}")
+                            current_model = next_fallback
+                            self.last_used_model = current_model
+                            wait_time = retry_delay * (2 ** retry)
+                            logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            # All fallbacks exhausted, fallback to model_planner
+                            logger.warning(f"All {current_tier} fallback models exhausted, switching to model_planner: {self.model_planner}")
+                            current_model = self.model_planner
+                            self.last_used_model = current_model
+                            # Reset fallback state for potential future use
+                            self._reset_fallbacks(current_tier)
+                            wait_time = retry_delay * (2 ** retry)
+                            logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
+                            await asyncio.sleep(wait_time)
+                            continue
                     if retry < max_retries - 1:
                         wait_time = retry_delay * (2 ** retry)  # Exponential backoff
                         logger.warning(f"API call failed, retry {retry+1}/{max_retries}, waiting {wait_time}s: {e}")
