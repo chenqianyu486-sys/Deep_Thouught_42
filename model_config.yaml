@@ -4,7 +4,7 @@
 
 flash:
   model_tier: "flash"
-  model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
+  model_name: "minimax/minimax-m2.7/minimax/fp8"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 40000       # Trigger soft compression at 40K (16% of max) to build cumulative summaries early
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -16,8 +16,8 @@ flash:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
+    - "deepseek/deepseek-v4-flash/deepseek"
     - "qwen/qwen3.6-flash"
-    - "xiaomi/mimo-v2-flash"
 
 pro:
   model_tier: "pro"
