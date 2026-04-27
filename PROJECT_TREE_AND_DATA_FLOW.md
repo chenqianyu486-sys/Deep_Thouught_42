@@ -200,6 +200,7 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | Intra-iteration model switch | Re-evaluate model when task category changes during tool execution loop |
 | Tool round limit | Increased from 15 to 22 per iteration |
 | Iteration checkpoint check | Mandatory checkpoint save + get_wns check before proceeding to next iteration |
+| WNS regression rollback | If WNS < 0 and worse than best, auto-rollback to best checkpoint; completion check uses `latest_wns` not `best_wns` |
 
 ## 10. Iteration Exit Conditions
 
@@ -215,6 +216,9 @@ Iteration proceeds to next round if ALL conditions met:
 Iteration ends when:
 - is_done = (wns_target_met OR max_iterations_reached)
 - Checkpoint + get_wns check FAILED → iteration skipped (continue, no counter update)
+
+Completion judgment uses latest_wns (current state), NOT best_wns (historical best)
+WNS regression (WNS < 0 and worse than best) triggers automatic rollback to best checkpoint
 ```
 
 ## 11. Key Constants

@@ -631,6 +631,7 @@ class DCPOptimizer(DCPOptimizerBase):
         # Track optimization progress
         self.iteration = 0
         self.best_wns = float('-inf')
+        self._best_wns_iteration: Optional[int] = None  # Track which iteration achieved best WNS
         self.latest_wns: Optional[float] = None  # Cache for O(1) _get_current_wns()
         self.current_task_type = ""  # Current task type
         # Task type success rate tracking (task_type -> {success: int, total: int})
@@ -2075,13 +2076,14 @@ class DCPOptimizer(DCPOptimizerBase):
 
             # [FIX] Completion flag no longer depends on model output, changed to objective data judgment
             # 5. Objective judgment of whether optimization is complete
-            current_best_wns = self.best_wns if self.best_wns > float('-inf') else None
+            # Use latest_wns (current state) instead of best_wns (historical best)
+            current_valid = (self.latest_wns is not None and
+                             self.latest_wns >= self.WNS_TARGET_THRESHOLD and
+                             self._is_valid_wns(self.latest_wns))
 
             # Condition 1: WNS target check (core completion condition)
             # Must pass sanity check to prevent false positives from parsing errors
-            wns_target_met = (current_best_wns is not None and
-                              current_best_wns >= self.WNS_TARGET_THRESHOLD and
-                              self._is_valid_wns(current_best_wns))
+            wns_target_met = current_valid
 
             # Condition 2: Hard limit reached (consecutive no-improvement count exceeds threshold)
             max_iterations_reached = (self.global_no_improvement >= self.GLOBAL_NO_IMPROVEMENT_LIMIT)
@@ -2093,7 +2095,7 @@ class DCPOptimizer(DCPOptimizerBase):
             if is_done:
                 reasons = []
                 if wns_target_met:
-                    reasons.append(f"WNS target met ({current_best_wns:.3f} ns >= {self.WNS_TARGET_THRESHOLD:.1f} ns)")
+                    reasons.append(f"WNS target met ({self.latest_wns:.3f} ns >= {self.WNS_TARGET_THRESHOLD:.1f} ns)")
                 if max_iterations_reached:
                     reasons.append(f"Hard limit reached ({self.global_no_improvement} consecutive no improvements)")
                 logger.info(f"Optimization ending - Reasons: {'; '.join(reasons)}")
@@ -2333,7 +2335,20 @@ CRITICAL OPTIMIZATION RULES:
                             try:
                                 wns_value = float(wns_result.strip())
                                 if self._is_valid_wns(wns_value):
-                                    self.best_wns = wns_value
+                                    # Regression: WNS < 0 and worse than best
+                                    if wns_value < 0 and wns_value < self.best_wns:
+                                        logger.warning(f"WNS regressed: {self.best_wns:.3f} -> {wns_value:.3f}, rolling back...")
+                                        best_iter = self._best_wns_iteration
+                                        if best_iter is not None:
+                                            rollback_path = self._get_intermediate_checkpoint_path(best_iter)
+                                            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(rollback_path)})
+                                            self.latest_wns = self.best_wns  # Restore to best value (checkpoint restored)
+                                        # Do not update best_wns
+                                    else:
+                                        self.latest_wns = wns_value  # Normal update
+                                        if wns_value > self.best_wns:
+                                            self.best_wns = wns_value
+                                            self._best_wns_iteration = self.iteration
                                     get_wns_success = True
                                     logger.info(f"Iteration {self.iteration}: get_wns succeeded, WNS={wns_value}")
                                 else:
