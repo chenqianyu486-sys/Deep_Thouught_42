@@ -893,15 +893,32 @@ class DCPOptimizer(DCPOptimizerBase):
             "flash" or "pro" based on model name
         """
         if not model_name:
-            return "flash"  # Default
+            return "flash"
 
         model_lower = model_name.lower()
+
+        # Known pro models (main model + fallbacks)
+        if model_lower in [
+            "xiaomi/mimo-v2.5-pro",
+            "deepseek/deepseek-v4-pro",
+            "qwen/qwen3.6-plus"
+        ]:
+            return "pro"
+
+        # Known flash models (main model + fallbacks)
+        if model_lower in [
+            "deepseek/deepseek-v4-flash",
+            "qwen/qwen3.6-flash",
+            "xiaomi/mimo-v2-flash"
+        ]:
+            return "flash"
+
+        # Generic fallback for unknown models
         if "pro" in model_lower or "planner" in model_lower:
             return "pro"
         elif "flash" in model_lower or "worker" in model_lower:
             return "flash"
         else:
-            # Unknown model, use conservative default
             return "flash"
 
     def _get_previous_model_tier(self) -> Optional[str]:
@@ -1435,7 +1452,13 @@ class DCPOptimizer(DCPOptimizerBase):
             # If wns_improvement >= 0 (improving or stable): no bias adjustment
 
         # ── Decision threshold ────────────────────────────────────────────────
-        if planner_score > worker_score + 1:   # Margin of 2 required to switch, avoids thrashing
+        # Filter out exhausted models
+        worker_exhausted = self.model_worker in self._exhausted_flash_fallbacks or self.model_worker in self._exhausted_pro_fallbacks
+
+        if worker_exhausted:
+            logger.info(f"Model {self.model_worker} is exhausted, forcing planner")
+            selected_model = self.model_planner
+        elif planner_score > worker_score + 1:   # Margin of 2 required to switch, avoids thrashing
             selected_model = self.model_planner
         elif worker_score > planner_score:
             selected_model = self.model_worker
@@ -2058,16 +2081,19 @@ class DCPOptimizer(DCPOptimizerBase):
                     last_exception = e
                     # On rate limit (429), switch to fallback model
                     if isinstance(e, OpenAIRateLimitError) or "429" in str(e):
+                        # Save the model that hit rate limit BEFORE reassignment
+                        rate_limited_model = current_model
                         current_tier = self._infer_model_tier(current_model)
-                        # Mark current model as exhausted if it's a fallback
-                        if current_model in self.flash_fallback_models or current_model in self.pro_fallback_models:
-                            self._mark_fallback_exhausted(current_model)
+
+                        # Mark current model as exhausted (both original and fallback models)
+                        self._mark_fallback_exhausted(rate_limited_model)
 
                         # Try to get next fallback model for current tier
                         next_fallback = self._get_next_fallback_model(current_tier)
 
                         if next_fallback:
-                            logger.warning(f"Rate limit on {current_model}, switching to fallback: {next_fallback}")
+                            self._mark_fallback_exhausted(next_fallback)
+                            logger.warning(f"Rate limit on {rate_limited_model}, switching to fallback: {next_fallback}")
                             current_model = next_fallback
                             self.last_used_model = current_model
                             wait_time = retry_delay * (2 ** retry)
@@ -2076,6 +2102,9 @@ class DCPOptimizer(DCPOptimizerBase):
                             continue
                         else:
                             # All fallbacks exhausted, fallback to model_planner
+                            # Clear all exhausted states for clean slate with planner
+                            self._exhausted_flash_fallbacks.clear()
+                            self._exhausted_pro_fallbacks.clear()
                             logger.warning(f"All {current_tier} fallback models exhausted, switching to model_planner: {self.model_planner}")
                             current_model = self.model_planner
                             self.last_used_model = current_model

@@ -211,7 +211,7 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | Tool round limit | Increased from 15 to 22 per iteration |
 | Iteration checkpoint check | Mandatory checkpoint save + get_wns check before proceeding to next iteration |
 | WNS regression rollback | If WNS < 0 and worse than best, auto-rollback to best checkpoint; completion check uses `latest_wns` not `best_wns` |
-| 429 rate limit fallback | Separate fallback model lists per tier (flash/pro); round-robin with exhaustion tracking |
+| 429 rate limit fallback | Separate fallback model lists per tier; correct log shows rate-limited model; mark both original and fallback as exhausted; _select_model() filters exhausted models |
 
 ## 10. Iteration Exit Conditions
 
@@ -255,14 +255,29 @@ WNS_TARGET_THRESHOLD = 0.0           # WNS target (0.0 ns = timing converged)
 
 ```
 On 429 error:
-1. Mark current model as exhausted (if it's a fallback model)
-2. Try next fallback model from current tier's list (round-robin)
-3. If all fallbacks exhausted → switch to model_planner
-4. Reset exhausted set after switching to model_planner
+1. Save rate_limited_model BEFORE reassignment (fixes log showing wrong model)
+2. Mark rate_limited_model as exhausted (original model, not just fallback models)
+3. Try next fallback model from current tier's list (round-robin)
+4. Mark next_fallback as exhausted too
+5. If all fallbacks exhausted → switch to model_planner
+6. Clear BOTH exhausted sets (flash and pro) for clean slate with planner
+
+_select_model() also checks if model_worker is exhausted:
+- If model_worker in _exhausted_flash_fallbacks or _exhausted_pro_fallbacks → force planner
+- Prevents immediately re-selecting a model that just hit 429
 
 Key state variables:
 - _flash_fallback_index / _pro_fallback_index: round-robin position
 - _exhausted_flash_fallbacks / _exhausted_pro_fallbacks: track exhausted models
+
+Model tier inference (_infer_model_tier):
+- Uses exact matching for known models (pro: xiaomi/mimo-v2.5-pro, deepseek/deepseek-v4-pro, qwen/qwen3.6-plus)
+- flash: deepseek/deepseek-v4-flash, qwen/qwen3.6-flash, xiaomi/mimo-v2-flash
+- Generic fallback: "pro"/"planner" → pro tier, "flash"/"worker" → flash tier
+
+Example log after fix:
+"Rate limit on deepseek/deepseek-v4-flash, switching to fallback: qwen/qwen3.6-flash"
+```
 
 ## 13. Console Exit Intervention
 
