@@ -263,4 +263,21 @@ On 429 error:
 Key state variables:
 - _flash_fallback_index / _pro_fallback_index: round-robin position
 - _exhausted_flash_fallbacks / _exhausted_pro_fallbacks: track exhausted models
+
+## 13. Console Exit Intervention
+
+User can type `quit` in the console to request graceful exit without killing the process.
+
+```
+Implementation:
+- _user_exit_requested: threading.Event flag
+- _start_console_reader(): daemon thread reading stdin for "quit"
+- _check_exit_requested(): returns True if exit was requested
+
+Exit checkpoints:
+- optimize() while loop: checks before iteration starts → saves checkpoint + summary
+- get_completion() tool_round loop: checks between tool rounds → breaks loop gracefully
+```
+
+See [docs/CONSOLE_EXIT.md](docs/CONSOLE_EXIT.md) for usage details.
 ```

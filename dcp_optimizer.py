@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from collections import OrderedDict
 from contextlib import AsyncExitStack
@@ -662,6 +663,11 @@ class DCPOptimizer(DCPOptimizerBase):
         self.global_no_improvement = 0               # Global consecutive no-improvement count
         self.iteration_tool_errors = []              # Tool errors in current iteration for failure classification
 
+        # === Section 7.1.1: Console Exit Intervention ===
+        self._user_exit_requested = threading.Event()
+        self._console_reader_started = False
+        self._start_console_reader()
+
         # Threshold configuration
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
@@ -1086,6 +1092,32 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Under threshold - record as skipped
         self.compression_skipped += 1
+
+    def _start_console_reader(self) -> None:
+        """Start a background thread that listens for 'quit' on stdin to request graceful exit."""
+        if self._console_reader_started:
+            return
+        self._console_reader_started = True
+
+        def read_console():
+            try:
+                while True:
+                    line = sys.stdin.readline()
+                    if not line:
+                        break
+                    if line.strip().lower() == "quit":
+                        logger.info("User requested exit via console 'quit' command")
+                        self._user_exit_requested.set()
+                        break
+            except Exception:
+                pass
+
+        t = threading.Thread(target=read_console, daemon=True)
+        t.start()
+
+    def _check_exit_requested(self) -> bool:
+        """Check if user requested exit. Returns True if exit requested."""
+        return self._user_exit_requested.is_set()
 
     def _record_compression_event(self, trigger: str, tokens_before: int, tokens_after: int, iteration: int = 0) -> None:
         """Record structured compression event for observability.
@@ -1968,6 +2000,12 @@ class DCPOptimizer(DCPOptimizerBase):
         tool_round = 0
         while True:
             tool_round += 1
+            # Check for user-requested exit between tool rounds
+            if self._check_exit_requested():
+                logger.info(f"User requested exit during tool round {tool_round}, breaking inner loop")
+                content = f"[User requested exit during tool round {tool_round}, iteration {self.iteration}]"
+                is_done = False
+                break
             if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
                 logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
                 content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
@@ -2019,7 +2057,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 except Exception as e:
                     last_exception = e
                     # On rate limit (429), switch to fallback model
-                    if isinstance(e, OpenAIRateLimitError) or ("429" in str(e) and "rate" in str(e).lower()):
+                    if isinstance(e, OpenAIRateLimitError) or "429" in str(e):
                         current_tier = self._infer_model_tier(current_model)
                         # Mark current model as exhausted if it's a fallback
                         if current_model in self.flash_fallback_models or current_model in self.pro_fallback_models:
@@ -2332,6 +2370,13 @@ CRITICAL OPTIMIZATION RULES:
             self.iteration_tool_errors = []  # Reset tool error tracking for this iteration
             print()
             logger.info(f"=== Iteration {self.iteration} ===")
+
+            # Check for user-requested exit via console "quit"
+            if self._check_exit_requested():
+                logger.info(f"User requested exit at iteration {self.iteration}, saving checkpoint and exiting gracefully...")
+                self.end_time = time.time()
+                self._print_optimization_summary()
+                return False
 
             try:
                 response_text, is_done = await self.get_completion()
