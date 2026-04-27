@@ -56,7 +56,6 @@ class WorkerCompressor(YAMLStructuredCompressor):
         - Error messages: 3000 chars (error type +简短 message)
         - General: 1500 chars
         """
-        import re
         content_len = len(content)
         content_lower = content.lower()
 

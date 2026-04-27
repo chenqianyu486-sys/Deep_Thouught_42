@@ -54,11 +54,17 @@ class InMemoryContextStore(ContextStore):
     def restore(self, snapshot: ContextSnapshot) -> None:
         """Restore state from snapshot.
 
-        Note: ContextSnapshot only stores metadata (count, timestamps), not actual messages.
-        Full state restoration would require storing the message list itself, which is not
-        currently implemented. This method is a no-op.
+        Raises:
+            NotImplementedError: ContextSnapshot does not store message data,
+            so restoration is not possible. This method exists for interface
+            compatibility but cannot function as-is.
         """
-        pass
+        raise NotImplementedError(
+            "ContextSnapshot.restore() is not implemented: snapshot contains "
+            "only metadata (count, timestamp), not actual messages. "
+            "To support restore(), ContextSnapshot would need to store "
+            "a full message list."
+        )
 
     def clear(self) -> None:
         count = len(self._messages)

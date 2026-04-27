@@ -396,6 +396,12 @@ class DCPOptimizerBase:
     
     async def cleanup(self):
         """Clean up resources."""
+        # Unsubscribe EventBus handlers to prevent memory leak
+        if hasattr(self, '_event_compressed_token'):
+            self._event_bus.unsubscribe_by_token(self._event_compressed_token)
+        if hasattr(self, '_layer_promoted_token'):
+            self._event_bus.unsubscribe_by_token(self._layer_promoted_token)
+
         rw_file = self._rw_log_file
         v_file = self._v_log_file
         self._rw_log_file = None
@@ -720,8 +726,8 @@ class DCPOptimizer(DCPOptimizerBase):
         self._agent_context_manager = AgentContextManager(event_bus=self._event_bus)
 
         # === Phase 3: Subscribe to EventBus events ===
-        self._event_bus.subscribe(CMEventType.CONTEXT_COMPRESSED, self._on_context_compressed)
-        self._event_bus.subscribe(CMEventType.LAYER_PROMOTED, self._on_layer_promoted)
+        self._event_compressed_token = self._event_bus.subscribe(CMEventType.CONTEXT_COMPRESSED, self._on_context_compressed)
+        self._layer_promoted_token = self._event_bus.subscribe(CMEventType.LAYER_PROMOTED, self._on_layer_promoted)
 
     # === Section 7.1.1: messages Property (Phase 2) ===
     # Route all message access through DCPOptimizerCompat / MemoryManager
@@ -2560,12 +2566,17 @@ CRITICAL OPTIMIZATION RULES:
                     logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
                     continue  # Skip to next iteration without _on_iteration_end
 
-                # [NEW] Skip per-iteration validation if this is the final iteration
-                # (final validation will run after the is_done check below)
-                if self.validation_enabled and hasattr(self, 'output_dcp') and self.output_dcp.exists() and not is_done:
+                # [NEW] Per-iteration validation using intermediate checkpoint (every N iterations)
+                # Use validation_interval to avoid running validation too frequently
+                if (self.validation_enabled and
+                    hasattr(self, 'output_dcp') and
+                    intermediate_dcp is not None and
+                    intermediate_dcp.exists() and
+                    not is_done and
+                    self.iteration % self.validation_interval == 0):
                     logger.info(f"Running mandatory validation (500 vectors) for iteration {self.iteration}...")
                     validation_passed = await self._run_full_validation(
-                        self.output_dcp,
+                        intermediate_dcp,
                         label=f"iteration_{self.iteration}",
                         num_vectors=500
                     )
@@ -2853,41 +2864,6 @@ CRITICAL OPTIMIZATION RULES:
         except Exception as e:
             logger.warning(f"Failed to save intermediate checkpoint: {e}")
             return None
-
-    async def _run_phase1_validation(self, intermediate_dcp: Path, iteration: int) -> bool:
-        """Run Phase 1 structural validation. Returns True if passed. Timeouts/errors don't block optimization."""
-        if not self.validation_enabled or not intermediate_dcp.exists():
-            return True
-
-        script_path = Path(__file__).parent / "validate_dcps.py"
-        validation_cmd = [
-            sys.executable, "-u",
-            str(script_path),
-            str(self.input_dcp),
-            str(intermediate_dcp),
-            "--phase1-only"
-        ]
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *validation_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
-
-            if proc.returncode == 0:
-                logger.info(f"Phase 1 validation PASSED for iteration {iteration}")
-                return True
-            else:
-                logger.warning(f"Phase 1 validation FAILED for iteration {iteration}")
-                return False
-        except asyncio.TimeoutExpired:
-            logger.warning(f"Phase 1 validation TIMEOUT for iteration {iteration}")
-            return True
-        except Exception as e:
-            logger.warning(f"Phase 1 validation ERROR for iteration {iteration}: {e}")
-            return True
 
     async def _run_full_validation(self, dcp: Path, label: str = "final", num_vectors: int = 10000) -> bool:
         """Run full Phase 1 + Phase 2 validation. Used for final DCP only."""

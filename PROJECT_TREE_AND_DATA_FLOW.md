@@ -189,9 +189,15 @@ pro:
 ## 7. DCP Validation Integration
 
 ```
-Every iteration end (except final): Validation (500 vectors) - failure triggers rollback + skip iteration
+Every N iterations (validation_interval=5): Validation (500 vectors) on intermediate checkpoint - failure triggers rollback + skip iteration
 On is_done: Final full validation (Phase 1 + Phase 2, 10000 vectors)
 ```
+
+Validation trigger conditions (all must be true):
+- validation_enabled = True
+- intermediate_dcp exists (not output_dcp, which is only written at completion)
+- not is_done (skip on final iteration)
+- iteration % validation_interval == 0 (run every 5 iterations by default)
 
 ## 8. Prompt Logger
 
@@ -223,6 +229,14 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | Iteration-aware scoring | Current iteration messages get 1.5x weight, previous iteration 1.2x |
 | WNS trend scoring | Tool results boosted 1.2x when WNS improving, 1.3x when degrading |
 | max_chars_multiplier | Planner=1.0 (full), Worker=0.5 (aggressive truncation) |
+| Per-iteration validation | Fixed validation trigger: uses intermediate_dcp (not output_dcp), runs every 5 iterations (validation_interval), failure triggers rollback |
+| Dead code cleanup | Removed unused `_run_phase1_validation()` method |
+| EventBus memory leak | DCPOptimizer.cleanup() now unsubscribes EventBus handlers to prevent memory leak |
+| ContextSnapshot.restore() | Now raises NotImplementedError (was no-op, now fail-fast) |
+| WorkingMemory capacity check | add_message() now checks token limits and logs warnings |
+| HistoricalMemory index | Changed from list to set for O(1) membership and consistent eviction |
+| Tool call name preservation | Compression now preserves tool_call function names in YAML output |
+| Dead config fields | Added DEPRECATED comments to unused recent_window, tool_result_truncate, relevance_threshold, age_based_decay |
 
 ## 10. Iteration Exit Conditions
 

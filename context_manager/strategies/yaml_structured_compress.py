@@ -400,6 +400,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
         sorted_msgs = sorted(messages, key=lambda x: x[1], reverse=True)
 
         selected = []
+        selected_keys: set[tuple[int, float, tuple]] = set()  # O(1) membership check
         current_tokens = 0
 
         # First pass: add high-importance messages
@@ -410,11 +411,13 @@ class YAMLStructuredCompressor(CompressionStrategy):
             msg_tokens = self._estimate_tokens([msg])
             if current_tokens + msg_tokens <= budget:
                 selected.append((msg, importance, topic))
+                selected_keys.add((id(msg), importance, tuple(topic)))
                 current_tokens += msg_tokens
 
         # Second pass: fill remaining budget with medium importance
         for msg, importance, topic in sorted_msgs:
-            if (msg, importance, topic) in selected:
+            key = (id(msg), importance, tuple(topic))
+            if key in selected_keys:  # O(1) lookup
                 continue
             if importance < min_importance_threshold * 0.5:
                 continue
@@ -422,6 +425,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
             msg_tokens = self._estimate_tokens([msg])
             if current_tokens + msg_tokens <= budget:
                 selected.append((msg, importance, topic))
+                selected_keys.add(key)
                 current_tokens += msg_tokens
 
         return selected
@@ -511,6 +515,17 @@ class YAMLStructuredCompressor(CompressionStrategy):
             turn['importance'] = round(importance, 2)
             if topics:
                 turn['topics'] = topics
+
+            # Preserve tool_call function names if present
+            if msg.tool_calls:
+                tool_names = []
+                for tc in msg.tool_calls:
+                    if isinstance(tc, dict) and "function" in tc:
+                        tool_names.append(tc["function"].get("name", "unknown"))
+                    elif isinstance(tc, dict):
+                        tool_names.append(tc.get("name", "unknown"))
+                if tool_names:
+                    turn['tool_calls'] = tool_names
 
             # Smart truncate long content (adaptive max_chars based on content type)
             content = self._smart_truncate_content(msg.content)

@@ -55,7 +55,6 @@ class PlannerCompressor(YAMLStructuredCompressor):
         - Error messages: 8000 chars (preserve full debugging context)
         - General: 5000 chars
         """
-        import re
         content_len = len(content)
         content_lower = content.lower()
 

@@ -12,8 +12,9 @@ from ..events import EventBus
 class HistoricalMemoryConfig:
     """Configuration for Historical Memory."""
     max_entries: int = 10_000
-    relevance_threshold: float = 0.5
-    age_based_decay: float = 0.95
+    # DEPRECATED: unused fields - will be removed in future version
+    relevance_threshold: float = 0.5  # DEPRECATED: not used
+    age_based_decay: float = 0.95  # DEPRECATED: not used
 
 
 class HistoricalMemory:
@@ -24,7 +25,7 @@ class HistoricalMemory:
         self._event_bus = event_bus
         self._entries: dict[str, HistoricalEntry] = {}
         self._index_by_time: list[str] = []
-        self._index_by_importance: list[str] = []
+        self._index_by_importance: set[str] = set()
         self._index_by_task_type: dict[str, list[str]] = {}
 
     def add(
@@ -43,9 +44,8 @@ class HistoricalMemory:
             old_entry = self._entries.get(oldest_id)
             self._entries.pop(oldest_id, None)
             self._index_by_time.pop(0)
-            # Remove from importance index
-            if oldest_id in self._index_by_importance:
-                self._index_by_importance.remove(oldest_id)
+            # Remove from importance index (use discard for safety)
+            self._index_by_importance.discard(oldest_id)
             # Remove from task type index
             if old_entry and old_entry.task_type and old_entry.task_type in self._index_by_task_type:
                 try:
@@ -84,8 +84,13 @@ class HistoricalMemory:
             candidate_ids = self._index_by_task_type.get(query.task_type, [])
             candidates = [self._entries[eid] for eid in candidate_ids if eid in self._entries]
         elif not query.text and not query.agent_id and not query.task_type:
-            # Use importance index only (reverse it for descending order)
-            candidates = [self._entries[eid] for eid in reversed(self._index_by_importance) if eid in self._entries]
+            # Use importance index only (sort by importance descending at retrieval time)
+            sorted_by_importance = sorted(
+                [eid for eid in self._index_by_importance if eid in self._entries],
+                key=lambda eid: self._entries[eid].importance_score,
+                reverse=True
+            )
+            candidates = [self._entries[eid] for eid in sorted_by_importance]
         else:
             # Fall back to full scan for complex queries
             candidates = list(self._entries.values())
@@ -128,11 +133,8 @@ class HistoricalMemory:
                 time_idx = i + 1
         self._index_by_time.insert(time_idx, entry_id)
 
-        imp_idx = 0
-        for i, eid in enumerate(self._index_by_importance):
-            if self._entries[eid].importance_score < entry.importance_score:
-                imp_idx = i + 1
-        self._index_by_importance.insert(imp_idx, entry_id)
+        # Add to importance set (order handled at retrieval time via sorting)
+        self._index_by_importance.add(entry_id)
 
         if entry.task_type:
             if entry.task_type not in self._index_by_task_type:

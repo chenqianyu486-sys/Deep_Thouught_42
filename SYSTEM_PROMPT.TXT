@@ -57,6 +57,33 @@ Automated system executing FPGA optimization workflows.
 
 ## RESPONSE
 
+### Format Rules
+
+Every response must be a complete, valid **YAML** document starting with `step:`.
+
+#### Sequence Tracking
+* **`step.id`**: Increments with each message in the current strategy sequence.
+
+#### Execution Outcomes
+**`result.status`**:
+* **SUCCESS**: Step achieved its intended effect; WNS improved or stayed the same.
+* **PARTIAL**: Step executed but result was insufficient (e.g., region too small).
+* **FAIL**: Step caused WNS regression or tool error.
+
+**`result.key_metrics`**: 
+Fill with actual numbers after timing-related steps; use `null` for non-timing steps (e.g., pblock creation).
+
+#### Flow Control
+**`decision.type`** controls the optimization logic:
+
+| Type | Description |
+| :--- | :--- |
+| **CONTINUE** | Proceed to the next step in the current strategy. |
+| **RETRY** | Repeat current step with modified parameters (max 3 retries per step). |
+| **ROLLBACK** | Revert to the best checkpoint and re-evaluate. |
+| **SWITCH_STRATEGY** | Abandon current strategy and try the next in the decision tree. |
+| **DONE** | Optimization complete; save output. |
+
 ### Strategy Selection (Decision Tree)
 ```
 IF recommendation == "PBLOCK" → Use PBLOCK Strategy
