@@ -3491,7 +3491,38 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             if final_fmax is not None:
                 print(f"*** Final achievable fmax: {final_fmax:.2f} MHz ***")
             print()
-            
+
+            # ================================================================
+            # Step 9.5: Verify get_wns tool
+            # ================================================================
+            print("\n" + "-"*60)
+            print("STEP 9.5: Verify get_wns tool")
+            print("-"*60)
+
+            try:
+                get_wns_result = await self.call_vivado_tool("get_wns", {}, timeout=60.0)
+                print(f"get_wns raw result: '{get_wns_result}'")
+                if get_wns_result.strip() == "PARSE_ERROR":
+                    print("*** get_wns returned PARSE_ERROR ***")
+                    logger.warning("get_wns returned PARSE_ERROR in test mode")
+                else:
+                    try:
+                        get_wns_value = float(get_wns_result.strip())
+                        print(f"*** get_wns WNS: {get_wns_value} ns ***")
+                        if hasattr(self, 'final_wns'):
+                            diff = abs(get_wns_value - self.final_wns)
+                            if diff < 0.01:
+                                print("✓ get_wns matches timing_summary (diff < 0.01 ns)")
+                            else:
+                                print(f"WARNING: get_wns differs from timing_summary by {diff:.4f} ns")
+                        logger.info(f"get_wns verification: {get_wns_value} ns (timing_summary: {self.final_wns} ns)")
+                    except ValueError as e:
+                        print(f"*** get_wns parse error: {e} ***")
+                        logger.warning(f"get_wns cannot parse '{get_wns_result}': {e}")
+            except Exception as e:
+                print(f"*** get_wns call failed: {e} ***")
+                logger.error(f"get_wns call failed in test mode: {e}")
+
             # ================================================================
             # Write final DCP and report results
             # ================================================================
