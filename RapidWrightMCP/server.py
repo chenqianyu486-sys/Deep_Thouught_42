@@ -364,6 +364,60 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["golden_dcp", "revised_dcp"]
             }
+        ),
+        Tool(
+            name="analyze_net_detour",
+            description="""Analyze detour ratio for cells on critical paths.
+
+            Computes detour_ratio = routed_path_length / manhattan_distance for nets
+            on critical paths. A detour ratio > ~2.0 suggests a cell may benefit from
+            re-placement.
+
+            Input is a pin-path list as produced by Vivado's extract_critical_path_pins:
+            ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+
+            Requires design to be loaded via read_checkpoint first.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "pin_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of pin names from critical path (e.g., ['cell1/I0', 'cell1/O', 'cell2/I0'])"
+                    },
+                    "detour_threshold": {
+                        "type": "number",
+                        "description": "Minimum detour ratio to report (default: 2.0)",
+                        "default": 2.0
+                    }
+                },
+                "required": ["pin_paths"]
+            }
+        ),
+        Tool(
+            name="optimize_cell_placement",
+            description="""Optimize cell placement by moving cells to the centroid of their connections.
+
+            For each cell:
+            1. Collect tile locations of all connected pins
+            2. Compute centroid using ECOPlacementHelper
+            3. Unplace cell and unroute its nets
+            4. Spiral outward from centroid to find empty compatible site
+            5. Place cell and re-route intra-site wiring
+
+            After optimization, use write_checkpoint to save and Vivado to re-route
+            and verify timing improvement.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cell_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of cell names to optimize"
+                    }
+                },
+                "required": ["cell_names"]
+            }
         )
     ]
 
@@ -475,7 +529,18 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 golden_dcp=arguments["golden_dcp"],
                 revised_dcp=arguments["revised_dcp"]
             )
-        
+
+        elif name == "analyze_net_detour":
+            result = rw.analyze_net_detour(
+                pin_paths=arguments["pin_paths"],
+                detour_threshold=arguments.get("detour_threshold", 2.0)
+            )
+
+        elif name == "optimize_cell_placement":
+            result = rw.optimize_cell_placement(
+                cell_names=arguments["cell_names"]
+            )
+
         else:
             result = {"error": f"Unknown tool: {name}"}
 

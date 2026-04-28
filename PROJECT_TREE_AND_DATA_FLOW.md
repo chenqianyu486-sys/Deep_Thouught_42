@@ -22,7 +22,19 @@ fpl26_optimization_contest/
 │       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60
 │       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=20
 ├── RapidWrightMCP/               # RapidWright MCP服务器
-└── VivadoMCP/                    # Vivado MCP服务器
+│   ├── rapidwright_tools.py      # 工具函数实现
+│   ├── server.py                 # MCP服务器入口
+│   └── test_server.py            # 服务器测试
+├── VivadoMCP/                    # Vivado MCP服务器
+├── skills/                       # Skill框架（标准接口、注册发现机制）
+│   ├── __init__.py                  # 导出 Skill, SkillRegistry, SkillContext
+│   ├── base.py                      # Skill基类、元数据、结果定义
+│   ├── context.py                   # SkillContext依赖注入
+│   ├── registry.py                   # SkillRegistry注册发现
+│   ├── skill_decorator.py           # @skill装饰器
+│   ├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
+│   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
+│   └── test_skill_framework.py      # 集成测试（SkillRegistry/Skill类）
 ```
 
 ## 2. 核心数据流
@@ -79,6 +91,24 @@ PLANNER: xiaomi/mimo-v2.5-pro (1M context, 复杂推理)
 WORKER: deepseek/deepseek-v4-flash (500K context, 快速执行)
 - 429降级: 按层级fallback列表，轮询+耗尽追踪
 - 迭代内切换: 任务类别变化时重新评估模型
+```
+
+### 2.6 Skill 机制
+
+```
+skills/
+├── Skill (base.py)              # 抽象基类，定义 get_metadata() / execute()
+├── SkillMetadata                # 元数据：name, description, category, parameters
+├── SkillResult                  # 执行结果：success, data, error
+├── SkillContext                 # 依赖注入：design, initialized, tools
+├── SkillRegistry                # 注册/发现：register(), get(), list_all(), list_by_category()
+├── @skill decorator             # 自动注册 Skill 类
+└── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
+
+调用链:
+Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get() → Skill.execute()
+                                      ↓
+                            SkillContext(design=_current_design)
 ```
 
 ## 3. 事件系统

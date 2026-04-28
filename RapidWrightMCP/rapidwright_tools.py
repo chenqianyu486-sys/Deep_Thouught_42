@@ -1601,3 +1601,135 @@ def convert_fabric_region_to_pblock_ranges(
         traceback.print_exc()
         return {"error": str(e)}
 
+
+def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> Dict[str, Any]:
+    """
+    Analyze detour ratios for cells on critical paths.
+
+    This is a thin wrapper that delegates to the AnalyzeNetDetourSkill.
+
+    Args:
+        pin_paths: List of pin names from Vivado's extract_critical_path_pins
+        detour_threshold: Minimum ratio to flag as problematic (default 2.0)
+
+    Returns:
+        Dictionary with analysis results
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("analyze_net_detour")
+        if skill is None:
+            return {"error": "Skill 'analyze_net_detour' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
+
+        if not result.success:
+            return {"error": result.error}
+
+        # Convert dataclass results to dict for JSON serialization
+        results = result.data
+        results_dict = {}
+        for cell_name, res in results.items():
+            results_dict[cell_name] = {
+                "cell_name": res.cell_name,
+                "in_pin": res.in_pin,
+                "out_pin": res.out_pin,
+                "max_detour_ratio": res.max_detour_ratio,
+                "in_net_detour": res.in_net_detour,
+                "out_net_detour": res.out_net_detour,
+                "source_pin": res.source_pin,
+                "worst_sink_pin": res.worst_sink_pin
+            }
+
+        return {
+            "status": "success",
+            "cells_analyzed": len(results),
+            "detour_threshold": detour_threshold,
+            "results": results_dict
+        }
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error analyzing net detour: {e}")
+        return {"error": str(e)}
+
+
+def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
+    """
+    Optimize cell placement by moving cells to centroid of their connections.
+
+    This is a thin wrapper that delegates to the OptimizeCellPlacementSkill.
+
+    Args:
+        cell_names: List of cell names to optimize
+
+    Returns:
+        Dictionary with optimization results
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("optimize_cell_placement")
+        if skill is None:
+            return {"error": "Skill 'optimize_cell_placement' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute(context, cell_names=cell_names)
+
+        if not result.success:
+            return {"error": result.error}
+
+        # Convert dataclass results to dict for JSON serialization
+        results = result.data
+        results_dict = {}
+        for cell_name, res in results.items():
+            results_dict[cell_name] = {
+                "cell_name": res.cell_name,
+                "original_site": res.original_site,
+                "new_site": res.new_site,
+                "centroid_tile": res.centroid_tile,
+                "nets_unrouted": res.nets_unrouted,
+                "status": res.status,
+                "message": res.message
+            }
+
+        success_count = sum(1 for r in results.values() if r.status == "success")
+        error_count = sum(1 for r in results.values() if r.status == "error")
+        skipped_count = sum(1 for r in results.values() if r.status == "skipped")
+
+        return {
+            "status": "success",
+            "total_cells": len(cell_names),
+            "success_count": success_count,
+            "error_count": error_count,
+            "skipped_count": skipped_count,
+            "results": results_dict
+        }
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error optimizing cell placement: {e}")
+        return {"error": str(e)}
+
