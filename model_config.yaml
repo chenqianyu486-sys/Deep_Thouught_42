@@ -1,5 +1,5 @@
 # LLM Model Configuration for Context Management
-# Flash models: optimized for speed, smaller context window (500K tokens)
+# Flash models: optimized for speed, smaller context window (250K tokens)
 # Pro models: optimized for reasoning, larger context window (1M tokens)
 
 flash:
@@ -33,6 +33,5 @@ pro:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "google/gemini-3-flash-preview"
     - "xiaomi/mimo-v2.5-pro"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)
