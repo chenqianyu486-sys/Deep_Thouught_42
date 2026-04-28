@@ -220,14 +220,14 @@ implementing_custom_optimizations:
       location: rapidwright_tools.py
       template: |
         def optimize_<transformation>(parameters):
-            if not _initialized: return {"error": "Not initialized"}
-            if _current_design is None: return {"error": "No design loaded"}
+            if not _initialized: return {{"error": "Not initialized"}}
+            if _current_design is None: return {{"error": "No design loaded"}}
             try:
                 from com.xilinx.rapidwright.eco import <EcoClass>
                 # Apply transformation
-                return {"status": "success", "metrics": {...}}
+                return {{"status": "success", "metrics": {{...}}}}
             except Exception as e:
-                return {"error": str(e)}
+                return {{"error": str(e)}}
     - step: Register in server.py
       location: TOOL_DEFINITIONS list
 
