@@ -2,12 +2,12 @@
 Worker Compressor - Context compression optimized for WORKER model calls.
 
 Designed for fast execution tasks (get_utilization, get_timing, report_power, etc.):
-- Fewer conversation turns (preserve_turns=20)
-- Higher importance threshold (min_importance=0.35) to filter noise
-- Smaller token budget (35K) for quick responses
-- Aggressive truncation of tool results
+- Moderate conversation turns (preserve_turns=40)
+- Lower importance threshold (min_importance=0.15) to preserve more context
+- Token budget (35K) for responses
+- Standard truncation of tool results
 
-This compressor prioritizes speed and efficiency over context completeness.
+This compressor balances speed and context completeness.
 """
 
 import logging
@@ -39,21 +39,21 @@ class WorkerCompressor(YAMLStructuredCompressor):
         """Worker compressor with parameters optimized for quick execution."""
         super().__init__(
             token_budget=35_000,
-            preserve_turns=20,
-            min_importance_threshold=0.35,
-            max_chars_multiplier=0.5
+            preserve_turns=40,
+            min_importance_threshold=0.15,
+            max_chars_multiplier=1.0
         )
 
     def get_name(self) -> str:
         return "worker"
 
     def _get_adaptive_max_chars(self, content: str) -> int:
-        """Worker mode: aggressive truncation for speed.
+        """Worker mode: standard truncation.
 
-        Worker tasks need minimal context for quick execution:
-        - Timing reports: 4000 chars (summary only)
-        - Utilization reports: 2000 chars (percentages only)
-        - Error messages: 3000 chars (error type +简短 message)
+        Worker tasks need moderate context for execution:
+        - Timing reports: 4000 chars (summary + critical path)
+        - Utilization reports: 2000 chars (percentages)
+        - Error messages: 3000 chars (error type + message)
         - General: 1500 chars
         """
         content_len = len(content)

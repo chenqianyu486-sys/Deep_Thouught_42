@@ -52,9 +52,13 @@ DCPOptimizer._compress_context()  ← 单次触发点（LLM调用前）
 MemoryManager._compress("yaml_structured", context, model_tier)
          ↓
 YAMLStructuredCompressor:
-    - 正常模式: preserve_turns/min_importance 按model_config
+    - 正常模式: preserve_turns=40/min_importance=0.15 (worker), preserve_turns=60/min_importance=0.1 (planner)
     - 激进模式(hard_limit触发): preserve_turns=10, min_importance=0.7
     - system消息始终保护
+    - 两轮预算分配: 60%高重要性 + 40%中等重要性
+    - preserve_turns预留预算: ~1500 tokens/turn, 最多10K
+    - 工具调用保留参数（最多5个）
+    - 时序报告专门截断（保留header和data path行）
     - WNS状态注入时机: API调用时（不在working memory）
 ```
 
@@ -138,15 +142,15 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 # Worker: 速度优化, 250K max
 worker:
   soft_threshold: 40K, hard_limit: 200K
-  token_budget: 35K, preserve_turns: 40/10(激进)
-  min_importance: 0.15/0.7(激进)
-  fallback_models: ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
+  token_budget: 35K, preserve_turns: 40/10(激进), min_importance: 0.15/0.7(激进)
+  max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
+  fallback_models: ["deepseek/deepseek-v4-flash", "stepfun/step-3.5-flash"]
 
 # Planner: 推理优化, 1M max
 planner:
   soft_threshold: 120K, hard_limit: 300K
-  token_budget: 100K, preserve_turns: 60/10(激进)
-  min_importance: 0.1/0.7(激进)
+  token_budget: 100K, preserve_turns: 60/10(激进), min_importance: 0.1/0.7(激进)
+  max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
   fallback_models: ["xiaomi/mimo-v2.5-pro"]
 ```
 
@@ -174,6 +178,16 @@ WNS回归处理: WNS<0且差于best时自动回滚
 
 **效果**: 避免空迭代浪费工具额度，5次硬限制改为真正无改进时触发
 
+### 5.2 WNS解析修复（Bug Fix）
+
+**问题**: `report_timing_summary` 在 `phys_opt_design` 后执行时，输出缓冲区包含前一个命令的残留内容（许可证消息、命令回显等），导致 `parse_timing_summary_static()` 无法找到 `WNS(ns) TNS(ns)` 头，行返回 `None`。
+
+**修复**: `parse_timing_summary_static()` 增强了跳过非时序行的逻辑：
+- 跳过许可证消息 (`Attempting to get a license`, `Got license`)
+- 跳过 info/warning/error 消息 (`INFO:`, `WARNING:`, `ERROR:`, `Common 17-`)
+- 跳过命令回显 (`Command:`, `phys_opt_design`, `place_design`, `route_design`, `report_`)
+- 在整个输出中搜索时序头，而非假设在开头
+
 ## 6. 429降级机制
 
 ```
@@ -190,9 +204,11 @@ _select_model()检查: worker在耗尽列表则强制planner
 ## 7. 控制台退出
 
 ```
-_user_exit_requested: threading.Event
-检查点: optimize()循环开始、get_completion()工具轮次间
+_user_exit_requested: threading.Event   # 同步退出标志
+_async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼容）
+检查点: optimize()循环开始、get_completion()工具轮次间、LLM调用返回后
 输入"quit"请求优雅退出
+响应延迟: LLM调用完成后立即检查（最多等待LLM调用完成）
 ```
 
 ## 8. 退出原因
@@ -205,7 +221,7 @@ _user_exit_requested: threading.Event
 | `tool_round_limit` | 22轮工具调用达限 |
 | `user_requested` | 用户输入quit |
 
-## 9. DCP验证
+## 11. DCP验证
 
 ```
 每5次迭代: 中间checkpoint验证（500向量）
@@ -213,7 +229,24 @@ _user_exit_requested: threading.Event
 触发条件: validation_enabled AND intermediate_dcp存在 AND 非完成态 AND iteration%5==0
 ```
 
-## 10. 重要常量
+## 10. 心跳日志系统
+
+```
+tool call 入口:
+├── DCPOptimizer.call_tool()           # 主要入口，MCP工具调用
+├── FPGAOptimizerTest.call_vivado_tool()    # 测试模式Vivado工具
+└── FPGAOptimizerTest.call_rapidwright_tool() # 测试模式RapidWright工具
+
+心跳机制 (_start_tool_heartbeat):
+- 每60秒打印 [HEARTBEAT #{n}] Tool '{name}' still running after {elapsed}s
+- 日志包含 extra 字段: tool_name, heartbeat_elapsed, heartbeat_count
+- 工具完成时打印 [TOOL_COMPLETE] '{name}' completed in {elapsed}s (heartbeats: {n})
+- 超时/异常时正确取消心跳任务
+
+所有tool call路径统一心跳日志，无遗漏
+```
+
+## 12. 重要常量
 
 ```python
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 35K

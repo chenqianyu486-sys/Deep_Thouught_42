@@ -66,6 +66,8 @@ class WorkingMemory:
                     msg_dict["name"] = m.name
                 if m.role == MessageRole.TOOL and m.tool_call_id:
                     msg_dict["tool_call_id"] = m.tool_call_id
+                if m.role == MessageRole.ASSISTANT and m.tool_calls:
+                    msg_dict["tool_calls"] = m.tool_calls
                 messages.append(msg_dict)
         return messages
 

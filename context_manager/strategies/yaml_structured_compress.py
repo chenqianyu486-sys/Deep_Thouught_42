@@ -286,7 +286,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         # Calculate available budget (system messages take priority)
         system_tokens = self._estimate_tokens([m for m, _, _ in system_msgs])
-        available_budget = max(5000, effective_token_budget - system_tokens - 2000)  # 2K buffer
+        # Reserve budget for preserve_turns to ensure recent turns are actually preserved
+        preserve_reserve = min(preserve_turns * 1500, 10000)  # ~1500 tokens per turn, max 10K
+        available_budget = max(5000, effective_token_budget - system_tokens - 2000 - preserve_reserve)  # 2K buffer
 
         # Select important messages within budget (use dynamic threshold)
         selected = self._select_messages(conversation_msgs, available_budget, context, min_importance_threshold)
@@ -401,20 +403,26 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         selected = []
         selected_keys: set[tuple[int, float, tuple]] = set()  # O(1) membership check
+
+        # Reserve 60% of budget for first pass (high importance), 40% for second pass (medium importance)
+        first_pass_budget = int(budget * 0.6)
         current_tokens = 0
 
-        # First pass: add high-importance messages
+        # First pass: add high-importance messages (up to 60% of budget)
         for msg, importance, topic in sorted_msgs:
             if importance < min_importance_threshold:
                 continue
 
             msg_tokens = self._estimate_tokens([msg])
-            if current_tokens + msg_tokens <= budget:
+            if current_tokens + msg_tokens <= first_pass_budget:
                 selected.append((msg, importance, topic))
                 selected_keys.add((id(msg), importance, tuple(topic)))
                 current_tokens += msg_tokens
 
         # Second pass: fill remaining budget with medium importance
+        remaining_budget = budget - current_tokens
+        current_tokens = 0
+
         for msg, importance, topic in sorted_msgs:
             key = (id(msg), importance, tuple(topic))
             if key in selected_keys:  # O(1) lookup
@@ -423,7 +431,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
                 continue
 
             msg_tokens = self._estimate_tokens([msg])
-            if current_tokens + msg_tokens <= budget:
+            if current_tokens + msg_tokens <= remaining_budget:
                 selected.append((msg, importance, topic))
                 selected_keys.add(key)
                 current_tokens += msg_tokens
@@ -516,16 +524,23 @@ class YAMLStructuredCompressor(CompressionStrategy):
             if topics:
                 turn['topics'] = topics
 
-            # Preserve tool_call function names if present
+            # Preserve tool_call function names and arguments
             if msg.tool_calls:
-                tool_names = []
+                tool_calls_preserved = []
                 for tc in msg.tool_calls:
-                    if isinstance(tc, dict) and "function" in tc:
-                        tool_names.append(tc["function"].get("name", "unknown"))
-                    elif isinstance(tc, dict):
-                        tool_names.append(tc.get("name", "unknown"))
-                if tool_names:
-                    turn['tool_calls'] = tool_names
+                    if isinstance(tc, dict):
+                        func = tc.get("function", tc)
+                        tool_info = {"name": func.get("name", "unknown")}
+                        # Preserve arguments for recent/important tool calls (limit to 5)
+                        if len(tool_calls_preserved) < 5:
+                            args = func.get("arguments", "")
+                            if args and isinstance(args, str) and len(args) < 500:
+                                tool_info["arguments"] = args[:500]
+                            elif args and isinstance(args, dict):
+                                tool_info["arguments"] = str(args)[:500]
+                        tool_calls_preserved.append(tool_info)
+                if tool_calls_preserved:
+                    turn['tool_calls'] = tool_calls_preserved
 
             # Smart truncate long content (adaptive max_chars based on content type)
             content = self._smart_truncate_content(msg.content)
@@ -650,6 +665,10 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         report_type = _detect_report_type(content)
 
+        # Use specialized truncation for timing reports to preserve critical path data
+        if report_type == 'timing':
+            return self._smart_truncate_timing_report(content, lines, max_chars)
+
         # Score each line by importance
         scored_lines = []
         for i, line in enumerate(lines):
@@ -675,6 +694,61 @@ class YAMLStructuredCompressor(CompressionStrategy):
         result_lines = [lines[i] for i in selected_indices]
 
         return '\n'.join(result_lines) + f'\n... [preserved {len(selected_indices)}/{len(lines)} lines, original {len(content)} chars]'
+
+    def _smart_truncate_timing_report(self, content: str, lines: list, max_chars: int) -> str:
+        """Specialized truncation for timing reports that preserves critical path data."""
+        header_lines = []
+        data_lines = []
+        other_lines = []
+
+        for i, line in enumerate(lines):
+            line_upper = line.upper()
+            # Header: contains WNS, TNS, Clock, summary keywords
+            if any(k in line_upper for k in ['WNS', 'TNS', 'FMAX', 'CLOCK', '====', '----', 'TARGET', 'Failing']):
+                header_lines.append((i, line))
+            # Data path lines: contain path, delay, endpoint, slack, critical
+            elif any(k in line.lower() for k in ['path', 'slack', 'endpoint', 'critical', 'delay']) or \
+                 re.search(r'-?[\d.]+\s*ns', line.lower()):
+                data_lines.append((i, line))
+            else:
+                other_lines.append((i, line))
+
+        # Score each section
+        header_score = sum(self._score_line(line, 'timing') for _, line in header_lines)
+        data_score = sum(self._score_line(line, 'timing') for _, line in data_lines)
+        total_score = header_score + data_score + 1
+
+        # Allocate budget proportionally to score
+        header_budget = int((max_chars - 200) * (header_score / total_score))
+        data_budget = int((max_chars - 200) * (data_score / total_score))
+
+        selected_indices = []
+
+        # Select header lines within budget
+        current_len = 0
+        for idx, line in header_lines:
+            if current_len + len(line) + 1 <= header_budget:
+                selected_indices.append(idx)
+                current_len += len(line) + 1
+
+        # Select data lines within budget
+        current_len = 0
+        for idx, line in data_lines:
+            if current_len + len(line) + 1 <= data_budget:
+                selected_indices.append(idx)
+                current_len += len(line) + 1
+
+        # Fill remaining with other lines
+        remaining = max_chars - 200 - sum(len(lines[i]) + 1 for i in selected_indices)
+        for idx, line in other_lines:
+            if remaining - len(line) - 1 >= 0:
+                selected_indices.append(idx)
+                remaining -= len(line) + 1
+
+        selected_indices.sort()
+        result_lines = [lines[i] for i in selected_indices]
+
+        return '\n'.join(result_lines) + f'\n... [preserved {len(selected_indices)}/{len(lines)} lines, timing report]'
 
 
 def messages_to_yaml(messages: List[Message], context: CompressionContext) -> str:

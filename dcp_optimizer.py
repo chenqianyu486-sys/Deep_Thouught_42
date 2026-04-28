@@ -171,13 +171,31 @@ TOOL_MODEL_MAPPING = {
 def parse_timing_summary_static(timing_report: str) -> dict:
     """
     Parse timing summary report to extract WNS, TNS, and failing endpoints.
-    Enhanced version: automatically skip separator lines and empty lines, locate the first valid data row.
+    Enhanced version: automatically skip separator lines, empty lines, and non-timing lines
+    (license messages, command echoes, info/warning messages) to locate the timing header and data.
     """
     result = {"wns": None, "tns": None, "failing_endpoints": None}
     lines = timing_report.split('\n')
 
     header_idx = -1
     for i, line in enumerate(lines):
+        # Skip lines that are clearly not timing headers
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip command echo lines
+        if stripped.startswith('Command:'):
+            continue
+        # Skip license-related messages
+        if 'Attempting to get a license' in stripped or 'Got license' in stripped:
+            continue
+        # Skip info/warning/error messages from Vivado
+        if any(x in stripped for x in ['INFO:', 'WARNING:', 'ERROR:', 'Common 17-']):
+            continue
+        # Skip design commands that might appear in output
+        if any(stripped.startswith(x) for x in ['phys_opt_design', 'place_design', 'route_design', 'report_']):
+            continue
+        # Look for the timing header
         if 'WNS(ns)' in line and 'TNS(ns)' in line:
             header_idx = i
             break
@@ -188,6 +206,9 @@ def parse_timing_summary_static(timing_report: str) -> dict:
     for data_line in lines[header_idx + 1:]:
         stripped = data_line.strip()
         if not stripped or stripped.startswith('---') or stripped.startswith('==='):
+            continue
+        # Skip non-data lines
+        if any(x in stripped for x in ['Command:', 'INFO:', 'WARNING:', 'ERROR:', 'Attempting', 'Got license', 'Common 17-']):
             continue
         parts = stripped.split()
         if len(parts) >= 3:
@@ -673,6 +694,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # === Section 7.1.1: Console Exit Intervention ===
         self._user_exit_requested = threading.Event()
+        self._async_exit_requested = asyncio.Event()
         self._console_reader_started = False
         self._start_console_reader()
 
@@ -1200,6 +1222,8 @@ class DCPOptimizer(DCPOptimizerBase):
                     if line.strip().lower() == "quit":
                         logger.info("User requested exit via console 'quit' command")
                         self._user_exit_requested.set()
+                        # Also set async event so it can be checked during await calls
+                        self._async_exit_requested.set()
                         break
             except Exception:
                 pass
@@ -1210,6 +1234,42 @@ class DCPOptimizer(DCPOptimizerBase):
     def _check_exit_requested(self) -> bool:
         """Check if user requested exit. Returns True if exit requested."""
         return self._user_exit_requested.is_set()
+
+    def _check_async_exit_requested(self) -> bool:
+        """Check if user requested exit (async version). Returns True if exit requested."""
+        return self._async_exit_requested.is_set()
+
+    async def _call_llm_with_exit_check(self, model: str, messages: list, tools: list, timeout: float = 600.0) -> Optional[object]:
+        """Make an LLM call with exit checking after completion.
+
+        Note: httpx doesn't support true cancellation of in-flight requests.
+        This method checks for exit after the call completes, so quit will be
+        responsive within ~10 seconds of the LLM call completing (or immediately
+        if the call completes faster).
+
+        Args:
+            model: Model name to use
+            messages: Messages to send
+            tools: Tools available
+            timeout: Total timeout in seconds
+
+        Returns:
+            Response object if successful, None if exit requested
+        """
+        response = await self.openai.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=4096,
+            timeout=timeout
+        )
+
+        # Check if exit was requested during the LLM call
+        if self._check_async_exit_requested():
+            return None
+
+        return response
 
     def _record_compression_event(self, trigger: str, tokens_before: int, tokens_after: int, iteration: int = 0) -> None:
         """Record structured compression event for observability.
@@ -1660,15 +1720,36 @@ class DCPOptimizer(DCPOptimizerBase):
     async def _collect_tools(self):
         """Collect and convert tools from both MCP servers."""
         self.tools = []
-        
+
         rw_response = await self.rapidwright_session.list_tools()
         for tool in rw_response.tools:
             self.tools.append(convert_mcp_tool_to_openai(tool, "rapidwright"))
-        
+
         v_response = await self.vivado_session.list_tools()
         for tool in v_response.tools:
             self.tools.append(convert_mcp_tool_to_openai(tool, "vivado"))
-    
+
+    def _start_tool_heartbeat(self, tool_name: str, start_time: float, interval: float = 60.0) -> tuple[asyncio.Task, int]:
+        """
+        Start a background heartbeat logger for a long-running tool call.
+        Returns (task, heartbeat_count_ref) so the caller can cancel and log final status.
+        """
+        heartbeat_count = 0
+
+        async def heartbeat_logger():
+            nonlocal heartbeat_count
+            while True:
+                await asyncio.sleep(interval)
+                heartbeat_count += 1
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s",
+                    extra={"tool_name": tool_name, "heartbeat_elapsed": int(elapsed), "heartbeat_count": heartbeat_count}
+                )
+
+        task = asyncio.create_task(heartbeat_logger())
+        return task, heartbeat_count
+
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call on the appropriate MCP server."""
         # Parse server prefix from tool name
@@ -1685,16 +1766,6 @@ class DCPOptimizer(DCPOptimizerBase):
         start_time = time.time()
         wns_measured = None
         error_occurred = False
-        heartbeat_count = 0
-
-        # Heartbeat logger for long-running tool calls (prints every 60 seconds)
-        async def heartbeat_logger():
-            nonlocal heartbeat_count
-            while True:
-                await asyncio.sleep(60)
-                heartbeat_count += 1
-                elapsed = time.time() - start_time
-                logger.info(f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s")
 
         # Log MCP request with sanitized arguments
         sanitized_args = sanitize_payload(arguments)
@@ -1708,10 +1779,8 @@ class DCPOptimizer(DCPOptimizerBase):
             }
         )
 
-        heartbeat_task = None
+        heartbeat_task, heartbeat_count = self._start_tool_heartbeat(tool_name, start_time)
         try:
-            # Start heartbeat task for long-running tools
-            heartbeat_task = asyncio.create_task(heartbeat_logger())
             result = await session.call_tool(actual_name, arguments)
             # Cancel heartbeat task on completion
             heartbeat_task.cancel()
@@ -1719,6 +1788,11 @@ class DCPOptimizer(DCPOptimizerBase):
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+            elapsed_time = time.time() - start_time
+            logger.info(
+                f"[TOOL_COMPLETE] '{tool_name}' completed in {elapsed_time:.1f}s (heartbeats: {heartbeat_count})",
+                extra={"tool_name": tool_name, "tool_elapsed": int(elapsed_time), "heartbeat_count": heartbeat_count}
+            )
 
             # Extract text content from result
             if result.content:
@@ -2176,16 +2250,19 @@ class DCPOptimizer(DCPOptimizerBase):
             )
             for retry in range(max_retries):
                 try:
-                    response = await self.openai.chat.completions.create(  # Async wait
+                    response = await self._call_llm_with_exit_check(
                         model=current_model,
                         messages=api_messages,
                         tools=self.tools,
-                        tool_choice="auto",
-                        max_tokens=4096,
-                        timeout=600.0  # Increased timeout to 600 seconds (10 minutes) to allow complex reasoning
+                        timeout=600.0
                     )
                     if response is None:
-                        raise ValueError("API returned None response")
+                        # Exit was requested during LLM call
+                        logger.info(f"User requested exit during LLM call, breaking inner loop")
+                        content = f"[User requested exit during LLM call, iteration {self.iteration}]"
+                        self._is_done_reason = "user_requested"
+                        is_done = False
+                        break
                     last_exception = None  # [FIX] Clear stale exception after successful fallback
                     # Update model_worker to current model after successful fallback
                     self.model_worker = current_model
@@ -2269,6 +2346,11 @@ class DCPOptimizer(DCPOptimizerBase):
             if last_exception is not None:
                 raise last_exception
 
+            # If response is None, user requested exit - exit the while loop
+            if response is None:
+                logger.info(f"User requested exit, breaking out of tool_round loop")
+                break
+
             # Safely extract Usage and Cost (compatible with OpenRouter extended fields)
             try:
                 usage = getattr(response, 'usage', None)
@@ -2314,7 +2396,8 @@ class DCPOptimizer(DCPOptimizerBase):
             message = response.choices[0].message
             # [Phase 2] Add assistant message via compat (tool_calls extracted below)
             assistant_content = message.content or ""
-            self._compat.add_message("assistant", assistant_content)
+            metadata = {"tool_calls": message.tool_calls} if message.tool_calls else None
+            self._compat.add_message("assistant", assistant_content, metadata)
             
             if message.tool_calls:
                 for tc in message.tool_calls:
@@ -3075,62 +3158,92 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         logger.info(f"[VIVADO] Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
         print(f"[TEST] Calling vivado_{tool_name}...")
         start_time = time.time()
-        
+
+        heartbeat_task, heartbeat_count = self._start_tool_heartbeat(f"vivado_{tool_name}", start_time)
         try:
             result = await asyncio.wait_for(
                 self.vivado_session.call_tool(tool_name, arguments),
                 timeout=timeout
             )
-            
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
-            logger.info(f"[VIVADO] {tool_name} completed in {elapsed:.2f}s")
+            logger.info(f"[VIVADO] {tool_name} completed in {elapsed:.2f}s (heartbeats: {heartbeat_count})")
             print(f"[TEST] vivado_{tool_name} completed in {elapsed:.2f}s")
-            
+
             # Extract text content from result
             if result.content:
                 text_parts = [c.text for c in result.content if hasattr(c, 'text')]
                 return "\n".join(text_parts)
             return "(no output)"
-            
+
         except asyncio.TimeoutError:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
             logger.error(f"[VIVADO] {tool_name} TIMED OUT after {elapsed:.2f}s")
             print(f"[TEST] ERROR: vivado_{tool_name} TIMED OUT after {elapsed:.2f}s")
             raise
         except Exception as e:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
             logger.error(f"[VIVADO] {tool_name} FAILED after {elapsed:.2f}s: {e}")
             print(f"[TEST] ERROR: vivado_{tool_name} failed after {elapsed:.2f}s: {e}")
             raise
-    
+
     async def call_rapidwright_tool(self, tool_name: str, arguments: dict, timeout: float = 300.0) -> str:
         """Execute a RapidWright tool call with timing and logging."""
         logger.info(f"[RAPIDWRIGHT] Calling {tool_name} with args: {json.dumps(arguments)[:200]}...")
         print(f"[TEST] Calling rapidwright_{tool_name}...")
         start_time = time.time()
-        
+
+        heartbeat_task, heartbeat_count = self._start_tool_heartbeat(f"rapidwright_{tool_name}", start_time)
         try:
             result = await asyncio.wait_for(
                 self.rapidwright_session.call_tool(tool_name, arguments),
                 timeout=timeout
             )
-            
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
-            logger.info(f"[RAPIDWRIGHT] {tool_name} completed in {elapsed:.2f}s")
+            logger.info(f"[RAPIDWRIGHT] {tool_name} completed in {elapsed:.2f}s (heartbeats: {heartbeat_count})")
             print(f"[TEST] rapidwright_{tool_name} completed in {elapsed:.2f}s")
-            
+
             # Extract text content from result
             if result.content:
                 text_parts = [c.text for c in result.content if hasattr(c, 'text')]
                 return "\n".join(text_parts)
             return "(no output)"
-            
+
         except asyncio.TimeoutError:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
             logger.error(f"[RAPIDWRIGHT] {tool_name} TIMED OUT after {elapsed:.2f}s")
             print(f"[TEST] ERROR: rapidwright_{tool_name} TIMED OUT after {elapsed:.2f}s")
             raise
         except Exception as e:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
             elapsed = time.time() - start_time
             logger.error(f"[RAPIDWRIGHT] {tool_name} FAILED after {elapsed:.2f}s: {e}")
             print(f"[TEST] ERROR: rapidwright_{tool_name} failed after {elapsed:.2f}s: {e}")
