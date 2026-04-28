@@ -1,10 +1,10 @@
 # LLM Model Configuration for Context Management
-# Flash models: optimized for speed, smaller context window (250K tokens)
-# Pro models: optimized for reasoning, larger context window (1M tokens)
+# Worker models: optimized for speed, smaller context window (250K tokens)
+# Planner models: optimized for reasoning, larger context window (1M tokens)
 
-flash:
-  model_tier: "flash"
-  model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
+worker:
+  model_tier: "worker"
+  model_name: "tencent/hy3-preview:free"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 40000       # Trigger soft compression at 40K (16% of max) to build cumulative summaries early
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -17,11 +17,12 @@ flash:
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
     - "stepfun/step-3.5-flash"
+    - "xiaomi/mimo-v2-flash"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 
-pro:
-  model_tier: "pro"
-  model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name
+planner:
+  model_tier: "planner"
+  model_name: "deepseek/deepseek-v4-flash"    # Default Pro model name
   max_tokens: 1000000
   soft_threshold: 120000      # Trigger soft compression at 120K (12% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
@@ -33,5 +34,5 @@ pro:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "xiaomi/mimo-v2.5-pro"
+    - "xiaomi/mimo-v2.5"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)

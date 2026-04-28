@@ -76,13 +76,13 @@ def _create_model_context_config(data: ModelConfigData) -> ModelContextConfig:
 
 # Load model configurations from YAML
 _loader = get_model_config_loader()
-_flash_data = _loader.get_flash_config()
-_pro_data = _loader.get_pro_config()
+_worker_data = _loader.get_worker_config()
+_planner_data = _loader.get_planner_config()
 
-FLASH_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_flash_data)
-PRO_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_pro_data)
-DEFAULT_MODEL_PLANNER: str = _pro_data.model_name
-DEFAULT_MODEL_WORKER: str = _flash_data.model_name
+WORKER_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_worker_data)
+PLANNER_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_planner_data)
+DEFAULT_MODEL_PLANNER: str = _planner_data.model_name
+DEFAULT_MODEL_WORKER: str = _worker_data.model_name
 
 # === Section 2: Logging & Constants ===
 
@@ -93,22 +93,22 @@ logger = logging.getLogger(__name__)
 # === Section 2.1: Model Context Configurations (loaded from model_config.yaml) ===
 # Model tier to config mapping
 MODEL_CONTEXT_CONFIGS = {
-    "flash": FLASH_CONTEXT_CONFIG,
-    "pro": PRO_CONTEXT_CONFIG,
+    "worker": WORKER_CONTEXT_CONFIG,
+    "planner": PLANNER_CONTEXT_CONFIG,
 }
 
 # Derived constants from loaded config
-WORKER_MODEL_MAX_TOKENS = _flash_data.max_tokens
-PLANNER_MODEL_MAX_TOKENS = _pro_data.max_tokens
+WORKER_MODEL_MAX_TOKENS = _worker_data.max_tokens
+PLANNER_MODEL_MAX_TOKENS = _planner_data.max_tokens
 
-# Worker thresholds based on flash model capacity
-WORKER_CONTEXT_WARN_TOKENS = int(_flash_data.max_tokens * 0.6)  # 60% of max
-WORKER_CONTEXT_FORCE_TOKENS = int(_flash_data.max_tokens * 0.8)  # 80% of max
+# Worker thresholds based on worker model capacity
+WORKER_CONTEXT_WARN_TOKENS = int(_worker_data.max_tokens * 0.6)  # 60% of max
+WORKER_CONTEXT_FORCE_TOKENS = int(_worker_data.max_tokens * 0.8)  # 80% of max
 
 # Legacy constants for backward compatibility
-LEGACY_FLASH_MAX_TOKENS = 200_000
-CONTEXT_COMPRESSION_THRESHOLD = _flash_data.soft_threshold  # deprecated
-CONTEXT_HARD_LIMIT = _flash_data.hard_limit  # deprecated
+LEGACY_WORKER_MAX_TOKENS = 200_000
+CONTEXT_COMPRESSION_THRESHOLD = _worker_data.soft_threshold  # deprecated
+CONTEXT_HARD_LIMIT = _worker_data.hard_limit  # deprecated
 
 RECENT_TURNS_TO_KEEP = 20              # number of recent messages to keep during compression (maintains conversation continuity)
 TOOL_RESULT_TRUNCATE = 30000           # tool result truncation threshold (retains key info after type-based filtering)
@@ -647,12 +647,12 @@ class DCPOptimizer(DCPOptimizerBase):
         self.llm_call_count = 0
         self.last_used_model = None
         # Fallback models for 429 rate limit (loaded from config)
-        self.flash_fallback_models = _flash_data.fallback_models
-        self.pro_fallback_models = _pro_data.fallback_models
-        self._flash_fallback_index = 0  # Round-robin index for flash fallback models
-        self._pro_fallback_index = 0     # Round-robin index for pro fallback models
-        self._exhausted_flash_fallbacks: set[str] = set()  # Track exhausted flash fallback models
-        self._exhausted_pro_fallbacks: set[str] = set()    # Track exhausted pro fallback models
+        self.worker_fallback_models = _worker_data.fallback_models
+        self.planner_fallback_models = _planner_data.fallback_models
+        self._worker_fallback_index = 0  # Round-robin index for worker fallback models
+        self._planner_fallback_index = 0     # Round-robin index for planner fallback models
+        self._exhausted_worker_fallbacks: set[str] = set()  # Track exhausted worker fallback models
+        self._exhausted_planner_fallbacks: set[str] = set()    # Track exhausted planner fallback models
         self._model_usage_history: list = []          # Track recent model selections for switch detection
         self._previous_tier: Optional[str] = None   # Track previous tier for switch detection
         self._iteration_model_switch_logged = False  # Track if model switch was logged in current iteration
@@ -686,7 +686,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.total_completion_tokens = 0
         self.total_tokens = 0
         self.total_cost = 0.0
-        self.cost_hard_limit = _flash_data.cost_hard_limit  # USD hard limit (combined planner+worker)
+        self.cost_hard_limit = _worker_data.cost_hard_limit  # USD hard limit (combined planner+worker)
         self.api_call_details = []
 
         # Track compression metrics for observability and tuning
@@ -937,10 +937,10 @@ class DCPOptimizer(DCPOptimizerBase):
 
         Args:
             current_tokens: Current token count estimate
-            model_config: Model-specific configuration (uses FLASH_CONTEXT_CONFIG if None)
+            model_config: Model-specific configuration (uses WORKER_CONTEXT_CONFIG if None)
             model_switched: True if model tier switched since last compression
         """
-        config = model_config or FLASH_CONTEXT_CONFIG
+        config = model_config or WORKER_CONTEXT_CONFIG
         return CMCompressionContext(
             current_tokens=current_tokens,
             threshold_tokens=config.soft_threshold,
@@ -964,42 +964,42 @@ class DCPOptimizer(DCPOptimizerBase):
             model_name: Model name string
 
         Returns:
-            "flash" or "pro" based on model name
+            "worker" or "planner" based on model name
         """
         if not model_name:
-            return "flash"
+            return "worker"
 
         model_lower = model_name.lower()
 
-        # Known pro models (main model + fallbacks)
+        # Known planner models (main model + fallbacks)
         if model_lower in [
             "xiaomi/mimo-v2.5-pro",
             "deepseek/deepseek-v4-pro",
             "qwen/qwen3.6-plus"
         ]:
-            return "pro"
+            return "planner"
 
-        # Known flash models (main model + fallbacks)
+        # Known worker models (main model + fallbacks)
         if model_lower in [
             "deepseek/deepseek-v4-flash",
             "qwen/qwen3.6-flash",
             "xiaomi/mimo-v2-flash"
         ]:
-            return "flash"
+            return "worker"
 
         # Generic fallback for unknown models
         if "pro" in model_lower or "planner" in model_lower:
-            return "pro"
+            return "planner"
         elif "flash" in model_lower or "worker" in model_lower:
-            return "flash"
+            return "worker"
         else:
-            return "flash"
+            return "worker"
 
     def _get_previous_model_tier(self) -> Optional[str]:
         """Get previous model tier from history.
 
         Returns:
-            Previous model tier ("flash" or "pro"), or None if not available
+            Previous model tier ("worker" or "planner"), or None if not available
         """
         if len(self._model_usage_history) >= 2:
             previous_model = self._model_usage_history[-2]
@@ -1010,21 +1010,21 @@ class DCPOptimizer(DCPOptimizerBase):
         """Get fallback models and related state for a given tier.
 
         Args:
-            tier: "flash" or "pro"
+            tier: "worker" or "planner"
 
         Returns:
             Tuple of (fallback_models list, exhausted_set, fallback_index)
         """
-        if tier == "flash":
-            return self.flash_fallback_models, self._exhausted_flash_fallbacks, self._flash_fallback_index
+        if tier == "worker":
+            return self.worker_fallback_models, self._exhausted_worker_fallbacks, self._worker_fallback_index
         else:
-            return self.pro_fallback_models, self._exhausted_pro_fallbacks, self._pro_fallback_index
+            return self.planner_fallback_models, self._exhausted_planner_fallbacks, self._planner_fallback_index
 
     def _get_next_fallback_model(self, tier: str) -> Optional[str]:
         """Get next available fallback model for the given tier.
 
         Args:
-            tier: "flash" or "pro"
+            tier: "worker" or "planner"
 
         Returns:
             Next fallback model name, or None if all are exhausted.
@@ -1046,10 +1046,10 @@ class DCPOptimizer(DCPOptimizerBase):
             model = available[(start_index + attempts) % len(available)]
             if model not in exhausted_set:
                 # Update the index for the next call
-                if tier == "flash":
-                    self._flash_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
+                if tier == "worker":
+                    self._worker_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
                 else:
-                    self._pro_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
+                    self._planner_fallback_index = (fallback_models.index(model) + 1) % len(fallback_models)
                 return model
             attempts += 1
 
@@ -1062,23 +1062,23 @@ class DCPOptimizer(DCPOptimizerBase):
             model: Model name that hit 429
         """
         tier = self._infer_model_tier(model)
-        if tier == "flash":
-            self._exhausted_flash_fallbacks.add(model)
-            logger.info(f"Fallback flash model {model} marked as exhausted due to 429")
+        if tier == "worker":
+            self._exhausted_worker_fallbacks.add(model)
+            logger.info(f"Fallback worker model {model} marked as exhausted due to 429")
         else:
-            self._exhausted_pro_fallbacks.add(model)
-            logger.info(f"Fallback pro model {model} marked as exhausted due to 429")
+            self._exhausted_planner_fallbacks.add(model)
+            logger.info(f"Fallback planner model {model} marked as exhausted due to 429")
 
     def _reset_fallbacks(self, tier: str) -> None:
         """Reset exhausted fallbacks for a tier.
 
         Args:
-            tier: "flash" or "pro"
+            tier: "worker" or "planner"
         """
-        if tier == "flash":
-            self._exhausted_flash_fallbacks.clear()
+        if tier == "worker":
+            self._exhausted_worker_fallbacks.clear()
         else:
-            self._exhausted_pro_fallbacks.clear()
+            self._exhausted_planner_fallbacks.clear()
 
     def _get_active_model_config_with_switch_detection(self) -> tuple:
         """Get model config and detect if model has switched.
@@ -1100,7 +1100,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 logger.info(f"Model tier switch detected: {self._previous_tier} -> {current_tier}")
                 self._iteration_model_switch_logged = True
 
-        config = MODEL_CONTEXT_CONFIGS.get(current_tier, FLASH_CONTEXT_CONFIG)
+        config = MODEL_CONTEXT_CONFIGS.get(current_tier, WORKER_CONTEXT_CONFIG)
         return config, model_switched
 
     def _compress_context(self):
@@ -1527,7 +1527,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # ── Decision threshold ────────────────────────────────────────────────
         # Filter out exhausted models
-        worker_exhausted = self.model_worker in self._exhausted_flash_fallbacks or self.model_worker in self._exhausted_pro_fallbacks
+        worker_exhausted = self.model_worker in self._exhausted_worker_fallbacks or self.model_worker in self._exhausted_planner_fallbacks
 
         if worker_exhausted:
             logger.info(f"Model {self.model_worker} is exhausted, forcing planner")
@@ -2214,8 +2214,8 @@ class DCPOptimizer(DCPOptimizerBase):
                         else:
                             # All fallbacks exhausted, fallback to model_planner
                             # Clear all exhausted states for clean slate with planner
-                            self._exhausted_flash_fallbacks.clear()
-                            self._exhausted_pro_fallbacks.clear()
+                            self._exhausted_worker_fallbacks.clear()
+                            self._exhausted_planner_fallbacks.clear()
                             logger.warning(f"All {current_tier} fallback models exhausted, switching to model_planner: {self.model_planner}")
                             current_model = self.model_planner
                             self.last_used_model = current_model
@@ -2247,8 +2247,8 @@ class DCPOptimizer(DCPOptimizerBase):
                             continue
                         else:
                             # All fallbacks exhausted, fallback to model_planner
-                            self._exhausted_flash_fallbacks.clear()
-                            self._exhausted_pro_fallbacks.clear()
+                            self._exhausted_worker_fallbacks.clear()
+                            self._exhausted_planner_fallbacks.clear()
                             logger.warning(f"All {current_tier} fallback models exhausted (tool use unsupported), switching to model_planner: {self.model_planner}")
                             current_model = self.model_planner
                             self.last_used_model = current_model

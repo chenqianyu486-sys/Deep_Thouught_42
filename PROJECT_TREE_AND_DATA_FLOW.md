@@ -77,8 +77,12 @@ MemoryManager._compress("yaml_structured", context, model_tier)
          └─ model_tier=None → YAMLStructuredCompressor (default fallback)
 
 YAMLStructuredCompressor (default):
-    - force_aggressive=False → preserve_turns from model_config, min_threshold from model_config
-    - force_aggressive=True  → preserve_turns=10, min_importance=0.7
+    - Normal mode: preserve_turns from model_config, min_threshold from model_config
+    - Aggressive mode (triggered by hard_limit): preserve_turns=10, min_importance=0.7
+    - Note: force_aggressive parameter REMOVED - aggressive mode is triggered solely by token hard_limit
+    - **System messages ALWAYS protected** (role==SYSTEM or metadata.protected)
+    - **WNS state is NEVER in working memory** - injected at API call time
+    - **Tool call details stored separately** (not in working memory)
 ```
 
 ### 2.3 Sequential Compression (inside MemoryManager._compress)
@@ -89,6 +93,34 @@ YAMLStructuredCompressor (default):
 3. WorkingMemory.clear()                          ← Then clear
 4. Add system + compressed non-system messages    ← Repopulate
 5. EventBus.emit(CONTEXT_COMPRESSED)
+```
+
+### 2.3.1 Critical Information Protection
+
+| Information Type | Storage Location | Protection Mechanism |
+|------------------|------------------|---------------------|
+| System Messages | Working memory (protected) | Separated before compression, always prepended |
+| WNS State | MemoryManager (separate from WM) | Injected at API call time, NOT in working memory |
+| Tool Call Summaries | MemoryManager._tool_call_details | Stored separately, NOT in working memory |
+| Failed Strategies | MemoryManager._failed_strategies | Passed to CompressionContext, stored in YAML output |
+
+**WNS Injection at API Call Time**:
+```
+DCPOptimizer._inject_wns_state_to_system_prompt()
+    → Reads from self.latest_wns (cache), NOT from working memory
+    → Updates system_prompt str before each API call
+```
+
+**Tool Call Details Structure**:
+```python
+{
+    "tool_name": str,
+    "result": str,
+    "wns": float,
+    "error": bool,
+    "iteration": int,
+    "elapsed_time": float  # if recorded
+}
 ```
 
 ### 2.4 WNS State Injection (Anti-Compression-Loss)
@@ -113,6 +145,7 @@ API call with updated system message (model always sees current state)
 **Problem solved**: After context compression, the LLM may lose track of current WNS state.
 **Solution**: System prompt is dynamically updated before each LLM call to ensure
 the model always has access to current_wns, best_wns, and checkpoint information.
+**Note**: WNS state is NEVER stored in working memory - it's always injected at API call time.
 
 ### 2.5 Tool Call WNS Tracking
 
@@ -134,8 +167,9 @@ CompressionContext(
     current_tokens, threshold_tokens, hard_limit_tokens,
     failed_strategies, tool_call_details,
     best_wns, initial_wns, current_wns, clock_period,
-    iteration, force_aggressive, retrieved_history, agent_id,
+    iteration, retrieved_history, agent_id,
     model_context_config, model_switch_detected, previous_model_tier  # Model-aware compression
+    # Note: force_aggressive field REMOVED - aggressive compression triggered by hard_limit only
 )
 ```
 
@@ -171,29 +205,28 @@ RetrievalQuery( text, task_type, time_range, min_importance, limit, agent_id )
 ## 5. Configuration (from model_config.yaml)
 
 ```yaml
-# Flash (Worker): deepseek/deepseek-v4-flash, 500K max
-flash:
+# Worker: optimized for speed, 250K max
+worker:
   soft_threshold: 40K
-  hard_limit: 100K
+  hard_limit: 200K
   token_budget: 35K
   preserve_turns: 40 (normal) / 10 (aggressive)
   min_importance: 0.15 (normal) / 0.7 (aggressive)
   cost_hard_limit: $1.00 (combined planner+worker)
   fallback_models:  # 429 rate limit fallback (priority order)
-    - "qwen/qwen3.6-flash"
+    - "stepfun/step-3.5-flash"
     - "xiaomi/mimo-v2-flash"
 
-# Pro (Planner): xiaomi/mimo-v2.5-pro, 1M max
-pro:
+# Planner: optimized for reasoning, 1M max
+planner:
   soft_threshold: 120K
   hard_limit: 300K
   token_budget: 100K
   preserve_turns: 60 (normal) / 10 (aggressive)
   min_importance: 0.1 (normal) / 0.7 (aggressive)
-  cost_hard_limit: $1.00 (combined planner+worker, same as flash)
+  cost_hard_limit: $1.00 (combined planner+worker, same as worker)
   fallback_models:  # 429 rate limit fallback (priority order)
-    - "deepseek/deepseek-v4-pro"
-    - "qwen/qwen3.6-plus"
+    - "xiaomi/mimo-v2.5-pro"
 ```
 
 ## 6. File Responsibilities
@@ -201,7 +234,7 @@ pro:
 | File | Responsibility |
 |------|-----------------|
 | `dcp_optimizer.py` | Main agent; owns EventBus + AgentContextManager; single compression trigger; `latest_wns` cache; file handles via exit_stack.callback() |
-| `config_loader.py` | ModelConfigLoader singleton; loads model_config.yaml; provides flash/pro config including fallback_models |
+| `config_loader.py` | ModelConfigLoader singleton; loads model_config.yaml; provides worker/planner config including fallback_models |
 | `SYSTEM_PROMPT.TXT` | System prompt with YAML format docs |
 | `validate_dcps.py` | DCP validation (supports --vectors for custom vector count) |
 | `context_manager/manager.py` | `_compress()` only uses "yaml_structured"; no auto-MESSAGE_ADDED subscribe |
@@ -287,14 +320,14 @@ WNS regression (WNS < 0 and worse than best) triggers automatic rollback to best
 
 ```python
 # From model_config.yaml
-# Flash (Worker): deepseek/deepseek-v4-flash, 500K context
-FLASH_SOFT_THRESHOLD = 40K
-FLASH_HARD_LIMIT = 100K
-FLASH_FALLBACK_MODELS = ["qwen/qwen3.6-flash", "xiaomi/mimo-v2-flash"]
-# Pro (Planner): xiaomi/mimo-v2.5-pro, 1M context
-PRO_SOFT_THRESHOLD = 120K
-PRO_HARD_LIMIT = 300K
-PRO_FALLBACK_MODELS = ["deepseek/deepseek-v4-pro", "qwen/qwen3.6-plus"]
+# Worker: deepseek/deepseek-v4-flash, 250K context
+WORKER_SOFT_THRESHOLD = 40K
+WORKER_HARD_LIMIT = 200K
+WORKER_FALLBACK_MODELS = ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
+# Planner: xiaomi/mimo-v2.5-pro, 1M context
+PLANNER_SOFT_THRESHOLD = 120K
+PLANNER_HARD_LIMIT = 300K
+PLANNER_FALLBACK_MODELS = ["xiaomi/mimo-v2.5-pro"]
 
 # Iteration control
 MAX_TOOL_ROUNDS_PER_ITERATION = 22  # Max tool-calling rounds per iteration
@@ -315,25 +348,25 @@ On 429 error:
 4. [FIX] Only mark next_fallback as exhausted when it ACTUALLY hits 429
 5. [FIX] Clear last_exception on successful fallback to prevent stale exception
 6. If all fallbacks exhausted → switch to model_planner
-7. Clear BOTH exhausted sets (flash and pro) for clean slate with planner
+7. Clear BOTH exhausted sets (worker and planner) for clean slate with planner
 
 _select_model() also checks if model_worker is exhausted:
-- If model_worker in _exhausted_flash_fallbacks or _exhausted_pro_fallbacks → force planner
+- If model_worker in _exhausted_worker_fallbacks or _exhausted_planner_fallbacks → force planner
 - Prevents immediately re-selecting a model that just hit 429
 - [FIX] After successful fallback, model_worker is updated to current model so this check uses correct status
 
 Key state variables:
-- _flash_fallback_index / _pro_fallback_index: round-robin position
-- _exhausted_flash_fallbacks / _exhausted_pro_fallbacks: track exhausted models
+- _worker_fallback_index / _planner_fallback_index: round-robin position
+- _exhausted_worker_fallbacks / _exhausted_planner_fallbacks: track exhausted models
 
 Model tier inference (_infer_model_tier):
-- Uses exact matching for known models (pro: xiaomi/mimo-v2.5-pro, deepseek/deepseek-v4-pro, qwen/qwen3.6-plus)
-- flash: deepseek/deepseek-v4-flash, qwen/qwen3.6-flash, xiaomi/mimo-v2-flash
-- Generic fallback: "pro"/"planner" → pro tier, "flash"/"worker" → flash tier
+- Uses exact matching for known models (planner: xiaomi/mimo-v2.5-pro, deepseek/deepseek-v4-pro, qwen/qwen3.6-plus)
+- worker: deepseek/deepseek-v4-flash, qwen/qwen3.6-flash, xiaomi/mimo-v2-flash
+- Generic fallback: "pro"/"planner" → planner tier, "flash"/"worker" → worker tier
 
 Example log after fix:
-"Rate limit on deepseek/deepseek-v4-flash, switching to fallback: qwen/qwen3.6-flash"
-"HTTP Request: POST ... 200 OK" ← qwen/qwen3.6-flash succeeds, last_exception cleared
+"Rate limit on deepseek/deepseek-v4-flash, switching to fallback: stepfun/step-3.5-flash"
+"HTTP Request: POST ... 200 OK" ← stepfun/step-3.5-flash succeeds, last_exception cleared
 ```
 
 ## 13. Console Exit Intervention

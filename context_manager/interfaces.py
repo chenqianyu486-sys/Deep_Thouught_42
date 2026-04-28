@@ -49,7 +49,7 @@ class ModelContextConfig:
     """Model-specific context configuration for adaptive compression.
 
     Attributes:
-        model_tier: Model tier identifier - "flash" or "pro"
+        model_tier: Model tier identifier - "worker" or "planner"
         max_context_tokens: Maximum context window for the model
         soft_threshold: Token count to trigger soft compression (80% of max)
         hard_limit: Token count that triggers aggressive compression (90% of max)
@@ -92,7 +92,7 @@ class CompressionContext:
     # Model-aware compression fields
     model_context_config: Optional[ModelContextConfig] = None  # Model-specific configuration
     model_switch_detected: bool = False  # True if model tier switched since last compression
-    previous_model_tier: Optional[str] = None  # Previous model tier ("flash" or "pro")
+    previous_model_tier: Optional[str] = None  # Previous model tier ("worker" or "planner")
 
 
 class EventType(Enum):

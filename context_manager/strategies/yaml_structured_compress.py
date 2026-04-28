@@ -226,17 +226,17 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         # Adjust parameters based on model tier switch
         if model_switched and previous_tier and model_config:
-            # Planner -> Flash: Worker needs more condensed summary
-            if previous_tier == "pro" and model_config.model_tier == "flash":
+            # Planner -> Worker: Worker needs more condensed summary
+            if previous_tier == "planner" and model_config.model_tier == "worker":
                 min_importance_threshold = max(min_importance_threshold, 0.35)
                 preserve_turns = max(preserve_turns - 5, 20)
-                logger.info("[COMPRESS] Model switch detected: pro->flash, adjusted threshold=%.2f, preserve_turns=%d",
+                logger.info("[COMPRESS] Model switch detected: planner->worker, adjusted threshold=%.2f, preserve_turns=%d",
                            min_importance_threshold, preserve_turns)
-            # Flash -> Planner: Planner needs more comprehensive context
-            elif previous_tier == "flash" and model_config.model_tier == "pro":
+            # Worker -> Planner: Planner needs more comprehensive context
+            elif previous_tier == "worker" and model_config.model_tier == "planner":
                 min_importance_threshold = min(min_importance_threshold, 0.1)
                 preserve_turns = min(preserve_turns + 10, 60)
-                logger.info("[COMPRESS] Model switch detected: flash->pro, adjusted threshold=%.2f, preserve_turns=%d",
+                logger.info("[COMPRESS] Model switch detected: worker->planner, adjusted threshold=%.2f, preserve_turns=%d",
                            min_importance_threshold, preserve_turns)
 
         # Use model's token budget if available
