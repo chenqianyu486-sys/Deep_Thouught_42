@@ -637,11 +637,19 @@ class AnalyzeNetDetourSkill(Skill):
         return self._skill_metadata
 
     def execute(self, context: SkillContext, pin_paths: list, detour_threshold: float = 2.0) -> SkillResult:
+        """Execute the skill business logic.
+
+        For telemetry, use execute_with_telemetry() instead.
+        """
         try:
             results = analyze_net_detour(context.design, pin_paths, detour_threshold)
             return SkillResult(success=True, data=results)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
+
+    def execute_with_telemetry(self, context: SkillContext, pin_paths: list, detour_threshold: float = 2.0) -> SkillResult:
+        """Execute with telemetry instrumentation."""
+        return Skill.execute_with_telemetry(self, context, pin_paths=pin_paths, detour_threshold=detour_threshold)
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
         if "pin_paths" not in kwargs:
@@ -669,11 +677,19 @@ class OptimizeCellPlacementSkill(Skill):
         return self._skill_metadata
 
     def execute(self, context: SkillContext, cell_names: list) -> SkillResult:
+        """Execute the skill business logic.
+
+        For telemetry, use execute_with_telemetry() instead.
+        """
         try:
             results = optimize_cell_placement(context.design, cell_names)
             return SkillResult(success=True, data=results)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
+
+    def execute_with_telemetry(self, context: SkillContext, cell_names: list) -> SkillResult:
+        """Execute with telemetry instrumentation."""
+        return Skill.execute_with_telemetry(self, context, cell_names=cell_names)
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
         if "cell_names" not in kwargs:

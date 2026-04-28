@@ -27,14 +27,15 @@ fpl26_optimization_contest/
 │   └── test_server.py            # 服务器测试
 ├── VivadoMCP/                    # Vivado MCP服务器
 ├── skills/                       # Skill框架（标准接口、注册发现机制）
-│   ├── __init__.py                  # 导出 Skill, SkillRegistry, SkillContext
+│   ├── __init__.py                  # 导出 Skill, SkillRegistry, SkillContext, SkillTelemetry
 │   ├── base.py                      # Skill基类、元数据、结果定义
 │   ├── context.py                   # SkillContext依赖注入
 │   ├── registry.py                   # SkillRegistry注册发现
 │   ├── skill_decorator.py           # @skill装饰器
+│   ├── telemetry.py                  # 可观测性：执行记录、指标聚合、查询接口
 │   ├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
-│   └── test_skill_framework.py      # 集成测试（SkillRegistry/Skill类）
+│   └── test_skill_framework.py      # 集成测试（SkillRegistry/Skill/Telemetry）
 ```
 
 ## 2. 核心数据流
@@ -103,12 +104,21 @@ skills/
 ├── SkillContext                 # 依赖注入：design, initialized, tools
 ├── SkillRegistry                # 注册/发现：register(), get(), list_all(), list_by_category()
 ├── @skill decorator             # 自动注册 Skill 类
+├── SkillTelemetry               # 可观测性：record_execution(), get_metrics(), get_all_metrics()
+├── SkillExecutionTimer           # 执行计时上下文管理器
 └── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
 
 调用链:
 Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get() → Skill.execute()
                                       ↓
                             SkillContext(design=_current_design)
+
+Telemetry:
+Skill.execute_with_telemetry() → 自动记录 duration_ms, status, params_summary
+                                    ↓
+                            SkillTelemetry.record_execution()
+                                    ↓
+                            SkillMetrics (聚合) + SkillExecutionRecord (历史)
 ```
 
 ## 3. 事件系统

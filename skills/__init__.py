@@ -18,6 +18,13 @@ from skills.base import (
 from skills.context import SkillContext
 from skills.registry import SkillRegistry
 from skills.skill_decorator import skill
+from skills.telemetry import (
+    SkillTelemetry,
+    SkillExecutionRecord,
+    SkillMetrics,
+    ExecutionStatus,
+    SkillExecutionTimer,
+)
 
 # Import submodules to trigger @skill decorators
 from skills import net_detour_optimization
@@ -31,4 +38,9 @@ __all__ = [
     "SkillContext",
     "SkillRegistry",
     "skill",
+    "SkillTelemetry",
+    "SkillExecutionRecord",
+    "SkillMetrics",
+    "ExecutionStatus",
+    "SkillExecutionTimer",
 ]

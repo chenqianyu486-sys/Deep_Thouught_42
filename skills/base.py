@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from skills.telemetry import (
+    SkillTelemetry,
+    SkillExecutionTimer,
+    ExecutionStatus,
+    sanitize_params_for_logging,
+)
+
 
 class SkillCategory(Enum):
     """Categories for classifying skills."""
@@ -71,3 +78,37 @@ class Skill(ABC):
             (is_valid, error_message)
         """
         return True, ""
+
+    def execute_with_telemetry(self, context: "SkillContext", **kwargs) -> SkillResult:
+        """Execute with telemetry instrumentation.
+
+        Records execution time, status, and parameters to SkillTelemetry.
+        Override this method to add custom instrumentation logic.
+
+        Args:
+            context: SkillContext with design and tools
+            **kwargs: Skill-specific parameters
+
+        Returns:
+            SkillResult from execute()
+        """
+        skill_name = self.get_metadata().name
+        params_summary = sanitize_params_for_logging(kwargs)
+
+        with SkillExecutionTimer() as timer:
+            result = self.execute(context, **kwargs)
+
+        if result.success:
+            status = ExecutionStatus.SUCCESS
+        else:
+            status = ExecutionStatus.FAILURE
+
+        SkillTelemetry.record_execution(
+            skill_name=skill_name,
+            duration_ms=timer.duration_ms,
+            status=status,
+            error=result.error,
+            params_summary=params_summary
+        )
+
+        return result

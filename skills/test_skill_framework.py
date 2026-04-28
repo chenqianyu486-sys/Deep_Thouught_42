@@ -232,6 +232,110 @@ def test_skill_category_enum():
     print("  PASSED: SkillCategory enum")
 
 
+def test_telemetry_record_execution():
+    """Test SkillTelemetry recording."""
+    from skills import SkillTelemetry, ExecutionStatus
+    SkillTelemetry.reset()
+
+    # Record a mock execution
+    record = SkillTelemetry.record_execution(
+        skill_name="test_skill",
+        duration_ms=100.5,
+        status=ExecutionStatus.SUCCESS,
+        params_summary="{param1=value1}"
+    )
+
+    assert record.skill_name == "test_skill"
+    assert record.duration_ms == 100.5
+    assert record.status == ExecutionStatus.SUCCESS
+    print("  PASSED: telemetry record execution")
+
+
+def test_telemetry_metrics():
+    """Test SkillTelemetry metrics aggregation."""
+    from skills import SkillTelemetry, ExecutionStatus
+    SkillTelemetry.reset()
+
+    # Record multiple executions
+    SkillTelemetry.record_execution("test_skill", 100.0, ExecutionStatus.SUCCESS)
+    SkillTelemetry.record_execution("test_skill", 200.0, ExecutionStatus.SUCCESS)
+    SkillTelemetry.record_execution("test_skill", 150.0, ExecutionStatus.FAILURE, error="test error")
+
+    metrics = SkillTelemetry.get_metrics("test_skill")
+    assert metrics is not None
+    assert metrics["total_calls"] == 3
+    assert metrics["success_count"] == 2
+    assert metrics["failure_count"] == 1
+    assert metrics["avg_duration_ms"] == 150.0
+    assert metrics["last_error"] == "test error"
+    print("  PASSED: telemetry metrics")
+
+
+def test_telemetry_execute_with_telemetry():
+    """Test execute_with_telemetry on a skill."""
+    from skills import SkillTelemetry
+    SkillTelemetry.reset()
+
+    skill = SkillRegistry.get("analyze_net_detour")
+    assert skill is not None
+
+    context = SkillContext(design=None, initialized=True)
+    result = skill.execute_with_telemetry(context, pin_paths=["a", "b"], detour_threshold=2.0)
+
+    assert result is not None
+
+    metrics = SkillTelemetry.get_metrics("analyze_net_detour")
+    assert metrics is not None
+    assert metrics["total_calls"] == 1
+    print("  PASSED: execute_with_telemetry")
+
+
+def test_telemetry_get_all_metrics():
+    """Test getting all metrics."""
+    from skills import SkillTelemetry, ExecutionStatus
+    SkillTelemetry.reset()
+
+    # Record something first
+    SkillTelemetry.record_execution("analyze_net_detour", 50.0, ExecutionStatus.SUCCESS)
+
+    all_metrics = SkillTelemetry.get_all_metrics()
+    assert "analyze_net_detour" in all_metrics
+    print("  PASSED: get all metrics")
+
+
+def test_telemetry_get_recent_executions():
+    """Test getting recent executions."""
+    from skills import SkillTelemetry, ExecutionStatus
+    SkillTelemetry.reset()
+
+    # Record multiple
+    SkillTelemetry.record_execution("test_skill", 10.0, ExecutionStatus.SUCCESS)
+    SkillTelemetry.record_execution("test_skill", 20.0, ExecutionStatus.SUCCESS)
+
+    recent = SkillTelemetry.get_recent_executions(limit=5)
+    # Most recent is first (T2=20ms before T1=10ms)
+    assert len(recent) == 2
+    assert recent[0]["duration_ms"] == 20.0
+    assert recent[1]["duration_ms"] == 10.0
+    print("  PASSED: get recent executions")
+
+
+def test_telemetry_execution_summary():
+    """Test execution summary."""
+    from skills import SkillTelemetry, ExecutionStatus
+    SkillTelemetry.reset()
+
+    SkillTelemetry.record_execution("skill1", 100.0, ExecutionStatus.SUCCESS)
+    SkillTelemetry.record_execution("skill2", 100.0, ExecutionStatus.FAILURE, error="err")
+
+    summary = SkillTelemetry.get_execution_summary()
+    assert summary["total_calls"] == 2
+    assert summary["total_success"] == 1
+    assert summary["total_failures"] == 1
+    assert summary["skills_tracked"] == 2
+    print("  PASSED: execution summary")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -253,6 +357,12 @@ def main():
         test_skill_metadata_dataclass,
         test_parameter_spec,
         test_skill_category_enum,
+        test_telemetry_record_execution,
+        test_telemetry_metrics,
+        test_telemetry_execute_with_telemetry,
+        test_telemetry_get_all_metrics,
+        test_telemetry_get_recent_executions,
+        test_telemetry_execution_summary,
     ]
 
     passed = 0
