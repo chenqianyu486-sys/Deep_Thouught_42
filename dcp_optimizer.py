@@ -2422,7 +2422,14 @@ class DCPOptimizer(DCPOptimizerBase):
                 print(f"\n*** Optimization completion judgment ***")
                 for reason in reasons:
                     print(f"  [OK] {reason}")
-            
+
+            # [FIX] When LLM returns no tool calls but is_done=False, continue the loop
+            # instead of returning to main loop. This ensures the LLM gets more chances
+            # to generate optimization commands within this iteration.
+            if not is_done:
+                logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
+                continue
+
             # At the end of get_completion(), before the return statement:
             if self.current_task_type:
                 task_category = self.classify_task(self.current_task_type)

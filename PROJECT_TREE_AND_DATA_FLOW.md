@@ -164,6 +164,16 @@ WNS回归处理: WNS<0且差于best时自动回滚
 完成判定: 使用latest_wns（当前），非best_wns（历史）
 ```
 
+### 5.1 无工具调用迭代处理（Bug Fix）
+
+**问题**: 当 LLM 返回无 tool_calls 时，原逻辑直接 return 导致迭代空转（无优化操作）
+
+**修复**: `get_completion()` 中无 tool_calls 时：
+- `is_done=False` → `continue` 回 while 循环，给 LLM 更多生成机会
+- `is_done=True` → 正常 return 到主循环
+
+**效果**: 避免空迭代浪费工具额度，5次硬限制改为真正无改进时触发
+
 ## 6. 429降级机制
 
 ```
