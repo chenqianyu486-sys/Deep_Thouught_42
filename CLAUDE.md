@@ -1,5 +1,6 @@
-**ALWAYS refer to PROJECT_TREE_AND_DATA_FLOW.md when exploring the code.**
-**ALWAYS update PROJECT_TREE_AND_DATA_FLOW.md after task accomplished(if necessary).**
+# ALWAYS:
+**ALWAYS refer to `PROJECT_TREE_AND_DATA_FLOW.md` when exploring the code.**
+**ALWAYS update `PROJECT_TREE_AND_DATA_FLOW.md` after task accomplished(if necessary).**
 **ALWAYS use English to write code comment, but use Chinese to write plans.**
 
 # Guidelines:

@@ -226,7 +226,7 @@ planner:
   min_importance: 0.1 (normal) / 0.7 (aggressive)
   cost_hard_limit: $1.00 (combined planner+worker, same as worker)
   fallback_models:  # 429 rate limit fallback (priority order)
-    - "xiaomi/mimo-v2.5-pro"
+    - "xiaomi/mimo-v2.5"
 ```
 
 ## 6. File Responsibilities

@@ -2462,8 +2462,9 @@ class DCPOptimizer(DCPOptimizerBase):
                 )
 
             # Log exit reason
-            reason = self._is_done_reason or ("wns_target_met" if is_done and
-                                              wns_target_met else "max_iterations_reached")
+            # _is_done_reason is always set (by user_requested, tool_round_limit, cost_limit, or wns_target_met/max_iterations_reached)
+            # Prioritize explicit reason over default fallback
+            reason = self._is_done_reason or "unknown"
             logger.info(f"get_completion exit: reason={reason}, is_done={is_done}, WNS={self.best_wns:.4f}")
             print(f"[Exit reason: {reason}]")
 
@@ -2719,6 +2720,17 @@ CRITICAL OPTIMIZATION RULES:
                     logger.info("Optimization workflow completed")
                     self.end_time = time.time()
 
+                    # Write output DCP before validation
+                    if hasattr(self, 'output_dcp') and self.output_dcp:
+                        logger.info(f"Writing final DCP to {self.output_dcp}...")
+                        try:
+                            await self.call_tool("vivado_write_checkpoint", {
+                                "dcp_path": str(self.output_dcp.resolve()),
+                                "force": True
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to write output DCP: {e}")
+
                     # [NEW] Final full validation (Phase 1 + Phase 2)
                     if self.validation_enabled and hasattr(self, 'output_dcp') and self.output_dcp.exists():
                         logger.info("Running final full validation on output DCP...")
@@ -2824,7 +2836,7 @@ CRITICAL OPTIMIZATION RULES:
         if self.start_time is not None:
             total_runtime = (self.end_time or time.time()) - self.start_time
             print(f"\nTOTAL RUNTIME: {total_runtime:.2f} seconds ({total_runtime/60:.2f} minutes)")
-        
+
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
         result_lines = self._format_fmax_results(
             self.clock_period, self.initial_wns, best_wns, result_label="Best"
@@ -2855,8 +2867,12 @@ CRITICAL OPTIMIZATION RULES:
         
         # Cost
         print(f"\nCOST:")
-        print(f"  Planner Model:       {self.model_planner}")
-        print(f"  Worker Model:        {self.model_worker}")
+        used_models = sorted(set(d.get("model", "") for d in self.api_call_details if d.get("model")))
+        if used_models:
+            print(f"  Models used:         {', '.join(used_models)}")
+        else:
+            print(f"  Planner Model:       {self.model_planner}")
+            print(f"  Worker Model:        {self.model_worker}")
         if self.total_cost > 0:
             print(f"  Total cost:          ${self.total_cost:.4f}")
         else:
@@ -2962,6 +2978,12 @@ CRITICAL OPTIMIZATION RULES:
             print(f"Detailed token usage report saved to: {report_path}\n")
         except Exception as e:
             logger.warning(f"Failed to save token usage report: {e}")
+
+        # Print output files
+        print(f"Output files:")
+        if hasattr(self, 'output_dcp') and self.output_dcp:
+            print(f"  Optimized DCP: {self.output_dcp}")
+        print(f"  Run directory: {self.run_dir}")
 
     # === Section 7.X: DCP Validation Helpers ===
 
@@ -4112,4 +4134,5 @@ Examples:
 
 
 if __name__ == "__main__":
+    print("Type 'quit' and press Enter to terminate the program.")
     asyncio.run(main())
