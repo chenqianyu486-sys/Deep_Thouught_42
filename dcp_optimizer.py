@@ -659,7 +659,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
 
         # === Section 7.X: DCP Validation ===
-        self.validation_enabled = True          # Enable validation during optimization
+        self.validation_enabled = False          # Disable validation during optimization
         self.validation_interval = 5            # Run Phase 1 every N iterations
         self.validation_report_dir = self.temp_dir / "validation_reports"
 
