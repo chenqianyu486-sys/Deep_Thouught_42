@@ -25,6 +25,7 @@ class ModelConfigData:
     token_budget: int
     preserve_turns: int
     preserve_turns_aggressive: int = 3  # Default for aggressive mode
+    cost_hard_limit: float = 1.0  # USD hard limit (combined planner+worker budget)
     min_importance_threshold: float = 0.3
     min_importance_threshold_aggressive: float = 0.8  # Default for aggressive mode
     history_retrieval_limit: int = 5
@@ -84,6 +85,7 @@ class ModelConfigLoader:
             token_budget=config['flash']['token_budget'],
             preserve_turns=config['flash']['preserve_turns'],
             preserve_turns_aggressive=config['flash'].get('preserve_turns_aggressive', 3),
+            cost_hard_limit=config['flash'].get('cost_hard_limit', 1.0),
             min_importance_threshold=config['flash']['min_importance_threshold'],
             min_importance_threshold_aggressive=config['flash'].get('min_importance_threshold_aggressive', 0.8),
             history_retrieval_limit=config['flash']['history_retrieval_limit'],
@@ -100,6 +102,7 @@ class ModelConfigLoader:
             token_budget=config['pro']['token_budget'],
             preserve_turns=config['pro']['preserve_turns'],
             preserve_turns_aggressive=config['pro'].get('preserve_turns_aggressive', 3),
+            cost_hard_limit=config['pro'].get('cost_hard_limit', 1.0),
             min_importance_threshold=config['pro']['min_importance_threshold'],
             min_importance_threshold_aggressive=config['pro'].get('min_importance_threshold_aggressive', 0.8),
             history_retrieval_limit=config['pro']['history_retrieval_limit'],

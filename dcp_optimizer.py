@@ -686,6 +686,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.total_completion_tokens = 0
         self.total_tokens = 0
         self.total_cost = 0.0
+        self.cost_hard_limit = _flash_data.cost_hard_limit  # USD hard limit (combined planner+worker)
         self.api_call_details = []
 
         # Track compression metrics for observability and tuning
@@ -700,6 +701,9 @@ class DCPOptimizer(DCPOptimizerBase):
         # Track total runtime
         self.start_time = None
         self.end_time = None
+
+        # Track is_done exit reason for logging
+        self._is_done_reason: Optional[str] = None
 
         # === Section 7.0: Context Manager Integration ===
         # Initialize EventBus for context change notifications
@@ -859,6 +863,69 @@ class DCPOptimizer(DCPOptimizerBase):
     def _get_current_wns(self) -> Optional[float]:
         """Get latest WNS - O(1) from cached instance variable."""
         return self.latest_wns
+
+    def _inject_wns_state_to_system_prompt(self, system_content: str) -> str:
+        """Inject current WNS/state into system prompt to prevent context loss after compression.
+
+        Updates the YAML metadata section in system prompt with current:
+        - current_wns (from latest_wns)
+        - best_wns (best achieved so far)
+        - iteration (current iteration)
+        - clock_period
+        """
+        import re
+
+        current_wns = self._get_current_wns()
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        iteration = self.iteration
+        clock_period = self.clock_period
+
+        # Update wns_ns in timing section
+        if current_wns is not None:
+            system_content = re.sub(
+                r'(wns_ns:\s*)[-+]?\d+\.?\d*',
+                f'\\g<1>{current_wns:.3f}',
+                system_content
+            )
+
+        # Update clock_period_ns in timing section
+        if clock_period is not None:
+            system_content = re.sub(
+                r'(clock_period_ns:\s*)[-+]?\d+\.?\d*',
+                f'\\g<1>{clock_period:.3f}',
+                system_content
+            )
+
+        # Add or update current optimization state section after the YAML block
+        current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
+        best_wns_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
+        clock_period_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
+        best_wns_iter = self._best_wns_iteration
+        best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
+        input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
+        state_section = f"""**Current Optimization State:**
+- iteration: {iteration}
+- current_wns: {current_wns_str}
+- best_wns: {best_wns_str} (achieved at iteration {best_wns_iter})
+- clock_period: {clock_period_str}
+- input_dcp: {input_dcp_str}
+- best_checkpoint: {best_dcp_str}
+"""
+
+        # Check if "Current Optimization State" already exists
+        if "Current Optimization State:" in system_content:
+            # Replace existing state section
+            pattern = r'\*\*Current Optimization State:\*\*[^\n]*\n(?:[^\n]*\n)*?'
+            system_content = re.sub(pattern, state_section, system_content)
+        else:
+            # Append after the YAML code block
+            yaml_end_pattern = r'(```)\s*$'
+            match = re.search(yaml_end_pattern, system_content, re.MULTILINE)
+            if match:
+                insert_pos = match.end()
+                system_content = system_content[:insert_pos] + "\n\n" + state_section + system_content[insert_pos:]
+
+        return system_content
 
     def _build_compression_context(
         self,
@@ -1626,7 +1693,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 await asyncio.sleep(60)
                 heartbeat_count += 1
                 elapsed = time.time() - start_time
-                logger.warning(f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s")
+                logger.info(f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s")
 
         # Log MCP request with sanitized arguments
         sanitized_args = sanitize_payload(arguments)
@@ -2061,14 +2128,15 @@ class DCPOptimizer(DCPOptimizerBase):
             if self._check_exit_requested():
                 logger.info(f"User requested exit during tool round {tool_round}, breaking inner loop")
                 content = f"[User requested exit during tool round {tool_round}, iteration {self.iteration}]"
+                self._is_done_reason = "user_requested"
                 is_done = False
                 break
             if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
                 logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
                 content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
+                self._is_done_reason = "tool_round_limit"
                 is_done = False
                 break
-            # Capture WNS at the start of this iteration for improvement comparison
             iteration_start_wns = self.best_wns
 
             # 1. Inject failed strategies via compat
@@ -2091,6 +2159,13 @@ class DCPOptimizer(DCPOptimizerBase):
             last_exception = None
             # Get messages for logging and API call
             api_messages = self._compat.get_formatted_for_api()
+
+            # Inject current WNS state into system message to prevent context loss after compression
+            if api_messages and api_messages[0].get("role") == "system":
+                system_content = api_messages[0].get("content", "")
+                updated_content = self._inject_wns_state_to_system_prompt(system_content)
+                api_messages[0]["content"] = updated_content
+
             # Log prompt for observability
             self._prompt_logger.log_prompt(
                 model=current_model,
@@ -2111,6 +2186,8 @@ class DCPOptimizer(DCPOptimizerBase):
                     if response is None:
                         raise ValueError("API returned None response")
                     last_exception = None  # [FIX] Clear stale exception after successful fallback
+                    # Update model_worker to current model after successful fallback
+                    self.model_worker = current_model
                     break  # Success, exit retry loop
                 except Exception as e:
                     last_exception = e
@@ -2163,6 +2240,7 @@ class DCPOptimizer(DCPOptimizerBase):
                             logger.warning(f"Tool use not supported on {tool_unsupported_model}, switching to fallback: {next_fallback}")
                             current_model = next_fallback
                             self.last_used_model = current_model
+                            self.model_worker = current_model
                             wait_time = retry_delay * (2 ** retry)
                             logger.warning(f"Retry {retry+1}/{max_retries} with {current_model}, waiting {wait_time}s: {e}")
                             await asyncio.sleep(wait_time)
@@ -2209,6 +2287,13 @@ class DCPOptimizer(DCPOptimizerBase):
                     self.total_completion_tokens += completion
                     self.total_tokens += total
                     self.total_cost += cost
+                    # Check cost hard limit after updating total_cost
+                    if self.total_cost >= self.cost_hard_limit:
+                        self._is_done_reason = "cost_limit"
+                        logger.warning(f"Cost limit ${self.total_cost:.4f} >= ${self.cost_hard_limit:.2f}, stopping optimization")
+                        content = f"[Cost limit reached: ${self.total_cost:.4f} >= ${self.cost_hard_limit:.2f}]"
+                        is_done = True
+                        break
                     self.api_call_details.append({
                         "call_number": self.llm_call_count, "iteration": self.iteration,
                         "model": current_model,
@@ -2323,9 +2408,10 @@ class DCPOptimizer(DCPOptimizerBase):
 
             # Comprehensive judgment: WNS met OR hard limit reached
             is_done = wns_target_met or max_iterations_reached
-
-            # Log the judgment reasons
             if is_done:
+                # Set is_done_reason if not already set by cost_limit
+                if self._is_done_reason is None:
+                    self._is_done_reason = "wns_target_met" if wns_target_met else "max_iterations_reached"
                 reasons = []
                 if wns_target_met:
                     reasons.append(f"WNS target met ({self.latest_wns:.3f} ns >= {self.WNS_TARGET_THRESHOLD:.1f} ns)")
@@ -2374,6 +2460,12 @@ class DCPOptimizer(DCPOptimizerBase):
                     tool_error=tool_error,
                     failure_type=failure_type
                 )
+
+            # Log exit reason
+            reason = self._is_done_reason or ("wns_target_met" if is_done and
+                                              wns_target_met else "max_iterations_reached")
+            logger.info(f"get_completion exit: reason={reason}, is_done={is_done}, WNS={self.best_wns:.4f}")
+            print(f"[Exit reason: {reason}]")
 
             return content, is_done
 

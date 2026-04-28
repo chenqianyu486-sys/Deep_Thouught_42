@@ -91,7 +91,30 @@ YAMLStructuredCompressor (default):
 5. EventBus.emit(CONTEXT_COMPRESSED)
 ```
 
-### 2.4 Tool Call WNS Tracking
+### 2.4 WNS State Injection (Anti-Compression-Loss)
+
+```
+Before LLM API call:
+api_messages = get_formatted_for_api()
+         │
+         ▼
+_inject_wns_state_to_system_prompt()  ← Injects current/best WNS into system message
+         │
+         ├── Updates wns_ns in YAML metadata section (current_wns)
+         ├── Updates clock_period_ns in YAML metadata section
+         └── Appends/Updates "Current Optimization State:" block:
+             - iteration, current_wns, best_wns, clock_period
+             - input_dcp, best_checkpoint (with iteration info)
+         │
+         ▼
+API call with updated system message (model always sees current state)
+```
+
+**Problem solved**: After context compression, the LLM may lose track of current WNS state.
+**Solution**: System prompt is dynamically updated before each LLM call to ensure
+the model always has access to current_wns, best_wns, and checkpoint information.
+
+### 2.5 Tool Call WNS Tracking
 
 ```
 WNS captured via 3 routes:
@@ -104,7 +127,7 @@ Validation: _is_valid_wns()
 - wns < -999 → REJECT (parsing error)
 ```
 
-### 2.5 Compression Context
+### 2.6 Compression Context
 
 ```python
 CompressionContext(
@@ -155,6 +178,7 @@ flash:
   token_budget: 35K
   preserve_turns: 40 (normal) / 10 (aggressive)
   min_importance: 0.15 (normal) / 0.7 (aggressive)
+  cost_hard_limit: $1.00 (combined planner+worker)
   fallback_models:  # 429 rate limit fallback (priority order)
     - "qwen/qwen3.6-flash"
     - "xiaomi/mimo-v2-flash"
@@ -166,6 +190,7 @@ pro:
   token_budget: 100K
   preserve_turns: 60 (normal) / 10 (aggressive)
   min_importance: 0.1 (normal) / 0.7 (aggressive)
+  cost_hard_limit: $1.00 (combined planner+worker, same as flash)
   fallback_models:  # 429 rate limit fallback (priority order)
     - "deepseek/deepseek-v4-pro"
     - "qwen/qwen3.6-plus"
@@ -237,6 +262,7 @@ Truncation: >5000 chars → first 2500 + "..." + last 2500
 | HistoricalMemory index | Changed from list to set for O(1) membership and consistent eviction |
 | Tool call name preservation | Compression now preserves tool_call function names in YAML output |
 | Dead config fields | Added DEPRECATED comments to unused recent_window, tool_result_truncate, relevance_threshold, age_based_decay |
+| Fallback model_worker update | After successful fallback, model_worker is updated to current model so _select_model() checks correct exhausted status |
 
 ## 10. Iteration Exit Conditions
 
@@ -274,6 +300,9 @@ PRO_FALLBACK_MODELS = ["deepseek/deepseek-v4-pro", "qwen/qwen3.6-plus"]
 MAX_TOOL_ROUNDS_PER_ITERATION = 22  # Max tool-calling rounds per iteration
 GLOBAL_NO_IMPROVEMENT_LIMIT = 5      # Hard limit for consecutive no-improvement
 WNS_TARGET_THRESHOLD = 0.0           # WNS target (0.0 ns = timing converged)
+
+# Cost control
+COST_HARD_LIMIT = 1.00              # USD hard limit (combined planner+worker)
 ```
 
 ## 12. 429 Rate Limit Fallback Mechanism
@@ -291,6 +320,7 @@ On 429 error:
 _select_model() also checks if model_worker is exhausted:
 - If model_worker in _exhausted_flash_fallbacks or _exhausted_pro_fallbacks → force planner
 - Prevents immediately re-selecting a model that just hit 429
+- [FIX] After successful fallback, model_worker is updated to current model so this check uses correct status
 
 Key state variables:
 - _flash_fallback_index / _pro_fallback_index: round-robin position
@@ -322,4 +352,23 @@ Exit checkpoints:
 ```
 
 See [docs/CONSOLE_EXIT.md](docs/CONSOLE_EXIT.md) for usage details.
+
+## 14. Exit Reason Tracking
+
+When optimization ends, the reason is logged via `_is_done_reason` and printed to console as `[Exit reason: ...]`.
+
+| Reason | Description |
+|--------|-------------|
+| `cost_limit` | Reached $1.00 USD hard limit (planner+worker combined) |
+| `wns_target_met` | WNS >= 0.0 ns (timing converged) |
+| `max_iterations_reached` | 5 consecutive iterations without improvement |
+| `tool_round_limit` | 22 tool-calling rounds per iteration reached |
+| `user_requested` | User typed `quit` to exit |
+
+```python
+# In get_completion(), exit reason is logged before return:
+reason = self._is_done_reason or ("wns_target_met" if is_done and wns_target_met else "max_iterations_reached")
+logger.info(f"get_completion exit: reason={reason}, is_done={is_done}, WNS={self.best_wns:.4f}")
+print(f"[Exit reason: {reason}]")
+```
 ```
