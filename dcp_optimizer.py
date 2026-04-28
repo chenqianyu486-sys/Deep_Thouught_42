@@ -660,6 +660,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
+        self.checkpoint_saving_enabled = True     # Enable checkpoint saving for iteration rollback
         self.validation_interval = 5            # Run Phase 1 every N iterations
         self.validation_report_dir = self.temp_dir / "validation_reports"
 
@@ -2992,8 +2993,8 @@ CRITICAL OPTIMIZATION RULES:
         return self.validation_report_dir / f"iteration_{iteration:03d}_checkpoint.dcp"
 
     async def _save_intermediate_checkpoint(self, iteration: int) -> Optional[Path]:
-        """Save intermediate checkpoint for validation. Returns path or None on failure."""
-        if not self.validation_enabled:
+        """Save intermediate checkpoint for iteration rollback. Returns path or None on failure."""
+        if not self.checkpoint_saving_enabled:
             return None
 
         ckpt_path = self._get_intermediate_checkpoint_path(iteration)
