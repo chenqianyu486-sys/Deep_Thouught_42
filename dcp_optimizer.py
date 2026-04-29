@@ -22,6 +22,7 @@ import shutil
 import sys
 import threading
 import time
+import yaml
 from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -2293,6 +2294,70 @@ Continue optimization from this state. Do NOT reload the design - it is already 
 
         return results
 
+    @staticmethod
+    def _parse_yaml_tool_calls(content: str) -> list[dict]:
+        """Parse tool_calls from YAML-formatted LLM content.
+
+        Handles models that output tool calls in YAML format (as specified
+        in SYSTEM_PROMPT.TXT):
+          tool_calls:
+            - function: tool_name
+              parameters:
+                key: value
+
+        Handles multiple step: blocks and leading/trailing non-YAML text.
+        """
+        results = []
+
+        # Split on step: boundaries to handle multi-step YAML responses
+        blocks = re.split(r'\n(?=step:)', content)
+
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+
+            # Ensure block starts with step: for consistent parsing
+            if not block.startswith('step:'):
+                block = 'step:\n' + block
+
+            try:
+                data = yaml.safe_load(block)
+            except yaml.YAMLError:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            # Navigate through step -> tool_calls
+            step_data = data.get('step')
+            if not isinstance(step_data, dict):
+                # Maybe the block itself is the dict (no wrapper step: key)
+                step_data = data if isinstance(data, dict) else {}
+
+            tool_calls_list = step_data.get('tool_calls')
+            if not isinstance(tool_calls_list, list):
+                continue
+
+            for tc in tool_calls_list:
+                if not isinstance(tc, dict):
+                    continue
+                # Support both function: name and name: tool_name
+                name = tc.get('function') or tc.get('name')
+                if not name or not isinstance(name, str):
+                    continue
+
+                params = tc.get('parameters', {})
+                if not isinstance(params, dict):
+                    params = {}
+
+                results.append({
+                    "name": name.strip(),
+                    "arguments": params
+                })
+
+        return results
+
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -2550,12 +2615,14 @@ Continue optimization from this state. Do NOT reload the design - it is already 
             # 增强可观测性：打印 assistant 的回答
             logger.info(f"[ASSISTANT] {assistant_content}")
 
-            # [FIX] Fallback: parse XML-style tool calls from text for models
-            # that don't support native tool calling (e.g. tencent/hy3-preview:free)
+            # [FIX] Fallback: parse tool calls from raw text for models that don't
+            # support native tool calling (try XML format first, then YAML format)
             if not message.tool_calls:
                 text_calls = self._parse_text_tool_calls(assistant_content)
+                if not text_calls:
+                    text_calls = self._parse_yaml_tool_calls(assistant_content)
                 if text_calls:
-                    logger.info(f"Parsed {len(text_calls)} tool call(s) from raw text content (model does not support native tool calling)")
+                    logger.info(f"Parsed {len(text_calls)} tool call(s) from raw text (XML/YAML fallback, model={current_model})")
                     simulated = []
                     for i, tc_data in enumerate(text_calls):
                         tc = SimpleNamespace()
