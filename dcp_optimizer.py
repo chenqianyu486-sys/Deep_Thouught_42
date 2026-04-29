@@ -309,6 +309,27 @@ class DCPOptimizerBase:
         error_lower = error_msg.lower() if isinstance(error_msg, str) else str(error_msg).lower()
         return any(phrase in error_lower for phrase in ROUTING_FAILURE_PHRASES)
 
+    def _start_tool_heartbeat(self, tool_name: str, start_time: float, interval: float = 60.0) -> tuple[asyncio.Task, int]:
+        """
+        Start a background heartbeat logger for a long-running tool call.
+        Returns (task, heartbeat_count_ref) so the caller can cancel and log final status.
+        """
+        heartbeat_count = 0
+
+        async def heartbeat_logger():
+            nonlocal heartbeat_count
+            while True:
+                await asyncio.sleep(interval)
+                heartbeat_count += 1
+                elapsed = time.time() - start_time
+                logger.info(
+                    f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s",
+                    extra={"tool_name": tool_name, "heartbeat_elapsed": int(elapsed), "heartbeat_count": heartbeat_count}
+                )
+
+        task = asyncio.create_task(heartbeat_logger())
+        return task, heartbeat_count
+
     async def start_servers(self, log_prefix: str = ""):
         """Start and connect to both MCP servers."""
         script_dir = Path(__file__).parent.resolve()
@@ -1796,27 +1817,6 @@ Continue optimization from this state. Do NOT reload the design - it is already 
         v_response = await self.vivado_session.list_tools()
         for tool in v_response.tools:
             self.tools.append(convert_mcp_tool_to_openai(tool, "vivado"))
-
-    def _start_tool_heartbeat(self, tool_name: str, start_time: float, interval: float = 60.0) -> tuple[asyncio.Task, int]:
-        """
-        Start a background heartbeat logger for a long-running tool call.
-        Returns (task, heartbeat_count_ref) so the caller can cancel and log final status.
-        """
-        heartbeat_count = 0
-
-        async def heartbeat_logger():
-            nonlocal heartbeat_count
-            while True:
-                await asyncio.sleep(interval)
-                heartbeat_count += 1
-                elapsed = time.time() - start_time
-                logger.info(
-                    f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {elapsed:.1f}s",
-                    extra={"tool_name": tool_name, "heartbeat_elapsed": int(elapsed), "heartbeat_count": heartbeat_count}
-                )
-
-        task = asyncio.create_task(heartbeat_logger())
-        return task, heartbeat_count
 
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call on the appropriate MCP server."""
