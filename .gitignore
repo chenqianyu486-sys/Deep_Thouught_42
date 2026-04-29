@@ -3,3 +3,5 @@ __pycache__
 *.dcp
 *.log
 *.jou
+benchmarks/
+dcp_optimizer_run-*/
