@@ -1631,7 +1631,7 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
             return {"error": "Skill 'analyze_net_detour' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
-        result = skill.execute(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
+        result = skill.execute_with_telemetry(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
 
         if not result.success:
             return {"error": result.error}
@@ -1694,7 +1694,7 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
             return {"error": "Skill 'optimize_cell_placement' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
-        result = skill.execute(context, cell_names=cell_names)
+        result = skill.execute_with_telemetry(context, cell_names=cell_names)
 
         if not result.success:
             return {"error": result.error}

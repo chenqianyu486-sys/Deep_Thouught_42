@@ -123,6 +123,13 @@ Skill.execute_with_telemetry() → 自动记录 duration_ms, status, params_summ
                             SkillTelemetry.record_execution()
                                     ↓
                             SkillMetrics (聚合) + SkillExecutionRecord (历史)
+
+Heartbeat:
+- execute_with_telemetry() 启动 daemon heartbeat thread
+- 每30秒打印 [SKILL_HEARTBEAT] Skill '{name}' still running after {elapsed}s
+- 包含 extra: skill_name, heartbeat_elapsed, heartbeat_count
+- 技能完成时打印 [SKILL_COMPLETE] '{name}' completed in {duration_ms}ms (heartbeats: {n})
+- 快速完成的技能无 heartbeat 输出（30秒间隔内完成不触发）
 ```
 
 ## 3. 事件系统
