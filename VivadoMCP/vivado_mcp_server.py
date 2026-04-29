@@ -1456,7 +1456,15 @@ async def call_tool(name: str, arguments: dict):
             dcp_path = arguments["dcp_path"]
             force = arguments.get("force", False)
             timeout = arguments.get("timeout", 300)
-            
+
+            # Verify design is actually open before writing
+            if not _design_open:
+                probe = run_tcl_command("get_property NAME [current_design]", timeout=10)
+                if "ERROR" in probe or not probe.strip():
+                    return [TextContent(type="text",
+                        text="ERROR: No design is open. Cannot write checkpoint. Use open_checkpoint first.")]
+                _design_open = True
+
             force_flag = " -force" if force else ""
             output = run_tcl_command(f"write_checkpoint{force_flag} {{{dcp_path}}}", timeout=timeout)
             return [TextContent(type="text", text=f"Wrote checkpoint: {dcp_path}\n\n{output}")]
@@ -1477,36 +1485,38 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
-            # First try using report_timing_summary to get WNS (more reliable on Linux)
+            # Primary: use get_property WNS (format-independent, most reliable)
+            run_tcl_command("puts {wns_flush}", timeout=5)
+            output = run_tcl_command(
+                "set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]",
+                timeout=timeout
+            )
+            raw = output.strip()
+            lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
+            if lines:
+                try:
+                    parsed = float(lines[-1])
+                    if parsed == 0.0:
+                        parsed = abs(parsed)
+                    return [TextContent(type="text", text=str(parsed))]
+                except ValueError:
+                    logger.warning(f"get_wns: cannot parse from get_property: {raw}")
+
+            # Fallback: parse timing summary header/data format
             timing_output = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
-            wns_value = "PARSE_ERROR"
-
-            # Parse WNS from timing summary output
-            wns_match = re.search(r'^\s*(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s*$',
-                                  timing_output, re.MULTILINE)
-            if wns_match:
-                wns_candidate = float(wns_match.group(1))
-                if wns_candidate == 0.0:
-                    wns_candidate = abs(wns_candidate)
-                wns_value = str(wns_candidate)
-                logger.info(f"get_wns: parsed WNS={wns_value} from timing_summary")
-            else:
-                # Fallback: try direct get_property
-                run_tcl_command("puts {wns_flush}", timeout=5)
-                output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
-                raw = output.strip()
-                lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
-                if lines:
+            for line in timing_output.split('\n'):
+                if 'WNS(ns)' in line and 'TNS(ns)' in line:
+                    continue
+                if line.strip().startswith('---') or line.strip().startswith('==='):
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 2:
                     try:
-                        parsed = float(lines[-1])
-                        if parsed == 0.0:
-                            parsed = abs(parsed)
-                        wns_value = str(parsed)
-                        logger.info(f"get_wns: parsed WNS={wns_value} from get_property")
+                        wns = float(parts[0])
+                        return [TextContent(type="text", text=str(abs(wns) if wns == 0.0 else wns))]
                     except ValueError:
-                        logger.warning(f"get_wns: cannot parse WNS from get_property output: {raw}")
-
-            return [TextContent(type="text", text=wns_value)]
+                        continue
+            return [TextContent(type="text", text="PARSE_ERROR")]
         
         elif name == "place_design":
             directive = arguments.get("directive")

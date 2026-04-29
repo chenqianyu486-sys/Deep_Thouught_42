@@ -418,6 +418,30 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["cell_names"]
             }
+        ),
+        Tool(
+            name="get_high_fanout_nets",
+            description="""Find high fanout nets in the current RapidWright design.
+
+            Iterates all nets in the design to find those with fanout exceeding the threshold.
+            Returns the top nets sorted by fanout descending. This is a RapidWright-native
+            alternative to Vivado's get_critical_high_fanout_nets (which requires timing analysis).
+            Use this when you want to find high fanout nets without opening Vivado first.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "min_fanout": {
+                        "type": "integer",
+                        "description": "Minimum fanout threshold (default: 100)",
+                        "default": 100
+                    },
+                    "max_nets": {
+                        "type": "integer",
+                        "description": "Maximum number of nets to return (default: 10)",
+                        "default": 10
+                    }
+                },
+            }
         )
     ]
 
@@ -539,6 +563,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "optimize_cell_placement":
             result = rw.optimize_cell_placement(
                 cell_names=arguments["cell_names"]
+            )
+
+        elif name == "get_high_fanout_nets":
+            result = rw.get_high_fanout_nets(
+                min_fanout=arguments.get("min_fanout", 100),
+                max_nets=arguments.get("max_nets", 10)
             )
 
         else:

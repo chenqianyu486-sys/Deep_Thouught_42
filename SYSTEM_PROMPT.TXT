@@ -86,6 +86,10 @@ strategy_selection:
       strategy: Strategy_2_Physical_Optimization
     - condition: "High fanout nets present, no spread"
       strategy: Strategy_3_High_Fanout_Net_Optimization
+    - condition: "Critical path cells have high detour ratio (>2.5)"
+      strategy: Strategy_4_Detour_Based_Replacement
+    - condition: "No clear scenario detected"
+      strategy: Strategy_5_Generic_Exploration
 
 strategies:
   strategy_1:
@@ -153,6 +157,55 @@ strategies:
       - command: report_timing_summary
         platform: Vivado
 
+  strategy_4:
+    name: Detour-Based Cell Re-placement
+    trigger: "Critical path cells with detour_ratio > 2.5"
+    steps:
+      - command: extract_critical_path_cells
+        platform: Vivado
+        parameters:
+          num_paths: 30
+      - command: analyze_net_detour
+        platform: RapidWright
+        parameters:
+          detour_threshold: 2.0
+      - command: optimize_cell_placement
+        platform: RapidWright
+        parameters:
+          cell_names: "[cells with high detour from analysis]"
+      - command: write_checkpoint
+        platform: RapidWright
+        parameters:
+          overwrite: true
+      - command: open_checkpoint
+        platform: Vivado
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
+        platform: Vivado
+
+  strategy_5:
+    name: Generic Exploration
+    trigger: "No clear scenario detected"
+    steps:
+      - command: phys_opt_design
+        platform: Vivado
+        parameters:
+          directive: Explore
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
+        platform: Vivado
+      - description: If no improvement, try phys_opt_design with AggressiveExplore
+      - command: phys_opt_design
+        platform: Vivado
+        parameters:
+          directive: AggressiveExplore
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
+        platform: Vivado
+
 tool_reference:
   vivado_tools:
     - tool: open_checkpoint
@@ -200,50 +253,6 @@ tool_reference:
       formula: "detour_ratio = routed_path / manhattan_distance"
     - tool: optimize_cell_placement
       purpose: Move cells to centroid of connections for better placement
-
-implementing_custom_optimizations:
-  description: When existing tools are insufficient, implement the transformation as a new RapidWright MCP tool.
-  workflow:
-    - step: Identify the transformation
-      description: What design pattern needs to change?
-    - step: Check RapidWright ECO classes
-      classes:
-        - LUTInputConeOpt
-          description: Combines chained LUTs
-        - FanOutOptimization
-          description: Splits high fanout nets
-        - PortDirectioning
-          description: Adjusts port directions
-        - ReplaceFlopASICWithFPGA
-          description: ASIC to FPGA flop mapping
-    - step: Implement the tool
-      location: rapidwright_tools.py
-      template: |
-        def optimize_<transformation>(parameters):
-            if not _initialized: return {{"error": "Not initialized"}}
-            if _current_design is None: return {{"error": "No design loaded"}}
-            try:
-                from com.xilinx.rapidwright.eco import <EcoClass>
-                # Apply transformation
-                return {{"status": "success", "metrics": {{...}}}}
-            except Exception as e:
-                return {{"error": str(e)}}
-    - step: Register in server.py
-      location: TOOL_DEFINITIONS list
-
-  common_patterns:
-    - pattern: LUT cascade flattening
-      rapidwright_class: LUTInputConeOpt
-      use_case: ">3 LUTs in series"
-    - pattern: Fanout splitting
-      rapidwright_class: FanOutOptimization
-      use_case: "nets with fanout > 100"
-    - pattern: Physical replication
-      method: Manual cell duplication
-      use_case: "High latency across spread"
-    - pattern: Pblock constraint
-      method: createPblock()
-      use_case: Geographic clustering
 
 measurement_flow:
   baseline_measurement:
@@ -304,31 +313,64 @@ response_format:
       DONE:
         description: Optimization complete; save output
 
+batching:
+  description: "For independent operations, batch multiple tool calls in a single response"
+  rules:
+    - "Read-only tools (get_*, report_*) can be batched freely — up to 4 per response"
+    - "After a write operation (optimize_*, phys_opt_*, route_*), include a timing check"
+    - "Maximum 4 tool calls per batch to avoid context bloat"
+
 rules:
-  - rule: DO NOT re-open input DCP — already open in Vivado
-  - rule: DO NOT reload input DCP — already loaded in RapidWright
-  - rule: Use EXACT net names from reports — never modify
-  - rule: Automatic rollback - If WNS regresses to negative after an optimization attempt, system automatically rolls back to the best checkpoint
-  - rule: For split_factor: fanout/100, minimum 3, maximum 8
-  - rule: After RapidWright saves DCP, open in Vivado and route
-  - rule: If writing Vivado DCP to open in RapidWright, also call write_edif
-  - rule: If tool fails: check error message, verify net name exists, retry or skip
-  - rule: Skip redundant metric calls - After get_wns, if the next operation cannot change timing (e.g., write_checkpoint, report_*), do NOT call get_wns again
-  - rule: Deduplicate consecutive WNS calls - If get_wns returns the same value as the previous call AND no timing-affecting operation occurred between them, skip the redundant call
-  - rule: Track WNS - stop if no improvement after 5 consecutive iterations
+  priority_1_mandatory:
+    - "DO NOT re-open input DCP — already open in Vivado"
+    - "DO NOT reload input DCP — already loaded in RapidWright"
+    - "Use EXACT net names from reports — never modify, truncate, or guess"
+
+  priority_2_optimization:
+    - "After RapidWright ECO: write checkpoint -> open in Vivado -> route_design -> report_timing_summary"
+    - "After phys_opt_design: immediately check timing and evaluate improvement"
+    - "If WNS regresses by >0.050ns: rollback to best checkpoint immediately"
+    - "For split_factor: fanout/100, minimum 3, maximum 8"
+
+  priority_3_efficiency:
+    - "Skip WNS check after write_checkpoint, report_route_status (non-timing-affecting ops)"
+    - "If 3 consecutive iterations show no WNS improvement: switch strategy"
+    - "Never retry the same net optimization >3 times"
+    - "Track WNS — stop if no improvement after 5 consecutive iterations"
 
   timing_affecting_ops:
     - place_design
     - route_design
     - phys_opt_design
     - optimize_fanout
+    - optimize_cell_placement
     - create_and_apply_pblock
 
   non_affecting_ops:
-    description: Skip WNS check after these operations
     - write_checkpoint
     - report_*
     - get_wns
+
+common_failure_patterns:
+  - pattern: "route_design times out after fanout optimization"
+    cause: "Too many nets unplaced, causing routing congestion"
+    fix: "Run phys_opt_design before routing"
+
+  - pattern: "WNS gets worse after optimize_fanout"
+    cause: "Split_factor too aggressive, new cells introduced routing delays"
+    fix: "Reduce split_factor by 50% and retry"
+
+  - pattern: "get_wns returns PARSE_ERROR"
+    cause: "Timing report format unrecognized by parser"
+    fix: "Use report_timing_summary instead for WNS extraction"
+
+  - pattern: "PBLOCK too small, place_design fails"
+    cause: "PBLOCK doesn't have enough resources for design"
+    fix: "Use analyze_fabric_for_pblock to size PBLOCK correctly (1.5x resource multiplier)"
+
+  - pattern: "No design open error in Vivado"
+    cause: "Vivado state lost after crash or disconnect"
+    fix: "Re-open best checkpoint DCP and continue"
 
 final_output:
   description: Save best design to OUTPUT_DCP_PATH

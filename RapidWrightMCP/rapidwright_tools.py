@@ -1733,3 +1733,41 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
         logger.error(f"Error optimizing cell placement: {e}")
         return {"error": str(e)}
 
+
+def get_high_fanout_nets(min_fanout: int = 100, max_nets: int = 10) -> Dict[str, Any]:
+    """Find high fanout nets in the current RapidWright design."""
+    global _current_design
+    if not _initialized:
+        return {"error": "RapidWright not initialized"}
+    if _current_design is None:
+        return {"error": "No design loaded"}
+
+    try:
+        nets = _current_design.getNets()
+        candidates = []
+        for net in nets:
+            pins = net.getPins()
+            if pins and pins.size() > min_fanout:
+                # Convert Java strings to Python strings explicitly
+                name = str(net.getName())
+                # Skip global logic and clock nets
+                if 'GLOBAL_LOGIC' in name:
+                    continue
+                name_upper = name.upper()
+                if any(kw in name_upper for kw in ['BUFG', 'CLK', 'CLOCK', 'USERCLK', 'PCLK', 'RESET', 'RST']):
+                    continue
+                candidates.append((name, int(pins.size())))
+        candidates.sort(key=lambda x: -x[1])
+        result = []
+        for name, fanout in candidates[:max_nets]:
+            result.append({"name": str(name), "fanout": int(fanout)})
+        return {
+            "status": "success",
+            "total_nets": int(nets.size()),
+            "min_fanout_threshold": int(min_fanout),
+            "high_fanout_count": int(len(candidates)),
+            "nets": result
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
