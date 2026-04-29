@@ -228,7 +228,7 @@ def load_system_prompt() -> str:
     prompt_file = script_dir / "SYSTEM_PROMPT.TXT"
     
     try:
-        with open(prompt_file, 'r') as f:
+        with open(prompt_file, 'r', encoding='utf-8') as f:
             return f.read()
     except FileNotFoundError:
         logger.error(f"System prompt file not found: {prompt_file}")

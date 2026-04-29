@@ -58,15 +58,15 @@ strategies:
         platform: Vivado
       - step: analyze_fabric_for_pblock
         platform: RapidWright
-        params: { LUT: "1.5x", FF: "1.5x" }
+        params: {{ LUT: "1.5x", FF: "1.5x" }}
       - step: convert_fabric_region_to_pblock
         platform: RapidWright
-        params: { use_clock_regions: false }
+        params: {{ use_clock_regions: false }}
       - step: run_tcl("place_design -unplace")
         platform: Vivado
       - step: create_and_apply_pblock
         platform: Vivado
-        params: { ranges_format: "SLICE_X...DSP48E2_X...RAMB18_X..." }
+        params: {{ ranges_format: "SLICE_X...DSP48E2_X...RAMB18_X..." }}
       - step: place_design
         platform: Vivado
       - step: route_design
@@ -91,10 +91,10 @@ strategies:
     sequence:
       - step: optimize_fanout_batch
         platform: RapidWright
-        params: { nets: "[{net_name: ..., fanout: ...}, ...]" }
+        params: {{ nets: "[{{net_name: ..., fanout: ...}}, ...]" }}
       - step: write_checkpoint
         platform: RapidWright
-        params: { overwrite: true, directory: temp }
+        params: {{ overwrite: true, directory: temp }}
       - step: open_checkpoint
         platform: Vivado
       - step: route_design
@@ -134,7 +134,7 @@ custom_optimization:
 
 measurement:
   baseline:
-    - report_timing_summary → { WNS, TNS, failing_endpoints }
+    - report_timing_summary → {{ WNS, TNS, failing_endpoints }}
     - get_wns → baseline_wns
   intermediate:
     - report_timing_summary → compare WNS improvement
