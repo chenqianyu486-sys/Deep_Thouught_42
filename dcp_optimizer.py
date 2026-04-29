@@ -25,6 +25,7 @@ import time
 from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from mcp import ClientSession, StdioServerParameters
@@ -2244,6 +2245,54 @@ Continue optimization from this state. Do NOT reload the design - it is already 
 
     # === Section 7.6: LLM Completion Loop ===
 
+    @staticmethod
+    def _parse_text_tool_calls(content: str) -> list[dict]:
+        """Parse XML-style tool calls from raw LLM content text.
+
+        Handles models that don't support native tool calling and instead
+        output tool calls as text in the format:
+        <tool_call>tool_name<tool_sep>
+        <arg_key>param</arg_key>
+        <arg_value>value</arg_value>
+        </tool_call>
+
+        Returns:
+            List of dicts with keys 'name' and 'arguments' (dict of params).
+            Empty list if no valid tool calls found.
+        """
+        results = []
+
+        # Match <tool_call>name<tool_sep>...content...</tool_call>
+        tool_pattern = re.compile(
+            r'<tool_call>\s*(\w+)\s*<tool_sep>\s*(.*?)\s*</tool_call>',
+            re.DOTALL | re.IGNORECASE
+        )
+        # Match <arg_key>key</arg_key><arg_value>value</arg_value> pairs
+        arg_pattern = re.compile(
+            r'<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>',
+            re.DOTALL | re.IGNORECASE
+        )
+
+        for match in tool_pattern.finditer(content):
+            name = match.group(1).strip()
+            body = match.group(2)
+
+            args = {}
+            for arg_match in arg_pattern.finditer(body):
+                key = arg_match.group(1).strip()
+                value = arg_match.group(2).strip()
+                # Try to parse as JSON (number, boolean, null), keep as string otherwise
+                try:
+                    parsed = json.loads(value)
+                    args[key] = parsed
+                except (json.JSONDecodeError, ValueError):
+                    args[key] = value
+
+            if name:
+                results.append({"name": name, "arguments": args})
+
+        return results
+
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -2500,6 +2549,22 @@ Continue optimization from this state. Do NOT reload the design - it is already 
 
             # 增强可观测性：打印 assistant 的回答
             logger.info(f"[ASSISTANT] {assistant_content}")
+
+            # [FIX] Fallback: parse XML-style tool calls from text for models
+            # that don't support native tool calling (e.g. tencent/hy3-preview:free)
+            if not message.tool_calls:
+                text_calls = self._parse_text_tool_calls(assistant_content)
+                if text_calls:
+                    logger.info(f"Parsed {len(text_calls)} tool call(s) from raw text content (model does not support native tool calling)")
+                    simulated = []
+                    for i, tc_data in enumerate(text_calls):
+                        tc = SimpleNamespace()
+                        tc.function = SimpleNamespace()
+                        tc.function.name = tc_data["name"]
+                        tc.function.arguments = json.dumps(tc_data["arguments"])
+                        tc.id = f"text_call_{self.llm_call_count}_{i}"
+                        simulated.append(tc)
+                    message.tool_calls = simulated
 
             if message.tool_calls:
                 for tc in message.tool_calls:
