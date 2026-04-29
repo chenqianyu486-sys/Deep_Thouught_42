@@ -2291,9 +2291,8 @@ class DCPOptimizer(DCPOptimizerBase):
                             continue
                         else:
                             # All fallbacks exhausted, fallback to model_planner
-                            # Clear all exhausted states for clean slate with planner
+                            # Clear exhausted states for worker tier only (planner state preserved)
                             self._exhausted_worker_fallbacks.clear()
-                            self._exhausted_planner_fallbacks.clear()
                             logger.warning(f"All {current_tier} fallback models exhausted, switching to model_planner: {self.model_planner}")
                             current_model = self.model_planner
                             self.last_used_model = current_model
@@ -2325,8 +2324,8 @@ class DCPOptimizer(DCPOptimizerBase):
                             continue
                         else:
                             # All fallbacks exhausted, fallback to model_planner
+                            # Clear exhausted states for worker tier only (planner state preserved)
                             self._exhausted_worker_fallbacks.clear()
-                            self._exhausted_planner_fallbacks.clear()
                             logger.warning(f"All {current_tier} fallback models exhausted (tool use unsupported), switching to model_planner: {self.model_planner}")
                             current_model = self.model_planner
                             self.last_used_model = current_model
@@ -2401,7 +2400,10 @@ class DCPOptimizer(DCPOptimizerBase):
             assistant_content = message.content or ""
             metadata = {"tool_calls": message.tool_calls} if message.tool_calls else None
             self._compat.add_message("assistant", assistant_content, metadata)
-            
+
+            # 增强可观测性：打印 assistant 的回答
+            logger.info(f"[ASSISTANT] {assistant_content}")
+
             if message.tool_calls:
                 for tc in message.tool_calls:
                     if not tc.function: continue
@@ -2454,7 +2456,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     if "error" in result_lower and "success" not in result_lower:
                         self.iteration_tool_errors.append({
                             "tool": tool_name,
-                            "result": result[:500]  # Store truncated result for analysis
+                            "result": result[:2000]  # Store truncated result for analysis
                         })
 
                     # [Phase 2] Add tool result via compat (each tool result is a separate message)

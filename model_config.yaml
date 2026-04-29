@@ -6,9 +6,9 @@ worker:
   model_tier: "worker"
   model_name: "tencent/hy3-preview:free"  # Default Flash model name
   max_tokens: 250000
-  soft_threshold: 40000       # Trigger soft compression at 40K (16% of max) to build cumulative summaries early
+  soft_threshold: 120000       # Trigger soft compression at 120K (50% of max) to build cumulative summaries early
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
-  token_budget: 35000        # Target compressed output ~35K tokens (15% of max)
+  token_budget: 100000        # Target compressed output ~100K tokens (40% of max)
   preserve_turns: 40         # Recent turns to preserve in normal mode
   preserve_turns_aggressive: 10  # Recent turns to preserve in aggressive mode
   min_importance_threshold: 0.15    # Minimum importance score (normal mode)
