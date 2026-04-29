@@ -1,7 +1,10 @@
 """Working memory layer for short-term context."""
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 from ..interfaces import ContextStore, Message, ContextEvent, EventType, MessageRole, ContextSnapshot
 from ..events import EventBus
 from ..estimator import ContextEstimator
