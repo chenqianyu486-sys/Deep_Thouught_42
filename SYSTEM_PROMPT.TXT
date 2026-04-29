@@ -73,6 +73,7 @@ strategies:
         platform: Vivado
       - step: report_timing_summary
         platform: Vivado
+        description: Verify improvement
 
   strategy_2:
     name: Physical Optimization
@@ -100,6 +101,55 @@ strategies:
       - step: route_design
         platform: Vivado
       - step: report_timing_summary
+        platform: Vivado
+
+  strategy_4:
+    name: Detour-Based Cell Re-placement
+    trigger: "Critical path cells with detour_ratio > 2.5"
+    steps:
+      - command: extract_critical_path_cells
+        platform: Vivado
+        parameters:
+          num_paths: 30
+      - command: analyze_net_detour
+        platform: RapidWright
+        parameters:
+          detour_threshold: 2.0
+      - command: optimize_cell_placement
+        platform: RapidWright
+        parameters:
+          cell_names: "[cells with high detour from analysis]"
+      - command: write_checkpoint
+        platform: RapidWright
+        parameters:
+          overwrite: true
+      - command: open_checkpoint
+        platform: Vivado
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
+        platform: Vivado
+
+  strategy_5:
+    name: Generic Exploration
+    trigger: "No clear scenario detected"
+    steps:
+      - command: phys_opt_design
+        platform: Vivado
+        parameters:
+          directive: Explore
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
+        platform: Vivado
+      - description: If no improvement, try phys_opt_design with AggressiveExplore
+      - command: phys_opt_design
+        platform: Vivado
+        parameters:
+          directive: AggressiveExplore
+      - command: route_design
+        platform: Vivado
+      - command: report_timing_summary
         platform: Vivado
 
 tool_reference:
@@ -170,6 +220,27 @@ timing_ops:
     - optimize_fanout_batch, create_and_apply_pblock
   non_affecting:
     - "Skip WNS check after: write_checkpoint, report_*, get_wns"
+
+common_failure_patterns:
+  - pattern: "route_design times out after fanout optimization"
+    cause: "Too many nets unplaced, causing routing congestion"
+    fix: "Run phys_opt_design before routing"
+
+  - pattern: "WNS gets worse after optimize_fanout"
+    cause: "Split_factor too aggressive, new cells introduced routing delays"
+    fix: "Reduce split_factor by 50% and retry"
+
+  - pattern: "get_wns returns PARSE_ERROR"
+    cause: "Timing report format unrecognized by parser"
+    fix: "Use report_timing_summary instead for WNS extraction"
+
+  - pattern: "PBLOCK too small, place_design fails"
+    cause: "PBLOCK doesn't have enough resources for design"
+    fix: "Use analyze_fabric_for_pblock to size PBLOCK correctly (1.5x resource multiplier)"
+
+  - pattern: "No design open error in Vivado"
+    cause: "Vivado state lost after crash or disconnect"
+    fix: "Re-open best checkpoint DCP and continue"
 
 final_output:
   save_to: OUTPUT_DCP_PATH

@@ -428,8 +428,8 @@ def optimize_cell_placement(
         return {}
 
     try:
-        from com.xilinx.rapidwright.eco import ECOPlacementHelper, PlacementModification
-        from com.xilinx.rapidwright.design.tools import DesignTools
+        from com.xilinx.rapidwright.eco import ECOPlacementHelper
+        from com.xilinx.rapidwright.design import DesignTools
     except ImportError:
         # Return error for all cells
         return {name: PlacementOptimizationResult(
@@ -445,6 +445,13 @@ def optimize_cell_placement(
 
     for cell_name in cell_names:
         cell = design.getCell(cell_name)
+
+        # Fallback: try stripping last path segment (likely a pin suffix)
+        if cell is None and '/' in cell_name:
+            fallback_name = cell_name.rsplit('/', 1)[0]
+            cell = design.getCell(fallback_name)
+            if cell is not None:
+                cell_name = fallback_name
 
         if cell is None:
             results[cell_name] = PlacementOptimizationResult(

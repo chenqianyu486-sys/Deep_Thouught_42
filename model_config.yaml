@@ -1,6 +1,14 @@
-# LLM Model Configuration for Context Management
-# Worker models: optimized for speed, smaller context window (250K tokens)
-# Planner models: optimized for reasoning, larger context window (1M tokens)
+# LLM Model Configuration / LLM 模型配置
+# Worker: cheaper models for routine optimization steps / 便宜模型用于常规优化步骤
+# Planner: capable models for complex reasoning / 强模型用于复杂推理决策
+#
+# NOTE: deepseek models frequently hit 429 rate limits on OpenRouter.
+# Fallback models (stepfun, minimax) provide automatic failover.
+# / deepseek 模型在 OpenRouter 上经常触发 429 限流，fallback 模型自动切换。
+#
+# WARNING: Vivado Implementation license is required for place_design/route_design.
+# Without it, the LLM agent will run but cannot actually improve Fmax.
+# / 警告：运行 place_design/route_design 需要 Vivado Implementation 许可证。
 
 worker:
   model_tier: "worker"
@@ -15,14 +23,17 @@ worker:
   min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
-  fallback_models:           # Fallback models for 429 rate limit (in priority order)
+  fallback_models:           # Fallback models for 429 rate limit
+    - "minimax/minimax-m2.7"
     - "stepfun/step-3.5-flash"
-    - "xiaomi/mimo-v2-flash"
+  pricing:
+    input_per_1m: 0.14
+    output_per_1m: 0.28
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-flash"    # Default Pro model name
+  model_name: "deepseek/deepseek-v4-flash"  # Also v4-flash to stay within $1.00 budget
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
@@ -33,6 +44,10 @@ planner:
   min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
-  fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "xiaomi/mimo-v2.5"
+  fallback_models:           # Fallback models for 429 rate limit
+    - "minimax/minimax-m2.7"
+    - "xiaomi/mimo-v2.5-pro"
+  pricing:
+    input_per_1m: 0.435
+    output_per_1m: 0.87
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)

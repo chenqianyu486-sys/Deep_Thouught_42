@@ -519,8 +519,10 @@ def extract_critical_path_cells(
                     if '/' in part and not part.startswith('('):
                         # Remove pin suffix (e.g., /C, /D, /O, /Q, /CE, etc.)
                         cell_path = part
-                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE', 
-                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6']
+                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
+                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6',
+                                       '/I', '/A', '/B', '/ADDR', '/DATA', '/WE', '/EN',
+                                       '/IN', '/OUT', '/SEL', '/CLK']
                         for suffix in pin_suffixes:
                             if cell_path.endswith(suffix):
                                 cell_path = cell_path[:-len(suffix)]
@@ -549,6 +551,52 @@ def extract_critical_path_cells(
             return json.dumps({"error": f"Error writing to file: {str(e)}"})
     else:
         return json.dumps(all_paths)
+
+
+def extract_critical_path_pins(
+    num_paths: int = 50,
+    output_file: str = None,
+    timeout: float = 600.0
+) -> str:
+    """Extract flat pin list from critical timing paths for detour analysis.
+
+    Returns a flat list of pin names like ["src_ff/Q", "lut1/I2", "lut1/O", "dst_ff/D", ...]
+    suitable for RapidWright's analyze_net_detour (which uses _group_pins_by_cell).
+    """
+    import re
+    import json
+
+    cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
+
+    try:
+        timing_report = run_tcl_command(cmd, timeout=timeout)
+    except Exception as e:
+        return json.dumps({"error": f"Error generating timing report: {str(e)}"})
+
+    path_sections = re.split(r'Slack \(', timing_report)
+    all_pins = []
+
+    for path_section in path_sections[1:]:
+        for line in path_section.split('\n'):
+            if '/' not in line or line.strip().startswith('net'):
+                continue
+            parts = line.split()
+            for part in parts:
+                if '/' in part and not part.startswith('('):
+                    all_pins.append(part.strip('()'))
+                    break
+
+    if output_file:
+        try:
+            import os
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(all_pins, f, indent=2)
+            return json.dumps({"status": "success", "output_file": output_file, "pin_count": len(all_pins)})
+        except Exception as e:
+            return json.dumps({"error": f"Error writing to file: {str(e)}"})
+    else:
+        return json.dumps(all_pins)
 
 
 def report_utilization_for_pblock(timeout: float = 300.0) -> str:
@@ -1188,6 +1236,32 @@ async def list_tools():
             }
         ),
         Tool(
+            name="extract_critical_path_pins",
+            description="""Extract ordered pin lists from critical timing paths for detour analysis.
+
+Returns pin-level paths like [["src_ff/Q", "lut1/I2", "lut1/O", "dst_ff/D"], ...]
+suitable for RapidWright's analyze_net_detour. Unlike extract_critical_path_cells
+which strips pin suffixes to get cell names, this preserves full pin paths.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_paths": {
+                        "type": "integer",
+                        "description": "Number of critical paths to extract (default: 50)",
+                        "default": 50
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Optional: write JSON to this file instead of returning inline"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 600)"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="report_utilization_for_pblock",
             description="""Get design resource utilization for pblock sizing.
             
@@ -1461,7 +1535,15 @@ async def call_tool(name: str, arguments: dict):
             dcp_path = arguments["dcp_path"]
             force = arguments.get("force", False)
             timeout = arguments.get("timeout", 300)
-            
+
+            # Verify design is actually open before writing
+            if not _design_open:
+                probe = run_tcl_command("get_property NAME [current_design]", timeout=10)
+                if "ERROR" in probe or not probe.strip():
+                    return [TextContent(type="text",
+                        text="ERROR: No design is open. Cannot write checkpoint. Use open_checkpoint first.")]
+                _design_open = True
+
             force_flag = " -force" if force else ""
             output = run_tcl_command(f"write_checkpoint{force_flag} {{{dcp_path}}}", timeout=timeout)
             return [TextContent(type="text", text=f"Wrote checkpoint: {dcp_path}\n\n{output}")]
@@ -1482,36 +1564,38 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
-            # First try using report_timing_summary to get WNS (more reliable on Linux)
+            # Primary: use get_property WNS (format-independent, most reliable)
+            run_tcl_command("puts {wns_flush}", timeout=5)
+            output = run_tcl_command(
+                "set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]",
+                timeout=timeout
+            )
+            raw = output.strip()
+            lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
+            if lines:
+                try:
+                    parsed = float(lines[-1])
+                    if parsed == 0.0:
+                        parsed = abs(parsed)
+                    return [TextContent(type="text", text=str(parsed))]
+                except ValueError:
+                    logger.warning(f"get_wns: cannot parse from get_property: {raw}")
+
+            # Fallback: parse timing summary header/data format
             timing_output = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
-            wns_value = "PARSE_ERROR"
-
-            # Parse WNS from timing summary output
-            wns_match = re.search(r'^\s*(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s*$',
-                                  timing_output, re.MULTILINE)
-            if wns_match:
-                wns_candidate = float(wns_match.group(1))
-                if wns_candidate == 0.0:
-                    wns_candidate = abs(wns_candidate)
-                wns_value = str(wns_candidate)
-                logger.info(f"get_wns: parsed WNS={wns_value} from timing_summary")
-            else:
-                # Fallback: try direct get_property
-                run_tcl_command("puts {wns_flush}", timeout=5)
-                output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
-                raw = output.strip()
-                lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
-                if lines:
+            for line in timing_output.split('\n'):
+                if 'WNS(ns)' in line and 'TNS(ns)' in line:
+                    continue
+                if line.strip().startswith('---') or line.strip().startswith('==='):
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 2:
                     try:
-                        parsed = float(lines[-1])
-                        if parsed == 0.0:
-                            parsed = abs(parsed)
-                        wns_value = str(parsed)
-                        logger.info(f"get_wns: parsed WNS={wns_value} from get_property")
+                        wns = float(parts[0])
+                        return [TextContent(type="text", text=str(abs(wns) if wns == 0.0 else wns))]
                     except ValueError:
-                        logger.warning(f"get_wns: cannot parse WNS from get_property output: {raw}")
-
-            return [TextContent(type="text", text=wns_value)]
+                        continue
+            return [TextContent(type="text", text="PARSE_ERROR")]
         
         elif name == "place_design":
             directive = arguments.get("directive")
@@ -1567,10 +1651,18 @@ async def call_tool(name: str, arguments: dict):
             num_paths = arguments.get("num_paths", 50)
             output_file = arguments.get("output_file")
             timeout = arguments.get("timeout", 600)
-            
+
             output = extract_critical_path_cells(num_paths, output_file, timeout)
             return [TextContent(type="text", text=output)]
-        
+
+        elif name == "extract_critical_path_pins":
+            num_paths = arguments.get("num_paths", 50)
+            output_file = arguments.get("output_file")
+            timeout = arguments.get("timeout", 600)
+
+            output = extract_critical_path_pins(num_paths, output_file, timeout)
+            return [TextContent(type="text", text=output)]
+
         elif name == "report_utilization_for_pblock":
             timeout = arguments.get("timeout", 300)
             output = report_utilization_for_pblock(timeout)

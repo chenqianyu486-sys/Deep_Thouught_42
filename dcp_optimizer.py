@@ -4,10 +4,24 @@
 # SPDX-License-Identifier: Apache 2.0
 
 """
-FPGA Design Optimization Agent
+FPGA Design Optimization Agent / FPGA 设计优化智能体
 
 An autonomous AI agent that analyzes FPGA designs and applies optimizations
 using RapidWright and Vivado via MCP servers.
+/ 使用 RapidWright 和 Vivado 通过 MCP 服务器分析和优化 FPGA 设计的自主 AI 智能体。
+
+Modes / 运行模式:
+  --test       Test mode: hardcoded optimization without LLM (for environment validation)
+               / 测试模式：硬编码优化，无需 LLM（用于验证环境）
+  (no --test)  LLM agent mode: AI-driven optimization via OpenRouter API
+               / LLM 智能体模式：通过 OpenRouter API 进行 AI 驱动优化
+
+Requirements / 前提条件:
+  - OPENROUTER_API_KEY for LLM mode / LLM 模式需要 OPENROUTER_API_KEY
+  - Vivado license with Implementation feature for place_design/route_design
+    / 运行布局布线需要具备 Implementation 功能的 Vivado 许可证
+  - RapidWright JARs compiled: make build-rapidwright
+    / RapidWright JAR 已编译：make build-rapidwright
 """
 
 # === Section 1: Imports ===
@@ -202,6 +216,23 @@ def parse_timing_summary_static(timing_report: str) -> dict:
             header_idx = i
             break
     if header_idx == -1:
+        # Fallback: no header found, scan for first line with 2+ numeric values
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('---') or stripped.startswith('==='):
+                continue
+            if any(kw in stripped for kw in ['WNS', 'Slack', 'Setup', 'Hold', 'Path', 'Clock']):
+                continue
+            parts = stripped.split()
+            if len(parts) >= 2:
+                try:
+                    result["wns"] = float(parts[0])
+                    result["tns"] = float(parts[1])
+                    if len(parts) >= 3:
+                        result["failing_endpoints"] = int(parts[2])
+                    break
+                except (ValueError, IndexError):
+                    continue
         return result
 
     # Search for the first valid data row after the header
@@ -807,22 +838,31 @@ class DCPOptimizer(DCPOptimizerBase):
             mm._working_store.add(Message(role=role, content=content, metadata=metadata))
 
     def _is_valid_wns(self, wns: float) -> bool:
-        """Validate WNS value to reject parsing errors and false positives."""
+        """Validate WNS to reject parsing errors and false positives.
+        / 验证 WNS 值，拒绝解析错误和假阳性。
+
+        Vivado's get_property WNS can return bogus 0.0 or 1.0 when the design state
+        is incomplete or when no Implementation license is available.
+        / Vivado 的 get_property WNS 在 design 状态不完整或没有 Implementation
+        许可证时，可能返回虚假的 0.0 或 1.0 值。
+        """
         if wns is None:
             return False
-        # WNS should not exceed 10x the clock period (would indicate a parsing error)
         if self.clock_period and abs(wns) > self.clock_period * 10:
             logger.warning(f"WNS sanity check failed: {wns:.3f} ns > {self.clock_period * 10:.1f} ns (10x clock period)")
             return False
-        # Extreme negative values are usually parsing errors
         if wns < -999:
             logger.warning(f"WNS sanity check failed: {wns:.3f} ns < -999")
             return False
-        # Jump from negative to exactly 0.0 without optimization is suspicious
+        # Reject false 0.0/1.0 from get_property WNS when design has real violations
+        # / 当 design 有真实时序违例时，拒绝 get_property WNS 返回的虚假 0.0/1.0
         best = self.best_wns if self.best_wns > float('-inf') else None
-        # Note: -0.0 is normalized to 0.0 in get_wns, so this check only sees +0.0
-        if wns == 0.0 and best is not None and best < -0.1:
-            logger.warning(f"WNS suspicious: 0.000 ns from {best:.3f} ns without visible optimization")
+        if wns in (0.0, 1.0) and best is not None and best < -0.1:
+            logger.warning(f"WNS suspicious: {wns:.3f} ns from {best:.3f} ns without visible optimization — rejecting")
+            return False
+        if wns >= 0.0 and self.initial_wns is not None and self.initial_wns < -0.1:
+            logger.warning(f"WNS suspicious: {wns:.3f} ns positive but initial was {self.initial_wns:.3f} ns — rejecting")
+            return False
         return True
 
     @property
@@ -2889,14 +2929,33 @@ CRITICAL OPTIMIZATION RULES:
         self._compat.add_message("user", initial_user_content)
         
         max_iterations = 50  # Safety limit
-        
+        wall_clock_deadline = time.time() + 3500  # 58:20 deadline (leave 100s for cleanup)
+
         print("=== Starting LLM-Driven Optimization ===\n")
-        
-        while self.iteration < max_iterations:
+
+        while self.iteration < max_iterations and time.time() < wall_clock_deadline:
             self.iteration += 1
             self.iteration_tool_errors = []  # Reset tool error tracking for this iteration
             print()
             logger.info(f"=== Iteration {self.iteration} ===")
+
+            # Vivado health check — probe and recover if design was lost
+            if self.iteration > 1:
+                try:
+                    health = await self.call_tool("vivado_get_wns", {})
+                    if health.strip() == "PARSE_ERROR":
+                        logger.warning("Vivado health check failed (PARSE_ERROR), probing...")
+                        probe = await self.call_tool("vivado_run_tcl", {"command": "get_property NAME [current_design]"}, timeout=10)
+                        if "ERROR" in probe:
+                            logger.warning("Vivado lost design handle, recovering from best checkpoint...")
+                            best_iter = self._best_wns_iteration
+                            if best_iter is not None:
+                                rollback_path = self._get_intermediate_checkpoint_path(best_iter)
+                                if rollback_path.exists():
+                                    await self.call_tool("vivado_open_checkpoint", {"dcp_path": str(rollback_path)})
+                                    self.latest_wns = self.best_wns
+                except Exception as e:
+                    logger.warning(f"Vivado health check exception: {e}")
 
             # Check for user-requested exit via console "quit"
             if self._check_exit_requested():
@@ -3097,6 +3156,21 @@ CRITICAL OPTIMIZATION RULES:
                     f"An error occurred: {e}. Please verify your approach and continue or report if unrecoverable."
                 )
         
+        if time.time() >= wall_clock_deadline:
+            logger.warning("Approaching 1-hour wall clock limit - saving best result")
+            self._is_done_reason = "wall_clock_limit"
+            # Write best checkpoint to output path
+            best_iter = self._best_wns_iteration
+            if best_iter is not None:
+                best_dcp = self._get_intermediate_checkpoint_path(best_iter)
+                if best_dcp.exists():
+                    import shutil
+                    shutil.copy2(str(best_dcp), str(self.output_dcp))
+                    logger.info(f"Saved best checkpoint (iter {best_iter}) to {self.output_dcp}")
+            self.end_time = time.time()
+            self._print_optimization_summary()
+            return True
+
         logger.warning("Reached maximum iterations")
         self.end_time = time.time()
         self._print_optimization_summary(max_iterations_reached=True)
@@ -3414,19 +3488,13 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         print(f"[TEST] Calling vivado_{tool_name}...")
         start_time = time.time()
 
-        heartbeat_task, heartbeat_count = self._start_tool_heartbeat(f"vivado_{tool_name}", start_time)
         try:
             result = await asyncio.wait_for(
                 self.vivado_session.call_tool(tool_name, arguments),
                 timeout=timeout
             )
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
-            logger.info(f"[VIVADO] {tool_name} completed in {elapsed:.2f}s (heartbeats: {heartbeat_count})")
+            logger.info(f"[VIVADO] {tool_name} completed in {elapsed:.2f}s")
             print(f"[TEST] vivado_{tool_name} completed in {elapsed:.2f}s")
 
             # Extract text content from result
@@ -3436,21 +3504,11 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             return "(no output)"
 
         except asyncio.TimeoutError:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
             logger.error(f"[VIVADO] {tool_name} TIMED OUT after {elapsed:.2f}s")
             print(f"[TEST] ERROR: vivado_{tool_name} TIMED OUT after {elapsed:.2f}s")
             raise
         except Exception as e:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
             logger.error(f"[VIVADO] {tool_name} FAILED after {elapsed:.2f}s: {e}")
             print(f"[TEST] ERROR: vivado_{tool_name} failed after {elapsed:.2f}s: {e}")
@@ -3462,19 +3520,13 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         print(f"[TEST] Calling rapidwright_{tool_name}...")
         start_time = time.time()
 
-        heartbeat_task, heartbeat_count = self._start_tool_heartbeat(f"rapidwright_{tool_name}", start_time)
         try:
             result = await asyncio.wait_for(
                 self.rapidwright_session.call_tool(tool_name, arguments),
                 timeout=timeout
             )
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
-            logger.info(f"[RAPIDWRIGHT] {tool_name} completed in {elapsed:.2f}s (heartbeats: {heartbeat_count})")
+            logger.info(f"[RAPIDWRIGHT] {tool_name} completed in {elapsed:.2f}s")
             print(f"[TEST] rapidwright_{tool_name} completed in {elapsed:.2f}s")
 
             # Extract text content from result
@@ -3484,21 +3536,11 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             return "(no output)"
 
         except asyncio.TimeoutError:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
             logger.error(f"[RAPIDWRIGHT] {tool_name} TIMED OUT after {elapsed:.2f}s")
             print(f"[TEST] ERROR: rapidwright_{tool_name} TIMED OUT after {elapsed:.2f}s")
             raise
         except Exception as e:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
             elapsed = time.time() - start_time
             logger.error(f"[RAPIDWRIGHT] {tool_name} FAILED after {elapsed:.2f}s: {e}")
             print(f"[TEST] ERROR: rapidwright_{tool_name} failed after {elapsed:.2f}s: {e}")
@@ -3549,106 +3591,55 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         
         try:
             # ================================================================
-            # Step 0: Initialize RapidWright (Vivado starts automatically)
+            # Step 0: RapidWright init + read + find nets + optimize + write
+            # (All RapidWright work before Vivado — only one Vivado open needed)
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 0: Initialize RapidWright")
             print("-"*60)
-            
-            # Initialize RapidWright (Vivado will auto-start when first used)
+
             result = await self.call_rapidwright_tool("initialize_rapidwright", {
                 "jvm_max_memory": "8G"
             }, timeout=120.0)
-            print(f"RapidWright init result:\n{result[:500]}...")
-            logger.info(f"RapidWright init result: {result}")
-            
-            # ================================================================
-            # Step 1: Open the input DCP in Vivado
-            # ================================================================
+            print(f"RapidWright init: {result[:300]}...")
+
+            # Step 0.1: Read DCP in RapidWright (3-5x faster than Vivado)
             print("\n" + "-"*60)
-            print("STEP 1: Open input DCP in Vivado")
+            print("STEP 1: Read DCP in RapidWright (fast)")
             print("-"*60)
-            
-            result = await self.call_vivado_tool("open_checkpoint", {
-                "dcp_path": str(input_dcp.resolve())
-            }, timeout=600.0)
-            print(f"Open checkpoint result:\n{result}")
-            logger.info(f"Open checkpoint result: {result}")
-            
-            # ================================================================
-            # Step 2: Report timing in Vivado
-            # ================================================================
-            print("\n" + "-"*60)
-            print("STEP 2: Report timing in Vivado")
-            print("-"*60)
-            
-            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
-            print(f"Timing summary (first 2000 chars):\n{result[:2000]}...")
-            logger.info(f"Initial timing summary: {result}")
-            
-            # Parse initial WNS
-            self.initial_wns = self.parse_wns_from_timing_report(result)
-            print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
-            logger.info(f"Initial WNS: {self.initial_wns} ns")
-            
-            # Get clock period for fmax calculation
-            self.clock_period = await self.fetch_clock_period()
-            if self.clock_period is not None:
-                target_fmax = 1000.0 / self.clock_period
-                print(f"*** Target fmax: {target_fmax:.2f} MHz ***")
-                
-                initial_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
-                if initial_fmax is not None:
-                    print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
-            print()
-            
-            # ================================================================
-            # Step 3: Get critical high fanout nets
-            # ================================================================
-            print("\n" + "-"*60)
-            print("STEP 3: Get critical high fanout nets")
-            print("-"*60)
-            
-            result = await self.call_vivado_tool("get_critical_high_fanout_nets", {
-                "num_paths": 50,
-                "min_fanout": 100,
-                "exclude_clocks": True
-            }, timeout=600.0)
-            print(f"High fanout nets report:\n{result}")
-            logger.info(f"High fanout nets: {result}")
-            
-            # Parse the nets
-            self.high_fanout_nets = self.parse_high_fanout_nets(result)
-            print(f"\nParsed {len(self.high_fanout_nets)} high fanout nets")
-            
-            if not self.high_fanout_nets:
-                print("WARNING: No high fanout nets found to optimize!")
-                logger.warning("No high fanout nets found to optimize")
-            
-            # Select top nets to optimize
-            nets_to_optimize = self.high_fanout_nets[:max_nets_to_optimize]
-            print(f"Will optimize {len(nets_to_optimize)} nets:")
-            for net_name, fanout, path_count in nets_to_optimize:
-                print(f"  - {net_name} (fanout={fanout}, paths={path_count})")
-            
-            # ================================================================
-            # Step 4: Open the DCP in RapidWright
-            # ================================================================
-            print("\n" + "-"*60)
-            print("STEP 4: Open DCP in RapidWright")
-            print("-"*60)
-            
+
             result = await self.call_rapidwright_tool("read_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"RapidWright read checkpoint result:\n{result}")
-            logger.info(f"RapidWright read checkpoint: {result}")
-            
+
+            # Step 1.1: Find high fanout nets via RapidWright (no Vivado needed)
+            print("\n" + "-"*60)
+            print("STEP 2: Find high fanout nets in RapidWright")
+            print("-"*60)
+
+            rw_nets_result = await self.call_rapidwright_tool("get_high_fanout_nets", {
+                "min_fanout": 100,
+                "max_nets": max_nets_to_optimize
+            }, timeout=120.0)
+            print(f"High fanout nets: {rw_nets_result[:500]}...")
+
+            # Parse RapidWright nets result
+            nets_to_optimize = []
+            try:
+                import json as _json
+                nets_data = _json.loads(rw_nets_result)
+                for net in nets_data.get("nets", []):
+                    nets_to_optimize.append((net["name"], net["fanout"], 0))
+                print(f"Found {len(nets_to_optimize)} high fanout nets")
+            except Exception:
+                print("WARNING: Could not parse high fanout nets from RapidWright")
+
             # ================================================================
-            # Step 5: Apply fanout optimization for each high fanout net
+            # Step 3: Apply fanout optimization in RapidWright
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 5: Apply fanout optimizations in RapidWright")
+            print("STEP 3: Apply fanout optimizations in RapidWright")
             print("-"*60)
 
             # Build batch request: list of {net_name, fanout}
@@ -3685,10 +3676,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
             
             # ================================================================
-            # Step 6: Write DCP from RapidWright
+            # Step 4: Write DCP from RapidWright
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 6: Write DCP from RapidWright")
+            print("STEP 4: Write DCP from RapidWright")
             print("-"*60)
             
             rapidwright_dcp = Path(self.temp_dir) / "rapidwright_optimized.dcp"
@@ -3703,14 +3694,28 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             if rapidwright_dcp.exists():
                 print(f"DCP file created: {rapidwright_dcp} ({rapidwright_dcp.stat().st_size} bytes)")
             else:
-                print("WARNING: DCP file was not created!")
-                logger.warning("RapidWright DCP file not created")
-            
+                print("WARNING: RapidWright DCP was not created! Fanout optimization may have failed.")
+                print("Skipping RapidWright DCP steps, continuing with Vivado-only optimization...")
+                logger.warning("RapidWright DCP file not created - skipping RW DCP open")
+                # Jump directly to phys_opt + route on original design
+                await self._run_vivado_physopt_and_route()
+                # Skip to final report
+                result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+                self.final_wns = self.parse_wns_from_timing_report(result)
+                print(f"\nFinal WNS (Vivado-only): {self.final_wns} ns")
+                # Write output
+                await self.call_vivado_tool("write_checkpoint", {
+                    "dcp_path": str(output_dcp.resolve()), "force": True
+                }, timeout=300.0)
+                total = time.time() - overall_start
+                self.print_test_summary(successful_optimizations, total)
+                return True
+
             # ================================================================
-            # Step 7: Read RapidWright DCP into Vivado
+            # Step 5: Open RapidWright DCP in Vivado (only Vivado open needed)
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 7: Read RapidWright DCP into Vivado")
+            print("STEP 5: Open optimized DCP in Vivado")
             print("-"*60)
             
             # Note: Opening a RapidWright-generated DCP takes MUCH longer than
@@ -3718,7 +3723,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # 1. Vivado must reload encrypted IP blocks from disk
             # 2. Vivado must reconstruct internal data structures
             # For large designs, this can take 10-30 minutes
-            RAPIDWRIGHT_DCP_TIMEOUT = 300.0  # 5 minutes
+            RAPIDWRIGHT_DCP_TIMEOUT = 600.0  # 10 minutes (only one Vivado open needed)
             
             # Check if there's a Tcl script we need to source first (for encrypted IP)
             tcl_script = rapidwright_dcp.with_suffix('.tcl')
@@ -3743,7 +3748,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Step 8: Route the design in Vivado
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 8: Route design in Vivado")
+            print("STEP 6: Route design in Vivado")
             print("-"*60)
             
             # First check route status
@@ -3821,7 +3826,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Step 9: Report timing and compare WNS
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 9: Report final timing")
+            print("STEP 7: Report final timing")
             print("-"*60)
 
             result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
@@ -3843,7 +3848,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Step 9.5: Verify get_wns tool
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 9.5: Verify get_wns tool")
+            print("STEP 7.5: Verify get_wns tool")
             print("-"*60)
 
             try:
@@ -4231,7 +4236,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             # Step 9.5: Verify get_wns tool
             # ================================================================
             print("\n" + "-"*60)
-            print("STEP 9.5: Verify get_wns tool")
+            print("STEP 7.5: Verify get_wns tool")
             print("-"*60)
 
             try:
@@ -4292,6 +4297,179 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Exception: {type(e).__name__}: {e}")
             return False
 
+    async def run_test_generic(self, input_dcp: Path, output_dcp: Path, max_nets_to_optimize: int = 5) -> bool:
+        """Generic test flow: detour-based cell re-placement.
+        / 通用测试流程：基于绕路分析的 cell 重定位。
+
+        Follows the official contest optimization example recipe:
+        / 遵循官方竞赛优化示例配方：
+        1. Vivado: open + report timing + extract_critical_path_pins
+        2. RapidWright: read DCP + analyze_net_detour + optimize_cell_placement + write DCP
+        3. Vivado: open modified DCP + route_design + report timing + write output
+
+        NOTE: Step 3 requires a Vivado license with Implementation feature for route_design.
+        / 注意：第3步需要具备 Implementation 功能的 Vivado 许可证才能运行 route_design。
+        """
+        print("\n" + "="*70)
+        print("FPGA OPTIMIZER TEST MODE - DETOUR CELL RE-PLACEMENT")
+        print("="*70)
+        overall_start = time.time()
+
+        try:
+            # === Phase 1: Vivado baseline ===
+            print("\n" + "-"*60)
+            print("STEP 1: Vivado baseline (open + timing + critical path pins)")
+            print("-"*60)
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Open: {result[:200]}...")
+
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            self.initial_wns = self.parse_wns_from_timing_report(result)
+            self.clock_period = await self.fetch_clock_period()
+            if self.clock_period:
+                fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                print(f"Baseline WNS: {self.initial_wns} ns, Fmax: {fmax:.2f} MHz" if fmax else f"Baseline WNS: {self.initial_wns} ns")
+            else:
+                print(f"Baseline WNS: {self.initial_wns} ns")
+
+            # Extract critical path pins for detour analysis (official contest recipe)
+            result = await self.call_vivado_tool("extract_critical_path_pins", {
+                "num_paths": 50
+            }, timeout=300.0)
+            pin_paths = []
+            try:
+                pin_paths = json.loads(result)
+                if isinstance(pin_paths, dict) and "error" in pin_paths:
+                    print(f"Pin extraction error: {pin_paths['error']}")
+                    pin_paths = []
+                print(f"Extracted {len(pin_paths)} pin paths")
+            except Exception:
+                print("Could not parse pin paths from extract_critical_path_pins")
+
+            # === Phase 2: RapidWright detour analysis + cell placement ===
+            print("\n" + "-"*60)
+            print("STEP 2: RapidWright detour analysis + cell placement")
+            print("-"*60)
+
+            result = await self.call_rapidwright_tool("initialize_rapidwright", {
+                "jvm_max_memory": "8G"
+            }, timeout=120.0)
+            print(f"RW init: {result[:200]}...")
+
+            result = await self.call_rapidwright_tool("read_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"RW read: {result[:200]}...")
+
+            # Official recipe: analyze_net_detour -> optimize_cell_placement
+            cells_moved = 0
+            if pin_paths:
+                result = await self.call_rapidwright_tool("analyze_net_detour", {
+                    "pin_paths": pin_paths,
+                    "detour_threshold": 2.0
+                }, timeout=300.0)
+                detour_data = json.loads(result) if isinstance(result, str) else result
+                candidates = list(detour_data.get("results", {}).keys()) if detour_data.get("status") == "success" else []
+                print(f"Detour analysis: {detour_data.get('cells_analyzed', '?')} cells, {len(candidates)} high-detour candidates")
+
+                if candidates:
+                    result = await self.call_rapidwright_tool("optimize_cell_placement", {
+                        "cell_names": candidates[:20]
+                    }, timeout=600.0)
+                    place_data = json.loads(result) if isinstance(result, str) else result
+                    cells_moved = place_data.get("success_count", 0)
+                    print(f"Cell placement: {cells_moved} moved, {place_data.get('error_count', 0)} errors")
+                else:
+                    print("No detour candidates found")
+
+            # Write RapidWright DCP
+            print("\n" + "-"*60)
+            print("STEP 3: Write modified DCP (RapidWright)")
+            print("-"*60)
+            rw_dcp = self.temp_dir / "detour_optimized.dcp"
+            await self.call_rapidwright_tool("write_checkpoint", {
+                "dcp_path": str(rw_dcp), "overwrite": True
+            }, timeout=600.0)
+            if rw_dcp.exists():
+                print(f"DCP written: {rw_dcp.stat().st_size} bytes")
+            else:
+                print("WARNING: RapidWright DCP not created, using original")
+                rw_dcp = input_dcp
+
+            # === Phase 3: Vivado route + verify ===
+            print("\n" + "-"*60)
+            print("STEP 4: Vivado route + verify")
+            print("-"*60)
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(rw_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Vivado re-open: {result[:200]}...")
+
+            # Route (only unrouted nets will be re-routed)
+            for directive in ["Default", "Explore"]:
+                try:
+                    print(f"  route_design -directive {directive}...")
+                    await self.call_vivado_tool("route_design", {
+                        "directive": directive
+                    }, timeout=3600.0)
+                    break
+                except Exception as e:
+                    print(f"    {directive}: {e}")
+
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            self.final_wns = self.parse_wns_from_timing_report(result)
+
+            # Write output
+            print("\n" + "-"*60)
+            print("STEP 5: Write output DCP")
+            print("-"*60)
+            await self.call_vivado_tool("write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()), "force": True
+            }, timeout=300.0)
+
+            total = time.time() - overall_start
+            print(f"\n" + "="*70)
+            print("TEST SUMMARY")
+            print("="*70)
+            print(f"Total runtime: {total:.2f}s ({total/60:.2f} min)")
+            if self.initial_wns is not None and self.final_wns is not None:
+                change = self.final_wns - self.initial_wns
+                direction = "IMPROVED" if change > 0 else ("REGRESSION" if change < 0 else "UNCHANGED")
+                print(f"WNS: {self.initial_wns:.3f} -> {self.final_wns:.3f} ns ({direction})")
+                if self.clock_period:
+                    init_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                    final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
+                    if init_fmax and final_fmax:
+                        print(f"Fmax: {init_fmax:.2f} -> {final_fmax:.2f} MHz ({final_fmax - init_fmax:+.2f} MHz)")
+            print(f"Cells moved: {cells_moved}")
+            return True
+
+        except Exception as e:
+            logger.exception(f"Detour test failed: {e}")
+            print(f"\n*** TEST FAILED: {e} ***")
+            return False
+
+    async def _run_vivado_physopt_and_route(self):
+        """Run phys_opt_design + route_design on the currently open Vivado design."""
+        try:
+            print("  Running phys_opt_design -directive Explore...")
+            await self.call_vivado_tool("phys_opt_design", {
+                "directive": "Explore"
+            }, timeout=1200.0)
+        except Exception as e:
+            print(f"    phys_opt_design Explore: {e}")
+        for directive in ["Default", "Explore"]:
+            try:
+                print(f"  route_design -directive {directive}...")
+                await self.call_vivado_tool("route_design", {
+                    "directive": directive
+                }, timeout=3600.0)
+                break
+            except Exception as e:
+                print(f"    route_design {directive}: {e}")
+
     async def cleanup(self):
         """Clean up resources."""
         print("\n[TEST] Cleaning up...")
@@ -4316,13 +4494,8 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
         design_type = "logicnets"
         print(f"[TEST] Detected LogicNets design - using pblock optimization flow")
     else:
-        print(f"\n[TEST] ERROR: Unsupported DCP file: {input_dcp.name}")
-        print(f"[TEST] Test mode requires one of the two example DCPs:")
-        print(f"[TEST]   - demo_corundum_25g_misses_timing.dcp")
-        print(f"[TEST]   - logicnets_jscl.dcp")
-        print(f"[TEST]")
-        print(f"[TEST] For custom DCPs, run without --test to use the LLM-guided optimizer.")
-        return 1
+        design_type = "generic"
+        print(f"[TEST] Detected generic DCP - using universal optimization flow")
     
     tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir)
     
@@ -4331,8 +4504,10 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
         
         if design_type == "corundum":
             success = await tester.run_test(input_dcp, output_dcp, max_nets_to_optimize=max_nets)
-        else:  # logicnets
+        elif design_type == "logicnets":
             success = await tester.run_test_logicnets(input_dcp, output_dcp)
+        else:  # generic
+            success = await tester.run_test_generic(input_dcp, output_dcp, max_nets_to_optimize=max_nets)
         
         if success:
             print("\n[TEST] Test completed successfully")

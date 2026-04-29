@@ -352,7 +352,15 @@ validate_demo:
 	$(PYTHON) validate_dcps.py "$(EXAMPLE_DCP_2)" "$(EXAMPLE_DCP_2)" --vectors 1000
 
 run-submission:
-	@echo "Running submission...[Will be implemented later]"
+	@if [ -z "$(DCP_DIR)" ]; then \
+		printf "$(COLOR_RED)Error: DCP_DIR variable not set$(COLOR_RESET)\n"; \
+		echo "Usage: make run-submission DCP_DIR=/path/to/benchmarks"; \
+		echo "  DCP_DIR  - Directory containing benchmark .dcp files"; \
+		echo "  OUTPUT_DIR - Directory for optimized outputs (default: DCP_DIR)"; \
+		exit 1; \
+	fi
+	@printf "$(COLOR_GREEN)Running submission on benchmarks in $(DCP_DIR)...$(COLOR_RESET)\n"
+	$(PYTHON) run_submission.py "$(DCP_DIR)" $(if $(OUTPUT_DIR),"$(OUTPUT_DIR)",)
 	
 # Clean target: Remove run directories and Vivado-generated .Xil directories
 clean:

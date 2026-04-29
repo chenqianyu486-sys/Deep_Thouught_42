@@ -8,7 +8,14 @@ Uses the rapidwright pip package for JPype integration, with RAPIDWRIGHT_PATH
 and CLASSPATH pointing to the local RapidWright git submodule for Java classes.
 """
 import logging
+import sys
+from pathlib import Path
 from typing import Dict, Any, Optional
+
+# Add project root to path so skills module is importable from MCP server
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 logger = logging.getLogger(__name__)
 
