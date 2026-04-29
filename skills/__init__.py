@@ -28,6 +28,7 @@ from skills.telemetry import (
 
 # Import submodules to trigger @skill decorators
 from skills import net_detour_optimization
+from skills import smart_region_search
 
 __all__ = [
     "Skill",

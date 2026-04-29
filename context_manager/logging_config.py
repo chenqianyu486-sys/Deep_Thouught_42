@@ -628,9 +628,13 @@ Messages: {len(messages)}
                 self._logger.debug(msg_header)
                 self._logger.debug(content)
                 for tc in tool_calls:
-                    func = getattr(tc, 'function', None) or tc.get("function", {})
-                    func_name = getattr(func, 'name', None) or func.get("name", "unknown")
-                    args = getattr(func, 'arguments', None) or func.get("arguments", "")
+                    if isinstance(tc, dict):
+                        func_name = tc.get("function", {}).get("name", "unknown")
+                        args = tc.get("function", {}).get("arguments", "")
+                    else:
+                        # Pydantic model case (ChatCompletionMessageFunctionToolCall)
+                        func_name = tc.function.name if tc.function else "unknown"
+                        args = tc.function.arguments if tc.function else ""
                     if isinstance(args, str) and len(args) > 2000:
                         args = args[:1000] + f"\n... [TRUNCATED {len(args)} chars] ...\n" + args[-1000:]
                     self._logger.debug(f"  tool_call: {func_name}")

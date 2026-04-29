@@ -740,71 +740,126 @@ def optimize_lut_input_cone(hierarchical_input_pins: list[str]) -> Dict[str, Any
         return {"error": str(e)}
 
 
-def optimize_fanout(net_name: str, split_factor: int) -> Dict[str, Any]:
+def optimize_fanout_batch(net_configs: list[dict]) -> dict:
     """
-    Optimize high fanout nets by splitting them into multiple driven nets.
-    
-    This optimization reduces fanout by replicating the source driver and dividing
-    the loads among multiple copies. This can improve timing and routability for
-    nets with very high fanout.
-    
+    Batch optimize multiple high fanout nets by splitting them into multiple driven nets.
+
+    This reduces fanout by replicating the source driver and dividing the loads among
+    multiple copies. This can improve timing and routability for nets with very high fanout.
+
     Args:
-        net_name: Name of the high fanout net to optimize
-        split_factor: Number of copies to create (k) - net will be split into k parts
-        
+        net_configs: List of {"net_name": str, "fanout": int}
+                     fanout is used to calculate split_factor internally:
+                     split_factor = max(3, min(8, fanout // 100))
+
     Returns:
-        Dictionary with optimization results
+        Dictionary with batch optimization results:
+        {
+            "status": "success",
+            "total_nets": int,
+            "successful_count": int,
+            "failed_count": int,
+            "results": [
+                {
+                    "net_name": str,
+                    "fanout": int,
+                    "split_factor": int,
+                    "original_fanout": int,
+                    "status": "success" | "error",
+                    "message": str
+                },
+                ...
+            ]
+        }
     """
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
-    
+
     if _current_design is None:
-        return {"error": "No design loaded. Use load_design first."}
-    
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
     try:
         from com.xilinx.rapidwright.eco import FanOutOptimization
-        
+
         design = _current_design
-        
-        # Get the net
-        net = design.getNet(net_name)
-        if net is None:
-            return {"error": f"Net '{net_name}' not found in design"}
-        
-        # Get original fanout info
-        original_fanout = net.getFanOut()
-        logger.info(f"Optimizing net '{net_name}' with fanout {original_fanout} into {split_factor} parts")
-        
-        # Perform optimization
-        FanOutOptimization.cutFanOutOfRoutedNet(design, net, split_factor)
-        
-        # Collect info about the new nets created
-        # The optimization creates multiple nets by replicating the source
-        new_nets_info = []
-        
-        # Try to find the replicated nets (they will have similar names)
-        base_name = net_name
-        for design_net in design.getNets():
-            net_str = str(design_net.getName())
-            if base_name in net_str and net_str != net_name:
-                new_nets_info.append({
-                    "name": net_str,
-                    "fanout": design_net.getFanOut()
+        results = []
+        successful_count = 0
+        failed_count = 0
+
+        logger.info(f"Batch optimizing {len(net_configs)} nets")
+
+        for config in net_configs:
+            net_name = config.get("net_name")
+            fanout = config.get("fanout", 0)
+
+            if not net_name:
+                results.append({
+                    "net_name": None,
+                    "fanout": fanout,
+                    "split_factor": 0,
+                    "original_fanout": 0,
+                    "status": "error",
+                    "message": "net_name is required"
                 })
-                if len(new_nets_info) >= split_factor:
-                    break
-        
+                failed_count += 1
+                continue
+
+            try:
+                # Get the net
+                net = design.getNet(net_name)
+                if net is None:
+                    results.append({
+                        "net_name": net_name,
+                        "fanout": fanout,
+                        "split_factor": 0,
+                        "original_fanout": 0,
+                        "status": "error",
+                        "message": f"Net '{net_name}' not found in design"
+                    })
+                    failed_count += 1
+                    continue
+
+                # Calculate split_factor: fanout/100, min 3, max 8
+                original_fanout = net.getFanOut()
+                split_factor = max(3, min(8, original_fanout // 100))
+
+                logger.info(f"Optimizing net '{net_name}' with fanout {original_fanout} into {split_factor} parts")
+
+                # Perform optimization
+                FanOutOptimization.cutFanOutOfRoutedNet(design, net, split_factor)
+
+                results.append({
+                    "net_name": net_name,
+                    "fanout": fanout,
+                    "split_factor": split_factor,
+                    "original_fanout": original_fanout,
+                    "status": "success",
+                    "message": f"Successfully split net '{net_name}' into {split_factor} parts"
+                })
+                successful_count += 1
+
+            except Exception as e:
+                logger.error(f"Error optimizing net {net_name}: {e}")
+                results.append({
+                    "net_name": net_name,
+                    "fanout": fanout,
+                    "split_factor": 0,
+                    "original_fanout": 0,
+                    "status": "error",
+                    "message": str(e)
+                })
+                failed_count += 1
+
         return {
             "status": "success",
-            "net_name": net_name,
-            "original_fanout": original_fanout,
-            "split_factor": split_factor,
-            "new_nets": new_nets_info,
-            "message": f"Successfully split net '{net_name}' into {split_factor} parts"
+            "total_nets": len(net_configs),
+            "successful_count": successful_count,
+            "failed_count": failed_count,
+            "results": results
         }
-        
+
     except Exception as e:
-        logger.error(f"Error in fanout optimization: {e}")
+        logger.error(f"Error in batch fanout optimization: {e}")
         return {"error": str(e)}
 
 
@@ -1567,7 +1622,8 @@ def convert_fabric_region_to_pblock_ranges(
                         bounds["min_y"] = min(bounds["min_y"], y)
                         bounds["max_y"] = max(bounds["max_y"], y)
                         bounds["count"] += 1
-                    except:
+                    except Exception:
+                        logger.debug(f"Failed to parse site coordinates from line: {line}")
                         pass
         
         # Build the pblock range string
@@ -1638,7 +1694,7 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
             return {"error": "Skill 'analyze_net_detour' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
-        result = skill.execute(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
+        result = skill.execute_with_telemetry(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
 
         if not result.success:
             return {"error": result.error}
@@ -1701,7 +1757,7 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
             return {"error": "Skill 'optimize_cell_placement' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
-        result = skill.execute(context, cell_names=cell_names)
+        result = skill.execute_with_telemetry(context, cell_names=cell_names)
 
         if not result.success:
             return {"error": result.error}
@@ -1741,40 +1797,111 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def get_high_fanout_nets(min_fanout: int = 100, max_nets: int = 10) -> Dict[str, Any]:
-    """Find high fanout nets in the current RapidWright design."""
+def smart_region_search(
+    target_lut_count: int,
+    target_ff_count: int,
+    target_dsp_count: int = 0,
+    target_bram_count: int = 0,
+    reference_col: Optional[int] = None,
+    reference_row: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Find optimal pblock region using greedy expansion from reference point.
+
+    This tool analyzes the FPGA fabric and finds an optimal rectangular region
+    that satisfies the target resource requirements. It uses greedy expansion
+    from a reference point (or design center of mass), avoiding delay-heavy
+    columns (URAM, HPIO, etc.) and prioritizing high-density columns.
+
+    Single tool call replaces 12+ LLM interaction rounds for pblock selection.
+
+    Args:
+        target_lut_count: Required number of LUTs (1.5x current usage recommended)
+        target_ff_count: Required number of FFs (1.5x current usage recommended)
+        target_dsp_count: Required number of DSPs (default 0)
+        target_bram_count: Required number of BRAMs (default 0)
+        reference_col: Reference column coordinate (optional, uses design center of mass)
+        reference_row: Reference row coordinate (optional, uses design center of mass)
+
+    Returns:
+        Dictionary with optimal region coordinates and pblock description:
+        - col_min, col_max, row_min, row_max: Region boundaries
+        - center_col, center_row: Region center
+        - reference_col, reference_row: Reference point used
+        - pblock_ranges: Vivado-format pblock range string
+        - estimated_luts/ffs/dsps/brams: Resources in selected region
+        - target_luts/ffs/dsps/brams: Target requirements
+        - columns_used, rows_used: Region dimensions
+        - status: "success" or "error"
+        - message: Status description
+    """
     global _current_design
+
     if not _initialized:
-        return {"error": "RapidWright not initialized"}
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
     if _current_design is None:
-        return {"error": "No design loaded"}
+        return {"error": "No design loaded. Use read_checkpoint first."}
 
     try:
-        nets = _current_design.getNets()
-        candidates = []
-        for net in nets:
-            pins = net.getPins()
-            if pins and pins.size() > min_fanout:
-                # Convert Java strings to Python strings explicitly
-                name = str(net.getName())
-                # Skip global logic and clock nets
-                if 'GLOBAL_LOGIC' in name:
-                    continue
-                name_upper = name.upper()
-                if any(kw in name_upper for kw in ['BUFG', 'CLK', 'CLOCK', 'USERCLK', 'PCLK', 'RESET', 'RST']):
-                    continue
-                candidates.append((name, int(pins.size())))
-        candidates.sort(key=lambda x: -x[1])
-        result = []
-        for name, fanout in candidates[:max_nets]:
-            result.append({"name": str(name), "fanout": int(fanout)})
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("smart_region_search")
+        if skill is None:
+            return {"error": "Skill 'smart_region_search' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            target_lut_count=target_lut_count,
+            target_ff_count=target_ff_count,
+            target_dsp_count=target_dsp_count,
+            target_bram_count=target_bram_count,
+            reference_col=reference_col,
+            reference_row=reference_row
+        )
+
+        if not result.success:
+            return {"error": result.error}
+
         return {
             "status": "success",
-            "total_nets": int(nets.size()),
-            "min_fanout_threshold": int(min_fanout),
-            "high_fanout_count": int(len(candidates)),
-            "nets": result
+            "region": {
+                "col_min": result.data["col_min"],
+                "col_max": result.data["col_max"],
+                "row_min": result.data["row_min"],
+                "row_max": result.data["row_max"],
+                "center_col": result.data["center_col"],
+                "center_row": result.data["center_row"]
+            },
+            "reference": {
+                "col": result.data["reference_col"],
+                "row": result.data["reference_row"]
+            },
+            "pblock_ranges": result.data["pblock_ranges"],
+            "estimated_resources": {
+                "luts": result.data["estimated_luts"],
+                "ffs": result.data["estimated_ffs"],
+                "dsps": result.data["estimated_dsps"],
+                "brams": result.data["estimated_brams"]
+            },
+            "target_requirements": {
+                "luts": result.data["target_luts"],
+                "ffs": result.data["target_ffs"],
+                "dsps": result.data["target_dsps"],
+                "brams": result.data["target_brams"]
+            },
+            "dimensions": {
+                "columns_used": result.data["columns_used"],
+                "rows_used": result.data["rows_used"]
+            },
+            "message": result.data["message"]
         }
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
+        logger.error(f"Error in smart region search: {e}")
         return {"error": str(e)}
 

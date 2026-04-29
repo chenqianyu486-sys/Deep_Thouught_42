@@ -217,12 +217,20 @@ class YAMLStructuredCompressor(CompressionStrategy):
         model_config = getattr(context, 'model_context_config', None)
         model_switched = getattr(context, 'model_switch_detected', False)
         previous_tier = getattr(context, 'previous_model_tier', None)
+        force_aggressive = getattr(context, 'force_aggressive', False)
 
         # Get tier-aware parameters from instance attributes (set by subclasses)
         # These can be overridden by model_config if available
         preserve_turns = getattr(self, 'preserve_turns', 25)
         min_importance_threshold = getattr(self, 'min_importance_threshold', 0.2)
         max_chars_multiplier = getattr(self, 'max_chars_multiplier', 1.0)
+
+        # Hard limit level: more aggressive than soft threshold but preserves more than full aggressive
+        if force_aggressive:
+            preserve_turns = getattr(self, 'preserve_turns_hard_limit', 25)
+            min_importance_threshold = getattr(self, 'min_importance_threshold_hard_limit', 0.35)
+            logger.info("[COMPRESS] Hard limit level compression: preserve_turns=%d, threshold=%.2f",
+                       preserve_turns, min_importance_threshold)
 
         # Adjust parameters based on model tier switch
         if model_switched and previous_tier and model_config:
@@ -645,6 +653,149 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         return score
 
+    # 改进5: 最低评分阈值
+    MIN_HEADER_SCORE: float = 2.0
+    MIN_DATA_SCORE: float = 1.5
+    MIN_OTHER_SCORE: float = 0.5
+
+    # 改进2: WNS严重性预算上限
+    WNS_SEVERITY_BUDGET_CAP: int = 15000
+
+    # 改进3: 回退保护阈值
+    FALLBACK_CHAR_RATIO: float = 0.2
+    FALLBACK_CHAR_MIN: int = 200
+
+    def _extract_wns_value(self, content: str) -> Optional[float]:
+        match = re.search(r'WNS\s*[:=]\s*(-?[\d.]+)', content, re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+        return None
+
+    def _detect_clock_domain_sections(self, lines: list) -> list:
+        boundary_pattern = re.compile(r'^\s*(?:From\s+)?Clock\s*:?\s*', re.IGNORECASE)
+        boundaries = []
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and boundary_pattern.match(stripped):
+                boundaries.append((i, stripped))
+
+        if len(boundaries) <= 1:
+            return [(0, len(lines), None, lines)]
+
+        sections = []
+        first_boundary_idx = boundaries[0][0]
+        if first_boundary_idx > 0:
+            sections.append((0, first_boundary_idx, '_preamble', lines[0:first_boundary_idx]))
+
+        for j, (boundary_idx, label) in enumerate(boundaries):
+            start = boundary_idx
+            end = boundaries[j+1][0] if j+1 < len(boundaries) else len(lines)
+            sections.append((start, end, label, lines[start:end]))
+
+        return sections
+
+    def _ensure_startpoint_endpoint_pairs(self, lines: list, selected: set) -> set:
+        sp_pattern = re.compile(r'start\s*point\s*:', re.IGNORECASE)
+        ep_pattern = re.compile(r'end\s*point\s*:', re.IGNORECASE)
+
+        sp_indices = [i for i, line in enumerate(lines) if sp_pattern.search(line)]
+        ep_indices = [i for i, line in enumerate(lines) if ep_pattern.search(line)]
+
+        if not sp_indices or not ep_indices:
+            return selected
+
+        result = set(selected)
+        for sp_idx in sp_indices:
+            ep_idx = next((e for e in ep_indices if e > sp_idx), None)
+            if ep_idx is None:
+                break
+            if sp_idx in result or ep_idx in result:
+                result.add(sp_idx)
+                result.add(ep_idx)
+
+        return result
+
+    def _select_timing_lines_in_domain(
+        self, lines: list, available_budget: int
+    ) -> set:
+        header_entries = []
+        data_entries = []
+        other_entries = []
+
+        for i, line in enumerate(lines):
+            line_upper = line.upper()
+            if any(k in line_upper for k in ['WNS', 'TNS', 'FMAX', 'CLOCK', '====', '----', 'TARGET', 'Failing']):
+                header_entries.append((i, line))
+            elif any(k in line.lower() for k in ['path', 'slack', 'endpoint', 'critical', 'delay']) or \
+                 re.search(r'-?[\d.]+\s*ns', line.lower()):
+                data_entries.append((i, line))
+            else:
+                other_entries.append((i, line))
+
+        scored_header = [(idx, line, self._score_line(line, 'timing')) for idx, line in header_entries]
+        scored_data = [(idx, line, self._score_line(line, 'timing')) for idx, line in data_entries]
+        scored_other = [(idx, line, self._score_line(line, 'timing')) for idx, line in other_entries]
+
+        scored_header.sort(key=lambda x: x[2], reverse=True)
+        scored_data.sort(key=lambda x: x[2], reverse=True)
+        scored_other.sort(key=lambda x: x[2], reverse=True)
+
+        header_score_total = sum(s for _, _, s in scored_header)
+        data_score_total = sum(s for _, _, s in scored_data)
+        total_score = header_score_total + data_score_total + 1
+
+        overhead = 50
+        effective_budget = max(100, available_budget - overhead)
+        header_budget = int(effective_budget * (header_score_total / total_score))
+        data_budget = int(effective_budget * (data_score_total / total_score))
+
+        selected_set = set()
+        current_len = 0
+
+        # Header选择（带最低阈值）
+        for idx, line, score in scored_header:
+            if score < self.MIN_HEADER_SCORE:
+                continue
+            line_len = len(line) + 1
+            if current_len + line_len <= header_budget:
+                selected_set.add(idx)
+                current_len += line_len
+        unused_header = max(0, header_budget - current_len)
+
+        # Data选择（带最低阈值）
+        current_len = 0
+        for idx, line, score in scored_data:
+            if score < self.MIN_DATA_SCORE:
+                continue
+            line_len = len(line) + 1
+            if current_len + line_len <= data_budget:
+                selected_set.add(idx)
+                current_len += line_len
+        unused_data = max(0, data_budget - current_len)
+
+        # 未用完预算重新分配
+        other_budget_extra = 0
+        if unused_header > 0:
+            other_budget_extra += unused_header * 2 // 3
+        if unused_data > 0:
+            other_budget_extra += unused_data * 2 // 3
+
+        # Other选择（带最低阈值）
+        remaining = effective_budget - sum(len(lines[i]) + 1 for i in selected_set)
+        remaining += other_budget_extra
+        for idx, line, score in scored_other:
+            if score < self.MIN_OTHER_SCORE:
+                continue
+            line_len = len(line) + 1
+            if remaining >= line_len:
+                selected_set.add(idx)
+                remaining -= line_len
+
+        return selected_set
+
     def _smart_truncate_content(self, content: str, max_chars: int = None) -> str:
         """Intelligent truncation with priority-based line selection.
 
@@ -667,6 +818,18 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         # Use specialized truncation for timing reports to preserve critical path data
         if report_type == 'timing':
+            # 改进2: 根据WNS违例严重程度动态调整预算
+            wns_val = self._extract_wns_value(content)
+            if wns_val is not None:
+                abs_wns = abs(wns_val)
+                if abs_wns < 0.3:
+                    severity_mult = 1.0
+                elif abs_wns < 1.0:
+                    severity_mult = 1.3
+                else:
+                    severity_mult = 1.6
+                adjusted = int(max_chars * severity_mult)
+                max_chars = min(adjusted, self.WNS_SEVERITY_BUDGET_CAP)
             return self._smart_truncate_timing_report(content, lines, max_chars)
 
         # Score each line by importance
@@ -696,59 +859,92 @@ class YAMLStructuredCompressor(CompressionStrategy):
         return '\n'.join(result_lines) + f'\n... [preserved {len(selected_indices)}/{len(lines)} lines, original {len(content)} chars]'
 
     def _smart_truncate_timing_report(self, content: str, lines: list, max_chars: int) -> str:
-        """Specialized truncation for timing reports that preserves critical path data."""
-        header_lines = []
-        data_lines = []
-        other_lines = []
+        """时序报告专用截断，集成5项改进：
+        1. 成对保留 Startpoint/Endpoint
+        2. (动态预算在上游 _smart_truncate_content 中处理)
+        3. 异常格式回退保护
+        4. 时钟域感知的两级预算分配
+        5. 最低评分阈值过滤
+        """
+        marker_overhead = 200
+        available_budget = max(1, max_chars - marker_overhead)
 
-        for i, line in enumerate(lines):
-            line_upper = line.upper()
-            # Header: contains WNS, TNS, Clock, summary keywords
-            if any(k in line_upper for k in ['WNS', 'TNS', 'FMAX', 'CLOCK', '====', '----', 'TARGET', 'Failing']):
-                header_lines.append((i, line))
-            # Data path lines: contain path, delay, endpoint, slack, critical
-            elif any(k in line.lower() for k in ['path', 'slack', 'endpoint', 'critical', 'delay']) or \
-                 re.search(r'-?[\d.]+\s*ns', line.lower()):
-                data_lines.append((i, line))
-            else:
-                other_lines.append((i, line))
+        # 改进4: 时钟域检测
+        sections = self._detect_clock_domain_sections(lines)
 
-        # Score each section
-        header_score = sum(self._score_line(line, 'timing') for _, line in header_lines)
-        data_score = sum(self._score_line(line, 'timing') for _, line in data_lines)
-        total_score = header_score + data_score + 1
+        if len(sections) == 1:
+            # 单域路径（向后兼容）
+            selected = self._select_timing_lines_in_domain(lines, available_budget)
+        else:
+            # 多域路径：按 domain 分配子预算
+            section_weights = []
+            section_wns = []
+            for sec_start, sec_end, clock_label, sec_lines in sections:
+                sec_text = '\n'.join(sec_lines)
+                wns = self._extract_wns_value(sec_text)
+                section_wns.append(wns)
+                violation_factor = 1.0
+                if wns is not None:
+                    violation_factor = 1.0 + min(abs(wns), 5.0)
+                section_weights.append(len(sec_lines) * violation_factor)
 
-        # Allocate budget proportionally to score
-        header_budget = int((max_chars - 200) * (header_score / total_score))
-        data_budget = int((max_chars - 200) * (data_score / total_score))
+            total_weight = sum(section_weights) or 1
 
-        selected_indices = []
+            # 为有违例的 section 保证最少 5 行
+            MIN_LINES_PER_SECTION = 5
+            EST_CHARS_PER_LINE = 60
+            min_guarantee_total = 0
+            section_minimums = []
+            for i, wns in enumerate(section_wns):
+                if wns is not None and abs(wns) > 0.001:
+                    minimum = MIN_LINES_PER_SECTION * EST_CHARS_PER_LINE
+                    section_minimums.append(minimum)
+                    min_guarantee_total += minimum
+                else:
+                    section_minimums.append(0)
 
-        # Select header lines within budget
-        current_len = 0
-        for idx, line in header_lines:
-            if current_len + len(line) + 1 <= header_budget:
-                selected_indices.append(idx)
-                current_len += len(line) + 1
+            allocatable = max(0, available_budget - min_guarantee_total)
 
-        # Select data lines within budget
-        current_len = 0
-        for idx, line in data_lines:
-            if current_len + len(line) + 1 <= data_budget:
-                selected_indices.append(idx)
-                current_len += len(line) + 1
+            selected = set()
+            for i, (sec_start, sec_end, clock_label, sec_lines) in enumerate(sections):
+                if not sec_lines:
+                    continue
+                proportion = section_weights[i] / total_weight
+                sub_budget = section_minimums[i] + int(allocatable * proportion)
+                section_selected = self._select_timing_lines_in_domain(
+                    sec_lines, sub_budget
+                )
+                # 将相对索引映射为绝对索引
+                for rel_idx in section_selected:
+                    selected.add(sec_start + rel_idx)
 
-        # Fill remaining with other lines
-        remaining = max_chars - 200 - sum(len(lines[i]) + 1 for i in selected_indices)
-        for idx, line in other_lines:
-            if remaining - len(line) - 1 >= 0:
-                selected_indices.append(idx)
-                remaining -= len(line) + 1
+        # 改进1: Startpoint/Endpoint 成对绑定
+        selected = self._ensure_startpoint_endpoint_pairs(lines, selected)
 
-        selected_indices.sort()
-        result_lines = [lines[i] for i in selected_indices]
+        # 改进3: 回退保护
+        total_chars = sum(len(lines[i]) + 1 for i in selected)
+        fallback_threshold = max(int(max_chars * self.FALLBACK_CHAR_RATIO), self.FALLBACK_CHAR_MIN)
+        if total_chars < fallback_threshold:
+            logger.warning(
+                "[SMART_TRUNCATE] Timing report produced only %d chars (threshold=%d), "
+                "using head+tail fallback", total_chars, fallback_threshold,
+                extra={"trace_id": get_trace_id(), "total_chars": total_chars,
+                       "fallback_threshold": fallback_threshold}
+            )
+            head_count = max(1, int(len(lines) * 0.7))
+            tail_count = max(1, int(len(lines) * 0.3))
+            fallback_indices = set(range(head_count)) | set(
+                range(len(lines) - tail_count, len(lines))
+            )
+            result_lines = [lines[i] for i in sorted(fallback_indices)]
+            total_preserved = len(fallback_indices)
+            marker = f'\n[ABNORMAL TIMING REPORT - FALLBACK] ... [preserved {total_preserved}/{len(lines)} lines, timing report]'
+        else:
+            result_lines = [lines[i] for i in sorted(selected)]
+            total_preserved = len(selected)
+            marker = f'\n... [preserved {total_preserved}/{len(lines)} lines, timing report]'
 
-        return '\n'.join(result_lines) + f'\n... [preserved {len(selected_indices)}/{len(lines)} lines, timing report]'
+        return '\n'.join(result_lines) + marker
 
 
 def messages_to_yaml(messages: List[Message], context: CompressionContext) -> str:
