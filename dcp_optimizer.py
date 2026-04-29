@@ -3062,6 +3062,24 @@ CRITICAL OPTIMIZATION RULES:
                         # Skip this iteration (no counter update)
                         continue
 
+                # Print skill telemetry for this iteration
+                try:
+                    from skills import SkillTelemetry
+                    summary = SkillTelemetry.get_execution_summary()
+                    metrics = SkillTelemetry.get_all_metrics()
+                    if metrics:
+                        print(f"\n  SKILL TELEMETRY (Iter {self.iteration}):")
+                        for name, m in metrics.items():
+                            if m["total_calls"] > 0:
+                                print(f"    {name}: {m['total_calls']} calls, "
+                                      f"{m['success_rate']*100:.0f}% success, "
+                                      f"avg {m['avg_duration_ms']:.0f}ms")
+                        recent = SkillTelemetry.get_recent_executions(limit=3)
+                        if recent:
+                            print(f"    Latest: {recent[0]['skill_name']} → {recent[0]['status']} ({recent[0]['duration_ms']:.0f}ms)")
+                except Exception:
+                    pass
+
                 if is_done:
                     logger.info("Optimization workflow completed")
                     self.end_time = time.time()
@@ -3224,6 +3242,24 @@ CRITICAL OPTIMIZATION RULES:
         else:
             print(f"  Total cost:          Not available")
         
+        # Skill telemetry summary
+        try:
+            from skills import SkillTelemetry
+            skill_metrics = SkillTelemetry.get_all_metrics()
+            if skill_metrics:
+                print(f"\nSKILL TELEMETRY:")
+                for name, m in skill_metrics.items():
+                    if m["total_calls"] > 0:
+                        print(f"  {name}:")
+                        print(f"    Calls:           {m['total_calls']}")
+                        print(f"    Success rate:    {m['success_rate']*100:.0f}%")
+                        print(f"    Avg duration:    {m['avg_duration_ms']:.0f}ms")
+                        print(f"    Total duration:  {m['total_duration_ms']:.0f}ms")
+                        if m['last_error']:
+                            print(f"    Last error:      {m['last_error']}")
+        except Exception:
+            pass
+
         # Tool call summary
         if self.tool_call_details:
             print(f"\nTOOL CALLS SUMMARY:")
