@@ -4,7 +4,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "deepseek/deepseek-v4-flash"  # Fast, cheap ($0.14/M input, $0.28/M output), 1M context
+  model_name: "deepseek/deepseek-v4-flash"  # $0.14/M input, $0.28/M output, 1M context
   max_tokens: 1000000
   soft_threshold: 40000       # Trigger soft compression at 40K
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -16,8 +16,8 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit
+    - "minimax/minimax-2.7"
     - "stepfun/step-3.5-flash"
-    - "xiaomi/mimo-v2-flash"
   pricing:
     input_per_1m: 0.14
     output_per_1m: 0.28
@@ -25,7 +25,7 @@ worker:
 
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-pro"    # Powerful reasoning ($0.435/M input, $0.87/M output), 1M context
+  model_name: "deepseek/deepseek-v4-flash"  # Also v4-flash to stay within $1.00 budget
   max_tokens: 1000000
   soft_threshold: 120000      # Trigger soft compression at 120K
   hard_limit: 300000         # Trigger aggressive compression at 300K
@@ -37,6 +37,7 @@ planner:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit
+    - "minimax/minimax-2.7"
     - "xiaomi/mimo-v2.5-pro"
   pricing:
     input_per_1m: 0.435
