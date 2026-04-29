@@ -95,10 +95,14 @@ strategies:
   strategy_1:
     name: PBLOCK-Based Re-placement
     trigger: "recommendation: PBLOCK in initial analysis YAML"
+    critical: |
+      *** CRITICAL: Steps 4-6 are MANDATORY for PBLOCK to have any effect. ***
+      Without place_design -unplace → create_and_apply_pblock → place_design → route_design,
+      the PBLOCK constraint is just paper — it does NOTHING to the design.
+      You MUST execute ALL 7 steps in order. Do NOT skip to report_timing_summary prematurely.
     steps:
       - command: report_utilization_for_pblock
         platform: Vivado
-        description: Get resource counts
       - command: analyze_fabric_for_pblock
         platform: RapidWright
         parameters:
@@ -111,18 +115,24 @@ strategies:
           use_clock_regions: false
       - command: run_tcl("place_design -unplace")
         platform: Vivado
+        mandatory: true
+        description: Unplace ALL cells before applying pblock
       - command: create_and_apply_pblock
         platform: Vivado
+        mandatory: true
         parameters:
-          pblock_ranges_format: "SLICE_X...DSP48E2_X...RAMB..."  # NOT CLOCKREGION
+          pblock_ranges_format: "SLICE_X...DSP48E2_X...RAMB..."
       - command: place_design
         platform: Vivado
-        parameters: null
+        mandatory: true
+        description: Re-place design within pblock constraint
       - command: route_design
         platform: Vivado
-        parameters: null
+        mandatory: true
+        description: Route the re-placed design
       - command: report_timing_summary
         platform: Vivado
+        description: Verify improvement
 
   strategy_2:
     name: Physical Optimization

@@ -519,8 +519,10 @@ def extract_critical_path_cells(
                     if '/' in part and not part.startswith('('):
                         # Remove pin suffix (e.g., /C, /D, /O, /Q, /CE, etc.)
                         cell_path = part
-                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE', 
-                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6']
+                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
+                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6',
+                                       '/I', '/A', '/B', '/ADDR', '/DATA', '/WE', '/EN',
+                                       '/IN', '/OUT', '/SEL', '/CLK']
                         for suffix in pin_suffixes:
                             if cell_path.endswith(suffix):
                                 cell_path = cell_path[:-len(suffix)]
