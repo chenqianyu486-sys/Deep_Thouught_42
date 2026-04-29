@@ -2349,6 +2349,9 @@ class DCPOptimizer(DCPOptimizerBase):
             # If response is None, user requested exit - exit the while loop
             if response is None:
                 logger.info(f"User requested exit, breaking out of tool_round loop")
+                content = f"[User requested exit during LLM call, iteration {self.iteration}]"
+                self._is_done_reason = "user_requested"
+                is_done = False
                 break
 
             # Safely extract Usage and Cost (compatible with OpenRouter extended fields)
@@ -2558,6 +2561,14 @@ class DCPOptimizer(DCPOptimizerBase):
             reason = self._is_done_reason or "unknown"
             logger.info(f"get_completion exit: reason={reason}, is_done={is_done}, WNS={self.best_wns:.4f}")
             print(f"[Exit reason: {reason}]")
+
+            # [FIX] Defensive check: ensure content and is_done are defined before returning
+            if content is None:
+                logger.error(f"get_completion returning content=None! This indicates a bug in exit handling.")
+                content = "[Internal error: content not set]"
+            if is_done is None:
+                logger.error(f"get_completion returning is_done=None! This indicates a bug in exit handling.")
+                is_done = False
 
             return content, is_done
 
