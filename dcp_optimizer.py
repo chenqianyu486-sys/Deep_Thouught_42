@@ -702,7 +702,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
         self.GLOBAL_NO_IMPROVEMENT_LIMIT = 5         # Global no-improvement limit
-        self.MAX_TOOL_ROUNDS_PER_ITERATION = 22      # Max tool-calling rounds per iteration
+        self.MAX_TOOL_ROUNDS_PER_ITERATION = 30      # Max tool-calling rounds per iteration
         
         # Track token usage and costs
         self.total_prompt_tokens = 0
@@ -2205,12 +2205,16 @@ class DCPOptimizer(DCPOptimizerBase):
                 content = f"[User requested exit during tool round {tool_round}, iteration {self.iteration}]"
                 self._is_done_reason = "user_requested"
                 is_done = False
+                # [FIX] Mark that we broke without calling any tools - prevents tight continue loop
+                self._loop_break_without_tool_call = True
                 break
             if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
                 logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
                 content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
                 self._is_done_reason = "tool_round_limit"
                 is_done = False
+                # [FIX] Mark that we broke without calling any tools - prevents tight continue loop
+                self._loop_break_without_tool_call = True
                 break
             iteration_start_wns = self.best_wns
 
@@ -2514,9 +2518,15 @@ class DCPOptimizer(DCPOptimizerBase):
             # [FIX] When LLM returns no tool calls but is_done=False, continue the loop
             # instead of returning to main loop. This ensures the LLM gets more chances
             # to generate optimization commands within this iteration.
+            # BUT: If we broke from the loop due to tool_round_limit or user_exit without
+            # calling any tools, we should return instead of continuing (prevents tight loops).
             if not is_done:
-                logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
-                continue
+                if hasattr(self, '_loop_break_without_tool_call') and self._loop_break_without_tool_call:
+                    logger.info(f"Breaking from get_completion (no tool calls made in {tool_round} rounds)")
+                    delattr(self, '_loop_break_without_tool_call')
+                else:
+                    logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
+                    continue
 
             # At the end of get_completion(), before the return statement:
             if self.current_task_type:
@@ -2670,7 +2680,13 @@ CRITICAL OPTIMIZATION RULES:
                 return False
 
             try:
-                response_text, is_done = await self.get_completion()
+                result = await self.get_completion()
+                if result is None:
+                    logger.error("get_completion() returned None - exception escaped. Treating as tool_round_limit.")
+                    response_text = "[Internal error: get_completion returned None, treating as tool round limit]"
+                    is_done = False
+                else:
+                    response_text, is_done = result
                 print(f"\n{response_text}\n")
 
                 # Determine if this iteration had WNS improvement
