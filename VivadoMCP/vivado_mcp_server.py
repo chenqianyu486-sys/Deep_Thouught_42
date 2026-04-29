@@ -553,6 +553,52 @@ def extract_critical_path_cells(
         return json.dumps(all_paths)
 
 
+def extract_critical_path_pins(
+    num_paths: int = 50,
+    output_file: str = None,
+    timeout: float = 600.0
+) -> str:
+    """Extract flat pin list from critical timing paths for detour analysis.
+
+    Returns a flat list of pin names like ["src_ff/Q", "lut1/I2", "lut1/O", "dst_ff/D", ...]
+    suitable for RapidWright's analyze_net_detour (which uses _group_pins_by_cell).
+    """
+    import re
+    import json
+
+    cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
+
+    try:
+        timing_report = run_tcl_command(cmd, timeout=timeout)
+    except Exception as e:
+        return json.dumps({"error": f"Error generating timing report: {str(e)}"})
+
+    path_sections = re.split(r'Slack \(', timing_report)
+    all_pins = []
+
+    for path_section in path_sections[1:]:
+        for line in path_section.split('\n'):
+            if '/' not in line or line.strip().startswith('net'):
+                continue
+            parts = line.split()
+            for part in parts:
+                if '/' in part and not part.startswith('('):
+                    all_pins.append(part.strip('()'))
+                    break
+
+    if output_file:
+        try:
+            import os
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(all_pins, f, indent=2)
+            return json.dumps({"status": "success", "output_file": output_file, "pin_count": len(all_pins)})
+        except Exception as e:
+            return json.dumps({"error": f"Error writing to file: {str(e)}"})
+    else:
+        return json.dumps(all_pins)
+
+
 def report_utilization_for_pblock(timeout: float = 300.0) -> str:
     """
     Get detailed resource utilization report for pblock sizing.
@@ -1185,6 +1231,32 @@ async def list_tools():
             }
         ),
         Tool(
+            name="extract_critical_path_pins",
+            description="""Extract ordered pin lists from critical timing paths for detour analysis.
+
+Returns pin-level paths like [["src_ff/Q", "lut1/I2", "lut1/O", "dst_ff/D"], ...]
+suitable for RapidWright's analyze_net_detour. Unlike extract_critical_path_cells
+which strips pin suffixes to get cell names, this preserves full pin paths.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_paths": {
+                        "type": "integer",
+                        "description": "Number of critical paths to extract (default: 50)",
+                        "default": 50
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Optional: write JSON to this file instead of returning inline"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 600)"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="report_utilization_for_pblock",
             description="""Get design resource utilization for pblock sizing.
             
@@ -1574,10 +1646,18 @@ async def call_tool(name: str, arguments: dict):
             num_paths = arguments.get("num_paths", 50)
             output_file = arguments.get("output_file")
             timeout = arguments.get("timeout", 600)
-            
+
             output = extract_critical_path_cells(num_paths, output_file, timeout)
             return [TextContent(type="text", text=output)]
-        
+
+        elif name == "extract_critical_path_pins":
+            num_paths = arguments.get("num_paths", 50)
+            output_file = arguments.get("output_file")
+            timeout = arguments.get("timeout", 600)
+
+            output = extract_critical_path_pins(num_paths, output_file, timeout)
+            return [TextContent(type="text", text=output)]
+
         elif name == "report_utilization_for_pblock":
             timeout = arguments.get("timeout", 300)
             output = report_utilization_for_pblock(timeout)

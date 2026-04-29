@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
-"""FPL'26 Contest Submission Runner.
+"""FPL'26 Contest Submission Runner. / FPL'26 竞赛提交运行器。
 
-Runs the optimizer on all benchmark DCPs in a directory with a 1-hour
-per-benchmark timeout, recording Fmax improvement, cost, and runtime.
+Runs the LLM-guided optimizer on all benchmark DCPs in a directory,
+with a 1-hour per-benchmark wall-clock timeout. Records Fmax improvement,
+OpenRouter API cost, and total runtime. Computes contest score using the
+official formula: Score = alpha - 0.1*alpha*beta - 0.1*alpha*gamma.
+
+/ 对目录下所有 benchmark DCP 运行 LLM 引导的优化器，每个 benchmark
+有 1 小时的墙上时钟限制。记录 Fmax 提升、API 花费和总运行时间。
+使用官方公式计算竞赛得分。
+
+Requirements / 前提条件:
+- OPENROUTER_API_KEY environment variable / 环境变量
+- Vivado license with Implementation feature (for place_design/route_design)
+- RapidWright JARs compiled (make build-rapidwright)
 """
 
 import asyncio

@@ -4,10 +4,24 @@
 # SPDX-License-Identifier: Apache 2.0
 
 """
-FPGA Design Optimization Agent
+FPGA Design Optimization Agent / FPGA 设计优化智能体
 
 An autonomous AI agent that analyzes FPGA designs and applies optimizations
 using RapidWright and Vivado via MCP servers.
+/ 使用 RapidWright 和 Vivado 通过 MCP 服务器分析和优化 FPGA 设计的自主 AI 智能体。
+
+Modes / 运行模式:
+  --test       Test mode: hardcoded optimization without LLM (for environment validation)
+               / 测试模式：硬编码优化，无需 LLM（用于验证环境）
+  (no --test)  LLM agent mode: AI-driven optimization via OpenRouter API
+               / LLM 智能体模式：通过 OpenRouter API 进行 AI 驱动优化
+
+Requirements / 前提条件:
+  - OPENROUTER_API_KEY for LLM mode / LLM 模式需要 OPENROUTER_API_KEY
+  - Vivado license with Implementation feature for place_design/route_design
+    / 运行布局布线需要具备 Implementation 功能的 Vivado 许可证
+  - RapidWright JARs compiled: make build-rapidwright
+    / RapidWright JAR 已编译：make build-rapidwright
 """
 
 # === Section 1: Imports ===
@@ -798,24 +812,28 @@ class DCPOptimizer(DCPOptimizerBase):
             mm._working_store.add(Message(role=role, content=content, metadata=metadata))
 
     def _is_valid_wns(self, wns: float) -> bool:
-        """Validate WNS value to reject parsing errors and false positives."""
+        """Validate WNS to reject parsing errors and false positives.
+        / 验证 WNS 值，拒绝解析错误和假阳性。
+
+        Vivado's get_property WNS can return bogus 0.0 or 1.0 when the design state
+        is incomplete or when no Implementation license is available.
+        / Vivado 的 get_property WNS 在 design 状态不完整或没有 Implementation
+        许可证时，可能返回虚假的 0.0 或 1.0 值。
+        """
         if wns is None:
             return False
-        # WNS should not exceed 10x the clock period (would indicate a parsing error)
         if self.clock_period and abs(wns) > self.clock_period * 10:
             logger.warning(f"WNS sanity check failed: {wns:.3f} ns > {self.clock_period * 10:.1f} ns (10x clock period)")
             return False
-        # Extreme negative values are usually parsing errors
         if wns < -999:
             logger.warning(f"WNS sanity check failed: {wns:.3f} ns < -999")
             return False
-        # Jump from negative to exactly 0.0 or 1.0 without optimization is suspicious
-        # (get_property WNS can return bogus 0.0 or 1.0 when design state is incomplete)
+        # Reject false 0.0/1.0 from get_property WNS when design has real violations
+        # / 当 design 有真实时序违例时，拒绝 get_property WNS 返回的虚假 0.0/1.0
         best = self.best_wns if self.best_wns > float('-inf') else None
         if wns in (0.0, 1.0) and best is not None and best < -0.1:
             logger.warning(f"WNS suspicious: {wns:.3f} ns from {best:.3f} ns without visible optimization — rejecting")
             return False
-        # Positive WNS jump from negative initial without place/route is a parse error
         if wns >= 0.0 and self.initial_wns is not None and self.initial_wns < -0.1:
             logger.warning(f"WNS suspicious: {wns:.3f} ns positive but initial was {self.initial_wns:.3f} ns — rejecting")
             return False
@@ -4018,97 +4036,116 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             return False
 
     async def run_test_generic(self, input_dcp: Path, output_dcp: Path, max_nets_to_optimize: int = 5) -> bool:
-        """RapidWright-first universal flow: RW does analysis+optimization, Vivado opens once."""
+        """Generic test flow: detour-based cell re-placement.
+        / 通用测试流程：基于绕路分析的 cell 重定位。
+
+        Follows the official contest optimization example recipe:
+        / 遵循官方竞赛优化示例配方：
+        1. Vivado: open + report timing + extract_critical_path_pins
+        2. RapidWright: read DCP + analyze_net_detour + optimize_cell_placement + write DCP
+        3. Vivado: open modified DCP + route_design + report timing + write output
+
+        NOTE: Step 3 requires a Vivado license with Implementation feature for route_design.
+        / 注意：第3步需要具备 Implementation 功能的 Vivado 许可证才能运行 route_design。
+        """
         print("\n" + "="*70)
-        print("FPGA OPTIMIZER TEST MODE - GENERIC FLOW (RapidWright-first)")
+        print("FPGA OPTIMIZER TEST MODE - DETOUR CELL RE-PLACEMENT")
         print("="*70)
         overall_start = time.time()
 
         try:
-            # === Phase 1: RapidWright (init + read + find nets + optimize + write) ===
+            # === Phase 1: Vivado baseline ===
             print("\n" + "-"*60)
-            print("STEP 1: RapidWright init + load DCP")
+            print("STEP 1: Vivado baseline (open + timing + critical path pins)")
             print("-"*60)
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Open: {result[:200]}...")
+
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            self.initial_wns = self.parse_wns_from_timing_report(result)
+            self.clock_period = await self.fetch_clock_period()
+            if self.clock_period:
+                fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                print(f"Baseline WNS: {self.initial_wns} ns, Fmax: {fmax:.2f} MHz" if fmax else f"Baseline WNS: {self.initial_wns} ns")
+            else:
+                print(f"Baseline WNS: {self.initial_wns} ns")
+
+            # Extract critical path pins for detour analysis (official contest recipe)
+            result = await self.call_vivado_tool("extract_critical_path_pins", {
+                "num_paths": 50
+            }, timeout=300.0)
+            pin_paths = []
+            try:
+                pin_paths = json.loads(result)
+                if isinstance(pin_paths, dict) and "error" in pin_paths:
+                    print(f"Pin extraction error: {pin_paths['error']}")
+                    pin_paths = []
+                print(f"Extracted {len(pin_paths)} pin paths")
+            except Exception:
+                print("Could not parse pin paths from extract_critical_path_pins")
+
+            # === Phase 2: RapidWright detour analysis + cell placement ===
+            print("\n" + "-"*60)
+            print("STEP 2: RapidWright detour analysis + cell placement")
+            print("-"*60)
+
             result = await self.call_rapidwright_tool("initialize_rapidwright", {
                 "jvm_max_memory": "8G"
             }, timeout=120.0)
-            print(f"Init: {result[:200]}...")
+            print(f"RW init: {result[:200]}...")
 
             result = await self.call_rapidwright_tool("read_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
-            print(f"Read DCP: {result[:300]}...")
-            # Save initial WNS placeholder — actual WNS comes from Vivado later
-            self.initial_wns = 0.0
+            print(f"RW read: {result[:200]}...")
 
-            # Find high fanout nets in RapidWright
-            print("\n" + "-"*60)
-            print("STEP 2: Find high fanout nets (RapidWright)")
-            print("-"*60)
-            rw_result = await self.call_rapidwright_tool("get_high_fanout_nets", {
-                "min_fanout": 100, "max_nets": max_nets_to_optimize
-            }, timeout=120.0)
-            nets_to_optimize = []
-            try:
-                nets_data = json.loads(rw_result)
-                for net in nets_data.get("nets", []):
-                    nets_to_optimize.append((net["name"], net["fanout"]))
-                print(f"Found {len(nets_to_optimize)} data nets with fanout > 100")
-            except Exception:
-                print("Could not parse nets from RapidWright")
+            # Official recipe: analyze_net_detour -> optimize_cell_placement
+            cells_moved = 0
+            if pin_paths:
+                result = await self.call_rapidwright_tool("analyze_net_detour", {
+                    "pin_paths": pin_paths,
+                    "detour_threshold": 2.0
+                }, timeout=300.0)
+                detour_data = json.loads(result) if isinstance(result, str) else result
+                candidates = list(detour_data.get("results", {}).keys()) if detour_data.get("status") == "success" else []
+                print(f"Detour analysis: {detour_data.get('cells_analyzed', '?')} cells, {len(candidates)} high-detour candidates")
 
-            # Fanout optimization
-            nets_optimized = 0
-            if nets_to_optimize:
-                print("\n" + "-"*60)
-                print("STEP 3: Fanout optimization (RapidWright)")
-                print("-"*60)
-                for i, (name, fanout) in enumerate(nets_to_optimize):
-                    split = max(3, min(fanout // 100, 8))
-                    print(f"  [{i+1}/{len(nets_to_optimize)}] {name[:80]}: fanout={fanout} -> split={split}")
-                    try:
-                        opt_result = await self.call_rapidwright_tool("optimize_fanout", {
-                            "net_name": name, "split_factor": split
-                        }, timeout=300.0)
-                        if "error" not in str(opt_result).lower():
-                            nets_optimized += 1
-                            print(f"    OK")
-                    except Exception as e:
-                        print(f"    Error: {e}")
-                print(f"Optimized {nets_optimized}/{len(nets_to_optimize)} nets")
+                if candidates:
+                    result = await self.call_rapidwright_tool("optimize_cell_placement", {
+                        "cell_names": candidates[:20]
+                    }, timeout=600.0)
+                    place_data = json.loads(result) if isinstance(result, str) else result
+                    cells_moved = place_data.get("success_count", 0)
+                    print(f"Cell placement: {cells_moved} moved, {place_data.get('error_count', 0)} errors")
+                else:
+                    print("No detour candidates found")
 
             # Write RapidWright DCP
             print("\n" + "-"*60)
-            print("STEP 4: Write optimized DCP (RapidWright)")
+            print("STEP 3: Write modified DCP (RapidWright)")
             print("-"*60)
-            rw_dcp = self.temp_dir / "rapidwright_generic_optimized.dcp"
+            rw_dcp = self.temp_dir / "detour_optimized.dcp"
             await self.call_rapidwright_tool("write_checkpoint", {
                 "dcp_path": str(rw_dcp), "overwrite": True
             }, timeout=600.0)
-            print(f"DCP written: {rw_dcp.stat().st_size} bytes" if rw_dcp.exists() else "WARNING: DCP not created!")
+            if rw_dcp.exists():
+                print(f"DCP written: {rw_dcp.stat().st_size} bytes")
+            else:
+                print("WARNING: RapidWright DCP not created, using original")
+                rw_dcp = input_dcp
 
-            # === Phase 2: Vivado (open once + route + timing + write) ===
-            dcp_to_open = rw_dcp if rw_dcp.exists() else input_dcp
+            # === Phase 3: Vivado route + verify ===
             print("\n" + "-"*60)
-            print("STEP 5: Open in Vivado + route + report")
+            print("STEP 4: Vivado route + verify")
             print("-"*60)
             result = await self.call_vivado_tool("open_checkpoint", {
-                "dcp_path": str(dcp_to_open.resolve())
+                "dcp_path": str(rw_dcp.resolve())
             }, timeout=600.0)
-            print(f"Vivado open: {result[:200]}...")
+            print(f"Vivado re-open: {result[:200]}...")
 
-            # Get initial timing baseline
-            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
-            self.initial_wns = self.parse_wns_from_timing_report(result)
-            self.clock_period = await self.fetch_clock_period()
-            print(f"Initial WNS: {self.initial_wns} ns", end="")
-            if self.clock_period:
-                fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
-                print(f", Fmax: {fmax:.2f} MHz" if fmax else "")
-            else:
-                print()
-
-            # Route design
+            # Route (only unrouted nets will be re-routed)
             for directive in ["Default", "Explore"]:
                 try:
                     print(f"  route_design -directive {directive}...")
@@ -4117,16 +4154,14 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     }, timeout=3600.0)
                     break
                 except Exception as e:
-                    print(f"    route_design {directive}: {e}")
+                    print(f"    {directive}: {e}")
 
-            # Final timing
             result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
             self.final_wns = self.parse_wns_from_timing_report(result)
-            print(f"Final WNS: {self.final_wns} ns")
 
             # Write output
             print("\n" + "-"*60)
-            print("STEP 6: Write output DCP")
+            print("STEP 5: Write output DCP")
             print("-"*60)
             await self.call_vivado_tool("write_checkpoint", {
                 "dcp_path": str(output_dcp.resolve()), "force": True
@@ -4141,11 +4176,16 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 change = self.final_wns - self.initial_wns
                 direction = "IMPROVED" if change > 0 else ("REGRESSION" if change < 0 else "UNCHANGED")
                 print(f"WNS: {self.initial_wns:.3f} -> {self.final_wns:.3f} ns ({direction})")
-            print(f"Nets optimized: {nets_optimized}/{len(nets_to_optimize)}")
+                if self.clock_period:
+                    init_fmax = self.calculate_fmax(self.initial_wns, self.clock_period)
+                    final_fmax = self.calculate_fmax(self.final_wns, self.clock_period)
+                    if init_fmax and final_fmax:
+                        print(f"Fmax: {init_fmax:.2f} -> {final_fmax:.2f} MHz ({final_fmax - init_fmax:+.2f} MHz)")
+            print(f"Cells moved: {cells_moved}")
             return True
 
         except Exception as e:
-            logger.exception(f"Generic test failed: {e}")
+            logger.exception(f"Detour test failed: {e}")
             print(f"\n*** TEST FAILED: {e} ***")
             return False
 
