@@ -217,12 +217,20 @@ class YAMLStructuredCompressor(CompressionStrategy):
         model_config = getattr(context, 'model_context_config', None)
         model_switched = getattr(context, 'model_switch_detected', False)
         previous_tier = getattr(context, 'previous_model_tier', None)
+        force_aggressive = getattr(context, 'force_aggressive', False)
 
         # Get tier-aware parameters from instance attributes (set by subclasses)
         # These can be overridden by model_config if available
         preserve_turns = getattr(self, 'preserve_turns', 25)
         min_importance_threshold = getattr(self, 'min_importance_threshold', 0.2)
         max_chars_multiplier = getattr(self, 'max_chars_multiplier', 1.0)
+
+        # Hard limit level: more aggressive than soft threshold but preserves more than full aggressive
+        if force_aggressive:
+            preserve_turns = getattr(self, 'preserve_turns_hard_limit', 25)
+            min_importance_threshold = getattr(self, 'min_importance_threshold_hard_limit', 0.35)
+            logger.info("[COMPRESS] Hard limit level compression: preserve_turns=%d, threshold=%.2f",
+                       preserve_turns, min_importance_threshold)
 
         # Adjust parameters based on model tier switch
         if model_switched and previous_tier and model_config:

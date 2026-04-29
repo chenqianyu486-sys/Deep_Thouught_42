@@ -210,21 +210,26 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="optimize_fanout",
-            description="Optimize high fanout nets by splitting them into multiple driven nets. This reduces fanout by replicating the source driver and can improve timing and routability.",
+            name="optimize_fanout_batch",
+            description="Batch optimize multiple high fanout nets by splitting them into multiple driven nets. "
+                        "Reduces API calls by processing multiple nets in one call. "
+                        "split_factor is calculated internally: fanout/100 (min 3, max 8)",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "net_name": {
-                        "type": "string",
-                        "description": "Name of the high fanout net to optimize"
-                    },
-                    "split_factor": {
-                        "type": "integer",
-                        "description": "Number of copies to create (k) - net will be split into k parts"
+                    "nets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "net_name": {"type": "string", "description": "Name of the high fanout net to optimize"},
+                                "fanout": {"type": "integer", "description": "Current fanout count of the net (used to calculate split_factor)"}
+                            },
+                            "required": ["net_name", "fanout"]
+                        }
                     }
                 },
-                "required": ["net_name", "split_factor"]
+                "required": ["nets"]
             }
         ),
         Tool(
@@ -493,11 +498,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 hierarchical_input_pins=arguments["hierarchical_input_pins"]
             )
         
-        elif name == "optimize_fanout":
-            result = rw.optimize_fanout(
-                net_name=arguments["net_name"],
-                split_factor=arguments["split_factor"]
-            )
+        elif name == "optimize_fanout_batch":
+            result = rw.optimize_fanout_batch(arguments["nets"])
         
         elif name == "analyze_critical_path_spread":
             result = rw.analyze_critical_path_spread(

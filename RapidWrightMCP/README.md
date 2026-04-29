@@ -81,7 +81,7 @@ Restart Cursor after saving.
 | `get_tile_info` | Get information about a specific tile |
 | `search_sites` | Search for sites by type on a device |
 | `optimize_lut_input_cone` | Optimize LUT chains by combining into single LUTs |
-| `optimize_fanout` | Split high fanout nets by replicating drivers |
+| `optimize_fanout_batch` | Batch split high fanout nets by replicating drivers |
 
 ## Example Usage
 
@@ -99,7 +99,7 @@ AI: [calls optimize_lut_input_cone]
     "Successfully combined 3 chained LUTs into a single LUT6."
 
 User: "The net 'clk_enable' has very high fanout. Split it into 4 parts."
-AI: [calls optimize_fanout]
+AI: [calls optimize_fanout_batch]
     "Split 'clk_enable' (original fanout: 2,456) into 4 nets with ~614 loads each."
 ```
 

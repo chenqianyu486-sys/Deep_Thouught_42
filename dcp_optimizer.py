@@ -678,6 +678,9 @@ class DCPOptimizer(DCPOptimizerBase):
         self._previous_tier: Optional[str] = None   # Track previous tier for switch detection
         self._iteration_model_switch_logged = False  # Track if model switch was logged in current iteration
         self._prev_best_wns = None                    # Previous iteration's best_wns for improvement detection
+        self._next_iteration_model: Optional[str] = None  # Pre-decided model for next iteration
+        self._iteration_handoff_prompt: str = ""      # Handoff prompt for next iteration's model
+        self._iteration_handoff_injected: bool = False  # Whether handoff prompt was already injected
 
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
@@ -954,7 +957,8 @@ class DCPOptimizer(DCPOptimizerBase):
         self,
         current_tokens: int,
         model_config: ModelContextConfig = None,
-        model_switched: bool = False
+        model_switched: bool = False,
+        force_aggressive: bool = False
     ) -> CMCompressionContext:
         """Build CompressionContext with model awareness.
 
@@ -962,6 +966,7 @@ class DCPOptimizer(DCPOptimizerBase):
             current_tokens: Current token count estimate
             model_config: Model-specific configuration (uses WORKER_CONTEXT_CONFIG if None)
             model_switched: True if model tier switched since last compression
+            force_aggressive: True if hard limit triggered (hard_limit level compression)
         """
         config = model_config or WORKER_CONTEXT_CONFIG
         return CMCompressionContext(
@@ -977,7 +982,8 @@ class DCPOptimizer(DCPOptimizerBase):
             clock_period=self.clock_period,
             model_context_config=config,
             model_switch_detected=model_switched,
-            previous_model_tier=self._get_previous_model_tier()
+            previous_model_tier=self._get_previous_model_tier(),
+            force_aggressive=force_aggressive
         )
 
     def _infer_model_tier(self, model_name: str) -> str:
@@ -1170,7 +1176,7 @@ class DCPOptimizer(DCPOptimizerBase):
             history_limit = active_config.history_retrieval_limit
             history_min_importance = active_config.history_retrieval_min_importance
 
-        # Hard limit: must compress aggressively
+        # Hard limit: must compress with hard_limit level (more aggressive than soft, but preserves more than full aggressive)
         if current_tokens > hard_limit:
             self.compression_hard_count += 1
             self.compression_count += 1
@@ -1178,7 +1184,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 f"[COMPRESSION] Hard limit triggered: ~{current_tokens:,} tokens > {hard_limit:,} "
                 f"({active_config.model_tier} model, switch={model_switched})"
             )
-            context = self._build_compression_context(current_tokens, active_config, model_switched)
+            context = self._build_compression_context(current_tokens, active_config, model_switched, force_aggressive=True)
             context.retrieved_history = self._memory_manager.retrieve_historical(
                 CMRetrievalQuery(min_importance=history_min_importance, limit=history_limit)
             )
@@ -1461,6 +1467,77 @@ class DCPOptimizer(DCPOptimizerBase):
             # Global no-improvement count
             self.global_no_improvement += 1
 
+        # Decide next iteration's model and generate handoff prompt
+        next_model = self._select_model(
+            tool_name=self.current_task_type,
+            context_complexity=self._estimate_context_complexity(self.current_task_type),
+        )
+        self._next_iteration_model = next_model
+        logger.info(f"Next iteration {self.iteration + 1} will use model: {next_model}")
+
+        # Generate handoff prompt for the incoming model
+        self._iteration_handoff_prompt = self._generate_iteration_handoff_prompt()
+        self._iteration_handoff_injected = False
+
+    def _generate_iteration_handoff_prompt(self) -> str:
+        """Generate handoff prompt for the next iteration's model.
+
+        Provides the incoming model with:
+        - Current iteration number and next iteration
+        - Best WNS and corresponding checkpoint
+        - Next optimization goal/target
+        - Recent tools used and failed strategies to avoid
+        """
+        current_wns = self._get_current_wns()
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        best_wns_iter = self._best_wns_iteration
+        best_dcp = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
+        clock_period = self.clock_period
+
+        # Determine next goal based on current WNS state
+        if best_wns is not None and best_wns >= 0:
+            next_goal = "WNS target met! Focus on further optimization to achieve best possible timing."
+        elif best_wns is not None and best_wns > -0.5:
+            next_goal = "Close to timing meeting. Focus on fine-tuning critical paths."
+        elif best_wns is not None and best_wns > -2.0:
+            next_goal = "Moderate timing violation. Consider phys_opt_design or PBLOCK-based re-placement."
+        else:
+            next_goal = "Severe timing violation. Consider aggressive optimization strategies (PBLOCK, fanout splitting)."
+
+        # Recent tool calls in this iteration
+        recent_tools = [t['tool_name'] for t in getattr(self, 'tool_call_details', []) if t.get('iteration') == self.iteration]
+        recent_tools_str = ", ".join(set(recent_tools[-10:])) if recent_tools else "None"
+
+        # Failed strategies to avoid
+        failed_strategies_str = ", ".join(self._compat.failed_strategies[-5:]) if self._compat.failed_strategies else "None"
+
+        handoff = f"""**ITERATION HANDOFF - Model Transition**
+
+=== CURRENT STATE ===
+- Current Iteration: {self.iteration}
+- Next Iteration: {self.iteration + 1}
+- Current WNS: {current_wns:.3f}ns if available
+- Best WNS: {best_wns:.3f}ns (achieved at iteration {best_wns_iter})
+- Best Checkpoint: {best_dcp}
+- Clock Period: {clock_period:.3f}ns
+
+=== NEXT OPTIMIZATION GOAL ===
+{next_goal}
+
+=== RECENT TOOLS USED (this iteration) ===
+{recent_tools_str}
+
+=== FAILED STRATEGIES TO AVOID ===
+{failed_strategies_str}
+
+=== INCOMING MODEL ===
+You are about to work with this optimization state. The best checkpoint ({best_dcp}) contains the best achieved WNS.
+If you need to rollback, use: vivado_open_checkpoint with checkpoint_path="{best_dcp}"
+
+Continue optimization from this state. Do NOT reload the design - it is already open in Vivado."""
+
+        return handoff
+
     def classify_task(self, tool_name: str, arguments: dict = None) -> str:
         """Simplified: only distinguish OPTIMIZATION / INFORMATION / UNKNOWN"""
         if not tool_name:
@@ -1525,19 +1602,10 @@ class DCPOptimizer(DCPOptimizerBase):
         worker_score = 0
 
         # ── Dimension 1: Tool mapping (intrinsic complexity of the tool) ─────
-        if tool_name in TOOL_MODEL_MAPPING:
-            tier = TOOL_MODEL_MAPPING[tool_name]
-            if tier == ModelTier.PLANNER:
-                planner_score += 3
-            elif tier == ModelTier.WORKER:
-                worker_score += 3
+        # Removed: tool-specific mapping no longer influences model selection
 
         # ── Dimension 2: Task category ───────────────────────────────────────
-        category = self.classify_task(tool_name, arguments)
-        if category == TaskCategory.OPTIMIZATION:
-            planner_score += 2
-        elif category == TaskCategory.INFORMATION:
-            worker_score += 1
+        # Removed: task category no longer influences model selection
 
         # ── Dimension 3: Current context complexity (real-time signal) ───────
         if context_complexity >= 6:
@@ -1547,7 +1615,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # ── Dimension 4: Historical capability score (data-driven) ───────────
         capability = self._get_task_capability_score(tool_name)
-        if capability >= 0.7 and category != TaskCategory.OPTIMIZATION:
+        if capability >= 0.7:
             worker_score += 2
         elif capability < 0.3:
             planner_score += 2
@@ -2185,11 +2253,19 @@ class DCPOptimizer(DCPOptimizerBase):
         context_complexity = self._estimate_context_complexity(self.current_task_type)
         # Track previous tier before model selection for accurate switch detection
         self._previous_tier = self._infer_model_tier(self.last_used_model) if self.last_used_model else None
-        current_model = self._select_model(
-            tool_name=self.current_task_type,
-            context_complexity=context_complexity,
-        )
-        self.last_used_model = current_model
+        # Use pre-decided model from previous iteration's _on_iteration_end(), or fall back to _select_model()
+        if self._next_iteration_model is not None:
+            current_model = self._next_iteration_model
+            self.last_used_model = current_model
+            self._next_iteration_model = None  # Clear after use - one-time decision per iteration boundary
+            logger.info(f"Using pre-decided model from iteration handoff: {current_model}")
+        else:
+            # Fall back for first iteration or fallback scenarios
+            current_model = self._select_model(
+                tool_name=self.current_task_type,
+                context_complexity=context_complexity,
+            )
+            self.last_used_model = current_model
         # Track task type at iteration start for intra-iteration model re-selection
         self._iteration_start_task_type = self.current_task_type
         wns_at_start = self.best_wns
@@ -2244,6 +2320,23 @@ class DCPOptimizer(DCPOptimizerBase):
                 system_content = api_messages[0].get("content", "")
                 updated_content = self._inject_wns_state_to_system_prompt(system_content)
                 api_messages[0]["content"] = updated_content
+
+            # Inject iteration handoff prompt if not yet injected for this iteration
+            if self._iteration_handoff_prompt and not self._iteration_handoff_injected:
+                for i, msg in enumerate(api_messages):
+                    if msg.get("role") == "user":
+                        msg["content"] = self._iteration_handoff_prompt + "\n\n" + msg["content"]
+                        self._iteration_handoff_injected = True
+                        logger.info(f"Injected iteration handoff prompt (length: {len(self._iteration_handoff_prompt)} chars)")
+                        break
+                if not self._iteration_handoff_injected:
+                    # No user message found, insert after system
+                    if len(api_messages) > 1:
+                        api_messages.insert(1, {"role": "user", "content": self._iteration_handoff_prompt})
+                    else:
+                        api_messages.append({"role": "user", "content": self._iteration_handoff_prompt})
+                    self._iteration_handoff_injected = True
+                    logger.info(f"Injected iteration handoff prompt (length: {len(self._iteration_handoff_prompt)} chars)")
 
             # Log prompt for observability
             self._prompt_logger.log_prompt(
@@ -2439,9 +2532,10 @@ class DCPOptimizer(DCPOptimizerBase):
                     self.current_task_type = effective_task_type
 
                     # Intra-iteration model re-selection: check if task category changed
+                    # Only allow switch if we didn't have a pre-decided model (first iteration or fallback case)
                     current_category = self.classify_task(self.current_task_type)
                     start_category = self.classify_task(self._iteration_start_task_type)
-                    if current_category != start_category:
+                    if self._iteration_handoff_injected and current_category != start_category:
                         new_model = self._select_model(
                             tool_name=self.current_task_type,
                             context_complexity=context_complexity,
@@ -3424,31 +3518,38 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("\n" + "-"*60)
             print("STEP 5: Apply fanout optimizations in RapidWright")
             print("-"*60)
-            
-            successful_optimizations = 0
-            for i, (net_name, fanout, path_count) in enumerate(nets_to_optimize):
-                print(f"\n[{i+1}/{len(nets_to_optimize)}] Optimizing net: {net_name}")
-                print(f"    Fanout: {fanout}, Critical paths: {path_count}")
-                
-                # Calculate split factor: fanout/100, min 2, max 8
-                split_factor = max(2, min(8, fanout // 100))
-                print(f"    Split factor: {split_factor}")
-                
+
+            # Build batch request: list of {net_name, fanout}
+            net_configs = [
+                {"net_name": net_name, "fanout": fanout}
+                for net_name, fanout, path_count in nets_to_optimize
+            ]
+            print(f"Batch optimizing {len(net_configs)} nets")
+
+            try:
+                result = await self.call_rapidwright_tool("optimize_fanout_batch", {
+                    "nets": net_configs
+                }, timeout=300.0 * len(net_configs))  # scale timeout with number of nets
+                print(f"Batch result: {result[:1000]}...")
+                logger.info(f"Optimize fanout batch: {result}")
+
+                # Check batch results
+                import json
                 try:
-                    result = await self.call_rapidwright_tool("optimize_fanout", {
-                        "net_name": net_name,
-                        "split_factor": split_factor
-                    }, timeout=300.0)
-                    print(f"    Result: {result[:500]}...")
-                    logger.info(f"Optimize fanout {net_name}: {result}")
-                    
-                    # Check if successful
-                    if "error" not in result.lower() or "success" in result.lower():
-                        successful_optimizations += 1
-                except Exception as e:
-                    print(f"    FAILED: {e}")
-                    logger.error(f"Failed to optimize {net_name}: {e}")
-            
+                    result_data = json.loads(result)
+                    if result_data.get("status") == "success":
+                        successful_optimizations = result_data.get("successful_count", 0)
+                    else:
+                        successful_optimizations = 0
+                except json.JSONDecodeError:
+                    successful_optimizations = 0
+                    logger.error(f"Failed to parse batch result: {result}")
+
+            except Exception as e:
+                print(f"Batch optimization FAILED: {e}")
+                logger.error(f"Failed to batch optimize: {e}")
+                successful_optimizations = 0
+
             print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
             
             # ================================================================

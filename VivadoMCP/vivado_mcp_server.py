@@ -283,7 +283,7 @@ def get_critical_high_fanout_nets(
     
     Analyzes the worst negative slack (WNS) timing paths to identify non-clock
     nets with high fanout that may be candidates for fanout optimization.
-    The output can be used with RapidWright's optimize_fanout tool.
+    The output can be used with RapidWright's optimize_fanout_batch tool.
     
     Net names are automatically resolved to their PARENT net names, which is
     required for RapidWright compatibility.
@@ -463,8 +463,8 @@ def get_critical_high_fanout_nets(
         )
     
     result_lines.append("")
-    result_lines.append("=== Parent Net Names for RapidWright optimize_fanout ===")
-    result_lines.append("(These are parent net names, ready for use with RapidWright's optimize_fanout tool)")
+    result_lines.append("=== Parent Net Names for RapidWright optimize_fanout_batch ===")
+    result_lines.append("(These are parent net names, ready for use with RapidWright's optimize_fanout_batch tool)")
     result_lines.append("")
     
     for net_name, info in sorted_nets:
@@ -583,7 +583,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
             if len(parts) >= 3:
                 try:
                     resources["LUT"] = int(parts[2].strip().split()[0])
-                except:
+                except Exception:
+                    logger.debug(f"Failed to parse LUT from line: {line}")
                     pass
         
         if '| Register as Flip Flop' in line or '| Slice Registers' in line:
@@ -591,7 +592,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
             if len(parts) >= 3:
                 try:
                     resources["FF"] = int(parts[2].strip().split()[0])
-                except:
+                except Exception:
+                    logger.debug(f"Failed to parse FF from line: {line}")
                     pass
         
         if '| DSPs' in line and '| Block RAM' not in line:
@@ -599,7 +601,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
             if len(parts) >= 3:
                 try:
                     resources["DSP"] = int(parts[2].strip().split()[0])
-                except:
+                except Exception:
+                    logger.debug(f"Failed to parse DSP from line: {line}")
                     pass
         
         if '| Block RAM Tile' in line:
@@ -607,7 +610,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
             if len(parts) >= 3:
                 try:
                     resources["BRAM"] = int(parts[2].strip().split()[0])
-                except:
+                except Exception:
+                    logger.debug(f"Failed to parse BRAM from line: {line}")
                     pass
         
         if '| URAM' in line:
@@ -615,7 +619,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
             if len(parts) >= 3:
                 try:
                     resources["URAM"] = int(parts[2].strip().split()[0])
-                except:
+                except Exception:
+                    logger.debug(f"Failed to parse URAM from line: {line}")
                     pass
     
     # Format output

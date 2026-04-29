@@ -42,6 +42,9 @@ class PlannerCompressor(YAMLStructuredCompressor):
             min_importance_threshold=0.1,
             max_chars_multiplier=1.0
         )
+        # Hard limit level: more aggressive than normal but preserves more than full aggressive
+        self.preserve_turns_hard_limit = 40
+        self.min_importance_threshold_hard_limit = 0.25
 
     def get_name(self) -> str:
         return "planner"

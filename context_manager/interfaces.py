@@ -93,6 +93,7 @@ class CompressionContext:
     model_context_config: Optional[ModelContextConfig] = None  # Model-specific configuration
     model_switch_detected: bool = False  # True if model tier switched since last compression
     previous_model_tier: Optional[str] = None  # Previous model tier ("worker" or "planner")
+    force_aggressive: bool = False  # Hard limit level compression (preserves more than full aggressive)
 
 
 class EventType(Enum):

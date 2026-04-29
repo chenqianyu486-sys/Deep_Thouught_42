@@ -34,6 +34,7 @@ fpl26_optimization_contest/
 │   ├── skill_decorator.py           # @skill装饰器
 │   ├── telemetry.py                  # 可观测性：执行记录、指标聚合、查询接口
 │   ├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
+│   ├── smart_region_search.py       # Skill类 + 纯函数：智能区域搜索（贪心扩展算法）
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
 │   └── test_skill_framework.py      # 集成测试（SkillRegistry/Skill/Telemetry）
 ```
@@ -95,8 +96,26 @@ API调用前 → _inject_wns_state_to_system_prompt()
 PLANNER: xiaomi/mimo-v2.5-pro (1M context, 复杂推理)
 WORKER: deepseek/deepseek-v4-flash (500K context, 快速执行)
 - 429降级: 按层级fallback列表，轮询+耗尽追踪
-- 迭代内切换: 任务类别变化时重新评估模型
+- 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
+- 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
 ```
+
+### 2.5.1 模型选择维度（`_select_model()`）
+
+评分系统（6维度，加权得分高的模型胜出，margin=2防止震荡）：
+
+| 维度 | 条件 | Planner得分 | Worker得分 |
+|------|------|-----------|-----------|
+| 1. 上下文复杂度 | >=6 | +2 | - |
+| 2. 历史能力 | >=70%成功率 | - | +2 |
+| 3. 历史能力 | <30%成功率 | +2 | - |
+| 4. 连续失败 | >=2次 | +4 | - |
+| 5. 连续成功 | >=3次 | - | +1 |
+| 6. 全局无改善 | >=2.5次 | - | +1 |
+| 7. 上下文容量 | >=60% worker限制 | +2 | - |
+| 8. WNS状态 | 严重倒退(>-2.0ns) | +3 | - |
+
+（已移除：工具映射维度、任务类别维度）
 
 ### 2.6 Skill 机制
 
@@ -110,7 +129,24 @@ skills/
 ├── @skill decorator             # 自动注册 Skill 类
 ├── SkillTelemetry               # 可观测性：record_execution(), get_metrics(), get_all_metrics()
 ├── SkillExecutionTimer           # 执行计时上下文管理器
-└── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
+├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
+└── smart_region_search.py       # Skill类 + 纯函数：智能区域搜索
+
+已注册 Skills:
+├── analyze_net_detour           # 分析关键路径网络的绕路比率
+├── optimize_cell_placement      # 基于重心优化单元布局
+└── smart_region_search          # 智能 PBlock 区域搜索（贪心扩展）
+
+LLM 调用 Skill 方式:
+Agent → MCP Tool (如 smart_region_search)
+         ↓
+   rapidwright_tools.py wrapper
+         ↓
+   SkillRegistry.get("smart_region_search")
+         ↓
+   SmartRegionSearchSkill.execute_with_telemetry(context, **kwargs)
+         ↓
+   返回 SkillResult (success, data, error)
 
 调用链:
 Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get() → Skill.execute()
@@ -175,7 +211,22 @@ WNS回归处理: WNS<0且差于best时自动回滚
 完成判定: 使用latest_wns（当前），非best_wns（历史）
 ```
 
-### 5.1 无工具调用迭代处理（Bug Fix）
+### 5.1 迭代边界模型切换
+
+**机制**:
+- `_on_iteration_end()` 时调用 `_select_model()` 决定下一迭代使用的模型
+- 预定的模型存入 `self._next_iteration_model`
+- 下一迭代 `get_completion()` 开头直接使用预定模型，不再重新选择
+- 交接提示词（`_iteration_handoff_prompt`）在迭代结束时生成，包含：
+  - 当前/最佳 WNS 和检查点路径
+  - 下一步优化目标
+  - 最近使用的工具和失败策略
+
+**限制迭代内切换**:
+- 只有首次迭代或 fallback 场景才允许迭代内模型重新选择
+- 预定模型场景下，迭代内任务类别变化不会触发模型切换
+
+### 5.2 无工具调用迭代处理（Bug Fix）
 
 **问题**: 当 LLM 返回无 tool_calls 时，原逻辑直接 return 导致迭代空转（无优化操作）
 
@@ -185,7 +236,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 
 **效果**: 避免空迭代浪费工具额度，5次硬限制改为真正无改进时触发
 
-### 5.2 WNS解析修复（Bug Fix）
+### 5.3 WNS解析修复（Bug Fix）
 
 **问题**: `report_timing_summary` 在 `phys_opt_design` 后执行时，输出缓冲区包含前一个命令的残留内容（许可证消息、命令回显等），导致 `parse_timing_summary_static()` 无法找到 `WNS(ns) TNS(ns)` 头，行返回 `None`。
 
