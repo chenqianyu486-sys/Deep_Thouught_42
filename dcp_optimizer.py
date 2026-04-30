@@ -2358,6 +2358,35 @@ Continue optimization from this state. Do NOT reload the design - it is already 
 
         return results
 
+    @staticmethod
+    def _parse_action_from_yaml(content: str) -> tuple:
+        """Parse action and flow_control from YAML response.
+
+        Returns:
+            (action, flow_control) tuple - either may be None if not found
+        """
+        blocks = re.split(r'\n(?=step:)', content)
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            if not block.startswith('step:'):
+                block = 'step:\n' + block
+            try:
+                data = yaml.safe_load(block)
+            except yaml.YAMLError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            step_data = data.get('step')
+            if not isinstance(step_data, dict):
+                step_data = data
+            action = step_data.get('action')
+            flow_control = step_data.get('flow_control')
+            if action or flow_control:
+                return (action, flow_control)
+        return (None, None)
+
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -2741,12 +2770,28 @@ Continue optimization from this state. Do NOT reload the design - it is already 
                 for reason in reasons:
                     print(f"  [OK] {reason}")
 
-            # [FIX] When LLM returns no tool calls but is_done=False, continue the loop
-            # instead of returning to main loop. This ensures the LLM gets more chances
-            # to generate optimization commands within this iteration.
-            # BUT: If we broke from the loop due to tool_round_limit or user_exit without
-            # calling any tools, we should return instead of continuing (prevents tight loops).
-            if not is_done:
+            # [FIX] When LLM signals flow_control=DONE, it means "I've finished my analysis for
+            # this iteration" - NOT "exit the optimization". The system should properly end
+            # this iteration and move to the next one with updated context.
+            action, flow_control = self._parse_action_from_yaml(content)
+            if flow_control == "DONE" or action == "DONE":
+                logger.info(f"LLM signaled DONE (action={action}, flow_control={flow_control})")
+                # Check if target fmax (WNS >= 0) is met
+                current_valid = (self.latest_wns is not None and
+                                 self.latest_wns >= self.WNS_TARGET_THRESHOLD and
+                                 self._is_valid_wns(self.latest_wns))
+                if current_valid:
+                    is_done = True
+                    self._is_done_reason = "wns_target_met"
+                    logger.info("Target fmax reached, optimization complete")
+                else:
+                    # Target not met → end this iteration properly and move to next
+                    logger.info("flow_control=DONE but target not met, moving to next iteration...")
+                    self._is_done_reason = "flow_control_done_next_iteration"
+                    # Set flag to indicate iteration should end, not continue in tight loop
+                    self._end_iteration_on_return = True
+                # Fall through to exit get_completion()
+            elif not is_done:
                 if hasattr(self, '_loop_break_without_tool_call') and self._loop_break_without_tool_call:
                     logger.info(f"Breaking from get_completion (no tool calls made in {tool_round} rounds)")
                     delattr(self, '_loop_break_without_tool_call')
@@ -2807,6 +2852,12 @@ Continue optimization from this state. Do NOT reload the design - it is already 
             if is_done is None:
                 logger.error(f"get_completion returning is_done=None! This indicates a bug in exit handling.")
                 is_done = False
+
+            # [FIX] If flow_control=DONE was signaled and target not met, is_done=False
+            # but the iteration has ended. Main optimize() loop will handle transition to next iteration.
+            if hasattr(self, '_end_iteration_on_return') and self._end_iteration_on_return:
+                delattr(self, '_end_iteration_on_return')
+                logger.info("Iteration ended via flow_control=DONE, will transition to next iteration")
 
             return content, is_done
 

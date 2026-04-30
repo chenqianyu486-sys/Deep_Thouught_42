@@ -246,6 +246,29 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - 跳过命令回显 (`Command:`, `phys_opt_design`, `place_design`, `route_design`, `report_`)
 - 在整个输出中搜索时序头，而非假设在开头
 
+### 5.4 flow_control=DONE 信号处理（Bug Fix）
+
+**问题**: LLM 返回 `action: DONE` 或 `flow_control: DONE` 时，系统只解析 `tool_calls:` 字段，忽略 YAML 中的 `action`/`flow_control` 字段。导致系统继续在同一迭代内循环调用 LLM，产生垃圾输出（Minecraft 插件代码、Windows 路径等）。
+
+**语义澄清**:
+- `flow_control: DONE` ≠ 退出信号
+- `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化
+- 真正退出条件 = 达到目标 fmax（WNS >= 0）
+
+**修复**: `get_completion()` 中新增 `_parse_action_from_yaml()` 解析 `action`/`flow_control`：
+- 解析方式与 `_parse_yaml_tool_calls()` 相同（block 分割 + yaml.safe_load）
+- 检测到 `flow_control == "DONE"` 或 `action == "DONE"` 时：
+  - 目标 fmax 已达成（WNS >= 0）→ `is_done=True`，退出优化
+  - 目标未达成 → 设置 `_end_iteration_on_return=True`，退出 `get_completion()`，主循环进入下一迭代
+- 不再在同一迭代内空转调用 LLM
+
+**关键行为变化**:
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| LLM 返回 `flow_control: DONE`，WNS=-0.538 | 继续在同一迭代内空转，产生垃圾输出 | 正确识别为迭代完成，进入下一迭代 |
+| LLM 返回 `flow_control: DONE`，WNS>=0 | 继续空转 | 正确退出优化 |
+| LLM 返回无 tool_calls，无 DONE 信号 | continue 回循环 | 沿用原有逻辑 |
+
 ## 6. 429降级机制
 
 ```
@@ -278,6 +301,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 | `max_iterations_reached` | 5次迭代无改进 |
 | `tool_round_limit` | 22轮工具调用达限 |
 | `user_requested` | 用户输入quit |
+| `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |
 
 ## 11. DCP验证
 
