@@ -115,6 +115,45 @@ tool_reference:
     - analyze_fabric_for_pblock, convert_fabric_region_to_pblock
     - optimize_lut_input_cone, analyze_net_detour, optimize_cell_placement
 
+skill_guidance:
+  description: "Skills are specialized multi-step optimization modules powered by RapidWright ECO algorithms. Prefer skills over basic tools when conditions match."
+
+  when_to_use:
+    - condition: "Critical path has >3 LUT levels OR high detour cells detected"
+      skill: analyze_net_detour
+      action: "Call analyze_net_detour with pin_paths from extract_critical_path_pins"
+    - condition: "Cells with detour_ratio > 2.0 identified"
+      skill: optimize_cell_placement
+      action: "Collect high-detour cells and call optimize_cell_placement"
+    - condition: "Need to create pblock but optimal region unknown"
+      skill: smart_region_search
+      action: "Provide target resource counts from Vivado utilization report"
+
+  skill_catalog:
+    - name: analyze_net_detour
+      category: ANALYSIS
+      input: "pin_paths list from Vivado extract_critical_path_pins"
+      output: "cells with detour_ratio > threshold, sorted descending"
+      threshold: "2.0 (higher = worse placement)"
+
+    - name: optimize_cell_placement
+      category: PLACEMENT
+      input: "list of cell names identified by analyze_net_detour"
+      output: "new placement for each cell at connection centroid"
+      note: "Writes changes to design in RapidWright; must write_checkpoint and re-route in Vivado"
+
+    - name: smart_region_search
+      category: PLACEMENT
+      input: "target resource counts (1.5x current usage from utilization report)"
+      output: "optimal rectangular region with pblock ranges"
+      advantage: "Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns"
+
+  execution_pattern:
+    step_1: "Use Vivado report_timing/extract_critical_path_cells to get path data"
+    step_2: "Call appropriate skill via MCP tool"
+    step_3: "Interpret results and decide on next action"
+    step_4: "For placement changes: write_checkpoint → open in Vivado → route_design → report_timing"
+
 custom_optimization:
   when: "existing tools insufficient"
   workflow:

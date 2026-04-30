@@ -704,6 +704,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self._next_iteration_model: Optional[str] = None  # Pre-decided model for next iteration
         self._iteration_handoff_prompt: str = ""      # Handoff prompt for next iteration's model
         self._iteration_handoff_injected: bool = False  # Whether handoff prompt was already injected
+        self._iteration_narratives: list[dict] = []     # Progressive iteration summary for handoff
 
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
@@ -952,6 +953,7 @@ class DCPOptimizer(DCPOptimizerBase):
         best_wns_iter = self._best_wns_iteration
         best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
         input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
+        next_model = self._next_iteration_model or self.last_used_model or "worker"
         state_section = f"""**Current Optimization State:**
 - iteration: {iteration}
 - current_wns: {current_wns_str}
@@ -959,6 +961,7 @@ class DCPOptimizer(DCPOptimizerBase):
 - clock_period: {clock_period_str}
 - input_dcp: {input_dcp_str}
 - best_checkpoint: {best_dcp_str}
+- next_model: {next_model}
 """
 
         # Check if "Current Optimization State" already exists
@@ -1503,62 +1506,230 @@ class DCPOptimizer(DCPOptimizerBase):
         self._iteration_handoff_injected = False
 
     def _generate_iteration_handoff_prompt(self) -> str:
-        """Generate handoff prompt for the next iteration's model.
+        """Dispatcher: generate model-tier-specific handoff prompt."""
+        next_tier = self._infer_model_tier(self._next_iteration_model)
+        if next_tier == "planner":
+            return self._generate_planner_handoff()
+        else:
+            return self._generate_worker_handoff()
 
-        Provides the incoming model with:
-        - Current iteration number and next iteration
-        - Best WNS and corresponding checkpoint
-        - Next optimization goal/target
-        - Recent tools used and failed strategies to avoid
-        """
+    def _infer_strategy_from_tools(self, tools: list[str]) -> str:
+        """Deduce strategy label from tool sequence."""
+        tool_str = " ".join(tools).lower()
+        if "create_and_apply_pblock" in tool_str or "convert_fabric_region_to_pblock" in tool_str:
+            return "PBLOCK"
+        if "phys_opt_design" in tool_str:
+            return "PhysOpt"
+        if "optimize_fanout" in tool_str:
+            return "Fanout"
+        if "place_design" in tool_str or "route_design" in tool_str:
+            return "PlaceRoute"
+        if any(t in tool_str for t in ["report_", "get_", "extract_", "analyze_"]):
+            return "Information"
+        return "Unknown"
+
+    def _append_iteration_narrative(self) -> None:
+        """Record structured summary of this iteration for progressive context."""
+        prev_best = getattr(self, '_prev_best_wns', None)
+        current_best = self.best_wns if self.best_wns > float('-inf') else None
+
+        if prev_best is not None and current_best is not None:
+            wns_delta = current_best - prev_best
+        else:
+            wns_delta = 0.0
+
+        if wns_delta > 0.001:
+            outcome = "improved"
+        elif wns_delta < -0.001:
+            outcome = "regression"
+        else:
+            outcome = "unchanged"
+
+        tools_this_iter = [
+            t.get('tool_name', '')
+            for t in self._compat.tool_call_details
+            if t.get('iteration') == self.iteration
+        ]
+
+        entry = {
+            "iteration": self.iteration,
+            "model": self.last_used_model or "unknown",
+            "task_type": self.current_task_type,
+            "wns_before": prev_best,
+            "wns_after": current_best,
+            "wns_delta": wns_delta,
+            "tool_count": len(tools_this_iter),
+            "strategy_label": self._infer_strategy_from_tools(tools_this_iter),
+            "outcome": outcome
+        }
+        self._iteration_narratives.append(entry)
+        if len(self._iteration_narratives) > 20:
+            self._iteration_narratives.pop(0)
+
+    def _format_narrative(self, max_entries: int = None) -> str:
+        """Build progressive iteration summary from _iteration_narratives."""
+        entries = self._iteration_narratives
+        if max_entries:
+            entries = entries[-max_entries:]
+
+        if not entries:
+            return "No iteration history available."
+
+        lines = []
+        for e in entries:
+            delta = e['wns_delta']
+            delta_str = f"{delta:+.4f}" if delta else "+0.0000"
+            lines.append(
+                f"iter{e['iteration']}({e['outcome'].upper()[:3]}): "
+                f"{e['wns_before']:.3f}->{e['wns_after']:.3f}ns({delta_str}) "
+                f"{e['tool_count']}toks {e['strategy_label']}"
+            )
+        return "\n".join(lines)
+
+    def _build_tool_effect_summary(self, iteration: int) -> str:
+        """Build tool effect summary with WNS deltas for a given iteration."""
+        calls = [t for t in self._compat.tool_call_details if t.get('iteration') == iteration]
+        if not calls:
+            return "No tool calls this iteration."
+
+        lines = []
+        for call in calls[-8:]:
+            tool = call.get('tool_name', 'unknown')
+            wns = call.get('wns')
+            error = call.get('error')
+            if error:
+                lines.append(f"- {tool}: ERROR")
+            elif wns is not None:
+                lines.append(f"- {tool}: WNS={wns:.3f}ns")
+            else:
+                lines.append(f"- {tool}: (no WNS)")
+        return "\n".join(lines)
+
+    def _build_failed_strategy_summary(self) -> str:
+        """Build annotated failed strategy list with failure context."""
+        strategies = self._compat.failed_strategies[-5:]
+        if not strategies:
+            return "None"
+
+        lines = []
+        for s in strategies:
+            related_calls = [
+                t for t in self._compat.tool_call_details
+                if s.lower() in t.get('tool_name', '').lower()
+                or s.lower() in t.get('result', '').lower()
+            ]
+            if related_calls:
+                last = related_calls[-1]
+                iter_num = last.get('iteration', '?')
+                wns = last.get('wns')
+                wns_str = f", WNS={wns:.3f}ns" if wns is not None else ""
+                lines.append(f"- {s} (iter{iter_num}{wns_str})")
+            else:
+                lines.append(f"- {s}")
+        return "\n".join(lines)
+
+    def _build_data_driven_goal(self) -> str:
+        """Build data-driven next goal from WNS trajectory and strategy effects."""
+        current_wns = self._get_current_wns()
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+
+        if not self._iteration_narratives:
+            if best_wns is not None and best_wns >= 0:
+                return "WNS target met. Focus on further optimization."
+            elif best_wns is not None and best_wns > -0.5:
+                return "Close to target. Fine-tuning critical paths."
+            elif best_wns is not None and best_wns > -2.0:
+                return "Moderate violation. Consider phys_opt or PBLOCK."
+            else:
+                return "Severe violation. Consider aggressive strategies."
+        recent = self._iteration_narratives[-5:]
+        improved = [e for e in recent if e['outcome'] == 'improved']
+        regressed = [e for e in recent if e['outcome'] == 'regression']
+
+        if best_wns is not None and best_wns >= 0:
+            return "WNS target met. Focus on further optimization."
+        if not improved and regressed:
+            return f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
+        if improved:
+            last_improved_tools = [
+                t.get('tool_name', '')
+                for t in self._compat.tool_call_details
+                if t.get('iteration') == improved[-1]['iteration']
+            ]
+            strategy = self._infer_strategy_from_tools(last_improved_tools)
+            return f"Last success via {strategy}. Continue or refine approach."
+        if best_wns is not None and best_wns > -2.0:
+            return "Moderate violation. Consider phys_opt or PBLOCK."
+        return "Severe violation. Consider aggressive strategies."
+
+    def _generate_planner_handoff(self) -> str:
+        """Generate rich handoff for planner models (1M context)."""
         current_wns = self._get_current_wns()
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
         best_wns_iter = self._best_wns_iteration
         best_dcp = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
         clock_period = self.clock_period
 
-        # Determine next goal based on current WNS state
-        if best_wns is not None and best_wns >= 0:
-            next_goal = "WNS target met! Focus on further optimization to achieve best possible timing."
-        elif best_wns is not None and best_wns > -0.5:
-            next_goal = "Close to timing meeting. Focus on fine-tuning critical paths."
-        elif best_wns is not None and best_wns > -2.0:
-            next_goal = "Moderate timing violation. Consider phys_opt_design or PBLOCK-based re-placement."
-        else:
-            next_goal = "Severe timing violation. Consider aggressive optimization strategies (PBLOCK, fanout splitting)."
+        recent_tools = self._build_tool_effect_summary(self.iteration)
+        failed_strategies = self._build_failed_strategy_summary()
+        narrative = self._format_narrative(max_entries=None)
+        goal = self._build_data_driven_goal()
 
-        # Recent tool calls in this iteration
-        recent_tools = [t['tool_name'] for t in getattr(self, 'tool_call_details', []) if t.get('iteration') == self.iteration]
-        recent_tools_str = ", ".join(set(recent_tools[-10:])) if recent_tools else "None"
+        handoff = f"""**ITERATION HANDOFF - Planner**
 
-        # Failed strategies to avoid
-        failed_strategies_str = ", ".join(self._compat.failed_strategies[-5:]) if self._compat.failed_strategies else "None"
-
-        handoff = f"""**ITERATION HANDOFF - Model Transition**
+=== ITERATION TRAJECTORY ===
+{narrative}
 
 === CURRENT STATE ===
-- Current Iteration: {self.iteration}
-- Next Iteration: {self.iteration + 1}
+- Iteration: {self.iteration} -> {self.iteration + 1}
 - Current WNS: {current_wns:.3f}ns if available
-- Best WNS: {best_wns:.3f}ns (achieved at iteration {best_wns_iter})
-- Best Checkpoint: {best_dcp}
+- Best WNS: {best_wns:.3f}ns (iter {best_wns_iter}, checkpoint: {best_dcp})
 - Clock Period: {clock_period:.3f}ns
 
 === NEXT OPTIMIZATION GOAL ===
-{next_goal}
+{goal}
 
-=== RECENT TOOLS USED (this iteration) ===
-{recent_tools_str}
+=== LAST ITERATION TOOLS ===
+{recent_tools}
 
-=== FAILED STRATEGIES TO AVOID ===
-{failed_strategies_str}
+=== FAILED STRATEGIES ===
+{failed_strategies}
 
 === INCOMING MODEL ===
-You are about to work with this optimization state. The best checkpoint ({best_dcp}) contains the best achieved WNS.
-If you need to rollback, use: vivado_open_checkpoint with checkpoint_path="{best_dcp}"
+You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section. Do NOT reload the design - it is already open in Vivado."""
+        return handoff
 
-Continue optimization from this state. Do NOT reload the design - it is already open in Vivado."""
+    def _generate_worker_handoff(self) -> str:
+        """Generate lean handoff for worker models (250K context)."""
+        current_wns = self._get_current_wns()
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        best_wns_iter = self._best_wns_iteration
+        best_dcp = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
+        clock_period = self.clock_period
 
+        recent_tools = self._build_tool_effect_summary(self.iteration)
+        failed_strategies = self._build_failed_strategy_summary()
+        narrative = self._format_narrative(max_entries=3)
+        goal = self._build_data_driven_goal()
+
+        handoff = f"""**ITERATION HANDOFF - Worker**
+
+=== RECENT TRAJECTORY (last 3) ===
+{narrative}
+
+=== STATE ===
+- Iter: {self.iteration} -> {self.iteration + 1} | WNS: {current_wns:.3f}ns | Best: {best_wns:.3f}ns (iter{best_wns_iter}) | Clock: {clock_period:.3f}ns
+
+=== GOAL ===
+{goal}
+
+=== LAST ITERATION TOOLS ===
+{recent_tools}
+
+=== AVOID ===
+{failed_strategies}
+
+Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section. Do NOT reload the design."""
         return handoff
 
     def classify_task(self, tool_name: str, arguments: dict = None) -> str:
@@ -2465,21 +2636,12 @@ Continue optimization from this state. Do NOT reload the design - it is already 
                 api_messages[0]["content"] = updated_content
 
             # Inject iteration handoff prompt if not yet injected for this iteration
+            # Insert as standalone system message after primary system prompt for better attention weight
             if self._iteration_handoff_prompt and not self._iteration_handoff_injected:
-                for i, msg in enumerate(api_messages):
-                    if msg.get("role") == "user":
-                        msg["content"] = self._iteration_handoff_prompt + "\n\n" + msg["content"]
-                        self._iteration_handoff_injected = True
-                        logger.info(f"Injected iteration handoff prompt (length: {len(self._iteration_handoff_prompt)} chars)")
-                        break
-                if not self._iteration_handoff_injected:
-                    # No user message found, insert after system
-                    if len(api_messages) > 1:
-                        api_messages.insert(1, {"role": "user", "content": self._iteration_handoff_prompt})
-                    else:
-                        api_messages.append({"role": "user", "content": self._iteration_handoff_prompt})
-                    self._iteration_handoff_injected = True
-                    logger.info(f"Injected iteration handoff prompt (length: {len(self._iteration_handoff_prompt)} chars)")
+                handoff_msg = {"role": "system", "content": self._iteration_handoff_prompt}
+                api_messages.insert(1, handoff_msg)
+                self._iteration_handoff_injected = True
+                logger.info(f"Injected iteration handoff prompt as system message (length: {len(self._iteration_handoff_prompt)} chars)")
 
             # Log prompt for observability
             self._prompt_logger.log_prompt(
@@ -2837,6 +2999,9 @@ Continue optimization from this state. Do NOT reload the design - it is already 
                     tool_error=tool_error,
                     failure_type=failure_type
                 )
+
+            # Record iteration narrative for progressive handoff context
+            self._append_iteration_narrative()
 
             # Log exit reason
             # _is_done_reason is always set (by user_requested, tool_round_limit, cost_limit, or wns_target_met/max_iterations_reached)

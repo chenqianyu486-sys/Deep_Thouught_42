@@ -115,7 +115,6 @@ WORKER: deepseek/deepseek-v4-flash (500K context, 快速执行)
 | 7. 上下文容量 | >=60% worker限制 | +2 | - |
 | 8. WNS状态 | 严重倒退(>-2.0ns) | +3 | - |
 
-（已移除：工具映射维度、任务类别维度）
 
 ### 2.6 Skill 机制
 
@@ -217,26 +216,25 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `_on_iteration_end()` 时调用 `_select_model()` 决定下一迭代使用的模型
 - 预定的模型存入 `self._next_iteration_model`
 - 下一迭代 `get_completion()` 开头直接使用预定模型，不再重新选择
-- 交接提示词（`_iteration_handoff_prompt`）在迭代结束时生成，包含：
-  - 当前/最佳 WNS 和检查点路径
-  - 下一步优化目标
-  - 最近使用的工具和失败策略
+- 交接提示词（`_iteration_handoff_prompt`）在迭代结束时生成，模型分层专属
+
+**交接提示词（上下文工程优化）**:
+- `_generate_iteration_handoff_prompt()` → 分发器，根据 next_tier 调用对应生成器
+- `_generate_planner_handoff()`: Planner (1M context) → 完整迭代轨迹 + 策略分析 + 数据驱动目标（~500-800 tokens）
+- `_generate_worker_handoff()`: Worker (250K context) → 最近3迭代浓缩 + 操作指令（~200-300 tokens）
+- Handoff 注入方式: 插入为独立 system message（index=1），而非 prepend 到 user message
+- 渐进式叙事: `_iteration_narratives[]` 记录每个迭代的结构化摘要（iteration, model, wns_delta, strategy_label, outcome）
+- 工具效果标注: `_build_tool_effect_summary()` → 工具名 + WNS 变化量
+- 失败策略标注: `_build_failed_strategy_summary()` → 策略名 + 失败迭代号 + 当时 WNS
+- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果，非静态阈值
+- WNS 状态单点注入: `_inject_wns_state_to_system_prompt()` 为唯一真源，handoff 引用之（消除字段重复）
+- 新增字段: `next_model` 注入到 "Current Optimization State" section
 
 **限制迭代内切换**:
 - 只有首次迭代或 fallback 场景才允许迭代内模型重新选择
 - 预定模型场景下，迭代内任务类别变化不会触发模型切换
 
-### 5.2 无工具调用迭代处理（Bug Fix）
-
-**问题**: 当 LLM 返回无 tool_calls 时，原逻辑直接 return 导致迭代空转（无优化操作）
-
-**修复**: `get_completion()` 中无 tool_calls 时：
-- `is_done=False` → `continue` 回 while 循环，给 LLM 更多生成机会
-- `is_done=True` → 正常 return 到主循环
-
-**效果**: 避免空迭代浪费工具额度，5次硬限制改为真正无改进时触发
-
-### 5.3 WNS解析修复（Bug Fix）
+### 5.2 WNS解析修复（Bug Fix）
 
 **问题**: `report_timing_summary` 在 `phys_opt_design` 后执行时，输出缓冲区包含前一个命令的残留内容（许可证消息、命令回显等），导致 `parse_timing_summary_static()` 无法找到 `WNS(ns) TNS(ns)` 头，行返回 `None`。
 
@@ -246,9 +244,9 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - 跳过命令回显 (`Command:`, `phys_opt_design`, `place_design`, `route_design`, `report_`)
 - 在整个输出中搜索时序头，而非假设在开头
 
-### 5.4 flow_control=DONE 信号处理（Bug Fix）
+### 5.3 flow_control=DONE 信号处理（Bug Fix）
 
-**问题**: LLM 返回 `action: DONE` 或 `flow_control: DONE` 时，系统只解析 `tool_calls:` 字段，忽略 YAML 中的 `action`/`flow_control` 字段。导致系统继续在同一迭代内循环调用 LLM，产生垃圾输出（Minecraft 插件代码、Windows 路径等）。
+**问题**: LLM 返回 `action: DONE` 或 `flow_control: DONE` 时，系统只解析 `tool_calls:` 字段，忽略 YAML 中的 `action`/`flow_control` 字段。导致系统继续在同一迭代内循环调用 LLM，产生垃圾输出。
 
 **语义澄清**:
 - `flow_control: DONE` ≠ 退出信号
