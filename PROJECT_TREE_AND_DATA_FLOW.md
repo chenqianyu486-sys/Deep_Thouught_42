@@ -18,7 +18,7 @@ fpl26_optimization_contest/
 │   ├── interfaces.py             # 核心数据类
 │   ├── agent_context.py          # AgentContextManager - 多Agent分支
 │   └── strategies/
-│       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断
+│       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断 + 过时时序报告替换
 │       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60
 │       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=20
 ├── RapidWrightMCP/               # RapidWright MCP服务器
@@ -60,6 +60,7 @@ YAMLStructuredCompressor:
     - preserve_turns预留预算: ~1500 tokens/turn, 最多10K
     - 工具调用保留参数（最多5个）
     - 时序报告智能截断（5项改进：动态预算/阈值过滤/起终点成对/时钟域分组/回退保护）
+    - 过时时序报告替换：迭代 < current_iteration-1 的长时序报告 → `[Outdated timing report from iteration N]`（节省 token）
     - WNS状态注入时机: API调用时（不在working memory）
 ```
 

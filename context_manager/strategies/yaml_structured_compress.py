@@ -171,11 +171,73 @@ class ImportanceScorer:
         return score
 
 
+OUTDATED_TIMING_MIN_LENGTH = 500
+OUTDATED_TIMING_ITERATION_GAP = 1
+TIMING_REPORT_KEYWORDS = [
+    'wns', 'tns', 'timing summary', 'slack', 'critical path',
+    'report_timing', 'setup', 'hold', 'endpoint', 'startpoint',
+    'fmax', 'clock period', 'data path delay'
+]
+
+
 class YAMLStructuredCompressor(CompressionStrategy):
     """Compress messages using YAML format with FPGA-aware structure."""
 
     def get_name(self) -> str:
         return "yaml_structured"
+
+    def _is_timing_report(self, msg: Message) -> bool:
+        """Detect if a message is a timing report from a tool call result."""
+        if msg.role != MessageRole.TOOL:
+            return False
+        content_lower = msg.content.lower()
+        length_ok = len(msg.content) >= OUTDATED_TIMING_MIN_LENGTH
+        keyword_ok = any(kw in content_lower for kw in TIMING_REPORT_KEYWORDS)
+        return length_ok and keyword_ok
+
+    def _get_outdated_iteration_boundary(self, current_iteration: int) -> int:
+        """Return the iteration number below which timing reports are considered outdated."""
+        return current_iteration - OUTDATED_TIMING_ITERATION_GAP
+
+    def _compress_outdated_timing_reports(
+        self, scored: List[tuple], current_iteration: int
+    ) -> List[tuple]:
+        """Replace outdated timing reports with brief markers to save tokens."""
+        boundary = self._get_outdated_iteration_boundary(current_iteration)
+        if boundary <= 0:
+            return scored
+
+        result = []
+        replaced_count = 0
+        saved_chars = 0
+
+        for msg, importance, topic in scored:
+            if self._is_timing_report(msg):
+                msg_iter = msg.metadata.get('iteration', 0)
+                if msg_iter < boundary:
+                    marker = f"[Outdated timing report from iteration {msg_iter}]"
+                    saved_chars += len(msg.content)
+                    replaced_count += 1
+                    compressed_msg = Message(
+                        role=msg.role,
+                        content=marker,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                        tool_calls=msg.tool_calls,
+                        metadata=dict(msg.metadata)
+                    )
+                    result.append((compressed_msg, importance, topic))
+                    continue
+            result.append((msg, importance, topic))
+
+        if replaced_count > 0:
+            logger.info(
+                "[OUTDATED_TIMING] Replaced %d outdated timing reports (saved ~%d chars)",
+                replaced_count, saved_chars,
+                extra={"replaced_count": replaced_count, "saved_chars": saved_chars,
+                       "boundary_iteration": boundary, "trace_id": get_trace_id()}
+            )
+        return result
 
     def __init__(
         self,
@@ -281,6 +343,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
             if msg.role == MessageRole.TOOL else (msg, importance, topic)
             for msg, importance, topic in scored
         ]
+
+        # Replace outdated timing reports with brief markers to save tokens
+        scored = self._compress_outdated_timing_reports(scored, current_iteration)
 
         # Separate system messages (protected) from conversation
         system_msgs = []

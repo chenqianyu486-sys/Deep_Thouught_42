@@ -914,6 +914,28 @@ class DCPOptimizer(DCPOptimizerBase):
         """Get latest WNS - O(1) from cached instance variable."""
         return self.latest_wns
 
+    def _inject_format_requirement_to_system_prompt(self, system_content: str) -> str:
+        """Prepend YAML format requirement to system prompt on every LLM call.
+
+        Prevents LLM from forgetting YAML output format when context grows large
+        (e.g., ~94K tokens in later iterations).
+        """
+        FORMAT_GUARD = """**CRITICAL OUTPUT FORMAT - READ FIRST:**
+You MUST output valid YAML starting with `step:` in every response.
+Format:
+  step:
+    step_id: <N>
+    result_status: SUCCESS|PARTIAL|FAIL
+    key_metrics: {...}
+    flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
+    tool_calls: [...] (if calling tools)
+NO free text outside YAML. No markdown tables. No ASCII art. No summaries.
+
+"""
+        if "CRITICAL OUTPUT FORMAT" not in system_content:
+            system_content = FORMAT_GUARD + system_content
+        return system_content
+
     def _inject_wns_state_to_system_prompt(self, system_content: str) -> str:
         """Inject current WNS/state into system prompt to prevent context loss after compression.
 
@@ -923,6 +945,7 @@ class DCPOptimizer(DCPOptimizerBase):
         - iteration (current iteration)
         - clock_period
         """
+        system_content = self._inject_format_requirement_to_system_prompt(system_content)
         import re
 
         current_wns = self._get_current_wns()
