@@ -928,8 +928,13 @@ Format:
     result_status: SUCCESS|PARTIAL|FAIL
     key_metrics: {...}
     flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
-    tool_calls: [...] (if calling tools)
-NO free text outside YAML. No markdown tables. No ASCII art. No summaries.
+    tool_calls:
+      - function: tool_name
+        parameters:
+          key: value
+STRICTLY FORBIDDEN:
+  - XML/HTML tags (</arg_value>, <tool_call>, <arg_key>, etc.) — NOT valid YAML
+  - Markdown fences (```), free text, ASCII art, summaries
 
 """
         if "CRITICAL OUTPUT FORMAT" not in system_content:
@@ -2502,6 +2507,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         Handles multiple step: blocks and leading/trailing non-YAML text.
         """
         results = []
+
+        # Strip XML tags that LLMs sometimes mix into YAML output, and repair
+        # step: boundaries fused with tags (e.g. "</arg_value>step:")
+        content = re.sub(r'</?[^>]+>', '', content)
+        content = re.sub(r'([^\n])(step:)', r'\1\n\2', content)
 
         # Split on step: boundaries to handle multi-step YAML responses
         blocks = re.split(r'\n(?=step:)', content)

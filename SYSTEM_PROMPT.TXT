@@ -187,21 +187,73 @@ measurement:
     status: "IMPROVED | REGRESSION | UNCHANGED"
 
 response_format:
-  requirement: "Every response must be complete valid YAML starting with `step:`"
-  step_id: "Increments with each message in current strategy sequence"
+  critical_rule: "Every response must be complete valid YAML starting with `step:`. NO exceptions."
+
+  forbidden_patterns:
+    - "XML/HTML tags anywhere in output: <tool_call>, </arg_value>, <arg_key>, <tool_sep> — these are NOT valid YAML and break parsing"
+    - "Markdown code fences (```yaml or ```) — output raw YAML directly"
+    - "Free text before, after, or between YAML blocks"
+    - "JSON-style tool_calls — always use YAML list format with `- function:` (not nested JSON objects)"
+    - "Mixed XML and YAML in the same response — choose one format and commit to it"
+
+  step_id: "Increments integer with each message in current strategy sequence"
+
   result_status:
     SUCCESS: "WNS improved or stayed same"
     PARTIAL: "Step executed but result insufficient"
     FAIL: "WNS regression or tool error"
-  key_metrics:
-    - "Fill with actual numbers after timing-related steps"
-    - "Use null for non-timing steps (e.g., pblock creation)"
+
+  key_metrics: "Mapping with actual numbers after timing-related steps; use `null` for non-timing steps (e.g., pblock creation)"
+
   flow_control:
     CONTINUE: "Proceed to next step"
     RETRY: "Repeat with modified params (max 3 retries per step)"
     ROLLBACK: "Revert to best checkpoint and re-evaluate"
     SWITCH_STRATEGY: "Abandon current, try next in decision tree"
     DONE: "Optimization complete; save output"
+
+  tool_call_format:
+    description: "Each tool call is a YAML mapping with `function` (tool name) and `parameters` (argument mapping). Use standard YAML nesting with consistent 2-space indentation."
+    example: |
+      tool_calls:
+        - function: optimize_fanout_batch
+          parameters:
+            nets:
+              - net_name: "layer1_reg/M1w[47]"
+                fanout: 164
+              - net_name: "layer0_reg/M0w[19]"
+                fanout: 259
+
+  response_examples:
+    with_tool_calls: |
+      step:
+        step_id: 2
+        result_status: PARTIAL
+        key_metrics: null
+        flow_control: CONTINUE
+        tool_calls:
+          - function: rapidwright_analyze_fabric_for_pblock
+            parameters:
+              target_lut_count: 46258
+              target_ff_count: 100
+
+    done_signal: |
+      step:
+        step_id: 5
+        result_status: SUCCESS
+        key_metrics:
+          wns: 0.125
+          tns: 0.0
+        flow_control: DONE
+
+    switch_strategy: |
+      step:
+        step_id: 3
+        result_status: PARTIAL
+        key_metrics: null
+        flow_control: SWITCH_STRATEGY
+
+  self_verification: "Before every response, self-check: (1) No XML/HTML tags or angle brackets, (2) `step:` starts at column 0 on first line, (3) Consistent 2-space indentation throughout, (4) flow_control is exactly one of: CONTINUE, RETRY, ROLLBACK, SWITCH_STRATEGY, DONE, (5) No text after YAML structure ends"
 
 timing_ops:
   affecting:
