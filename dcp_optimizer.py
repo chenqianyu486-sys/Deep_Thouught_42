@@ -1662,18 +1662,154 @@ STRICTLY FORBIDDEN:
                 lines.append(f"- {s}")
         return "\n".join(lines)
 
+    def _detect_unfinished_strategy(self) -> dict:
+        """Detect if previous iteration's strategy was interrupted mid-execution.
+
+        Returns dict with was_interrupted, strategy, last_tool, tool_count, exit_reason.
+        """
+        last_iter_tools = [
+            t for t in self._compat.tool_call_details
+            if t.get('iteration') == self.iteration
+        ]
+
+        result = {
+            "was_interrupted": False,
+            "strategy": "None",
+            "last_tool": "",
+            "tool_count": len(last_iter_tools),
+            "exit_reason": self._is_done_reason or "unknown"
+        }
+
+        if not last_iter_tools:
+            return result
+
+        tool_names = [t.get('tool_name', '') for t in last_iter_tools]
+        strategy = self._infer_strategy_from_tools(tool_names)
+        last_tool_raw = tool_names[-1]
+        # Strip vendor prefix (e.g., vivado_phys_opt_design -> phys_opt_design)
+        parts = last_tool_raw.split("_", 1)
+        last_tool = parts[1] if parts[0] in ("vivado", "rapidwright") and len(parts) > 1 else last_tool_raw
+
+        result["strategy"] = strategy
+        result["last_tool"] = last_tool
+
+        # A strategy is "unfinished" if:
+        # 1. Exit reason suggests premature end
+        # 2. Strategy is actionable (not Information/Unknown)
+        # 3. Last 2 tool calls do NOT include report_timing_summary (incomplete cycle)
+        interrupted_exits = {"tool_round_limit", "flow_control_done_next_iteration"}
+        is_actionable = strategy not in ("Information", "Unknown")
+        cycle_complete = any("report_timing_summary" in t for t in tool_names[-2:])
+
+        if self._is_done_reason in interrupted_exits and is_actionable and not cycle_complete:
+            result["was_interrupted"] = True
+
+        return result
+
+    def _build_exit_reason_section(self) -> str:
+        """Build human-readable exit reason for planner handoff context."""
+        reason = self._is_done_reason or "unknown"
+
+        reason_map = {
+            "tool_round_limit": (
+                "Tool Round Limit",
+                "The previous iteration reached the maximum tool call rounds (50) before completing its strategy.",
+                "Continue optimization from where the previous iteration left off."
+            ),
+            "flow_control_done_next_iteration": (
+                "Premature DONE Signal",
+                "The previous model incorrectly signaled flow_control=DONE while WNS is still negative.",
+                "Optimization is NOT complete. Continue aggressively. Do NOT use DONE unless WNS >= 0.0."
+            ),
+            "cost_limit": (
+                "Cost Limit Reached",
+                "The previous iteration ended because the API cost limit was reached.",
+                "Continue optimization with fresh perspective."
+            ),
+            "user_requested": (
+                "User Requested",
+                "The previous iteration was ended by user request.",
+                "Resume optimization normally."
+            ),
+        }
+
+        if reason in reason_map:
+            label, description, implication = reason_map[reason]
+        else:
+            label = reason.replace("_", " ").title()
+            description = "The previous iteration ended."
+            implication = "Continue optimization."
+
+        current_wns = self._get_current_wns()
+        wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+
+        return (
+            f"- Reason: {label}\n"
+            f"- Description: {description}\n"
+            f"- Implication: {implication}\n"
+            f"- Current WNS: {wns_str} (target: 0.0ns)"
+        )
+
+    def _build_continuation_directive(self, unfinished: dict, is_worker: bool = False) -> str:
+        """Build explicit continuation directive for the next iteration's model."""
+        if is_worker:
+            parts = ["CONTINUE from previous iteration."]
+            if unfinished["was_interrupted"]:
+                parts.append(
+                    f"Strategy '{unfinished['strategy']}' was in progress "
+                    f"(last tool: {unfinished['last_tool']}, "
+                    f"{unfinished['tool_count']} calls). Resume or adjust."
+                )
+            else:
+                parts.append("Build upon existing progress. Do NOT reload the design.")
+            return " ".join(parts)
+
+        lines = [
+            "**CRITICAL: You are continuing optimization from the previous iteration.**",
+            "- Do NOT restart from scratch",
+            "- Build upon existing progress and checkpoints",
+            "- The design is already open in Vivado and RapidWright -- do NOT reload",
+            "- Continue from where the previous model left off",
+        ]
+        if unfinished["was_interrupted"]:
+            lines.extend([
+                "",
+                f"**Interrupted Strategy:** The previous iteration was executing "
+                f"'{unfinished['strategy']}' (last step: {unfinished['last_tool']}, "
+                f"{unfinished['tool_count']} tool calls) when it ended.",
+                "Consider resuming this strategy from the last step or switching to a better approach.",
+            ])
+        lines.append(
+            "- Use SWITCH_STRATEGY (not DONE) when you have exhausted your current approach but WNS is still negative."
+        )
+        return "\n".join(lines)
+
     def _build_data_driven_goal(self) -> str:
         """Build data-driven next goal from WNS trajectory and strategy effects."""
         current_wns = self._get_current_wns()
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
 
+        # Build continuation context prefix if previous strategy was interrupted
+        unfinished = self._detect_unfinished_strategy()
+        continuation_prefix = ""
+        if unfinished["was_interrupted"]:
+            continuation_prefix = (
+                f"[CONTINUATION] Previous iteration was in '{unfinished['strategy']}' "
+                f"(last tool: {unfinished['last_tool']}). "
+            )
+            if unfinished["exit_reason"] == "tool_round_limit":
+                continuation_prefix += "Strategy interrupted by round limit. "
+            elif unfinished["exit_reason"] == "flow_control_done_next_iteration":
+                continuation_prefix += "Model signaled DONE prematurely. "
+            continuation_prefix += "Resume or adjust.\n"
+
         if not self._iteration_narratives:
             if best_wns is not None and best_wns >= 0:
-                return "WNS target met. Focus on further optimization."
+                return continuation_prefix + "WNS target met. Focus on further optimization."
             elif best_wns is not None and best_wns > -0.5:
-                return "Close to target. Fine-tuning critical paths."
+                return continuation_prefix + "Close to target. Fine-tuning critical paths."
             elif best_wns is not None and best_wns > -2.0:
-                return "Moderate violation. Consider phys_opt or PBLOCK."
+                return continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
             else:
                 return "Severe violation. Consider aggressive strategies."
         recent = self._iteration_narratives[-5:]
@@ -1681,9 +1817,9 @@ STRICTLY FORBIDDEN:
         regressed = [e for e in recent if e['outcome'] == 'regression']
 
         if best_wns is not None and best_wns >= 0:
-            return "WNS target met. Focus on further optimization."
+            return continuation_prefix + "WNS target met. Focus on further optimization."
         if not improved and regressed:
-            return f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
+            return continuation_prefix + f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
         if improved:
             last_improved_tools = [
                 t.get('tool_name', '')
@@ -1691,10 +1827,10 @@ STRICTLY FORBIDDEN:
                 if t.get('iteration') == improved[-1]['iteration']
             ]
             strategy = self._infer_strategy_from_tools(last_improved_tools)
-            return f"Last success via {strategy}. Continue or refine approach."
+            return continuation_prefix + f"Last success via {strategy}. Continue or refine approach."
         if best_wns is not None and best_wns > -2.0:
-            return "Moderate violation. Consider phys_opt or PBLOCK."
-        return "Severe violation. Consider aggressive strategies."
+            return continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
+        return continuation_prefix + "Severe violation. Consider aggressive strategies."
 
     def _generate_planner_handoff(self) -> str:
         """Generate rich handoff for planner models (1M context)."""
@@ -1708,8 +1844,17 @@ STRICTLY FORBIDDEN:
         failed_strategies = self._build_failed_strategy_summary()
         narrative = self._format_narrative(max_entries=None)
         goal = self._build_data_driven_goal()
+        unfinished = self._detect_unfinished_strategy()
+        exit_reason = self._build_exit_reason_section()
+        directive = self._build_continuation_directive(unfinished, is_worker=False)
 
         handoff = f"""**ITERATION HANDOFF - Planner**
+
+=== EXIT REASON ===
+{exit_reason}
+
+=== CONTINUATION DIRECTIVE ===
+{directive}
 
 === ITERATION TRAJECTORY ===
 {narrative}
@@ -1730,7 +1875,7 @@ STRICTLY FORBIDDEN:
 {failed_strategies}
 
 === INCOMING MODEL ===
-You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section. Do NOT reload the design - it is already open in Vivado."""
+You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
 
     def _generate_worker_handoff(self) -> str:
@@ -1745,8 +1890,22 @@ You are the Planner for this iteration. Current WNS/checkpoint/clock values are 
         failed_strategies = self._build_failed_strategy_summary()
         narrative = self._format_narrative(max_entries=3)
         goal = self._build_data_driven_goal()
+        unfinished = self._detect_unfinished_strategy()
+        directive = self._build_continuation_directive(unfinished, is_worker=True)
+
+        exit_labels = {
+            "tool_round_limit": "ToolRoundLimit",
+            "flow_control_done_next_iteration": "PrematureDONE",
+            "cost_limit": "CostLimit",
+            "user_requested": "UserRequested",
+        }
+        exit_label = exit_labels.get(unfinished["exit_reason"], "Unknown")
 
         handoff = f"""**ITERATION HANDOFF - Worker**
+
+=== CONTINUATION ===
+{directive}
+Exit: {exit_label}
 
 === RECENT TRAJECTORY (last 3) ===
 {narrative}
@@ -1763,7 +1922,7 @@ You are the Planner for this iteration. Current WNS/checkpoint/clock values are 
 === AVOID ===
 {failed_strategies}
 
-Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section. Do NOT reload the design."""
+Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
 
     def classify_task(self, tool_name: str, arguments: dict = None) -> str:
@@ -2694,13 +2853,27 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 updated_content = self._inject_wns_state_to_system_prompt(system_content)
                 api_messages[0]["content"] = updated_content
 
-            # Inject iteration handoff prompt if not yet injected for this iteration
+            # Inject iteration handoff prompt or first-iteration starting context
             # Insert as standalone system message after primary system prompt for better attention weight
-            if self._iteration_handoff_prompt and not self._iteration_handoff_injected:
-                handoff_msg = {"role": "system", "content": self._iteration_handoff_prompt}
-                api_messages.insert(1, handoff_msg)
+            if not self._iteration_handoff_injected:
+                if self._iteration_handoff_prompt:
+                    handoff_msg = {"role": "system", "content": self._iteration_handoff_prompt}
+                    api_messages.insert(1, handoff_msg)
+                    logger.info(f"Injected iteration handoff prompt as system message (length: {len(self._iteration_handoff_prompt)} chars)")
+                elif self.iteration == 1:
+                    # First iteration: no handoff from previous iteration, inject starting context
+                    first_msg = {
+                        "role": "system",
+                        "content": (
+                            "**FIRST ITERATION** - Begin with initial design analysis "
+                            "(report_timing_summary, extract_critical_path_cells, etc.) "
+                            "to understand the current timing state before applying "
+                            "optimization strategies."
+                        )
+                    }
+                    api_messages.insert(1, first_msg)
+                    logger.info("Injected first iteration starting context")
                 self._iteration_handoff_injected = True
-                logger.info(f"Injected iteration handoff prompt as system message (length: {len(self._iteration_handoff_prompt)} chars)")
 
             # Log prompt for observability
             self._prompt_logger.log_prompt(

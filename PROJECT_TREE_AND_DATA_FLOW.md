@@ -242,15 +242,26 @@ WNS回归处理: WNS<0且差于best时自动回滚
 
 **交接提示词（上下文工程优化）**:
 - `_generate_iteration_handoff_prompt()` → 分发器，根据 next_tier 调用对应生成器
-- `_generate_planner_handoff()`: Planner (1M context) → 完整迭代轨迹 + 策略分析 + 数据驱动目标（~500-800 tokens）
-- `_generate_worker_handoff()`: Worker (250K context) → 最近3迭代浓缩 + 操作指令（~200-300 tokens）
+- `_generate_planner_handoff()`: Planner (1M context) → 完整迭代轨迹 + 策略分析 + 数据驱动目标 + 退出原因 + 续接指令（~500-800 tokens）
+- `_generate_worker_handoff()`: Worker (250K context) → 最近3迭代浓缩 + 续接指令 + 退出标签（~200-300 tokens）
+- **Planner handoff 结构**:
+  - `=== EXIT REASON ===`: 上一轮退出原因（Tool Round Limit / Premature DONE / Cost Limit）+ 当前 WNS
+  - `=== CONTINUATION DIRECTIVE ===`: 显式续接指令（"不要从头重启，从中断处继续"）+ 中断策略详情
+  - `=== ITERATION TRAJECTORY ===`: 完整迭代轨迹
+  - `=== NEXT OPTIMIZATION GOAL ===`: 含 continuation 前缀的数据驱动目标
+- **Worker handoff 结构**:
+  - `=== CONTINUATION ===`: 单行续接指令 + Exit 标签
+  - `=== RECENT TRAJECTORY (last 3) ===`: 最近 3 次迭代浓缩
+- 策略中断检测: `_detect_unfinished_strategy()` 分析上一轮 tool call，判断策略是否被 tool_round_limit / premature DONE 中断（检查最后 2 步是否有 report_timing_summary），信息注入 handoff 和 goal 前缀
+- 首次迭代上下文: 无 handoff 时自动注入 `**FIRST ITERATION** - Begin with initial design analysis...` 提示模型先分析再优化
 - Handoff 注入方式: 插入为独立 system message（index=1），而非 prepend 到 user message
-- 渐进式叙事: `_iteration_narratives[]` 记录每个迭代的结构化摘要（iteration, model, wns_delta, strategy_label, outcome）
-- 工具效果标注: `_build_tool_effect_summary()` → 工具名 + WNS 变化量
-- 失败策略标注: `_build_failed_strategy_summary()` → 策略名 + 失败迭代号 + 当时 WNS
-- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果，非静态阈值
+- 渐进式叙事: `_iteration_narratives[]` 记录每个迭代的结构化摘要（iteration, model, wns_delta, strategy_label, outcome），最多 20 条
+- 工具效果标注: `_build_tool_effect_summary()` → 工具名 + WNS 变化量（最近 8 条）
+- 失败策略标注: `_build_failed_strategy_summary()` → 策略名 + 失败迭代号 + 当时 WNS（最近 5 条）
+- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果生成目标，若检测到策略中断则在目标前拼接 `[CONTINUATION]` 前缀
 - WNS 状态单点注入: `_inject_wns_state_to_system_prompt()` 为唯一真源，handoff 引用之（消除字段重复）
-- 新增字段: `next_model` 注入到 "Current Optimization State" section
+- `next_model` 注入到 "Current Optimization State" section
+- SYSTEM_PROMPT.TXT 新增 `iteration_handoff` 指导节，解释 handoff section 含义及续接规则
 
 **限制迭代内切换**:
 - 只有首次迭代或 fallback 场景才允许迭代内模型重新选择

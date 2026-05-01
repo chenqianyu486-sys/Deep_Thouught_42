@@ -217,6 +217,19 @@ response_format:
     - "If WNS is still negative but you have exhausted all strategies in this iteration, use SWITCH_STRATEGY to signal the system to start a fresh iteration with updated context."
     - "Check key_metrics in the Current Optimization State section of the system prompt for the authoritative WNS value before choosing flow_control."
 
+  iteration_handoff:
+    description: "When starting a new iteration after previous work, the system injects an ITERATION HANDOFF system message with continuation context."
+    sections:
+      - "EXIT REASON: Why the previous iteration ended (Tool Round Limit, Premature DONE, Cost Limit, or User Requested)"
+      - "CONTINUATION DIRECTIVE: Explicit instruction to continue optimization from where the previous model left off"
+      - "ITERATION TRAJECTORY / RECENT TRAJECTORY: Summary of past iteration outcomes with WNS deltas"
+      - "NEXT OPTIMIZATION GOAL: Data-driven goal informed by WNS trajectory and interrupted strategy context"
+    rules:
+      - "Do NOT restart from scratch — build upon existing progress and checkpoints"
+      - "The design is already open in Vivado and RapidWright — do NOT reload"
+      - "If CONTINUATION DIRECTIVE mentions an Interrupted Strategy, consider resuming it from the last completed step rather than switching to something entirely new"
+      - "When CONTINUATION DIRECTIVE says 'Do NOT restart from scratch', treat it as a higher-priority instruction than any generic strategy selection guidance"
+
   tool_call_format:
     description: "Each tool call is a YAML mapping with `function` (tool name) and `parameters` (argument mapping). Use standard YAML nesting with consistent 2-space indentation."
     example: |
