@@ -31,8 +31,8 @@ strategies:
   skills: [analyze_net_detour, optimize_cell_placement, smart_region_search]
 
 tool_reference:
-  vivado: [open_checkpoint, report_timing_summary, get_critical_high_fanout_nets, report_utilization_for_pblock, create_and_apply_pblock, place_design, route_design, phys_opt_design, write_checkpoint, report_route_status, run_tcl, get_raw_tool_output]
-  rapidwright: [initialize_rapidwright, read_checkpoint, write_checkpoint, optimize_fanout_batch, analyze_critical_path_spread, analyze_fabric_for_pblock, convert_fabric_region_to_pblock, optimize_lut_input_cone, analyze_net_detour, optimize_cell_placement]
+  vivado: [open_checkpoint, write_checkpoint, report_route_status, report_timing_summary, get_wns, place_design, route_design, phys_opt_design, run_tcl, restart_vivado, get_critical_high_fanout_nets, write_edif, extract_critical_path_cells, report_utilization_for_pblock, create_and_apply_pblock, write_verilog_simulation, vivado_get_raw_tool_output]
+  rapidwright: [initialize_rapidwright, get_supported_devices, get_device_info, get_device_topology, read_checkpoint, write_checkpoint, get_design_info, search_cells, get_tile_info, search_sites, optimize_lut_input_cone, optimize_fanout_batch, analyze_critical_path_spread, analyze_fabric_for_pblock, convert_fabric_region_to_pblock, compare_design_structure, analyze_net_detour, optimize_cell_placement, smart_region_search]
 
 measurement:
   baseline: [report_timing_summary -> WNS/TNS/failing_endpoints, get_wns]

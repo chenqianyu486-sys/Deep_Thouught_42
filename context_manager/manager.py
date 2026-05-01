@@ -1,6 +1,7 @@
 """Memory Manager - Core orchestration for context management."""
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional, Literal
 from pathlib import Path
@@ -79,8 +80,17 @@ class MemoryManager:
         self._compressing: bool = False  # Explicitly initialized
 
     def add_message(self, role: MessageRole, content: str, metadata: dict = None) -> ContextSnapshot:
-        """Add message to working memory."""
+        """Add message to working memory with auto-injected metadata."""
         metadata = metadata or {}
+        # Auto-inject iteration for iteration-aware compression
+        if 'iteration' not in metadata and self._iteration > 0:
+            metadata['iteration'] = self._iteration
+        # Auto-inject timestamp for _get_recent_turns() ordering
+        if 'timestamp' not in metadata:
+            metadata['timestamp'] = time.time()
+        # Auto-inject index for stable message ordering after selection
+        if 'index' not in metadata:
+            metadata['index'] = len(self._working_store)
         tool_call_id = metadata.pop("tool_call_id", None)
         name = metadata.pop("name", None)
         tool_calls = metadata.pop("tool_calls", None)

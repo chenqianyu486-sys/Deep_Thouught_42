@@ -423,6 +423,49 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["cell_names"]
             }
+        ),
+        Tool(
+            name="smart_region_search",
+            description="""Find optimal pblock region using greedy expansion from reference point.
+
+            Analyzes FPGA fabric and finds an optimal rectangular region
+            that satisfies the target resource requirements. Uses greedy expansion
+            from a reference point (or design center of mass), avoiding delay-heavy
+            columns (URAM, HPIO, etc.) and prioritizing high-density columns.
+
+            Single tool call replaces 12+ LLM interaction rounds for pblock selection.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_lut_count": {
+                        "type": "integer",
+                        "description": "Required number of LUTs (1.5x current usage recommended)"
+                    },
+                    "target_ff_count": {
+                        "type": "integer",
+                        "description": "Required number of FFs (1.5x current usage recommended)"
+                    },
+                    "target_dsp_count": {
+                        "type": "integer",
+                        "description": "Required number of DSPs (default: 0)",
+                        "default": 0
+                    },
+                    "target_bram_count": {
+                        "type": "integer",
+                        "description": "Required number of BRAMs (default: 0)",
+                        "default": 0
+                    },
+                    "reference_col": {
+                        "type": "integer",
+                        "description": "Reference column coordinate (optional, uses design center of mass)"
+                    },
+                    "reference_row": {
+                        "type": "integer",
+                        "description": "Reference row coordinate (optional, uses design center of mass)"
+                    }
+                },
+                "required": ["target_lut_count", "target_ff_count"]
+            }
         )
     ]
 
@@ -541,6 +584,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         elif name == "optimize_cell_placement":
             result = rw.optimize_cell_placement(
                 cell_names=arguments["cell_names"]
+            )
+
+        elif name == "smart_region_search":
+            result = rw.smart_region_search(
+                target_lut_count=arguments["target_lut_count"],
+                target_ff_count=arguments["target_ff_count"],
+                target_dsp_count=arguments.get("target_dsp_count", 0),
+                target_bram_count=arguments.get("target_bram_count", 0),
+                reference_col=arguments.get("reference_col"),
+                reference_row=arguments.get("reference_row")
             )
 
         else:

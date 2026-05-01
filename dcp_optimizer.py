@@ -3651,6 +3651,7 @@ CRITICAL OPTIMIZATION RULES:
         
         while self.iteration < max_iterations:
             self.iteration += 1
+            self._memory_manager._iteration = self.iteration  # Sync MemoryManager iteration for correct metadata injection
             self.iteration_tool_errors = []  # Reset tool error tracking for this iteration
             print()
             logger.info(f"=== Iteration {self.iteration} ===")

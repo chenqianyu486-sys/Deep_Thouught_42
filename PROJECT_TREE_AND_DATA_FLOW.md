@@ -102,8 +102,8 @@ API调用前 → _inject_wns_state_to_system_prompt()
 ### 2.5 模型选择
 
 ```
-PLANNER: xiaomi/mimo-v2.5-pro (1M context, 复杂推理)
-WORKER: deepseek/deepseek-v4-flash (500K context, 快速执行)
+PLANNER: openrouter/owl-alpha (1M context, 复杂推理)
+WORKER: tencent/hy3-preview:free (250K context, 快速执行)
 - 429降级: 按层级fallback列表，轮询+耗尽追踪
 - 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
 - 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
