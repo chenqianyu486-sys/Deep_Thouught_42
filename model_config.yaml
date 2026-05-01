@@ -4,7 +4,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "tencent/hy3-preview:free"  # Default Flash model name
+  model_name: "minimax/minimax-m2.5:free"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -22,7 +22,7 @@ worker:
 
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-flash"    # Default Pro model name
+  model_name: "openrouter/owl-alpha"    # Default Pro model name
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
@@ -34,5 +34,6 @@ planner:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
+    - "deepseek/deepseek-v4-flash"
     - "xiaomi/mimo-v2.5"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)
