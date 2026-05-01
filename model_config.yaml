@@ -16,6 +16,7 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
+    - "deepseek/deepseek-v4-flash"
     - "stepfun/step-3.5-flash"
     - "xiaomi/mimo-v2-flash"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)

@@ -50,6 +50,7 @@ from context_manager.logging_config import (
     sanitize_payload, DynamicLogLevelManager, HeartbeatLogger, PromptLogger
 )
 from config_loader import get_model_config_loader, ModelConfigData
+from strategy_library import get_strategy_catalog, get_strategy_details, get_scenario_guide
 
 
 def _create_model_context_config(data: ModelConfigData) -> ModelContextConfig:
@@ -707,6 +708,11 @@ class DCPOptimizer(DCPOptimizerBase):
         self._iteration_handoff_prompt: str = ""      # Handoff prompt for next iteration's model
         self._iteration_handoff_injected: bool = False  # Whether handoff prompt was already injected
         self._iteration_narratives: list[dict] = []     # Progressive iteration summary for handoff
+        self._strategy_sequence: list[str] = []          # Ordered strategy labels for state summary
+
+        # Strategy content injection state (for layered system prompt)
+        self._injected_strategy_label: Optional[str] = None  # What strategy content is injected
+        self._strategy_switch_pending: bool = False           # SWITCH_STRATEGY was issued, needs re-injection
 
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
@@ -756,6 +762,11 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Track is_done exit reason for logging
         self._is_done_reason: Optional[str] = None
+
+        # Raw tool output buffer: {(iteration, round_index): raw_text}
+        # Stores complete Vivado logs for on-demand retrieval via vivado_get_raw_tool_output
+        self._raw_tool_outputs: dict[tuple[int, int], str] = {}
+        self._raw_tool_output_max = 50  # FIFO limit
 
         # === Section 7.0: Context Manager Integration ===
         # Initialize EventBus for context change notifications
@@ -976,6 +987,9 @@ STRICTLY FORBIDDEN:
                 system_content
             )
 
+        # Define known strategy catalog for remaining_strategies computation
+        ALL_STRATEGIES = {"PBLOCK", "PhysOpt", "Fanout", "PlaceRoute", "CellPlacement", "IncrementalRoute"}
+
         # Add or update current optimization state section after the YAML block
         current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
         best_wns_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
@@ -983,19 +997,49 @@ STRICTLY FORBIDDEN:
         current_tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "N/A"
         failing_eps_str = str(self.latest_failing_endpoints) if self.latest_failing_endpoints is not None else "N/A"
         best_wns_iter = self._best_wns_iteration
+
+        # current_wns origin hint
+        current_wns_origin = ""
+        if current_wns is not None and best_wns is not None and abs(current_wns - best_wns) < 0.0001:
+            current_wns_origin = " (restored from best)"
+        elif current_wns is not None:
+            current_wns_origin = " (new)"
+
+        # best_wns strategy hint from iteration narratives
+        best_wns_strategy = ""
+        if best_wns_iter is not None:
+            for entry in self._iteration_narratives:
+                if entry["iteration"] == best_wns_iter:
+                    strat = entry.get("strategy_label", "")
+                    if strat and strat not in ("Information", "Unknown"):
+                        best_wns_strategy = f" via {strat}"
+                    break
+
+        # Format strategy_sequence compactly
+        seq = self._strategy_sequence[-8:]  # Last 8 entries
+        strategy_seq_str = ", ".join(seq) if seq else "none"
+
+        # Compute remaining_strategies
+        tried = set(self._strategy_sequence)
+        tried.update(self._compat.failed_strategies)
+        remaining = sorted(ALL_STRATEGIES - tried)
+        remaining_str = ", ".join(remaining) if remaining else "none"
+
         best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
         input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
         next_model = self._next_iteration_model or self.last_used_model or "worker"
         state_section = f"""**Current Optimization State:**
-- iteration: {iteration}
-- current_wns: {current_wns_str}
-- current_tns: {current_tns_str}
-- failing_endpoints: {failing_eps_str}
-- best_wns: {best_wns_str} (achieved at iteration {best_wns_iter})
-- clock_period: {clock_period_str}
-- input_dcp: {input_dcp_str}
-- best_checkpoint: {best_dcp_str}
-- next_model: {next_model}
+  iteration: {iteration}
+  best_wns: {best_wns_str} (achieved at iteration {best_wns_iter}{best_wns_strategy})
+  best_checkpoint: {best_dcp_str}
+  current_wns: {current_wns_str}{current_wns_origin}
+  current_tns: {current_tns_str}
+  failing_endpoints: {failing_eps_str}
+  strategy_sequence: [{strategy_seq_str}]
+  remaining_strategies: [{remaining_str}]
+  clock_period: {clock_period_str}
+  input_dcp: {input_dcp_str}
+  next_model: {next_model}
 """
 
         # Check if "Current Optimization State" already exists
@@ -1010,6 +1054,74 @@ STRICTLY FORBIDDEN:
             if match:
                 insert_pos = match.end()
                 system_content = system_content[:insert_pos] + "\n\n" + state_section + system_content[insert_pos:]
+
+        return system_content
+
+    def _inject_strategy_content(self, system_content: str) -> str:
+        """Inject strategy content on-demand based on current state.
+
+        State machine:
+          None ------------> "CATALOG"  (first iteration: inject strategy catalog)
+          "CATALOG" --------> "STRATEGY:{name}"  (strategy detected: inject details)
+          "STRATEGY:{old}" -> "STRATEGY:{new}"   (strategy changed: inject new details)
+          (any) ------------> "CATALOG"          (after SWITCH_STRATEGY: re-inject catalog)
+
+        Strategy details are injected as a **Strategy Content:** block at the end
+        of the system content. Compression will strip it, and this method will
+        re-inject on the next LLM call.
+
+        Returns:
+            Modified system_content with appended strategy block (if needed).
+        """
+        # After SWITCH_STRATEGY: reset and re-inject catalog for re-evaluation
+        if self._strategy_switch_pending:
+            self._injected_strategy_label = None
+            self._strategy_switch_pending = False
+
+        # Determine current strategy from recent tool calls
+        tools_this_iter = [
+            t.get('tool_name', '')
+            for t in self._compat.tool_call_details
+            if t.get('iteration') == self.iteration
+        ]
+        current_strategy = self._infer_strategy_from_tools(tools_this_iter)
+
+        # Decide what to inject
+        strategy_block = ""
+        new_label = self._injected_strategy_label
+
+        if self._injected_strategy_label is None and self.iteration >= 1:
+            # First injection: give the model the strategy catalog
+            strategy_block = get_strategy_catalog()
+            # Also include scenario guide on first iteration for initial analysis
+            if self.iteration <= 1:
+                scenario_guide = get_scenario_guide()
+                strategy_block = scenario_guide + "\n\n" + strategy_block
+            new_label = "CATALOG"
+
+        elif (current_strategy not in ("Unknown", "Information", "PlaceRoute")
+              and self._injected_strategy_label != f"STRATEGY:{current_strategy}"):
+            # Real strategy identified and details not yet injected
+            details = get_strategy_details(current_strategy)
+            if details:
+                strategy_block = details
+                new_label = f"STRATEGY:{current_strategy}"
+
+        # Apply injection: append or replace existing strategy block
+        if strategy_block:
+            marker = "\n\n**Strategy Content:**"
+            if "**Strategy Content:**" in system_content:
+                # Replace existing block (keep marker, replace content)
+                import re
+                system_content = re.sub(
+                    r'\n\*\*Strategy Content:\*\*.*',
+                    f'{marker}\n{strategy_block}',
+                    system_content,
+                    flags=re.DOTALL
+                )
+            else:
+                system_content += f'{marker}\n{strategy_block}'
+            self._injected_strategy_label = new_label
 
         return system_content
 
@@ -1441,7 +1553,121 @@ STRICTLY FORBIDDEN:
         head_len = TOOL_RESULT_TRUNCATE // 2
         tail_len = TOOL_RESULT_TRUNCATE // 2
         return result[:head_len] + f"\n...[{len(result) - TOOL_RESULT_TRUNCATE} chars truncated]...\n" + result[-tail_len:]
-    
+
+    def _summarize_tool_result(self, tool_name: str, raw_result: str) -> str:
+        """Convert raw tool output to structured YAML summary for LLM consumption.
+
+        Preserves key metrics (WNS/TNS/failing_endpoints, deltas, status)
+        while discarding verbose INFO lines and path details.
+        Full raw output is stored in _raw_tool_outputs for on-demand retrieval.
+        """
+        lines = raw_result.split('\n')
+        line_count = len(lines)
+        char_count = len(raw_result)
+
+        # Build summary components
+        summary_parts = []
+        key_details = {}
+        duration = None
+        status = "completed"
+
+        # Common: extract any error/fail indicators
+        has_error = any("error" in l.lower() for l in lines[:20])
+        has_fail = any("fail" in l.lower() for l in lines[:20])
+        if has_error and "success" not in raw_result.lower():
+            status = "error" if has_error else "failed"
+
+        # Tool-type specific extraction
+        if tool_name in ("vivado_phys_opt_design", "vivado_report_timing_summary"):
+            timing = parse_timing_summary_static(raw_result)
+            wns = timing.get("wns")
+            tns = timing.get("tns")
+            fe = timing.get("failing_endpoints")
+
+            # Use latest tracked values if parser didn't find them (for phys_opt auto-eval appended text)
+            if wns is None:
+                wns = self.latest_wns
+            if tns is None:
+                tns = self.latest_tns
+            if fe is None:
+                fe = self.latest_failing_endpoints
+            if wns is not None:
+                prev = getattr(self, '_prev_best_wns', None)
+                delta_str = ""
+                if prev is not None and prev > float('-inf'):
+                    diff = wns - prev
+                    delta_str = f"{diff:+.3f}"
+                summary_parts.append(f"WNS: {wns:.3f}")
+                if tns is not None:
+                    summary_parts.append(f"TNS: {tns:.3f}")
+                if fe is not None:
+                    summary_parts.append(f"Failing endpoints: {fe}")
+                key_details["wns"] = round(wns, 3)
+                if prev is not None and prev > float('-inf'):
+                    key_details["wns_delta"] = round(wns - prev, 3)
+                key_details["tns"] = round(tns, 3) if tns is not None else None
+                key_details["failing_endpoints"] = fe
+
+        elif tool_name == "vivado_route_design":
+            # Extract route status
+            route_status = ""
+            for line in lines[:50]:
+                if any(kw in line.lower() for kw in ["error", "fail", "congestion", "unrouted", "status"]):
+                    route_status += line.strip() + "; "
+            if route_status:
+                summary_parts.append(f"Route: {route_status[:200]}")
+            timing = parse_timing_summary_static(raw_result)
+            if timing.get("wns") is not None:
+                summary_parts.append(f"WNS: {timing['wns']:.3f}")
+                key_details["wns"] = timing["wns"]
+                key_details["tns"] = timing["tns"]
+
+        elif tool_name == "vivado_get_wns":
+            try:
+                wns_val = float(raw_result.strip())
+                summary_parts.append(f"WNS: {wns_val:.3f}")
+                key_details["wns"] = round(wns_val, 3)
+            except ValueError:
+                summary_parts.append(f"WNS: {raw_result.strip()[:50]}")
+
+        elif tool_name == "vivado_place_design":
+            # Extract key placement info
+            for line in lines[:50]:
+                if any(kw in line.lower() for kw in ["error", "warning", "placed", "utilization", "slack"]):
+                    stripped = line.strip()
+                    if stripped:
+                        summary_parts.append(stripped[:200])
+
+        elif tool_name == "vivado_run_tcl_info":
+            # For informational Tcl (read-only), keep concise
+            summary_parts.append(f"Output: {line_count} lines, {char_count} chars")
+
+        # Fallback: generic truncation
+        if not summary_parts:
+            # Pick first few meaningful lines
+            meaningful = [l.strip() for l in lines[:30] if l.strip() and not l.strip().startswith(("INFO:", "WARNING:", "//", "#"))]
+            if meaningful:
+                summary_parts.extend(meaningful[:5])
+            else:
+                summary_parts.append(f"{line_count} lines, {char_count} chars")
+
+        summary_line = "; ".join(summary_parts)
+
+        # Build YAML output
+        yaml_lines = ["tool_result:"]
+        yaml_lines.append(f"  tool: {tool_name}")
+        yaml_lines.append(f"  summary: \"{summary_line}\"")
+        if key_details:
+            yaml_lines.append("  key_details:")
+            for k, v in key_details.items():
+                if v is not None:
+                    yaml_lines.append(f"    {k}: {v}")
+        yaml_lines.append(f"  status: {status}")
+        yaml_lines.append(f"  raw_output_truncated: true")
+        yaml_lines.append(f"  raw_output_chars: {char_count}")
+
+        return '\n'.join(yaml_lines)
+
     def _estimate_immediate_complexity(self, recent_messages: list) -> int:
         """
         Immediate complexity assessment: determine actual task complexity based on recent message content.
@@ -1599,6 +1825,13 @@ STRICTLY FORBIDDEN:
         self._iteration_narratives.append(entry)
         if len(self._iteration_narratives) > 20:
             self._iteration_narratives.pop(0)
+        # Track strategy sequence for state summary
+        strategy_label = entry["strategy_label"]
+        if strategy_label != "Information" and strategy_label != "Unknown":
+            if not self._strategy_sequence or self._strategy_sequence[-1] != strategy_label:
+                self._strategy_sequence.append(strategy_label)
+                if len(self._strategy_sequence) > 20:
+                    self._strategy_sequence.pop(0)
 
     def _format_narrative(self, max_entries: int = None) -> str:
         """Build progressive iteration summary from _iteration_narratives."""
@@ -2184,8 +2417,67 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         for tool in v_response.tools:
             self.tools.append(convert_mcp_tool_to_openai(tool, "vivado"))
 
+        # Register internal tool: retrieve full raw output for any previous tool call
+        self.tools.append({
+            "type": "function",
+            "function": {
+                "name": "vivado_get_raw_tool_output",
+                "description": "Retrieve the complete raw Vivado output for a previous tool call. "
+                               "By default tool results are returned as structured summaries; "
+                               "use this when you need to inspect raw timing paths, DRC details, or error messages.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "iteration": {
+                            "type": "integer",
+                            "description": "Iteration number (default: current iteration)"
+                        },
+                        "round_index": {
+                            "type": "integer",
+                            "description": "Tool round within the iteration (default: most recent)"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Filter by tool name, e.g. vivado_phys_opt_design (optional)"
+                        }
+                    }
+                },
+                "strict": False
+            }
+        })
+
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call on the appropriate MCP server."""
+        # Internal tool: retrieve raw tool output from side buffer
+        if tool_name == "vivado_get_raw_tool_output":
+            iteration = arguments.get("iteration", self.iteration)
+            round_idx = arguments.get("round_index")
+            target_tool = arguments.get("tool_name", "")
+
+            candidates = []
+            for (it, rd), txt in self._raw_tool_outputs.items():
+                if it == iteration and (round_idx is None or rd == round_idx):
+                    candidates.append(((it, rd), txt))
+
+            # Filter by tool_name if specified (search raw output for the tool name pattern)
+            if target_tool and candidates:
+                filtered = []
+                for (it, rd), txt in candidates:
+                    # For raw output, we can't know the original tool name from stored text,
+                    # but we can look for tool call syntax in the raw text
+                    if target_tool.replace("vivado_", "").replace("rapidwright_", "") in txt[:2000]:
+                        filtered.append(((it, rd), txt))
+                if filtered:
+                    candidates = filtered
+
+            if not candidates:
+                return json.dumps({"error": f"No raw output found for iteration={iteration}, round={round_idx}, tool={target_tool}"})
+
+            # Return most recent matching output
+            candidates.sort(key=lambda x: (x[0][0], x[0][1]), reverse=True)
+            (it, rd), txt = candidates[0]
+            return f"[Raw tool output from iteration {it}, round {rd} ({len(txt)} chars)]\n\n{txt}"
+
         # Parse server prefix from tool name
         if tool_name.startswith("rapidwright_"):
             session = self.rapidwright_session
@@ -2261,6 +2553,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 if current_wns > self.best_wns:
                                     logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                     self.best_wns = current_wns
+                                    self._best_wns_iteration = self.iteration
                                     wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
                                 else:
                                     logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -2275,6 +2568,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                         if current_wns > self.best_wns:
                                             logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                             self.best_wns = current_wns
+                                            self._best_wns_iteration = self.iteration
                                             wns_measured = current_wns
                                         else:
                                             logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -2305,6 +2599,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         if current_wns > self.best_wns:
                             logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                             self.best_wns = current_wns
+                            self._best_wns_iteration = self.iteration
                         else:
                             logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                     else:
@@ -2337,6 +2632,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             if current_wns > self.best_wns:
                                 logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                                 self.best_wns = current_wns
+                                self._best_wns_iteration = self.iteration
                             else:
                                 logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                         else:
@@ -2444,6 +2740,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         self.latest_tns = timing_info["tns"]
         self.latest_failing_endpoints = timing_info["failing_endpoints"]
         self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
+        self._best_wns_iteration = 0  # Track initial state as iteration 0
 
         # NOTE (Issue 7): _sync_state_to_memory_manager() is NOT called here.
         # MemoryManager._initial_wns/_best_wns remain at default values (None/-inf).
@@ -2851,6 +3148,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             if api_messages and api_messages[0].get("role") == "system":
                 system_content = api_messages[0].get("content", "")
                 updated_content = self._inject_wns_state_to_system_prompt(system_content)
+                # Inject strategy content on-demand (layered loading)
+                updated_content = self._inject_strategy_content(updated_content)
                 api_messages[0]["content"] = updated_content
 
             # Inject iteration handoff prompt or first-iteration starting context
@@ -3081,8 +3380,17 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             effective_task_type = "vivado_run_tcl_info"  # Information-class Tcl uses different identifier
 
                     result = await self.call_tool(tool_name, tool_args)
-                    # Smart filter tool results, retain key information
-                    result = self._filter_tool_result(tool_name, result)
+
+                    # [TOOL_SUMMARIZE] Store raw output, replace with structured summary
+                    raw_result = result
+                    result = self._summarize_tool_result(tool_name, raw_result)
+                    # Store full raw output in side buffer for on-demand retrieval
+                    self._raw_tool_outputs[(self.iteration, tool_round)] = raw_result
+                    # FIFO eviction when buffer exceeds limit
+                    if len(self._raw_tool_outputs) > self._raw_tool_output_max:
+                        oldest_key = min(self._raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
+                        del self._raw_tool_outputs[oldest_key]
+
                     # Update current task type for next iteration's model routing decision
                     self.current_task_type = effective_task_type
 
@@ -3168,6 +3476,9 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # this iteration" - NOT "exit the optimization". The system should properly end
             # this iteration and move to the next one with updated context.
             action, flow_control = self._parse_action_from_yaml(content)
+            # Track SWITCH_STRATEGY for strategy content re-injection
+            if flow_control == "SWITCH_STRATEGY" or action == "SWITCH_STRATEGY":
+                self._strategy_switch_pending = True
             if flow_control == "DONE" or action == "DONE":
                 logger.info(f"LLM signaled DONE (action={action}, flow_control={flow_control})")
                 # Check if target fmax (WNS >= 0) is met
@@ -3447,12 +3758,10 @@ CRITICAL OPTIMIZATION RULES:
                                 if self._is_valid_wns(wns_value):
                                     # Regression: WNS < 0 and worse than best
                                     if wns_value < 0 and wns_value < self.best_wns:
-                                        logger.warning(f"WNS regressed: {self.best_wns:.3f} -> {wns_value:.3f}, rolling back...")
-                                        best_iter = self._best_wns_iteration
-                                        if best_iter is not None:
-                                            rollback_path = self._get_intermediate_checkpoint_path(best_iter)
-                                            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(rollback_path)})
-                                            self.latest_wns = self.best_wns  # Restore to best value (checkpoint restored)
+                                        logger.warning(f"WNS regressed: {wns_value:.3f} < best {self.best_wns:.3f}, rolling back...")
+                                        rollback_ok = await self._rollback_to_best_checkpoint()
+                                        if not rollback_ok:
+                                            logger.warning("Rollback failed, continuing without checkpoint restore")
                                         # Do not update best_wns
                                     else:
                                         self.latest_wns = wns_value  # Normal update
@@ -3518,11 +3827,9 @@ CRITICAL OPTIMIZATION RULES:
                     if not validation_passed:
                         logger.warning(f"Iteration {self.iteration}: Full validation FAILED, rolling back...")
                         # Rollback to best checkpoint
-                        best_iter = self._best_wns_iteration
-                        if best_iter is not None:
-                            rollback_path = self._get_intermediate_checkpoint_path(best_iter)
-                            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(rollback_path)})
-                            self.latest_wns = self.best_wns  # Restore best WNS
+                        rollback_ok = await self._rollback_to_best_checkpoint()
+                        if not rollback_ok:
+                            logger.warning("Validation rollback failed, skipping iteration without restore")
                         # Skip this iteration (no counter update)
                         continue
 
@@ -3832,6 +4139,27 @@ CRITICAL OPTIMIZATION RULES:
         print(f"  Run directory: {self.run_dir}")
 
     # === Section 7.X: DCP Validation Helpers ===
+
+    async def _rollback_to_best_checkpoint(self) -> bool:
+        """Rollback to best known checkpoint with existence validation. Returns True on success."""
+        best_iter = self._best_wns_iteration
+        if best_iter is None:
+            logger.error("No best checkpoint iteration recorded, cannot rollback")
+            return False
+
+        ckpt_path = self._get_intermediate_checkpoint_path(best_iter)
+        if not ckpt_path.exists():
+            logger.error(f"Best checkpoint {ckpt_path} does not exist, cannot rollback")
+            return False
+
+        try:
+            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(ckpt_path)})
+            self.latest_wns = self.best_wns
+            logger.info(f"Rolled back to best checkpoint: {ckpt_path} (WNS={self.best_wns:.3f})")
+            return True
+        except Exception as e:
+            logger.error(f"Rollback to best checkpoint failed: {e}")
+            return False
 
     def _get_intermediate_checkpoint_path(self, iteration: int) -> Path:
         """Get path for intermediate checkpoint with iteration number."""

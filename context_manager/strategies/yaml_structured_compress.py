@@ -179,6 +179,13 @@ TIMING_REPORT_KEYWORDS = [
     'fmax', 'clock period', 'data path delay'
 ]
 
+# Tool result pruning: compress old tool messages to minimal markers
+TOOL_RESULT_ITERATION_GAP = 2  # Compress tool results older than this many iterations
+TOOL_RESULT_KEYWORDS = [
+    'wns', 'tns', 'slack', 'failing_endpoint', 'route', 'phys_opt',
+    'place_design', 'route_design', 'report_timing'
+]
+
 
 class YAMLStructuredCompressor(CompressionStrategy):
     """Compress messages using YAML format with FPGA-aware structure."""
@@ -233,6 +240,79 @@ class YAMLStructuredCompressor(CompressionStrategy):
         if replaced_count > 0:
             logger.info(
                 "[OUTDATED_TIMING] Replaced %d outdated timing reports (saved ~%d chars)",
+                replaced_count, saved_chars,
+                extra={"replaced_count": replaced_count, "saved_chars": saved_chars,
+                       "boundary_iteration": boundary, "trace_id": get_trace_id()}
+            )
+        return result
+
+    def _compress_outdated_tool_results(
+        self, scored: List[tuple], current_iteration: int
+    ) -> List[tuple]:
+        """Compress old tool result messages to minimal structured markers.
+
+        Tool results older than TOOL_RESULT_ITERATION_GAP iterations are replaced
+        with concise markers preserving only key metrics and tool name.
+        This prevents verbose YAML summary blocks from accumulating in history.
+        """
+        boundary = current_iteration - TOOL_RESULT_ITERATION_GAP
+        if boundary <= 0:
+            return scored
+
+        result = []
+        replaced_count = 0
+        saved_chars = 0
+
+        for msg, importance, topic in scored:
+            if msg.role == MessageRole.TOOL:
+                msg_iter = msg.metadata.get('iteration', 0)
+                is_tool_result = msg_iter > 0 and len(msg.content) > 100
+                if is_tool_result and msg_iter < boundary:
+                    # Try to extract key metrics from YAML summary format
+                    stripped = msg.content.strip()
+                    lines = stripped.split('\n')
+                    tool_name = ""
+                    summary_text = ""
+                    key_details = {}
+
+                    for line in lines:
+                        line_stripped = line.strip()
+                        if line_stripped.startswith('tool:'):
+                            tool_name = line_stripped.split(':', 1)[1].strip()
+                        elif line_stripped.startswith('summary:'):
+                            summary_text = line_stripped.split(':', 1)[1].strip().strip('"')
+                        elif line_stripped.startswith('wns:'):
+                            key_details['wns'] = line_stripped.split(':', 1)[1].strip()
+
+                    if tool_name:
+                        # Structured YAML summary format — keep only metadata
+                        detail_str = f", wns={key_details['wns']}" if 'wns' in key_details else ""
+                        marker = f"[Tool: {tool_name} (iteration {msg_iter}){detail_str}]"
+                    else:
+                        # Raw text format — try regex extraction for WNS
+                        wns_match = re.search(r'WNS[=:]\s*([-\d.]+)', stripped, re.IGNORECASE)
+                        wns_str = f", wns={wns_match.group(1)}" if wns_match else ""
+                        # Truncate tool name from first line
+                        first_line = lines[0][:80] if lines else ""
+                        marker = f"[Tool result (iteration {msg_iter}){wns_str}: {first_line}]"
+
+                    saved_chars += len(msg.content)
+                    replaced_count += 1
+                    compressed_msg = Message(
+                        role=msg.role,
+                        content=marker,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                        tool_calls=msg.tool_calls,
+                        metadata=dict(msg.metadata)
+                    )
+                    result.append((compressed_msg, importance, topic))
+                    continue
+            result.append((msg, importance, topic))
+
+        if replaced_count > 0:
+            logger.info(
+                "[OUTDATED_TOOL_RESULT] Compressed %d old tool results (saved ~%d chars)",
                 replaced_count, saved_chars,
                 extra={"replaced_count": replaced_count, "saved_chars": saved_chars,
                        "boundary_iteration": boundary, "trace_id": get_trace_id()}
@@ -346,6 +426,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
 
         # Replace outdated timing reports with brief markers to save tokens
         scored = self._compress_outdated_timing_reports(scored, current_iteration)
+
+        # Compress old tool results (iterations older than gap) to minimal markers
+        scored = self._compress_outdated_tool_results(scored, current_iteration)
 
         # Separate system messages (protected) from conversation
         system_msgs = []

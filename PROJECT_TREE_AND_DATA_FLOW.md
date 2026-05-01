@@ -391,3 +391,48 @@ WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 35K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 100K
 COST_HARD_LIMIT = $1.00 (planner+worker合计)
 ```
+
+## 13. 工具输出摘要化 + 历史自动裁剪
+
+### 动机
+phys_opt_design / route_design 等工具的原始 Vivado 日志单次可达 25k+ 字符，
+充斥 INFO 与重复的时序路径明细，导致模型注意力被稀释。
+
+### 实现
+
+**1. `_summarize_tool_result()`** (dcp_optimizer.py，位于 `_filter_tool_result()` 之后)
+
+每个工具调用返回时自动提取结构化 YAML 摘要替代原始日志：
+```yaml
+tool_result:
+  tool: vivado_phys_opt_design
+  summary: "WNS: -0.939, TNS: -834.718, Failing endpoints: 1529"
+  key_details:
+    wns: -0.939
+    wns_delta: +0.039
+    tns: -834.718
+    failing_endpoints: 1529
+  status: completed
+  raw_output_truncated: true
+  raw_output_chars: 45231
+```
+
+- 利用已有 `parse_timing_summary_static()` 提取 WNS/TNS/failing_endpoints
+- 与 `_prev_best_wns` 对比计算 delta
+- 摘要替换原始文本进入对话历史（message pipeline 中 `call_tool()` → `_summarize_tool_result()` → `add_message()`）
+
+**2. `_raw_tool_outputs`** (dcp_optimizer.py)
+
+完整原始日志存储在 side buffer dict `{(iteration, round_index): raw_text}` 中，
+FIFO 淘汰（最多 50 条）。仅当 LLM 调 `vivado_get_raw_tool_output` 时返回。
+
+**3. `vivado_get_raw_tool_output`** (dcp_optimizer.py)
+
+内部工具，不走 MCP 服务器。注册在 `_collect_tools()` 末尾，schema 包含迭代号/轮次/工具名筛选。
+
+**4. 压缩阶段旧消息裁剪** (yaml_structured_compress.py)
+
+`_compress_outdated_tool_results()`: 迭代差 > 2 的工具消息替换为：
+- YAML 格式: `[Tool: vivado_phys_opt_design (iteration 3), wns=-0.939]`
+- 旧格式: 正则提取 WNS + 首行截断
+- 放在 timing report 压缩之后，系统消息分离之前
