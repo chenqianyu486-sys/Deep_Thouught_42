@@ -39,7 +39,7 @@ measurement:
   baseline: [report_timing_summary -> WNS/TNS/failing_endpoints, get_wns]
   intermediate: [report_timing_summary -> compare WNS]
   final: [report_timing_summary, report_route_status]
-  format: "{baseline_wns} -> {final_wns}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
+  format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
 
 response_format:
   rule: "Every response MUST be valid YAML starting with `step:`. NO exceptions."
@@ -68,13 +68,13 @@ response_format:
     step:
       step_id: <N>
       result_status: SUCCESS|PARTIAL|FAIL
-      key_metrics: {wns: <float>, tns: <float>, failing_endpoints: <int>}
+      key_metrics: {{wns: <float>, tns: <float>, failing_endpoints: <int>}}
       flow_control: CONTINUE|SWITCH_STRATEGY|DONE
       tool_calls:
         - function: <tool_name>
           parameters:
             key: value
-  note: "For RETRY or ROLLBACK, set flow_control accordingly. SWITCH_STRATEGY example: result_status=PARTIAL, flow_control=SWITCH_STRATEGY (no tool_calls needed). DONE example: result_status=SUCCESS, key_metrics={wns: 0.125, tns: 0.0}, flow_control=DONE."
+  note: "For RETRY or ROLLBACK, set flow_control accordingly. SWITCH_STRATEGY example: result_status=PARTIAL, flow_control=SWITCH_STRATEGY (no tool_calls needed). DONE example: result_status=SUCCESS, key_metrics={{wns: 0.125, tns: 0.0}}, flow_control=DONE."
   self_check: "No XML/fences; starts with `step:` at col 0; 2-space indent; valid flow_control; no trailing text"
 
 timing_ops:
