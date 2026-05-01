@@ -31,8 +31,7 @@ strategies:
   skills: [analyze_net_detour, optimize_cell_placement, smart_region_search]
 
 tool_reference:
-  vivado: [open_checkpoint, report_timing_summary, get_critical_high_fanout_nets, report_utilization_for_pblock, create_and_apply_pblock, place_design, route_design, phys_opt_design, write_checkpoint, report_route_status, run_tcl]
-  get_raw_tool_output: "Retrieve complete raw Vivado output for previous tool call (use when full timing paths needed)"
+  vivado: [open_checkpoint, report_timing_summary, get_critical_high_fanout_nets, report_utilization_for_pblock, create_and_apply_pblock, place_design, route_design, phys_opt_design, write_checkpoint, report_route_status, run_tcl, get_raw_tool_output]
   rapidwright: [initialize_rapidwright, read_checkpoint, write_checkpoint, optimize_fanout_batch, analyze_critical_path_spread, analyze_fabric_for_pblock, convert_fabric_region_to_pblock, optimize_lut_input_cone, analyze_net_detour, optimize_cell_placement]
 
 measurement:

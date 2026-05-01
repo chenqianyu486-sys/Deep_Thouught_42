@@ -4,7 +4,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "minimax/minimax-m2.5:free"  # Default Flash model name
+  model_name: "tencent/hy3-preview:free"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
