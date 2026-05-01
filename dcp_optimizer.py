@@ -685,6 +685,8 @@ class DCPOptimizer(DCPOptimizerBase):
         self.best_wns = float('-inf')
         self._best_wns_iteration: Optional[int] = None  # Track which iteration achieved best WNS
         self.latest_wns: Optional[float] = None  # Cache for O(1) _get_current_wns()
+        self.latest_tns: Optional[float] = None  # Latest TNS from timing reports
+        self.latest_failing_endpoints: Optional[int] = None  # Latest failing endpoint count
         self.current_task_type = ""  # Current task type
         # Task type success rate tracking (task_type -> {success: int, total: int})
         self.task_type_stats: dict[str, dict[str, int]] = {}
@@ -728,8 +730,8 @@ class DCPOptimizer(DCPOptimizerBase):
         # Threshold configuration
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
-        self.GLOBAL_NO_IMPROVEMENT_LIMIT = 5         # Global no-improvement limit
-        self.MAX_TOOL_ROUNDS_PER_ITERATION = 30      # Max tool-calling rounds per iteration
+        self.GLOBAL_NO_IMPROVEMENT_LIMIT = 3         # Global no-improvement limit
+        self.MAX_TOOL_ROUNDS_PER_ITERATION = 50      # Max tool-calling rounds per iteration
         
         # Track token usage and costs
         self.total_prompt_tokens = 0
@@ -978,6 +980,8 @@ STRICTLY FORBIDDEN:
         current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
         best_wns_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
         clock_period_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
+        current_tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "N/A"
+        failing_eps_str = str(self.latest_failing_endpoints) if self.latest_failing_endpoints is not None else "N/A"
         best_wns_iter = self._best_wns_iteration
         best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
         input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
@@ -985,6 +989,8 @@ STRICTLY FORBIDDEN:
         state_section = f"""**Current Optimization State:**
 - iteration: {iteration}
 - current_wns: {current_wns_str}
+- current_tns: {current_tns_str}
+- failing_endpoints: {failing_eps_str}
 - best_wns: {best_wns_str} (achieved at iteration {best_wns_iter})
 - clock_period: {clock_period_str}
 - input_dcp: {input_dcp_str}
@@ -2081,23 +2087,40 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         timing_text = await self.call_tool("vivado_run_tcl", {"command": "report_timing_summary"})
                         result_text += "\n\n=== AUTO TIMING EVALUATION AFTER PHYS_OPT ===\n" + timing_text
 
-                        # Try to extract WNS and print to terminal for human to observe progress
-                        wns_match = re.search(r'WNS.*?([-\d.]+)', timing_text) or re.search(r'WNS\s*[=:]\s*([-\d.]+)', timing_text, re.IGNORECASE)
-                        if wns_match and hasattr(self, 'best_wns'):
-                            try:
-                                current_wns = float(wns_match.group(1))
-                                if not self._is_valid_wns(current_wns):
-                                    logger.warning(f"Auto-Eval: WNS value {current_wns:.3f} ns rejected by sanity check")
+                        # Try to extract WNS/TNS and print to terminal for human to observe progress
+                        timing_info = parse_timing_summary_static(timing_text)
+                        if timing_info["wns"] is not None:
+                            current_wns = timing_info["wns"]
+                            if not self._is_valid_wns(current_wns):
+                                logger.warning(f"Auto-Eval: WNS value {current_wns:.3f} ns rejected by sanity check")
+                            else:
+                                self.latest_wns = current_wns  # Cache for _get_current_wns()
+                                if timing_info["tns"] is not None:
+                                    self.latest_tns = timing_info["tns"]
+                                if timing_info["failing_endpoints"] is not None:
+                                    self.latest_failing_endpoints = timing_info["failing_endpoints"]
+                                if current_wns > self.best_wns:
+                                    logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
+                                    self.best_wns = current_wns
+                                    wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
                                 else:
-                                    self.latest_wns = current_wns  # Cache for _get_current_wns()
-                                    if current_wns > self.best_wns:
-                                        logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
-                                        self.best_wns = current_wns
-                                        wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
-                                    else:
-                                        logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
-                            except ValueError:
-                                logger.warning(f"Auto-Eval: WNS regex matched but float conversion failed: '{wns_match.group(1)}'")
+                                    logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
+                        elif timing_info["wns"] is None:
+                            # Fallback: regex for WNS if parse_timing_summary_static didn't find the header
+                            wns_match = re.search(r'WNS.*?([-\d.]+)', timing_text) or re.search(r'WNS\s*[=:]\s*([-\d.]+)', timing_text, re.IGNORECASE)
+                            if wns_match and hasattr(self, 'best_wns'):
+                                try:
+                                    current_wns = float(wns_match.group(1))
+                                    if self._is_valid_wns(current_wns):
+                                        self.latest_wns = current_wns
+                                        if current_wns > self.best_wns:
+                                            logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
+                                            self.best_wns = current_wns
+                                            wns_measured = current_wns
+                                        else:
+                                            logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
+                                except ValueError:
+                                    logger.warning(f"Auto-Eval: WNS regex matched but float conversion failed: '{wns_match.group(1)}'")
                 except Exception as eval_err:
                     logger.warning(f"Auto-eval timing failed: {eval_err}")
                     result_text += f"\n\n[Warning: Auto timing evaluation failed: {eval_err}]"
@@ -2110,6 +2133,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     if self._is_valid_wns(current_wns):
                         wns_measured = current_wns  # Store for tracking
                         self.latest_wns = current_wns  # Cache for _get_current_wns()
+                        # Also track TNS and failing_endpoints for context-aware optimization
+                        if timing_info["tns"] is not None:
+                            self.latest_tns = timing_info["tns"]
+                        if timing_info["failing_endpoints"] is not None:
+                            self.latest_failing_endpoints = timing_info["failing_endpoints"]
                         current_fmax = self.calculate_fmax(current_wns, self.clock_period)
 
                         # Format fmax string if available
@@ -2254,6 +2282,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         self.initial_wns = timing_info["wns"]
         self.initial_tns = timing_info["tns"]
         self.initial_failing_endpoints = timing_info["failing_endpoints"]
+        self.latest_tns = timing_info["tns"]
+        self.latest_failing_endpoints = timing_info["failing_endpoints"]
         self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
 
         # NOTE (Issue 7): _sync_state_to_memory_manager() is NOT called here.
@@ -2628,17 +2658,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 content = f"[User requested exit during tool round {tool_round}, iteration {self.iteration}]"
                 self._is_done_reason = "user_requested"
                 is_done = False
-                # [FIX] Mark that we broke without calling any tools - prevents tight continue loop
-                self._loop_break_without_tool_call = True
-                break
+                return content, is_done
             if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
                 logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
                 content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
                 self._is_done_reason = "tool_round_limit"
                 is_done = False
-                # [FIX] Mark that we broke without calling any tools - prevents tight continue loop
-                self._loop_break_without_tool_call = True
-                break
+                return content, is_done
             iteration_start_wns = self.best_wns
 
             # 1. Inject failed strategies via compat
@@ -2697,7 +2723,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         content = f"[User requested exit during LLM call, iteration {self.iteration}]"
                         self._is_done_reason = "user_requested"
                         is_done = False
-                        break
+                        return content, is_done
                     last_exception = None  # [FIX] Clear stale exception after successful fallback
                     # Update model_worker to current model after successful fallback
                     self.model_worker = current_model
@@ -2780,13 +2806,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             if last_exception is not None:
                 raise last_exception
 
-            # If response is None, user requested exit - exit the while loop
+            # If response is None, user requested exit - return directly
             if response is None:
-                logger.info(f"User requested exit, breaking out of tool_round loop")
+                logger.info(f"User requested exit, returning from get_completion")
                 content = f"[User requested exit during LLM call, iteration {self.iteration}]"
                 self._is_done_reason = "user_requested"
                 is_done = False
-                break
+                return content, is_done
 
             # Safely extract Usage and Cost (compatible with OpenRouter extended fields)
             try:
@@ -2813,7 +2839,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         logger.warning(f"Cost limit ${self.total_cost:.4f} >= ${self.cost_hard_limit:.2f}, stopping optimization")
                         content = f"[Cost limit reached: ${self.total_cost:.4f} >= ${self.cost_hard_limit:.2f}]"
                         is_done = True
-                        break
+                        return content, is_done
                     self.api_call_details.append({
                         "call_number": self.llm_call_count, "iteration": self.iteration,
                         "model": current_model,
@@ -2982,17 +3008,15 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 else:
                     # Target not met → end this iteration properly and move to next
                     logger.info("flow_control=DONE but target not met, moving to next iteration...")
-                    self._is_done_reason = "flow_control_done_next_iteration"
+                    # Guard: don't overwrite a higher-priority reason (e.g., max_iterations_reached)
+                    if self._is_done_reason is None:
+                        self._is_done_reason = "flow_control_done_next_iteration"
                     # Set flag to indicate iteration should end, not continue in tight loop
                     self._end_iteration_on_return = True
                 # Fall through to exit get_completion()
             elif not is_done:
-                if hasattr(self, '_loop_break_without_tool_call') and self._loop_break_without_tool_call:
-                    logger.info(f"Breaking from get_completion (no tool calls made in {tool_round} rounds)")
-                    delattr(self, '_loop_break_without_tool_call')
-                else:
-                    logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
-                    continue
+                logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
+                continue
 
             # At the end of get_completion(), before the return statement:
             if self.current_task_type:
@@ -3157,27 +3181,31 @@ CRITICAL OPTIMIZATION RULES:
             try:
                 result = await self.get_completion()
                 if result is None:
-                    logger.error("get_completion() returned None - exception escaped. Treating as tool_round_limit.")
+                    logger.error("get_completion() returned None - unhandled exception escaped. Treating as tool_round_limit.")
                     response_text = "[Internal error: get_completion returned None, treating as tool round limit]"
                     is_done = False
                 else:
                     response_text, is_done = result
                 print(f"\n{response_text}\n")
 
-                # Determine if this iteration had WNS improvement
-                current_best = self.best_wns if self.best_wns > float('-inf') else None
-                prev_best = getattr(self, '_prev_best_wns', None)
-                wns_improved = False
-                if current_best is not None and prev_best is not None:
-                    wns_improved = current_best > prev_best
-                elif current_best is not None and prev_best is None:
-                    wns_improved = True  # First valid WNS obtained is considered improvement
+                # [FIX] Inject corrective feedback when LLM prematurely declared DONE
+                # This ensures the next iteration's model knows optimization is NOT complete
+                if getattr(self, '_is_done_reason', None) == "flow_control_done_next_iteration":
+                    current_wns = self._get_current_wns()
+                    wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+                    tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "unknown"
+                    eps_str = str(self.latest_failing_endpoints) if self.latest_failing_endpoints is not None else "unknown"
+                    corrective_msg = (
+                        f"SYSTEM NOTICE: The previous model incorrectly used flow_control=DONE while "
+                        f"WNS is still {wns_str} (target: 0.0ns, gap: {abs(current_wns or 0):.3f}ns). "
+                        f"Optimization is NOT complete. "
+                        f"Current state: {eps_str} failing endpoints, TNS {tns_str}. "
+                        f"The system ended that iteration and is now starting a new one with fresh context. "
+                        f"You MUST continue optimization aggressively - DO NOT use DONE unless WNS >= 0.0."
+                    )
+                    self._compat.add_message("user", corrective_msg)
+                    logger.info("Injected corrective feedback for premature DONE signal")
 
-                # Simplified iteration end processing: update counters
-                self._on_iteration_end(wns_improved, self.last_used_model)
-
-                # Save this iteration's best_wns for next iteration comparison
-                self._prev_best_wns = self.best_wns
                 # [NEW] Routing failure fault tolerance handling
                 # Avoid adding route_design to failed_strategies due to routing timeout
                 # Only consider it a strategy failure when "routing failure" (non-timeout) is clearly detected
@@ -3283,7 +3311,21 @@ CRITICAL OPTIMIZATION RULES:
                 # If check failed after all retries, do not count this iteration - skip to next round without updating counters
                 if not (checkpoint_success and get_wns_success):
                     logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
-                    continue  # Skip to next iteration without _on_iteration_end
+                    continue
+
+                # [FIX] Determine WNS improvement AFTER checkpoint/get_wns confirms the actual WNS.
+                # Previously this ran before the checkpoint phase, so global_no_improvement and
+                # handoff prompts could use stale best_wns values. Now best_wns is guaranteed current.
+                current_best = self.best_wns if self.best_wns > float('-inf') else None
+                prev_best = getattr(self, '_prev_best_wns', None)
+                wns_improved = False
+                if current_best is not None and prev_best is not None:
+                    wns_improved = current_best > prev_best
+                elif current_best is not None and prev_best is None:
+                    wns_improved = True  # First valid WNS obtained is considered improvement
+
+                self._on_iteration_end(wns_improved, self.last_used_model)
+                self._prev_best_wns = self.best_wns
 
                 # [NEW] Per-iteration validation using intermediate checkpoint (every N iterations)
                 # Use validation_interval to avoid running validation too frequently

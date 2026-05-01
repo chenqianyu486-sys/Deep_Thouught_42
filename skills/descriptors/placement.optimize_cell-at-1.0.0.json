@@ -1,0 +1,53 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "placement.optimize_cell@1.0.0",
+  "displayName": "Optimize Cell Placement",
+  "description": "Move cells to centroid of their connections for better placement. MUTATING. Side effects: cell placement changes. Uses spiral search to find empty compatible sites.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "cell_placement"
+  ],
+  "timeout": {
+    "defaultMs": 60000,
+    "maxMs": 120000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "cell_names": {
+        "type": "array",
+        "description": "List of cell names to optimize"
+      }
+    },
+    "required": [
+      "cell_names"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

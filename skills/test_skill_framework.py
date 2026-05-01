@@ -37,9 +37,6 @@ class MockSkillForTest(Skill):
         self.execute_called = False
         self.execute_args = None
 
-    def get_metadata(self) -> SkillMetadata:
-        return self._skill_metadata
-
     def execute(self, context: SkillContext, **kwargs) -> SkillResult:
         self.execute_called = True
         self.execute_args = kwargs
@@ -61,10 +58,10 @@ def test_skill_registry_get():
 def test_skill_registry_get_registered_skill():
     """Test retrieving an already-registered skill."""
     # Skills are registered at import time
-    skill = SkillRegistry.get("analyze_net_detour")
-    assert skill is not None, "analyze_net_detour should be registered"
-    skill2 = SkillRegistry.get("optimize_cell_placement")
-    assert skill2 is not None, "optimize_cell_placement should be registered"
+    skill = SkillRegistry.get("net_detour")
+    assert skill is not None, "net_detour should be registered"
+    skill2 = SkillRegistry.get("optimize_cell")
+    assert skill2 is not None, "optimize_cell should be registered"
     print("  PASSED: get registered skills")
 
 
@@ -91,7 +88,7 @@ def test_skill_registry_list_all():
 def test_skill_registry_list_by_category():
     """Test filtering skills by category."""
     filtered = SkillRegistry.list_by_category(SkillCategory.ANALYSIS)
-    # Should have at least test_mock_skill and analyze_net_detour
+    # Should have at least test_mock_skill and net_detour
     assert len(filtered) >= 2, f"Expected at least 2 analysis skills, got {len(filtered)}"
     print(f"  PASSED: list by category ({len(filtered)} analysis skills)")
 
@@ -101,19 +98,19 @@ def test_skill_decorator_registration():
     skills = SkillRegistry.list_all()
     skill_names = [s.name for s in skills]
 
-    assert "analyze_net_detour" in skill_names, "AnalyzeNetDetourSkill should be registered"
-    assert "optimize_cell_placement" in skill_names, "OptimizeCellPlacementSkill should be registered"
+    assert "net_detour" in skill_names, "AnalyzeNetDetourSkill should be registered"
+    assert "optimize_cell" in skill_names, "OptimizeCellPlacementSkill should be registered"
     assert "test_mock_skill" in skill_names, "MockSkillForTest should be registered"
     print("  PASSED: @skill decorator registers automatically")
 
 
 def test_skill_metadata_from_decorator():
     """Test that metadata from decorator is correctly attached."""
-    skill = SkillRegistry.get("analyze_net_detour")
+    skill = SkillRegistry.get("net_detour")
     assert skill is not None
 
     meta = skill.get_metadata()
-    assert meta.name == "analyze_net_detour"
+    assert meta.name == "net_detour"
     assert meta.category == SkillCategory.ANALYSIS
     assert len(meta.parameters) == 2
     assert "design" in meta.required_context
@@ -140,7 +137,7 @@ def test_skill_context():
 
 def test_skill_execute():
     """Test skill execution."""
-    skill = SkillRegistry.get("analyze_net_detour")
+    skill = SkillRegistry.get("net_detour")
     assert skill is not None
 
     # execute with None design should return error result
@@ -155,7 +152,7 @@ def test_skill_execute():
 
 def test_skill_validate_inputs():
     """Test skill input validation."""
-    skill = SkillRegistry.get("analyze_net_detour")
+    skill = SkillRegistry.get("net_detour")
     assert skill is not None
 
     # Valid inputs
@@ -232,6 +229,21 @@ def test_skill_category_enum():
     print("  PASSED: SkillCategory enum")
 
 
+def test_skill_default_get_metadata():
+    """Test that Skill base class provides a default get_metadata()."""
+    skill = SkillRegistry.get("test_mock_skill")
+    assert skill is not None
+
+    # The default get_metadata() should return metadata injected by @skill
+    meta = skill.get_metadata()
+    assert meta.name == "test_mock_skill"
+    assert meta.description == "A mock skill for testing"
+    assert meta.category == SkillCategory.ANALYSIS
+    assert len(meta.parameters) == 1
+    assert meta.parameters[0].name == "required_param"
+    print("  PASSED: default get_metadata")
+
+
 def test_telemetry_record_execution():
     """Test SkillTelemetry recording."""
     from skills import SkillTelemetry, ExecutionStatus
@@ -276,7 +288,7 @@ def test_telemetry_execute_with_telemetry():
     from skills import SkillTelemetry
     SkillTelemetry.reset()
 
-    skill = SkillRegistry.get("analyze_net_detour")
+    skill = SkillRegistry.get("net_detour")
     assert skill is not None
 
     context = SkillContext(design=None, initialized=True)
@@ -284,7 +296,7 @@ def test_telemetry_execute_with_telemetry():
 
     assert result is not None
 
-    metrics = SkillTelemetry.get_metrics("analyze_net_detour")
+    metrics = SkillTelemetry.get_metrics("net_detour")
     assert metrics is not None
     assert metrics["total_calls"] == 1
     print("  PASSED: execute_with_telemetry")
@@ -296,10 +308,10 @@ def test_telemetry_get_all_metrics():
     SkillTelemetry.reset()
 
     # Record something first
-    SkillTelemetry.record_execution("analyze_net_detour", 50.0, ExecutionStatus.SUCCESS)
+    SkillTelemetry.record_execution("net_detour", 50.0, ExecutionStatus.SUCCESS)
 
     all_metrics = SkillTelemetry.get_all_metrics()
-    assert "analyze_net_detour" in all_metrics
+    assert "net_detour" in all_metrics
     print("  PASSED: get all metrics")
 
 
@@ -336,6 +348,128 @@ def test_telemetry_execution_summary():
     print("  PASSED: execution summary")
 
 
+def test_skill_descriptor_id_format():
+    """Test that skill IDs follow {namespace}.{name}@version format."""
+    for meta in SkillRegistry.list_all():
+        if meta.name == "test_mock_skill":
+            assert meta.id == "analysis.test_mock_skill@1.0.0"
+            continue
+        assert "@" in meta.id, f"ID '{meta.id}' missing version"
+        parts = meta.id.split("@")
+        assert len(parts) == 2
+        assert parts[1].count(".") == 2  # MAJOR.MINOR.PATCH
+    print("  PASSED: descriptor ID format")
+
+
+def test_skill_to_json_schema():
+    """Test that skills can generate valid JSON Schema for parameters."""
+    for meta in SkillRegistry.list_all():
+        schema = meta.to_json_schema()
+        assert schema.get("type") == "object"
+        assert schema.get("additionalProperties") is False
+        if meta.parameters:
+            assert "properties" in schema
+            assert len(schema["properties"]) == len(meta.parameters)
+    print("  PASSED: to_json_schema")
+
+
+def test_skill_descriptor_generation():
+    """Test that skills can generate the full descriptor dict."""
+    for meta in SkillRegistry.list_all():
+        desc = meta.to_descriptor()
+        assert "$schema" in desc
+        assert desc["specVersion"] == "3.0"
+        assert desc["id"] == meta.id
+        assert desc["displayName"]
+        assert desc["description"]
+        assert desc["idempotency"] in ("safe", "idempotent", "non-idempotent")
+        assert isinstance(desc["sideEffects"], list)
+        assert "defaultMs" in desc["timeout"]
+        assert "maxMs" in desc["timeout"]
+        assert desc["authentication"]["type"] == "none"
+        assert desc["parameters"]["type"] == "object"
+        assert isinstance(desc["errors"], list)
+    print("  PASSED: descriptor generation")
+
+
+def test_skill_error_code():
+    """Test SkillError dataclass and error code metadata."""
+    from skills.errors import SkillError, SkillErrorCode, ERROR_METADATA
+
+    # Basic error creation
+    err = SkillError.from_code(SkillErrorCode.INVALID_PARAMETER, message="test error")
+    assert err.code == "INVALID_PARAMETER"
+    assert not err.recoverable
+
+    # Recoverable error
+    err2 = SkillError.from_code(SkillErrorCode.TEMPORARILY_UNAVAILABLE)
+    assert err2.recoverable
+
+    # to_dict format matches spec
+    d = err.to_dict()
+    assert d["code"] == "INVALID_PARAMETER"
+    assert d["message"] == "test error"
+
+    # Error metadata is exhaustive
+    expected_codes = {
+        "INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "PERMISSION_DENIED",
+        "QUOTA_EXCEEDED", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT",
+        "CONCURRENT_MODIFICATION",
+    }
+    assert set(ERROR_METADATA.keys()) == expected_codes
+    print("  PASSED: error code contract")
+
+
+def test_skill_idempotency_store():
+    """Test IdempotencyStore basic operations."""
+    from skills.idempotency import IdempotencyStore
+    IdempotencyStore.reset()
+
+    assert not IdempotencyStore.is_duplicate("key1")
+    IdempotencyStore.store("key1", {"result": "data"})
+    assert IdempotencyStore.is_duplicate("key1")
+    assert IdempotencyStore.get_result("key1") == {"result": "data"}
+    print("  PASSED: idempotency store")
+
+
+def test_skill_inflight_guard():
+    """Test concurrent mutation guard."""
+    from skills.idempotency import IdempotencyStore
+    IdempotencyStore.reset()
+
+    acquired = IdempotencyStore.set_inflight("resource_1", "key-001")
+    assert acquired, "Should acquire lock"
+
+    not_acquired = IdempotencyStore.set_inflight("resource_1", "key-002")
+    assert not not_acquired, "Should NOT acquire already-locked resource"
+
+    assert IdempotencyStore.has_inflight("resource_1")
+    assert IdempotencyStore.get_inflight_key("resource_1") == "key-001"
+
+    IdempotencyStore.clear_inflight("resource_1")
+    assert not IdempotencyStore.has_inflight("resource_1")
+    print("  PASSED: inflight guard")
+
+
+def test_skill_trace_attributes():
+    """Test SkillTraceAttributes emission."""
+    from skills.tracing import SkillTraceAttributes
+
+    attrs = SkillTraceAttributes.from_execution(
+        skill_id="analysis.net_detour@1.0.0",
+        call_id="call_001",
+        outcome="success",
+        latency_ms=42.5,
+    )
+    d = attrs.to_dict()
+    assert d["skill.id"] == "analysis.net_detour@1.0.0"
+    assert d["skill.call_id"] == "call_001"
+    assert d["skill.outcome"] == "success"
+    assert d["skill.latency_ms"] == 42.5
+    assert d["skill.cache_hit"] is False
+    print("  PASSED: trace attributes")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -357,12 +491,20 @@ def main():
         test_skill_metadata_dataclass,
         test_parameter_spec,
         test_skill_category_enum,
+        test_skill_default_get_metadata,
         test_telemetry_record_execution,
         test_telemetry_metrics,
         test_telemetry_execute_with_telemetry,
         test_telemetry_get_all_metrics,
         test_telemetry_get_recent_executions,
         test_telemetry_execution_summary,
+        test_skill_descriptor_id_format,
+        test_skill_to_json_schema,
+        test_skill_descriptor_generation,
+        test_skill_error_code,
+        test_skill_idempotency_store,
+        test_skill_inflight_guard,
+        test_skill_trace_attributes,
     ]
 
     passed = 0

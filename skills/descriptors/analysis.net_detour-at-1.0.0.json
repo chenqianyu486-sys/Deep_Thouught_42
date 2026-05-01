@@ -1,0 +1,56 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "analysis.net_detour@1.0.0",
+  "displayName": "Analyze Net Detour",
+  "description": "Analyze detour ratios for cells on critical paths. READ-ONLY. detour_ratio = routed_path_length / manhattan_distance. Ratio > 2.0 suggests cell may benefit from re-placement.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 30000,
+    "maxMs": 60000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "pin_paths": {
+        "type": "array",
+        "description": "Pin path list from Vivado's extract_critical_path_pins"
+      },
+      "detour_threshold": {
+        "type": "number",
+        "description": "Minimum ratio to flag as problematic",
+        "default": 2.0
+      }
+    },
+    "required": [
+      "pin_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

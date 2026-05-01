@@ -1682,9 +1682,9 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
     try:
         from skills import SkillRegistry, SkillContext
 
-        skill = SkillRegistry.get("analyze_net_detour")
+        skill = SkillRegistry.get("net_detour")
         if skill is None:
-            return {"error": "Skill 'analyze_net_detour' not found in registry"}
+            return {"error": "Skill 'net_detour' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
         result = skill.execute_with_telemetry(context, pin_paths=pin_paths, detour_threshold=detour_threshold)
@@ -1745,7 +1745,7 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
     try:
         from skills import SkillRegistry, SkillContext
 
-        skill = SkillRegistry.get("optimize_cell_placement")
+        skill = SkillRegistry.get("optimize_cell")
         if skill is None:
             return {"error": "Skill 'optimize_cell_placement' not found in registry"}
 
@@ -1839,9 +1839,9 @@ def smart_region_search(
     try:
         from skills import SkillRegistry, SkillContext
 
-        skill = SkillRegistry.get("smart_region_search")
+        skill = SkillRegistry.get("smart_region")
         if skill is None:
-            return {"error": "Skill 'smart_region_search' not found in registry"}
+            return {"error": "Skill 'smart_region' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
         result = skill.execute_with_telemetry(

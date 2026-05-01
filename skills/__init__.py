@@ -6,6 +6,13 @@ Skill framework for FPGA optimization.
 
 This module provides a standardized skill mechanism for defining,
 registering, and invoking skills within the optimization system.
+
+The framework follows the Skill Descriptor v3 specification:
+    - Strongly-typed parameter contracts via JSON Schema
+    - Standardized error envelopes for Agent-safe error handling
+    - Idempotency and concurrency guards
+    - Tracing and observability attributes
+    - Machine-readable JSON descriptor files for each skill
 """
 
 from skills.base import (
@@ -16,6 +23,7 @@ from skills.base import (
     ParameterSpec,
 )
 from skills.context import SkillContext
+from skills.errors import SkillError, SkillErrorCode, ERROR_METADATA
 from skills.registry import SkillRegistry
 from skills.skill_decorator import skill
 from skills.telemetry import (
@@ -25,6 +33,10 @@ from skills.telemetry import (
     ExecutionStatus,
     SkillExecutionTimer,
 )
+from skills.idempotency import IdempotencyStore
+from skills.descriptor import export_all, write_descriptor, read_descriptor
+from skills.tracing import SkillTraceAttributes
+from skills.validate_descriptors import validate_descriptor
 
 # Import submodules to trigger @skill decorators
 from skills import net_detour_optimization
@@ -36,6 +48,9 @@ __all__ = [
     "SkillMetadata",
     "SkillResult",
     "ParameterSpec",
+    "SkillError",
+    "SkillErrorCode",
+    "ERROR_METADATA",
     "SkillContext",
     "SkillRegistry",
     "skill",
@@ -44,4 +59,10 @@ __all__ = [
     "SkillMetrics",
     "ExecutionStatus",
     "SkillExecutionTimer",
+    "IdempotencyStore",
+    "SkillTraceAttributes",
+    "export_all",
+    "write_descriptor",
+    "read_descriptor",
+    "validate_descriptor",
 ]

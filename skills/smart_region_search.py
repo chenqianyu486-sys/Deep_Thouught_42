@@ -12,7 +12,7 @@ region that satisfies capacity requirements while avoiding delay-heavy columns.
 from dataclasses import dataclass
 from typing import Optional
 
-from skills.base import Skill, SkillMetadata, SkillResult, SkillCategory, ParameterSpec
+from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 
@@ -362,12 +362,19 @@ def smart_region_search(
 
 
 @skill(
-    name="smart_region_search",
+    name="smart_region",
+    namespace="placement",
+    version="1.0.0",
+    display_name="Smart Region Search",
     description="Find optimal pblock region using greedy expansion from reference point. "
+                "READ-ONLY. "
                 "Input: target resource counts (LUT/FF/DSP/BRAM) and optional reference coordinates. "
                 "Output: optimal rectangular region and pblock description in one call. "
                 "Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns.",
     category=SkillCategory.PLACEMENT,
+    idempotency="safe",
+    side_effects=[],
+    timeout_ms=60000,
     parameters=[
         ParameterSpec("target_lut_count", int, "Required number of LUTs"),
         ParameterSpec("target_ff_count", int, "Required number of FFs"),
@@ -376,37 +383,21 @@ def smart_region_search(
         ParameterSpec("reference_col", int, "Reference column coordinate (optional)", default=None),
         ParameterSpec("reference_row", int, "Reference row coordinate (optional)", default=None)
     ],
-    required_context=["design"]
+    required_context=["design"],
+    error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class SmartRegionSearchSkill(Skill):
     """Skill for intelligent pblock region search."""
 
-    def get_metadata(self) -> SkillMetadata:
-        return self._skill_metadata
-
-    def execute(self, context: SkillContext, **kwargs) -> SkillResult:
-        """Execute the smart region search.
-
-        Args:
-            target_lut_count: Required LUTs
-            target_ff_count: Required FFs
-            target_dsp_count: Required DSPs (default 0)
-            target_bram_count: Required BRAMs (default 0)
-            reference_col: Reference column (optional)
-            reference_row: Reference row (optional)
-        """
-        target_lut = kwargs.get("target_lut_count", 0)
-        target_ff = kwargs.get("target_ff_count", 0)
-        target_dsp = kwargs.get("target_dsp_count", 0)
-        target_bram = kwargs.get("target_bram_count", 0)
-        ref_col = kwargs.get("reference_col")
-        ref_row = kwargs.get("reference_row")
-
+    def execute(self, context: SkillContext,
+                target_lut_count: int, target_ff_count: int,
+                target_dsp_count: int = 0, target_bram_count: int = 0,
+                reference_col: int | None = None, reference_row: int | None = None) -> SkillResult:
         try:
             result = smart_region_search(
                 context.design,
-                target_lut, target_ff, target_dsp, target_bram,
-                ref_col, ref_row
+                target_lut_count, target_ff_count, target_dsp_count, target_bram_count,
+                reference_col, reference_row
             )
 
             # Convert to dict for serialization
@@ -437,10 +428,6 @@ class SmartRegionSearchSkill(Skill):
             return SkillResult(success=(result.status == "success"), data=result_dict, error=None if result.status == "success" else result.message)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
-
-    def execute_with_telemetry(self, context: SkillContext, **kwargs) -> SkillResult:
-        """Execute with telemetry instrumentation."""
-        return Skill.execute_with_telemetry(self, context, **kwargs)
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
         if "target_lut_count" not in kwargs:

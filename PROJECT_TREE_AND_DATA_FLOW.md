@@ -26,17 +26,23 @@ fpl26_optimization_contest/
 │   ├── server.py                 # MCP服务器入口
 │   └── test_server.py            # 服务器测试
 ├── VivadoMCP/                    # Vivado MCP服务器
-├── skills/                       # Skill框架（标准接口、注册发现机制）
-│   ├── __init__.py                  # 导出 Skill, SkillRegistry, SkillContext, SkillTelemetry
-│   ├── base.py                      # Skill基类、元数据、结果定义
-│   ├── context.py                   # SkillContext依赖注入
-│   ├── registry.py                   # SkillRegistry注册发现
-│   ├── skill_decorator.py           # @skill装饰器
-│   ├── telemetry.py                  # 可观测性：执行记录、指标聚合、查询接口
-│   ├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
-│   ├── smart_region_search.py       # Skill类 + 纯函数：智能区域搜索（贪心扩展算法）
+├── skills/                       # Skill框架（Skill Descriptor v3 规范实现）
+│   ├── __init__.py                  # 导出所有公共符号
+│   ├── base.py                      # Skill基类、SkillMetadata、SkillResult、ParameterSpec
+│   ├── context.py                   # SkillContext依赖注入（design, call_id, idempotency_key）
+│   ├── registry.py                  # SkillRegistry注册发现
+│   ├── skill_decorator.py           # @skill装饰器（增强版：namespace/version/idempotency）
+│   ├── telemetry.py                 # 可观测性：执行记录、指标聚合、error_code追踪
+│   ├── errors.py                    # 错误契约：SkillErrorCode, ERROR_METADATA, SkillError信封
+│   ├── idempotency.py               # 幂等性存储 + 并发变异保护（423 Locked）
+│   ├── tracing.py                   # 追踪属性：SkillTraceAttributes（OTel兼容）
+│   ├── descriptor.py                # JSON描述符生成/导出
+│   ├── validate_descriptors.py      # CI验证套件（Schema/Enum/Description检查）
+│   ├── net_detour_optimization.py   # Skill类 + 纯函数：绕路比率分析 + 重心放置优化
+│   ├── smart_region_search.py       # Skill类 + 纯函数：智能PBlock区域搜索
+│   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
-│   └── test_skill_framework.py      # 集成测试（SkillRegistry/Skill/Telemetry）
+│   └── test_skill_framework.py      # 28项集成测试（注册/执行/遥测/错误/幂等/追踪）
 ```
 
 ## 2. 核心数据流
@@ -73,12 +79,13 @@ YAMLStructuredCompressor:
 4. 添加system + 压缩后的非system消息            ← 重建
 ```
 
-### 2.3 WNS状态注入（防压缩丢失）
+### 2.3 WNS/TNS状态注入（防压缩丢失）
 
 ```
 API调用前 → _inject_wns_state_to_system_prompt()
     - 更新wns_ns、clock_period_ns
-    - 追加"Current Optimization State:"块
+    - 注入 current_tns、failing_endpoints（2026-05-01 新增）
+    - 追加"Current Optimization State:"块（含 WNS/TNS/failing_endpoints/best_checkpoint/next_model）
     → 模型始终看到当前状态，不依赖working memory
 ```
 
@@ -88,6 +95,7 @@ API调用前 → _inject_wns_state_to_system_prompt()
 |------|----------|----------|
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
 | WNS状态 | MemoryManager（独立于WM） | API调用时注入 |
+| TNS/Failing Endpoints | DCPOptimizer.latest_tns/latest_failing_endpoints | API调用时随 WNS 一同注入 |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 失败策略 | CompressionContext | 存入YAML输出 |
 
@@ -121,51 +129,57 @@ WORKER: deepseek/deepseek-v4-flash (500K context, 快速执行)
 
 ```
 skills/
-├── Skill (base.py)              # 抽象基类，定义 get_metadata() / execute()
-├── SkillMetadata                # 元数据：name, description, category, parameters
-├── SkillResult                  # 执行结果：success, data, error
-├── SkillContext                 # 依赖注入：design, initialized, tools
-├── SkillRegistry                # 注册/发现：register(), get(), list_all(), list_by_category()
-├── @skill decorator             # 自动注册 Skill 类
-├── SkillTelemetry               # 可观测性：record_execution(), get_metrics(), get_all_metrics()
-├── SkillExecutionTimer           # 执行计时上下文管理器
-├── net_detour_optimization.py   # Skill类 + 纯函数（向后兼容）
-└── smart_region_search.py       # Skill类 + 纯函数：智能区域搜索
+├── Skill (base.py)                 # 抽象基类 + 默认 get_metadata()
+├── SkillMetadata                   # 元数据（Skill Descriptor v3 规范）
+│   ├── id                          # 全限定名: {namespace}.{name}@{version}
+│   ├── idempotency / side_effects  # 契约声明
+│   ├── error_codes                 # 可声明错误码
+│   └── to_descriptor() / to_json_schema()
+├── SkillResult + SkillError        # 结构化执行结果 + 错误信封
+├── SkillContext                    # 依赖注入：design, call_id, idempotency_key
+├── SkillRegistry                   # 注册/发现：register(), get(), list_all()
+├── @skill decorator                # 增强版：支持 namespace/version/idempotency 等
+│
+├── errors.py                       # 错误契约：SkillErrorCode, ERROR_METADATA
+├── idempotency.py                  # 幂等性存储 + 并发变异保护
+├── tracing.py                      # 追踪属性：SkillTraceAttributes
+├── descriptor.py                   # JSON 描述符生成/导出 → skills/descriptors/*.json
+├── validate_descriptors.py         # CI 验证套件（Schema/Enum/Description 检查）
+│
+├── telemetry.py                    # SkillTelemetry + SkillExecutionTimer
+├── net_detour_optimization.py      # Skill类 + 纯函数
+├── smart_region_search.py          # Skill类 + 纯函数
+├── descriptors/                    # 自动生成的 JSON 描述符文件
+└── test_skill_framework.py         # 28 项测试（含编排/执行/遥测/错误/幂等）
 
 已注册 Skills:
-├── analyze_net_detour           # 分析关键路径网络的绕路比率
-├── optimize_cell_placement      # 基于重心优化单元布局
-└── smart_region_search          # 智能 PBlock 区域搜索（贪心扩展）
-
-LLM 调用 Skill 方式:
-Agent → MCP Tool (如 smart_region_search)
-         ↓
-   rapidwright_tools.py wrapper
-         ↓
-   SkillRegistry.get("smart_region_search")
-         ↓
-   SmartRegionSearchSkill.execute_with_telemetry(context, **kwargs)
-         ↓
-   返回 SkillResult (success, data, error)
+├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率
+├── placement.optimize_cell@1.0.0       # 基于重心优化单元布局（non-idempotent）
+└── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索
 
 调用链:
-Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get() → Skill.execute()
-                                      ↓
-                            SkillContext(design=_current_design)
+Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get()
+         ↓
+   SkillContext(design, call_id, idempotency_key)
+         ↓
+   Skill.execute_with_telemetry(context, **kwargs)
+     ├── 幂等性检查（idempotent/non-idempotent）
+     ├── Heartbeat daemon（30秒间隔）
+     ├── self.execute(context, **kwargs)
+     ├── 追踪属性发射（SkillTraceAttributes）
+     ├── SkillTelemetry.record_execution(duration_ms, status, error_code)
+     └── 返回 SkillResult(success, data, error, error_code)
 
-Telemetry:
-Skill.execute_with_telemetry() → 自动记录 duration_ms, status, params_summary
-                                    ↓
-                            SkillTelemetry.record_execution()
-                                    ↓
-                            SkillMetrics (聚合) + SkillExecutionRecord (历史)
-
-Heartbeat:
-- execute_with_telemetry() 启动 daemon heartbeat thread
-- 每30秒打印 [SKILL_HEARTBEAT] Skill '{name}' still running after {elapsed}s
-- 包含 extra: skill_name, heartbeat_elapsed, heartbeat_count
-- 技能完成时打印 [SKILL_COMPLETE] '{name}' completed in {duration_ms}ms (heartbeats: {n})
-- 快速完成的技能无 heartbeat 输出（30秒间隔内完成不触发）
+JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）：
+├── $schema / specVersion / id / displayName
+├── idempotency: "safe" | sideEffects: []
+├── timeout: { defaultMs: 30000, maxMs: 60000 }
+├── authentication: { type: "none" }
+├── parameters: type=object, additionalProperties=false
+│   ├── pin_paths: { type: array, description, required }
+│   └── detour_threshold: { type: number, default: 2.0 }
+├── returns: { type: object, additionalProperties: false }
+└── errors: [{ code, recoverable }, ...]
 ```
 
 ## 3. 事件系统
@@ -200,11 +214,18 @@ planner:
 ## 5. 迭代控制
 
 ```python
-MAX_TOOL_ROUNDS_PER_ITERATION = 30
-GLOBAL_NO_IMPROVEMENT_LIMIT = 5
+MAX_TOOL_ROUNDS_PER_ITERATION = 50
+GLOBAL_NO_IMPROVEMENT_LIMIT = 3
 WNS_TARGET_THRESHOLD = 0.0  # 0.0ns = 时序收敛
 
-继续条件: iteration<50 AND WNS<0 AND global_no_improvement<5 AND tool_rounds<=22
+迭代流程:
+1. get_completion() → LLM tool-calling 循环
+2. checkpoint 保存 + get_wns 确认 WNS → 更新 best_wns/latest_tns/latest_failing_endpoints
+3. [FIX] 计算 wns_improved → _on_iteration_end() → _prev_best_wns (在 checkpoint 确认后)
+4. 中间验证 (每 N 迭代)
+5. 下一迭代
+
+继续条件: iteration<50 AND WNS<0 AND global_no_improvement<3 AND tool_rounds<=22
          AND checkpoint保存成功 AND get_wns返回有效值
 
 WNS回归处理: WNS<0且差于best时自动回滚
@@ -268,6 +289,31 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | LLM 返回 `flow_control: DONE`，WNS>=0 | 继续空转 | 正确退出优化 |
 | LLM 返回无 tool_calls，无 DONE 信号 | continue 回循环 | 沿用原有逻辑 |
 
+### 5.4 flow_control=DONE 优化补丁（2026-05-01）
+
+**问题 1: WNS 改善判定时序错误**
+- `_on_iteration_end()` 和 `_prev_best_wns` 在 checkpoint/get_wns 之前执行，导致 `global_no_improvement` 可能使用 stale WNS 错误递增
+- **修复**: 将 `_on_iteration_end()` 和 `_prev_best_wns` 移到 checkpoint/get_wns 成功之后，确保 counter、model selection、handoff prompt 都使用确认后的 WNS
+
+**问题 2: get_completion() break→None 返回**
+- `user_requested`、`tool_round_limit`、`cost_limit` 等路径使用 `break` 退出 while 循环，导致 `get_completion()` 隐式返回 None
+- `optimize()` 将 None 统一当 `tool_round_limit` 处理，`cost_limit` 的真实原因丢失
+- **修复**: 所有 `break` 改为 `return content, is_done`，确保退出原因正确传递
+- `_is_done_reason` 覆盖添加 `if self._is_done_reason is None:` guard
+
+**问题 4: LLM 过早声明 DONE**
+- System Prompt 定义 `DONE: "Optimization complete"` 但系统实际将 WNS<0 时的 DONE 诠释为"迭代结束"——语义不匹配
+- TNS 和 failing_endpoints 未注入 Context，LLM 缺少对问题规模的全局感知
+- **修复**:
+  - `SYSTEM_PROMPT.TXT`: DONE 语义收紧为 `WNS >= 0 achieved`；新增 `flow_control_rules` 显式规则；新增 `strategy_exhausted` 示例（用 SWITCH_STRATEGY 替代 DONE）
+  - `_inject_wns_state_to_system_prompt()`: 注入 `current_tns` 和 `failing_endpoints` 到 Current Optimization State
+  - 新增 `latest_tns`、`latest_failing_endpoints` 实时追踪（auto-eval + report_timing_summary）
+  - `optimize()`: 检测到 `flow_control_done_next_iteration` 时注入 corrective feedback user message，告知下一 LLM "上轮过早 DONE，优化未完成"
+
+**新增状态变量**:
+- `latest_tns: Optional[float]` — 最新 TNS（从 timing report / auto-eval 获取）
+- `latest_failing_endpoints: Optional[int]` — 最新失败端点计数
+
 ## 6. 429降级机制
 
 ```
@@ -297,7 +343,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 |------|------|
 | `cost_limit` | 达到$1.00硬限制 |
 | `wns_target_met` | WNS>=0.0（时序收敛） |
-| `max_iterations_reached` | 5次迭代无改进 |
+| `max_iterations_reached` | 3次迭代无改进 |
 | `tool_round_limit` | 22轮工具调用达限 |
 | `user_requested` | 用户输入quit |
 | `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |

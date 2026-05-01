@@ -206,11 +206,16 @@ response_format:
   key_metrics: "Mapping with actual numbers after timing-related steps; use `null` for non-timing steps (e.g., pblock creation)"
 
   flow_control:
-    CONTINUE: "Proceed to next step"
+    CONTINUE: "Proceed to next step in current strategy"
     RETRY: "Repeat with modified params (max 3 retries per step)"
     ROLLBACK: "Revert to best checkpoint and re-evaluate"
     SWITCH_STRATEGY: "Abandon current, try next in decision tree"
-    DONE: "Optimization complete; save output"
+    DONE: "WNS >= 0 achieved — optimization complete, save output"
+
+  flow_control_rules:
+    - "DENSE is ONLY valid when WNS >= 0.0 ns (timing converged). The system will reject DONE when WNS < 0 and continue to the next iteration with a new model."
+    - "If WNS is still negative but you have exhausted all strategies in this iteration, use SWITCH_STRATEGY to signal the system to start a fresh iteration with updated context."
+    - "Check key_metrics in the Current Optimization State section of the system prompt for the authoritative WNS value before choosing flow_control."
 
   tool_call_format:
     description: "Each tool call is a YAML mapping with `function` (tool name) and `parameters` (argument mapping). Use standard YAML nesting with consistent 2-space indentation."
@@ -245,6 +250,18 @@ response_format:
           wns: 0.125
           tns: 0.0
         flow_control: DONE
+      note: "DONE is ONLY valid when WNS >= 0.0. If WNS < 0, use SWITCH_STRATEGY or CONTINUE instead."
+
+    strategy_exhausted: |
+      step:
+        step_id: 4
+        result_status: PARTIAL
+        key_metrics:
+          wns: -0.466
+          tns: -431.3
+          failing_endpoints: 1481
+        flow_control: SWITCH_STRATEGY
+      note: "Use SWITCH_STRATEGY when the current strategy has been fully explored but WNS is still below target. The system will end this iteration and start a new one with a fresh model."
 
     switch_strategy: |
       step:

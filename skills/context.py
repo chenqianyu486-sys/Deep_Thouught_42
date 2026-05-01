@@ -20,3 +20,5 @@ class SkillContext:
     initialized: bool = False
     tools: dict[str, Callable] = field(default_factory=dict)
     trace_id: str = ""
+    call_id: str = ""               # Unique invocation identifier
+    idempotency_key: str = ""       # Idempotency key for replay detection

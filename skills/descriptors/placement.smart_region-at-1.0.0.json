@@ -1,0 +1,76 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "placement.smart_region@1.0.0",
+  "displayName": "Smart Region Search",
+  "description": "Find optimal pblock region using greedy expansion from reference point. READ-ONLY. Input: target resource counts (LUT/FF/DSP/BRAM) and optional reference coordinates. Output: optimal rectangular region and pblock description in one call. Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 60000,
+    "maxMs": 120000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "target_lut_count": {
+        "type": "integer",
+        "description": "Required number of LUTs"
+      },
+      "target_ff_count": {
+        "type": "integer",
+        "description": "Required number of FFs"
+      },
+      "target_dsp_count": {
+        "type": "integer",
+        "description": "Required number of DSPs",
+        "default": 0
+      },
+      "target_bram_count": {
+        "type": "integer",
+        "description": "Required number of BRAMs",
+        "default": 0
+      },
+      "reference_col": {
+        "type": "integer",
+        "description": "Reference column coordinate (optional)"
+      },
+      "reference_row": {
+        "type": "integer",
+        "description": "Reference row coordinate (optional)"
+      }
+    },
+    "required": [
+      "target_lut_count",
+      "target_ff_count",
+      "reference_col",
+      "reference_row"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

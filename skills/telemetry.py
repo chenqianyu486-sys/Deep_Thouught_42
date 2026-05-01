@@ -33,6 +33,7 @@ class SkillExecutionRecord:
     duration_ms: float
     status: ExecutionStatus
     error: Optional[str] = None
+    error_code: str = ""  # Canonical error code from SkillErrorCode
     params_summary: str = ""  # Sanitized params for logging
 
     def to_dict(self) -> dict:
@@ -42,6 +43,7 @@ class SkillExecutionRecord:
             "duration_ms": round(self.duration_ms, 2),
             "status": self.status.value,
             "error": self.error,
+            "error_code": self.error_code,
             "params_summary": self.params_summary
         }
 
@@ -60,6 +62,7 @@ class SkillMetrics:
     max_duration_ms: float = 0.0
     last_execution: Optional[datetime] = None
     last_error: Optional[str] = None
+    last_error_code: str = ""
 
     @property
     def success_rate(self) -> float:
@@ -86,6 +89,8 @@ class SkillMetrics:
         elif record.status == ExecutionStatus.FAILURE:
             self.failure_count += 1
             self.last_error = record.error
+            if record.error_code:
+                self.last_error_code = record.error_code
         elif record.status == ExecutionStatus.VALIDATION_ERROR:
             self.validation_error_count += 1
         elif record.status == ExecutionStatus.SKIPPED:
@@ -105,7 +110,8 @@ class SkillMetrics:
             "min_duration_ms": round(self.min_duration_ms, 2) if self.min_duration_ms != float('inf') else 0,
             "max_duration_ms": round(self.max_duration_ms, 2),
             "last_execution": self.last_execution.isoformat() if self.last_execution else None,
-            "last_error": self.last_error
+            "last_error": self.last_error,
+            "last_error_code": self.last_error_code
         }
 
 
@@ -131,6 +137,7 @@ class SkillTelemetry:
         duration_ms: float,
         status: ExecutionStatus,
         error: Optional[str] = None,
+        error_code: str = "",
         params_summary: str = ""
     ) -> SkillExecutionRecord:
         """Record a skill execution.
@@ -140,6 +147,7 @@ class SkillTelemetry:
             duration_ms: Execution duration in milliseconds
             status: Execution status
             error: Error message if failed
+            error_code: Canonical error code from SkillErrorCode
             params_summary: Sanitized parameter summary for logging
 
         Returns:
@@ -151,6 +159,7 @@ class SkillTelemetry:
             duration_ms=duration_ms,
             status=status,
             error=error,
+            error_code=error_code,
             params_summary=params_summary
         )
 

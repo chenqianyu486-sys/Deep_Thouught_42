@@ -14,7 +14,7 @@ The skill layer contains pure functions; MCP tool wrappers delegate to these.
 from dataclasses import dataclass, field
 from typing import Optional
 
-from skills.base import Skill, SkillMetadata, SkillResult, SkillCategory, ParameterSpec
+from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 
@@ -619,37 +619,33 @@ def optimize_cell_placement(
 
 
 @skill(
-    name="analyze_net_detour",
-    description="Analyze detour ratios for cells on critical paths. "
+    name="net_detour",
+    namespace="analysis",
+    version="1.0.0",
+    display_name="Analyze Net Detour",
+    description="Analyze detour ratios for cells on critical paths. READ-ONLY. "
                 "detour_ratio = routed_path_length / manhattan_distance. "
                 "Ratio > 2.0 suggests cell may benefit from re-placement.",
     category=SkillCategory.ANALYSIS,
+    idempotency="safe",
+    side_effects=[],
+    timeout_ms=30000,
     parameters=[
         ParameterSpec("pin_paths", list, "Pin path list from Vivado's extract_critical_path_pins"),
         ParameterSpec("detour_threshold", float, "Minimum ratio to flag as problematic", default=2.0)
     ],
-    required_context=["design"]
+    required_context=["design"],
+    error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class AnalyzeNetDetourSkill(Skill):
     """Skill for analyzing detour ratios of nets on critical paths."""
 
-    def get_metadata(self) -> SkillMetadata:
-        return self._skill_metadata
-
     def execute(self, context: SkillContext, pin_paths: list, detour_threshold: float = 2.0) -> SkillResult:
-        """Execute the skill business logic.
-
-        For telemetry, use execute_with_telemetry() instead.
-        """
         try:
             results = analyze_net_detour(context.design, pin_paths, detour_threshold)
             return SkillResult(success=True, data=results)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
-
-    def execute_with_telemetry(self, context: SkillContext, pin_paths: list, detour_threshold: float = 2.0) -> SkillResult:
-        """Execute with telemetry instrumentation."""
-        return Skill.execute_with_telemetry(self, context, pin_paths=pin_paths, detour_threshold=detour_threshold)
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
         if "pin_paths" not in kwargs:
@@ -661,35 +657,32 @@ class AnalyzeNetDetourSkill(Skill):
 
 
 @skill(
-    name="optimize_cell_placement",
+    name="optimize_cell",
+    namespace="placement",
+    version="1.0.0",
+    display_name="Optimize Cell Placement",
     description="Move cells to centroid of their connections for better placement. "
+                "MUTATING. Side effects: cell placement changes. "
                 "Uses spiral search to find empty compatible sites.",
     category=SkillCategory.PLACEMENT,
+    idempotency="non-idempotent",
+    side_effects=["cell_placement"],
+    timeout_ms=60000,
     parameters=[
         ParameterSpec("cell_names", list, "List of cell names to optimize")
     ],
-    required_context=["design"]
+    required_context=["design"],
+    error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class OptimizeCellPlacementSkill(Skill):
     """Skill for optimizing cell placement based on centroid of connections."""
 
-    def get_metadata(self) -> SkillMetadata:
-        return self._skill_metadata
-
     def execute(self, context: SkillContext, cell_names: list) -> SkillResult:
-        """Execute the skill business logic.
-
-        For telemetry, use execute_with_telemetry() instead.
-        """
         try:
             results = optimize_cell_placement(context.design, cell_names)
             return SkillResult(success=True, data=results)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
-
-    def execute_with_telemetry(self, context: SkillContext, cell_names: list) -> SkillResult:
-        """Execute with telemetry instrumentation."""
-        return Skill.execute_with_telemetry(self, context, cell_names=cell_names)
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
         if "cell_names" not in kwargs:
