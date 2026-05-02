@@ -206,6 +206,29 @@ class YAMLStructuredCompressor(CompressionStrategy):
         """Return the iteration number below which timing reports are considered outdated."""
         return current_iteration - OUTDATED_TIMING_ITERATION_GAP
 
+    def _is_failed_strategy_tool_result(self, msg: Message, failed_strategies: list[str]) -> bool:
+        """Check if a tool result corresponds to a known failed strategy.
+
+        Tool messages from strategies that have been marked as failed are candidates
+        for early compression, since the YAML blocked_strategies section provides
+        the distilled summary.
+        """
+        if not failed_strategies or msg.role != MessageRole.TOOL:
+            return False
+
+        name_lower = (msg.name or "").lower()
+        for fs in failed_strategies:
+            fs_lower = fs.lower()
+            if fs_lower == "pblock" and ("pblock" in name_lower):
+                return True
+            if fs_lower == "physopt" and ("phys_opt" in name_lower):
+                return True
+            if fs_lower == "fanout" and ("fanout" in name_lower or "optimize_fanout" in name_lower):
+                return True
+            if fs_lower == "placeroute" and ("place_design" in name_lower or "route_design" in name_lower):
+                return True
+        return False
+
     def _compress_outdated_timing_reports(
         self, scored: List[tuple], current_iteration: int
     ) -> List[tuple]:
@@ -247,27 +270,32 @@ class YAMLStructuredCompressor(CompressionStrategy):
         return result
 
     def _compress_outdated_tool_results(
-        self, scored: List[tuple], current_iteration: int
+        self, scored: List[tuple], current_iteration: int,
+        context: Optional[CompressionContext] = None
     ) -> List[tuple]:
         """Compress old tool result messages to minimal structured markers.
 
         Tool results older than TOOL_RESULT_ITERATION_GAP iterations are replaced
         with concise markers preserving only key metrics and tool name.
+        Tool results from known failed strategies are compressed regardless of age.
         This prevents verbose YAML summary blocks from accumulating in history.
         """
         boundary = current_iteration - TOOL_RESULT_ITERATION_GAP
-        if boundary <= 0:
+        if boundary <= 0 and not (context and context.failed_strategies):
             return scored
 
         result = []
         replaced_count = 0
         saved_chars = 0
+        failed_strategies = context.failed_strategies if context else []
 
         for msg, importance, topic in scored:
             if msg.role == MessageRole.TOOL:
                 msg_iter = msg.metadata.get('iteration', 0)
                 is_tool_result = msg_iter > 0 and len(msg.content) > 100
-                if is_tool_result and msg_iter < boundary:
+                is_outdated = is_tool_result and msg_iter < boundary
+                is_failed = is_tool_result and self._is_failed_strategy_tool_result(msg, failed_strategies)
+                if is_outdated or is_failed:
                     # Try to extract key metrics from YAML summary format
                     stripped = msg.content.strip()
                     lines = stripped.split('\n')
@@ -433,7 +461,8 @@ class YAMLStructuredCompressor(CompressionStrategy):
         scored = self._compress_outdated_timing_reports(scored, current_iteration)
 
         # Compress old tool results (iterations older than gap) to minimal markers
-        scored = self._compress_outdated_tool_results(scored, current_iteration)
+        # Also compress tool results from known failed strategies regardless of age
+        scored = self._compress_outdated_tool_results(scored, current_iteration, context)
 
         # Separate system messages (protected) from conversation
         system_msgs = []

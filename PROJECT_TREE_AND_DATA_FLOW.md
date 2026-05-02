@@ -72,6 +72,8 @@ YAMLStructuredCompressor:
     - 工具调用保留参数（最多5个）
     - 时序报告智能截断（5项改进：动态预算/阈值过滤/起终点成对/时钟域分组/回退保护）
     - 过时时序报告替换：迭代 < current_iteration-1 的长时序报告 → `[Outdated timing report from iteration N]`（节省 token）
+    - **失败策略工具消息提前压缩**：已知失败策略的工具结果不受迭代年龄限制，直接压缩为 `[Tool: name (iteration N)]` 标记（节省 token）
+    - `_is_failed_strategy_tool_result()`: 按工具名模式匹配 failed_strategies 列表（PBLOCK→含pblock, PhysOpt→含phys_opt, Fanout→含fanout/optimize_fanout, PlaceRoute→含place_design/route_design）
     - WNS状态注入时机: API调用时（不在working memory）
 ```
 
@@ -105,7 +107,7 @@ API调用前 → _inject_wns_state_to_system_prompt()
 | WNS状态 | MemoryManager（独立于WM） | API调用时注入 |
 | TNS/Failing Endpoints | DCPOptimizer.latest_tns/latest_failing_endpoints | API调用时随 WNS 一同注入 |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
-| 失败策略 | CompressionContext | 存入YAML输出 |
+| 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败）|
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 
 ### 2.5 模型选择
@@ -184,11 +186,11 @@ skills/
 │   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+checkpoint+route
 
 Skill 推荐机制 (_build_skill_recommendation()):
-├── avg_distance > 70     → rapidwright_execute_pblock_strategy
-├── max_fanout > 100      → rapidwright_execute_fanout_strategy
-├── no_improvement >=2 + physopt tried → rapidwright_analyze_net_detour（分析型）
-├── WNS > -2.0            → rapidwright_execute_physopt_strategy
-└── 以上均不匹配          → 空（不推荐）
+├── avg_distance > 70 AND PBLOCK not failed  → rapidwright_execute_pblock_strategy
+├── max_fanout > 100 AND Fanout not failed   → rapidwright_execute_fanout_strategy
+├── no_improvement >=2 + physopt tried       → rapidwright_analyze_net_detour（分析型）
+├── WNS > -2.0 AND PhysOpt not failed        → rapidwright_execute_physopt_strategy
+└── 以上均不匹配                               → 空（不推荐）
 
 Skill 推荐注入点:
 ├── _build_data_driven_goal() → 追加在NEXT OPTIMIZATION GOAL末尾
@@ -341,7 +343,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | LLM 返回 `flow_control: DONE`，WNS=-0.538 | 继续在同一迭代内空转，产生垃圾输出 | 正确识别为迭代完成，进入下一迭代 |
 | LLM 返回 `flow_control: DONE`，WNS>=0 | 继续空转 | 正确退出优化 |
 | LLM 返回无 tool_calls，无 DONE 信号 | continue 回循环 | 沿用原有逻辑 |
-| LLM 返回 `flow_control: SWITCH_STRATEGY` | 与CONTINUE同处理，继续循环 | 强制结束迭代 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
+| LLM 返回 `flow_control: SWITCH_STRATEGY` | 与CONTINUE同处理，继续循环 | 强制结束迭代 + 记录当前策略为失败 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
 | LLM 连续调用 physopt 无改进 | 继续循环调用physopt | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
 ### 5.4 flow_control=DONE 优化补丁（2026-05-01）
@@ -424,6 +426,24 @@ class StepState:
 - 矛盾信号（DONE + tool_calls）→ 打印警告，flow_control 优先，不执行工具
 - 旧模型不输出 YAML → 空 StepState，回退到 `_parse_action_from_yaml`
 - 多轮工具调用 → 每轮都解析 step YAML，step_id 可用于追踪轮次
+
+### 5.6 失败策略追踪增强（2026-05-02 新增）
+
+**新增 `record_failure()` 调用点**（共 6 处触发点）：
+
+| 触发点 | 记录的策略 | 条件 |
+|--------|-----------|------|
+| SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
+| 工具调用异常 | 工具所属策略 | 工具名匹配已知策略工具 |
+| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字 |
+| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed |
+| Routing 失败 | PlaceRoute | `route_design`/`place_design` 失败 |
+| 策略中断检测 | PBLOCK/Fanout | `_detect_interrupted_strategy()` 检测到验证缺失 |
+
+**`failed_strategies` 的使用**：
+- `_build_skill_recommendation()`: 跳过已失败策略的推荐（PBLOCK/Fanout/PhysOpt 分别检查）
+- `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩，不受迭代年龄限制
+- `_is_failed_strategy_tool_result()`: 按工具名模式匹配（PBLOCK→pblock, PhysOpt→phys_opt, Fanout→fanout/optimize_fanout, PlaceRoute→place_design/route_design）
 
 ## 6. 429降级机制
 

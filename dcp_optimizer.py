@@ -2105,12 +2105,12 @@ STRICTLY FORBIDDEN:
             result["was_interrupted"] = True
 
         # [Fix 4] Detect pblock validation failure: last tool is create_and_apply_pblock
-        # and its result contains validation_failed key.
+        # and its result contains validation_failed keyword in raw result text.
         _pblock_failed = False
         if last_tool_raw == "vivado_create_and_apply_pblock":
             last_detail = self._compat.tool_call_details[-1] if self._compat.tool_call_details else {}
-            last_details = last_detail.get("key_details", {}) if isinstance(last_detail, dict) else {}
-            if isinstance(last_details, dict) and last_details.get("validation_failed"):
+            last_result = (last_detail.get("result", "") or "").lower() if isinstance(last_detail, dict) else ""
+            if "validation_failed" in last_result:
                 _pblock_failed = True
 
         # [Fix 6] Detect missing post-fanout evaluation: optimize_fanout was used
@@ -2125,9 +2125,11 @@ STRICTLY FORBIDDEN:
         if _pblock_failed:
             result["was_interrupted"] = True
             result["reason"] = "pblock_validation_failed"
+            self._compat.record_failure("PBLOCK")
         elif _fanout_post_eval_missing:
             result["was_interrupted"] = True
             result["reason"] = "fanout_post_eval_missing"
+            self._compat.record_failure("Fanout")
 
         return result
 
@@ -2237,31 +2239,34 @@ STRICTLY FORBIDDEN:
         Returns a string like 'Recommended skill: rapidwright_execute_pblock_strategy'
         or empty string if no clear recommendation.
         """
+        failed = set(self._compat.failed_strategies)
+
         # Check spread data for distributed scenario
-        if hasattr(self, 'critical_path_spread') and self.critical_path_spread:
+        if "PBLOCK" not in failed and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
             if avg_dist and avg_dist > 70:
                 skill_name = STRATEGY_SKILL_MAP.get("PBLOCK", "pblock_strategy")
                 return f"Recommended skill: rapidwright_execute_{skill_name} (matches distributed scenario, avg_distance={avg_dist:.1f} > 70)"
 
         # Check high fanout nets
-        if hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
+        if "Fanout" not in failed and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
             max_fanout = max(n[1] for n in self.high_fanout_nets[:5]) if self.high_fanout_nets else 0
             if max_fanout > 100:
                 skill_name = STRATEGY_SKILL_MAP.get("Fanout", "fanout_strategy")
                 return f"Recommended skill: rapidwright_execute_{skill_name} (matches high_fanout scenario, max_fanout={max_fanout})"
 
-        # Check for repeated no-improvement with physopt → suggest analysis skill
+        # Check for repeated no-improvement with physopt → suggest analysis skill (not a strategy, no filter needed)
         if self.global_no_improvement >= 2 and self._iteration_narratives:
             recent_labels = [e.get('strategy_label', '') for e in self._iteration_narratives[-3:]]
             if any('physopt' in s.lower() for s in recent_labels):
                 return "Recommended skill: rapidwright_analyze_net_detour (multiple phys_opt iterations without improvement, check for placement detour issues on critical paths)"
 
         # Default: moderate WNS suggests physopt
-        current_wns = self._get_current_wns()
-        if current_wns is not None and current_wns > -2.0:
-            skill_name = STRATEGY_SKILL_MAP.get("PhysOpt", "physopt_strategy")
-            return f"Recommended skill: rapidwright_execute_{skill_name} (moderate WNS={current_wns:.3f}, suitable for physical optimization)"
+        if "PhysOpt" not in failed:
+            current_wns = self._get_current_wns()
+            if current_wns is not None and current_wns > -2.0:
+                skill_name = STRATEGY_SKILL_MAP.get("PhysOpt", "physopt_strategy")
+                return f"Recommended skill: rapidwright_execute_{skill_name} (moderate WNS={current_wns:.3f}, suitable for physical optimization)"
 
         return ""
 
@@ -3078,6 +3083,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     "is_optimization": False
                 }
             )
+
+            # Record as failed strategy (dedup inside record_failure)
+            tool_strategy = self._infer_strategy_from_tools([tool_name])
+            if tool_strategy not in ("Information", "Unknown"):
+                self._compat.record_failure(tool_strategy)
 
             # ── Skill invocation tracking (error path) ────────────
             if tool_name in SKILL_TOOL_MAP:
@@ -3937,6 +3947,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 "tool": tool_name,
                                 "result": result[:2000]  # Store truncated result for analysis
                             })
+                            # Record strategy failure when tool result indicates error
+                            tool_strategy = self._infer_strategy_from_tools([tool_name])
+                            if tool_strategy not in ("Information", "Unknown"):
+                                self._compat.record_failure(tool_strategy)
+
+                        # Special case: PBLOCK validation failure (status: validation_failed)
+                        if tool_name == "vivado_create_and_apply_pblock" and "validation_failed" in result_lower:
+                            self._compat.record_failure("PBLOCK")
 
                         # [Phase 2] Add tool result via compat (each tool result is a separate message)
                         self._compat.add_message("tool", result, {
@@ -4027,6 +4045,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 # Fall through to exit get_completion()
             elif flow_control == "SWITCH_STRATEGY" or action == "SWITCH_STRATEGY":
                 logger.info(f"LLM signaled SWITCH_STRATEGY (action={action}, flow_control={flow_control})")
+                # Record current iteration's strategy as failed before switching
+                tools_this_iter = [
+                    t.get('tool_name', '') for t in self._compat.tool_call_details
+                    if t.get('iteration') == self.iteration
+                ]
+                prev_strategy = self._infer_strategy_from_tools(tools_this_iter)
+                if prev_strategy not in ("Information", "Unknown"):
+                    self._compat.record_failure(prev_strategy)
                 # System-enforced: end current iteration, force re-analysis next iteration
                 if self._is_done_reason is None:
                     self._is_done_reason = "switch_strategy"
@@ -4271,6 +4297,7 @@ CRITICAL OPTIMIZATION RULES:
                             elif self._is_routing_failure(error_msg):
                                 logger.warning(f"route_design clear routing failure (Iter {tool_detail['iteration']}): {error_msg[:100]}")
                                 recent_routing_failure = 'routing_failed'
+                                self._compat.record_failure("PlaceRoute")
                             else:
                                 # Other errors, handle conservatively but don't fully mark as failure
                                 recent_routing_failure = 'unknown_error'

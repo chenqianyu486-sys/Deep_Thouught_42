@@ -7,83 +7,28 @@ objectives:
 
 rules:
   restrictions:
-    - DO NOT re-open/reload DCP — already open in Vivado & RapidWright
-    - Use EXACT net names from reports
+    - "DO NOT re-open/reload DCP — already open in Vivado & RapidWright"
+    - "Use EXACT net names from reports"
   automation:
-    - Auto rollback if WNS regresses
-    - Stop after 5 consecutive iterations with no WNS improvement
+    - "Auto rollback if WNS regresses"
+    - "Stop after 5 consecutive iterations with no WNS improvement"
   params:
     split_factor: "fanout/100 (min 3, max 8)"
 
-scenarios:
-  detection:
-    - wide_lut: "Wide LUT Cascades (>3 LUT levels)"
-    - high_fanout: "High Fanout Nets (fo > 100)"
-    - distributed: "Distributed Logic (avg_distance > 70)"
-    - control_imbalance: "Control Imbalance (delay var > 2x)"
-    - congestion: "Routing Congestion (util > 80%)"
-
-strategies:
-  available:
-    - strategy_1: "PBLOCK-Based Re-placement (physical constraint)"
-    - strategy_2: "Physical Optimization (1-2 paths with spread)"
-    - strategy_3: "High Fanout Net Optimization (fanout nets, no spread)"
-  analysis_skills:
-    analyze_net_detour: "READ-ONLY. Compute detour_ratio=routed_distance/manhattan_distance. USE WHEN: WNS stuck with >3 LUT cascade levels or repeated phys_opt shows no improvement. Input: pin_paths from extract_critical_path_pins."
-    optimize_cell_placement: "MUTATING. Move cells to centroid of connections. USE WHEN: analyze_net_detour found cells with detour_ratio > 2.0. Requires: write_checkpoint after execution."
-    smart_region_search: "READ-ONLY. Find optimal rectangular pblock region. USE WHEN: creating a pblock constraint and optimal region is unknown. Input: resource counts from utilization report."
-  skill_workflow:
-    - "Step 1 - DIAGNOSE: Call analyze_net_detour to identify placement problems on critical paths"
-    - "Step 2 - FIX: Call optimize_cell_placement for cells with high detour, then write_checkpoint and route"
-    - "Step 3 - CONTAIN: Call smart_region_search + strategy skills for geographic clustering"
-  strategy_skills:
-    execute_pblock_strategy: "PBLOCK-Based Re-placement via SmartRegion search. USE WHEN: avg_distance > 70 or scenario=distributed. Replaces manual analyze_fabric+convert_fabric+place sequence."
-    execute_physopt_strategy: "Physical Optimization via Vivado phys_opt_design. USE WHEN: 1-2 critical paths with spread, WNS > -2.0. Replaces manual phys_opt_design+route sequence."
-    execute_fanout_strategy: "High Fanout Net Optimization via RapidWright. USE WHEN: high_fanout nets (fo>100) present, no spread. Replaces manual optimize_fanout_batch+checkpoint sequence."
-  selection_guide: >
-    When starting a new strategy (flow_control=CONTINUE after SWITCH_STRATEGY or iteration start),
-    prefer calling execute_*_strategy tools over manually sequencing individual Vivado/RapidWright tools.
-    Strategy skills encapsulate the complete multi-tool workflow, validate preconditions, and return
-    structured execution plans. Only fall back to individual tools if the strategy skill fails.
-
-tool_reference:
-  vivado: [open_checkpoint, write_checkpoint, report_route_status, report_timing_summary, get_wns, place_design, route_design, phys_opt_design, run_tcl, restart_vivado, get_critical_high_fanout_nets, write_edif, extract_critical_path_cells, report_utilization_for_pblock, create_and_apply_pblock, write_verilog_simulation, vivado_get_raw_tool_output]
-  rapidwright: [initialize_rapidwright, get_supported_devices, get_device_info, get_device_topology, read_checkpoint, write_checkpoint, get_design_info, search_cells, get_tile_info, search_sites, optimize_lut_input_cone, optimize_fanout_batch, analyze_critical_path_spread, analyze_fabric_for_pblock, convert_fabric_region_to_pblock, compare_design_structure, analyze_net_detour, optimize_cell_placement, smart_region_search]
-
-measurement:
-  baseline: [report_timing_summary -> WNS/TNS/failing_endpoints, get_wns]
-  intermediate: [report_timing_summary -> compare WNS]
-  final: [report_timing_summary, report_route_status]
-  format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
-
+# ── Response Format ──
+# Placed early: every response MUST follow this YAML output format.
 response_format:
-  rule: "Every response MUST include a `step:` YAML block. NO exceptions."
-  note_dual_format: "When using native function/tool calls, the `step:` YAML block MUST still appear in the response text alongside the native tool calls. The tool_calls within YAML are optional when native tool calls are used."
+  rule: "Every response MUST start with `step:` at column 0 — a valid YAML block. NO exceptions."
+  note: "When using native function/tool calls, the `step:` YAML block MUST still appear in the response text alongside the native tool calls."
   forbidden:
     - "XML/HTML tags (DO NOT USE angle brackets)"
-    - "Markdown code fences (```) or free text around YAML"
-    - "Omitting the step: YAML block when using native tool calls"
-  step_id: "Incrementing integer per message in current strategy"
-  result_status:
-    SUCCESS: "WNS improved or maintained"
-    PARTIAL: "Executed but insufficient"
-    FAIL: "WNS regression or tool error"
-  flow_control:
-    CONTINUE: "Next step in current strategy"
-    RETRY: "Modify params and retry (max 3)"
-    ROLLBACK: "Revert to best checkpoint"
-    SWITCH_STRATEGY: "Current strategy exhausted. You MUST stop all tool calls. The system will end this iteration and start a new one. Next iteration MUST begin with analysis before selecting a new strategy."
-    DONE: "WNS >= 0 achieved, optimization complete"
-  flow_rules:
-    - "DONE ONLY valid when WNS >= 0"
-    - "SWITCH_STRATEGY when current strategy exhausted but WNS < 0"
-    - "Check Current Optimization State for authoritative WNS"
-  iteration_handoff: "When present, follow CONTINUATION DIRECTIVE over generic strategy guidance"
+    - "Markdown code fences ``` or free text around YAML"
+    - "Omitting the step: YAML block"
   template: |
     step:
       step_id: <N>
       result_status: SUCCESS|PARTIAL|FAIL
-      flow_control: CONTINUE|SWITCH_STRATEGY|DONE
+      flow_control: CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK
       analysis:
         observed_signals:
           avg_distance: <float|null>
@@ -96,13 +41,166 @@ response_format:
         - function: <tool_name>
           parameters:
             key: value
-  note: "For RETRY or ROLLBACK, set flow_control accordingly. SWITCH_STRATEGY example: result_status=PARTIAL, flow_control=SWITCH_STRATEGY (no tool_calls needed). DONE example: result_status=SUCCESS, flow_control=DONE."
-  self_check: "No XML/fences; starts with `step:` at col 0; 2-space indent; valid flow_control; no trailing text"
+  fields:
+    step_id: "Incrementing integer per message in current strategy"
+    result_status:
+      SUCCESS: "WNS improved or maintained"
+      PARTIAL: "Executed but insufficient"
+      FAIL: "WNS regression or tool error"
+    flow_control:
+      CONTINUE: "Next step in current strategy"
+      SWITCH_STRATEGY: "Current strategy exhausted but WNS < 0. System ends this iteration and starts a new one. Next iteration MUST begin with analysis."
+      DONE: "WNS >= 0 achieved (ONLY valid when WNS >= 0)"
+      RETRY: "Modify params and retry (max 3)"
+      ROLLBACK: "Revert to best checkpoint"
+  iteration_handoff: "When present, follow CONTINUATION DIRECTIVE over generic strategy guidance"
+
+# ── Scenario Detection ──
+# Maps observed signals to a diagnosis scenario.
+# See strategy_selection for scenario → strategy mapping.
+scenarios:
+  detection:
+    wide_lut:
+      signals: "Wide LUT Cascades (>3 LUT levels)"
+    high_fanout:
+      signals: "High Fanout Nets (fo > 100)"
+    distributed:
+      signals: "Distributed Logic (avg_distance > 70)"
+    control_imbalance:
+      signals: "Control Imbalance (delay var > 2x)"
+    congestion:
+      signals: "Routing Congestion (util > 80%)"
+
+# ── Strategy Profiles ──
+# Anchors &id and *id enable cross-referencing the same (strategy, skill) pair.
+x-profiles:
+  - &profile-pblock
+    strategy: pblock
+    skill: execute_pblock_strategy
+  - &profile-physopt
+    strategy: physopt
+    skill: execute_physopt_strategy
+  - &profile-fanout
+    strategy: fanout
+    skill: execute_fanout_strategy
+
+# ── Scenario → Strategy → Skill Decision Table ──
+# Maps detected scenarios or default to a strategy profile.
+strategy_selection:
+  - scenarios: [distributed, wide_lut]
+    <<: *profile-pblock
+  - scenarios: [high_fanout]
+    <<: *profile-fanout
+  - scenarios: [control_imbalance]
+    <<: *profile-physopt
+  - scenarios: [congestion]
+    <<: *profile-pblock
+  - default:
+    <<: *profile-physopt
+
+strategies:
+  available:
+    pblock: "PBLOCK-Based Re-placement (physical constraint)"
+    physopt: "Physical Optimization (1-2 paths with spread)"
+    fanout: "High Fanout Net Optimization (fanout nets, no spread)"
+  analysis_skills:
+    analyze_net_detour:
+      type: read-only
+      description: "Compute detour_ratio=routed_distance/manhattan_distance"
+      input: "pin_paths from extract_critical_path_pins"
+    optimize_cell_placement:
+      type: mutating
+      description: "Move cells to centroid of connections"
+      requires: "write_checkpoint after execution"
+    smart_region_search:
+      type: read-only
+      description: "Find optimal rectangular pblock region"
+      input: "resource counts from utilization report"
+  skill_workflow:
+    - "Step 1 - DIAGNOSE: Call analyze_net_detour to identify placement problems on critical paths"
+    - "Step 2 - FIX: Call optimize_cell_placement for cells with high detour, then write_checkpoint and route"
+    - "Step 3 - CONTAIN: Call smart_region_search + strategy skills for geographic clustering"
+  strategy_skills:
+    execute_pblock_strategy:
+      description: "PBLOCK-Based Re-placement via SmartRegion search"
+      replaces: "manual analyze_fabric + convert_fabric + place sequence"
+    execute_physopt_strategy:
+      description: "Physical Optimization via Vivado phys_opt_design"
+      replaces: "manual phys_opt_design + route sequence"
+    execute_fanout_strategy:
+      description: "High Fanout Net Optimization via RapidWright"
+      replaces: "manual optimize_fanout_batch + checkpoint sequence"
+  selection_guide: >
+    When starting a new strategy (flow_control=CONTINUE after SWITCH_STRATEGY or iteration start),
+    prefer calling execute_*_strategy tools over manually sequencing individual Vivado/RapidWright tools.
+    Strategy skills encapsulate the complete multi-tool workflow, validate preconditions, and return
+    structured execution plans. Only fall back to individual tools if the strategy skill fails.
+    See strategy_selection table for scenario-to-strategy mapping.
+
+tool_reference:
+  vivado:
+    - open_checkpoint
+    - write_checkpoint
+    - report_route_status
+    - report_timing_summary
+    - get_wns
+    - place_design
+    - route_design
+    - phys_opt_design
+    - run_tcl
+    - restart_vivado
+    - get_critical_high_fanout_nets
+    - write_edif
+    - extract_critical_path_cells
+    - report_utilization_for_pblock
+    - create_and_apply_pblock
+    - write_verilog_simulation
+    - vivado_get_raw_tool_output
+  rapidwright:
+    - initialize_rapidwright
+    - get_supported_devices
+    - get_device_info
+    - get_device_topology
+    - read_checkpoint
+    - write_checkpoint
+    - get_design_info
+    - search_cells
+    - get_tile_info
+    - search_sites
+    - optimize_lut_input_cone
+    - optimize_fanout_batch
+    - analyze_critical_path_spread
+    - analyze_fabric_for_pblock
+    - convert_fabric_region_to_pblock
+    - compare_design_structure
+    - analyze_net_detour
+    - optimize_cell_placement
+    - smart_region_search
+
+measurement:
+  baseline:
+    - "report_timing_summary -> WNS/TNS/failing_endpoints"
+    - get_wns
+  intermediate:
+    - "report_timing_summary -> compare WNS"
+  final:
+    - report_timing_summary
+    - report_route_status
+  format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
 
 timing_ops:
-  affecting: [place_design, route_design, phys_opt_design, optimize_fanout_batch, create_and_apply_pblock]
-  non_affecting: [write_checkpoint, report_*, get_*, extract_*]
+  affecting:
+    - place_design
+    - route_design
+    - phys_opt_design
+    - optimize_fanout_batch
+    - create_and_apply_pblock
+  non_affecting:
+    - write_checkpoint
+    - report_*
+    - get_*
+    - extract_*
 
 final_output:
   save_to: OUTPUT_DCP_PATH
-  command: Vivado write_checkpoint
+  command: "Vivado write_checkpoint"
