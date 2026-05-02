@@ -5371,7 +5371,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                            print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
+                            print(f"[TEST] Raw pins_result (first 2000 chars): {str(pins_result)[:2000]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
@@ -5910,7 +5910,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                            print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
+                            print(f"[TEST] Raw pins_result (first 2000 chars): {str(pins_result)[:2000]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
@@ -6376,7 +6376,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
                 else:
                     print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                    print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
+                    print(f"[TEST] Raw pins_result (first 2000 chars): {str(pins_result)[:2000]}")
             else:
                 print("[TEST] ⚠ analyze_net_detour skipped: no pin paths available")
 

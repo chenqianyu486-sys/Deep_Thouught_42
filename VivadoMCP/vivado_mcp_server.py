@@ -630,7 +630,9 @@ def extract_critical_path_pins(
 
     # Debug: when 0 paths found, include timing report snippet for diagnosis
     if not all_pin_paths:
-        result["debug_timing_report"] = timing_report[:1000]
+        result["debug_timing_report"] = timing_report[:3000]
+        result["debug_has_slack"] = "Slack (" in timing_report
+        result["debug_report_length"] = len(timing_report)
 
     if output_file:
         try:
