@@ -8,11 +8,14 @@ Analyzes FPGA fabric using RapidWright to find optimal pblock region,
 generates pblock ranges, and returns a structured execution plan
 with both completed (RapidWright) and pending (Vivado) steps.
 """
+import logging
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 from skills.strategy_plan import StrategyPlan, StrategyStep
+
+logger = logging.getLogger(__name__)
 
 
 def generate_pblock_plan(
@@ -37,6 +40,7 @@ def generate_pblock_plan(
         StrategyPlan with executed RapidWright steps and pending Vivado steps
     """
     if design is None:
+        logger.warning("generate_pblock_plan: design is None")
         return StrategyPlan(
             strategy_name="PBLOCK",
             status="error",

@@ -1946,9 +1946,11 @@ def execute_pblock_strategy(
     global _current_design
 
     if not _initialized:
+        logger.warning("execute_pblock_strategy: RapidWright not initialized")
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
     if _current_design is None:
+        logger.warning("execute_pblock_strategy: No design loaded")
         return {"error": "No design loaded. Use read_checkpoint first."}
 
     try:
@@ -1956,6 +1958,7 @@ def execute_pblock_strategy(
 
         skill = SkillRegistry.get("pblock_strategy")
         if skill is None:
+            logger.warning("execute_pblock_strategy: Skill 'pblock_strategy' not found in registry")
             return {"error": "Skill 'pblock_strategy' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)

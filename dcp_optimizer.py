@@ -327,6 +327,9 @@ class DCPOptimizerBase:
         self.high_fanout_nets = []
         self.device_topology = None
         self.clock_period = None
+
+        # Resource utilization (populated during initial analysis)
+        self.resource_utilization: Optional[dict] = None
         
         # Log file handles
         self._rw_log_file = None
@@ -339,6 +342,37 @@ class DCPOptimizerBase:
         """Check if error message indicates a routing failure."""
         error_lower = error_msg.lower() if isinstance(error_msg, str) else str(error_msg).lower()
         return any(phrase in error_lower for phrase in ROUTING_FAILURE_PHRASES)
+
+    @staticmethod
+    def _parse_resource_utilization(report: str) -> Optional[dict]:
+        """Parse LUT/FF/DSP/BRAM/URAM counts from report_utilization_for_pblock output.
+
+        Expected format:
+            LUTs:    12,345
+            FFs:     24,567
+            DSPs:    45
+            BRAMs:   120
+            URAMs:   0
+        """
+        import re
+        resources = {"LUT": 0, "FF": 0, "DSP": 0, "BRAM": 0, "URAM": 0}
+        patterns = {
+            "LUT": r'LUTs:\s+([0-9,]+)',
+            "FF": r'FFs:\s+([0-9,]+)',
+            "DSP": r'DSPs:\s+([0-9,]+)',
+            "BRAM": r'BRAMs:\s+([0-9,]+)',
+            "URAM": r'URAMs:\s+([0-9,]+)',
+        }
+        for key, pat in patterns.items():
+            m = re.search(pat, report)
+            if m:
+                try:
+                    resources[key] = int(m.group(1).replace(",", ""))
+                except ValueError:
+                    return None
+            else:
+                return None  # Missing key means parse failure
+        return resources
 
     def _start_tool_heartbeat(self, tool_name: str, start_time: float, interval: float = 60.0) -> tuple[asyncio.Task, int]:
         """
@@ -1047,6 +1081,12 @@ STRICTLY FORBIDDEN:
         clock_period_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
         current_tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "N/A"
         failing_eps_str = str(self.latest_failing_endpoints) if self.latest_failing_endpoints is not None else "N/A"
+        # Format resource utilization
+        if self.resource_utilization:
+            ru = self.resource_utilization
+            resource_util_str = f"LUT={ru['LUT']}, FF={ru['FF']}, DSP={ru['DSP']}, BRAM={ru['BRAM']}"
+        else:
+            resource_util_str = "N/A"
         best_wns_iter = self._best_wns_iteration
 
         # current_wns origin hint
@@ -1086,6 +1126,7 @@ STRICTLY FORBIDDEN:
   current_wns: {current_wns_str}{current_wns_origin}
   current_tns: {current_tns_str}
   failing_endpoints: {failing_eps_str}
+  resource_utilization: [{resource_util_str}]
   strategy_sequence: [{strategy_seq_str}]
   remaining_strategies: [{remaining_str}]
   clock_period: {clock_period_str}
@@ -2250,7 +2291,9 @@ STRICTLY FORBIDDEN:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
             if avg_dist and avg_dist > 70:
                 skill_name = STRATEGY_SKILL_MAP.get("PBLOCK", "pblock_strategy")
-                return f"Recommended skill: rapidwright_execute_{skill_name} (matches distributed scenario, avg_distance={avg_dist:.1f} > 70)"
+                return (f"Recommended skill: rapidwright_execute_{skill_name} (matches distributed scenario, avg_distance={avg_dist:.1f} > 70). "
+                        f"Prerequisite: First call vivado_report_utilization_for_pblock to get current LUT/FF/DSP/BRAM counts, "
+                        f"then call the skill with target_lut_count and target_ff_count set to those values.")
 
         # Check high fanout nets
         if "Fanout" not in failed and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
@@ -3220,7 +3263,24 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         # Parse high fanout nets
         self.high_fanout_nets = self.parse_high_fanout_nets(nets_report)
         print(f"✓ Found {len(self.high_fanout_nets)} high fanout nets (>100 fanout)\n")
-        
+
+        # Step 4.5: Get resource utilization for pblock sizing
+        logger.info("Getting resource utilization...")
+        print("Getting resource utilization...")
+        util_report = await self.call_tool("vivado_report_utilization_for_pblock", {})
+        self.resource_utilization = self._parse_resource_utilization(util_report)
+        if self.resource_utilization:
+            ru = self.resource_utilization
+            print(f"✓ Resource utilization:")
+            print(f"  - LUTs:  {ru['LUT']:>8,}")
+            print(f"  - FFs:   {ru['FF']:>8,}")
+            print(f"  - DSPs:  {ru['DSP']:>8,}")
+            print(f"  - BRAMs: {ru['BRAM']:>8,}")
+            print(f"  - URAMs: {ru['URAM']:>8,}")
+            print()
+        else:
+            print("[WARNING] Could not parse resource utilization\n")
+
         # Step 5: Load design in RapidWright for spread analysis
         critical_path_spread_info = None  # Initialize
         

@@ -732,13 +732,28 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
         elif name == "execute_pblock_strategy":
-            result = rw.execute_pblock_strategy(
-                target_lut_count=arguments["target_lut_count"],
-                target_ff_count=arguments["target_ff_count"],
-                target_dsp_count=arguments.get("target_dsp_count", 0),
-                target_bram_count=arguments.get("target_bram_count", 0),
-                resource_multiplier=arguments.get("resource_multiplier", 1.5),
-            )
+            # Validate required parameters before calling
+            missing_params = []
+            if "target_lut_count" not in arguments:
+                missing_params.append("target_lut_count")
+            if "target_ff_count" not in arguments:
+                missing_params.append("target_ff_count")
+            if missing_params:
+                result = {
+                    "error": f"Missing required parameters: {', '.join(missing_params)}. "
+                             f"Run report_utilization_for_pblock first to get current resource counts.",
+                    "missing_params": missing_params,
+                    "hint": "Run report_utilization_for_pblock first to get current LUT/FF usage, "
+                            "then retry with target_lut_count and target_ff_count set to those values.",
+                }
+            else:
+                result = rw.execute_pblock_strategy(
+                    target_lut_count=arguments["target_lut_count"],
+                    target_ff_count=arguments["target_ff_count"],
+                    target_dsp_count=arguments.get("target_dsp_count", 0),
+                    target_bram_count=arguments.get("target_bram_count", 0),
+                    resource_multiplier=arguments.get("resource_multiplier", 1.5),
+                )
 
         elif name == "execute_physopt_strategy":
             result = rw.execute_physopt_strategy(

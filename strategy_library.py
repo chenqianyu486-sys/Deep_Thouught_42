@@ -117,6 +117,14 @@ SKILL_GUIDANCE = {
         "advantage": "Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns",
         "condition": "Need to create pblock but optimal region unknown",
     },
+    "execute_pblock_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "target_lut_count, target_ff_count from vivado_report_utilization_for_pblock",
+        "output": "structured plan with pblock_ranges and ordered Vivado steps",
+        "advantage": "Single-call replacement for manual analyze_fabric + convert_fabric + place sequence",
+        "condition": "avg_distance > 70 (distributed scenario) or recommendation == 'PBLOCK'",
+        "prerequisite": "Call vivado_report_utilization_for_pblock first to get LUT/FF counts",
+    },
 }
 
 SKILL_EXECUTION_PATTERN = [
