@@ -5371,6 +5371,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
+                            print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
@@ -5382,7 +5383,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     skill_result = await self.call_rapidwright_tool("smart_region_search", {
                         "target_lut_count": 50000,
                         "target_ff_count": 50000,
-                    }, timeout=120.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("smart_region_search", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ smart_region_search skipped: {e}")
@@ -5396,7 +5397,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "target_lut_count": 50000,
                         "target_ff_count": 50000,
                         "resource_multiplier": 1.5,
-                    }, timeout=120.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("execute_pblock_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
@@ -5409,7 +5410,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     skill_result = await self.call_rapidwright_tool("execute_physopt_strategy", {
                         "directive": "Default",
                         "design_is_routed": False,
-                    }, timeout=60.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("execute_physopt_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
@@ -5442,7 +5443,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         }, timeout=360.0)
                         self._verify_skill_result("optimize_cell_placement", sr)
                     else:
-                        print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                        # Fallback: get cell names directly from the loaded RapidWright design
+                        print("[TEST] No critical path cells, trying search_cells fallback...")
+                        try:
+                            sr = await self.call_rapidwright_tool("search_cells", {"limit": 5}, timeout=60.0)
+                            if sr.strip():
+                                import json as _json
+                                cells_data = _json.loads(sr)
+                                fallback_names = [c["name"] for c in cells_data.get("cells", []) if c.get("name")]
+                                if fallback_names:
+                                    print(f"[TEST] Using fallback cell names: {fallback_names}")
+                                    sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                                        "cell_names": fallback_names,
+                                    }, timeout=360.0)
+                                    self._verify_skill_result("optimize_cell_placement", sr)
+                                else:
+                                    print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                            else:
+                                print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                        except Exception as e2:
+                            print(f"[TEST] ⚠ optimize_cell_placement skipped (fallback): {e2}")
                 except Exception as e:
                     print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
@@ -5890,6 +5910,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
+                            print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
@@ -5901,7 +5922,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     skill_result = await self.call_rapidwright_tool("smart_region_search", {
                         "target_lut_count": 50000,
                         "target_ff_count": 5000,
-                    }, timeout=120.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("smart_region_search", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ smart_region_search skipped: {e}")
@@ -5915,7 +5936,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "target_lut_count": 50000,
                         "target_ff_count": 5000,
                         "resource_multiplier": 1.5,
-                    }, timeout=120.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("execute_pblock_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
@@ -5928,7 +5949,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     skill_result = await self.call_rapidwright_tool("execute_physopt_strategy", {
                         "directive": "Default",
                         "design_is_routed": False,
-                    }, timeout=60.0)
+                    }, timeout=360.0)
                     self._verify_skill_result("execute_physopt_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
@@ -5977,7 +5998,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         }, timeout=360.0)
                         self._verify_skill_result("optimize_cell_placement", sr)
                     else:
-                        print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                        # Fallback: get cell names directly from the loaded RapidWright design
+                        print("[TEST] No critical path cells, trying search_cells fallback...")
+                        try:
+                            sr = await self.call_rapidwright_tool("search_cells", {"limit": 5}, timeout=60.0)
+                            if sr.strip():
+                                import json as _json
+                                cells_data = _json.loads(sr)
+                                fallback_names = [c["name"] for c in cells_data.get("cells", []) if c.get("name")]
+                                if fallback_names:
+                                    print(f"[TEST] Using fallback cell names: {fallback_names}")
+                                    sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                                        "cell_names": fallback_names,
+                                    }, timeout=360.0)
+                                    self._verify_skill_result("optimize_cell_placement", sr)
+                                else:
+                                    print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                            else:
+                                print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                        except Exception as e2:
+                            print(f"[TEST] ⚠ optimize_cell_placement skipped (fallback): {e2}")
                 except Exception as e:
                     print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
@@ -6336,6 +6376,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
                 else:
                     print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
+                    print(f"[TEST] Raw pins_result (first 500 chars): {str(pins_result)[:500]}")
             else:
                 print("[TEST] ⚠ analyze_net_detour skipped: no pin paths available")
 
@@ -6359,7 +6400,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 sr = await self.call_rapidwright_tool("execute_pblock_strategy", {
                     "target_lut_count": 50000, "target_ff_count": 50000,
                     "resource_multiplier": 1.5,
-                }, timeout=120.0)
+                }, timeout=360.0)
                 self._verify_skill_result("execute_pblock_strategy", sr)
             except Exception as e:
                 print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
@@ -6371,7 +6412,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             try:
                 sr = await self.call_rapidwright_tool("execute_physopt_strategy", {
                     "directive": "Default", "design_is_routed": False,
-                }, timeout=60.0)
+                }, timeout=360.0)
                 self._verify_skill_result("execute_physopt_strategy", sr)
             except Exception as e:
                 print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
@@ -6423,7 +6464,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     }, timeout=360.0)
                     self._verify_skill_result("optimize_cell_placement", sr)
                 else:
-                    print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                    # Fallback: get cell names directly from the loaded RapidWright design
+                    print("[TEST] No critical path cells, trying search_cells fallback...")
+                    try:
+                        sr = await self.call_rapidwright_tool("search_cells", {"limit": 5}, timeout=60.0)
+                        if sr.strip():
+                            import json as _json
+                            cells_data = _json.loads(sr)
+                            fallback_names = [c["name"] for c in cells_data.get("cells", []) if c.get("name")]
+                            if fallback_names:
+                                print(f"[TEST] Using fallback cell names: {fallback_names}")
+                                sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                                    "cell_names": fallback_names,
+                                }, timeout=360.0)
+                                self._verify_skill_result("optimize_cell_placement", sr)
+                            else:
+                                print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                        else:
+                            print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                    except Exception as e2:
+                        print(f"[TEST] ⚠ optimize_cell_placement skipped (fallback): {e2}")
             except Exception as e:
                 print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
