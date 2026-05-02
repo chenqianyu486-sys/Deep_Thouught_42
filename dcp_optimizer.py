@@ -1751,6 +1751,8 @@ STRICTLY FORBIDDEN:
                     key_details["strategy_status"] = status_val
                     if data.get("message"):
                         summary_parts.append(data["message"][:200])
+                    if status_val in ("error", "skipped") and data.get("error_details"):
+                        summary_parts.append(f"Details: {str(data['error_details'])[:200]}")
                     steps = data.get("steps", [])
                     if steps:
                         pending = [s for s in steps if not s.get("executed", False)]

@@ -50,6 +50,20 @@ logger.setLevel(logging.INFO)
 # Create MCP server instance
 app = Server("rapidwright-mcp")
 
+# Tools that perform real computation/optimization (expected >>1s execution time)
+COMPLEX_TOOLS = {
+    "execute_pblock_strategy",
+    "execute_physopt_strategy",
+    "execute_fanout_strategy",
+    "analyze_net_detour",
+    "optimize_cell_placement",
+    "smart_region_search",
+    "optimize_fanout_batch",
+    "analyze_critical_path_spread",
+    "analyze_fabric_for_pblock",
+    "optimize_lut_input_cone",
+}
+
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -744,17 +758,25 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         # Return formatted result
         duration_ms = int((time.perf_counter() - start_time) * 1000)
-        logger.info(
-            "[MCP_RESPONSE] Tool '%s' succeeded (%dms)",
-            name,
-            duration_ms,
-            extra={
-                "mcp_tool_name": name,
-                "mcp_response_duration_ms": duration_ms,
-                "mcp_response_status": "success",
-                "trace_id": trace_id,
-            }
-        )
+        has_error = isinstance(result, dict) and "error" in result
+        # Fast-return detection: complex tools that return <1s likely did no real work
+        if not has_error and duration_ms < 1000 and name in COMPLEX_TOOLS:
+            result["llm_hint"] = (
+                "Tool returned in <1s — no actual work was performed. "
+                "Try different preconditions or switch to a different strategy."
+            )
+        log_status = "error" if has_error else "success"
+        log_msg = f"[MCP_RESPONSE] Tool '{name}' {log_status} (%dms)"
+        log_args = {
+            "mcp_tool_name": name,
+            "mcp_response_duration_ms": duration_ms,
+            "mcp_response_status": log_status,
+            "trace_id": trace_id,
+        }
+        if has_error:
+            logger.warning(log_msg, duration_ms, extra=log_args)
+        else:
+            logger.info(log_msg, duration_ms, extra=log_args)
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     except Exception as e:

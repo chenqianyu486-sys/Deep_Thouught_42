@@ -1969,7 +1969,10 @@ def execute_pblock_strategy(
         )
 
         if not result.success:
-            return {"error": result.error}
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
 
         plan = result.data
         return _strategy_plan_to_dict(plan)
@@ -2018,7 +2021,10 @@ def execute_physopt_strategy(
         )
 
         if not result.success:
-            return {"error": result.error}
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
 
         plan = result.data
         return _strategy_plan_to_dict(plan)
@@ -2073,7 +2079,10 @@ def execute_fanout_strategy(
         )
 
         if not result.success:
-            return {"error": result.error}
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
 
         plan = result.data
         return _strategy_plan_to_dict(plan)

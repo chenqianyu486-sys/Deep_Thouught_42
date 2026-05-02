@@ -49,7 +49,8 @@ def generate_pblock_plan(
         return StrategyPlan(
             strategy_name="PBLOCK",
             status="skipped",
-            message="Invalid resource targets: LUT and FF counts must be positive",
+            message=f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} (must be positive). "
+                    f"Run report_utilization_for_pblock first to get actual resource counts.",
             preconditions_satisfied=False,
             analysis_summary={
                 "target_lut_count": target_lut_count,
@@ -143,9 +144,9 @@ def generate_pblock_plan(
             expected_duration_seconds=30,
         ),
         StrategyStep(
-            step_name="place_design -unplace",
+            step_name="place_design",
             platform="Vivado",
-            params={},
+            params={"directive": "unplace"},
             description="Unplace all cells before applying pblock constraint",
             executed=False,
             expected_duration_seconds=60,
@@ -260,7 +261,8 @@ class PblockStrategySkill(Skill):
                 target_dsp_count, target_bram_count,
                 resource_multiplier,
             )
-            return SkillResult(success=(plan.status != "error"), data=plan)
+            error_msg = plan.message if plan.status == "error" else None
+            return SkillResult(success=(plan.status != "error"), data=plan, error=error_msg)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
 
