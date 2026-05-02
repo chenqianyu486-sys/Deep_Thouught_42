@@ -778,7 +778,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Raw tool output buffer: {(iteration, round_index): raw_text}
         # Stores complete Vivado logs for on-demand retrieval via vivado_get_raw_tool_output
-        self._raw_tool_outputs: dict[tuple[int, int], str] = {}
+        self._raw_tool_outputs: dict[tuple[int, int], tuple[str, str]] = {}  # (iteration, round) -> (tool_name, raw_text)
         self._raw_tool_output_max = 50  # FIFO limit
 
         # Step state tracking from LLM YAML responses
@@ -1621,6 +1621,132 @@ STRICTLY FORBIDDEN:
             # For informational Tcl (read-only), keep concise
             summary_parts.append(f"Output: {line_count} lines, {char_count} chars")
 
+        elif tool_name == "vivado_extract_critical_path_pins":
+            # Extract pin path counts and preview paths for detour analysis
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data['error'][:200]}")
+                    status = "error"
+                else:
+                    path_count = data.get("path_count", 0)
+                    pin_paths = data.get("pin_paths", [])
+                    summary_parts.append(f"Extracted {path_count} critical pin paths")
+                    key_details["path_count"] = path_count
+                    if pin_paths:
+                        for i, pp in enumerate(pin_paths[:2]):
+                            preview = " -> ".join(pp[:4])
+                            if len(pp) > 4:
+                                preview += " -> ..."
+                            summary_parts.append(f"  Path {i+1}: {preview}")
+            except Exception:
+                pass
+
+        elif tool_name == "vivado_create_and_apply_pblock":
+            # Extract pblock resource validation results
+            has_validation_failure = False
+            for line in lines:
+                if "Resource validation FAILED" in line:
+                    summary_parts.append(line.strip()[:300])
+                    has_validation_failure = True
+                elif "shortage:" in line:
+                    summary_parts.append(line.strip()[:300])
+                    has_validation_failure = True
+                elif "Resource validation PASSED" in line:
+                    summary_parts.append(line.strip())
+                elif "Pblock Created Successfully" in line:
+                    key_details["pblock_created"] = True
+                elif "Maximum expansion attempts reached" in line:
+                    summary_parts.append(line.strip()[:300])
+                    has_validation_failure = True
+            if not summary_parts:
+                # Fallback: key status lines
+                for line in lines[:50]:
+                    if any(kw in line for kw in ["Created pblock", "Set pblock", "Applied pblock", "Error"]):
+                        stripped = line.strip()
+                        if stripped:
+                            summary_parts.append(stripped[:200])
+            if has_validation_failure:
+                status = "validation_failed"
+                key_details["validation_failed"] = True
+
+        elif tool_name == "rapidwright_analyze_fabric_for_pblock":
+            # Parse JSON output for fabric bounds and recommended region
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data['error'][:200]}")
+                    status = "error"
+                else:
+                    fb = data.get("fabric_bounds", {})
+                    rr = data.get("recommended_region", {})
+                    er = data.get("estimated_resources", {})
+                    tr = data.get("target_requirements", {})
+                    if fb:
+                        summary_parts.append(
+                            f"Fabric: cols {fb.get('min_col')}-{fb.get('max_col')}, "
+                            f"rows {fb.get('min_row')}-{fb.get('max_row')}"
+                        )
+                    if rr:
+                        summary_parts.append(
+                            f"Region: cols {rr.get('col_min')}-{rr.get('col_max')}, "
+                            f"rows {rr.get('row_min')}-{rr.get('row_max')}"
+                        )
+                        for k in ("col_min", "col_max", "row_min", "row_max",
+                                  "center_col", "center_row",
+                                  "center_of_mass_col", "center_of_mass_row"):
+                            v = rr.get(k)
+                            if v is not None:
+                                key_details[k] = v
+                    if er:
+                        summary_parts.append(
+                            f"Estimated: ~{er.get('approx_luts', '?')} LUTs, "
+                            f"~{er.get('approx_ffs', '?')} FFs, "
+                            f"{er.get('dsp_sites', 0)} DSPs, {er.get('bram_sites', 0)} BRAMs"
+                        )
+                    if tr:
+                        summary_parts.append(
+                            f"Target: {tr.get('luts', '?')} LUTs, {tr.get('ffs', '?')} FFs, "
+                            f"{tr.get('dsps', 0)} DSPs, {tr.get('brams', 0)} BRAMs"
+                        )
+                    if data.get("message"):
+                        summary_parts.append(data["message"][:200])
+            except Exception:
+                pass
+
+        elif tool_name in ("rapidwright_execute_fanout_strategy",
+                           "rapidwright_execute_pblock_strategy",
+                           "rapidwright_execute_physopt_strategy"):
+            # Parse StrategyPlan JSON for pending steps
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data.get('error', 'unknown')[:200]}")
+                    status = "error"
+                else:
+                    status_val = data.get("status", "unknown")
+                    summary_parts.append(f"Strategy status: {status_val}")
+                    key_details["strategy_status"] = status_val
+                    if data.get("message"):
+                        summary_parts.append(data["message"][:200])
+                    steps = data.get("steps", [])
+                    if steps:
+                        pending = [s for s in steps if not s.get("executed", False)]
+                        executed = [s for s in steps if s.get("executed", False)]
+                        if pending:
+                            pending_names = [s.get("step_name", "?") for s in pending]
+                            summary_parts.append(f"Pending: {' -> '.join(pending_names)}")
+                            key_details["pending_steps"] = pending_names
+                        if executed:
+                            key_details["executed_steps"] = [s.get("step_name", "?") for s in executed]
+                    if data.get("analysis_summary"):
+                        key_details["analysis"] = data["analysis_summary"]
+            except Exception:
+                pass
+
         # Fallback: generic truncation
         if not summary_parts:
             # Pick first few meaningful lines
@@ -1920,6 +2046,31 @@ STRICTLY FORBIDDEN:
         if self._is_done_reason in interrupted_exits and is_actionable and not cycle_complete:
             result["was_interrupted"] = True
 
+        # [Fix 4] Detect pblock validation failure: last tool is create_and_apply_pblock
+        # and its result contains validation_failed key.
+        _pblock_failed = False
+        if last_tool_raw == "vivado_create_and_apply_pblock":
+            last_detail = self._compat.tool_call_details[-1] if self._compat.tool_call_details else {}
+            last_details = last_detail.get("key_details", {}) if isinstance(last_detail, dict) else {}
+            if isinstance(last_details, dict) and last_details.get("validation_failed"):
+                _pblock_failed = True
+
+        # [Fix 6] Detect missing post-fanout evaluation: optimize_fanout was used
+        # but route_design + report_timing_summary are absent from the tool sequence.
+        _fanout_post_eval_missing = False
+        if any("optimize_fanout" in t for t in tool_names):
+            has_route = any("route_design" in t for t in tool_names)
+            has_timing = any("report_timing_summary" in t for t in tool_names[-3:])
+            if not (has_route and has_timing):
+                _fanout_post_eval_missing = True
+
+        if _pblock_failed:
+            result["was_interrupted"] = True
+            result["reason"] = "pblock_validation_failed"
+        elif _fanout_post_eval_missing:
+            result["was_interrupted"] = True
+            result["reason"] = "fanout_post_eval_missing"
+
         return result
 
     def _build_exit_reason_section(self) -> str:
@@ -1971,11 +2122,17 @@ STRICTLY FORBIDDEN:
         if is_worker:
             parts = ["CONTINUE from previous iteration."]
             if unfinished["was_interrupted"]:
-                parts.append(
-                    f"Strategy '{unfinished['strategy']}' was in progress "
-                    f"(last tool: {unfinished['last_tool']}, "
-                    f"{unfinished['tool_count']} calls). Resume or adjust."
-                )
+                reason = unfinished.get("reason", "")
+                if reason == "pblock_validation_failed":
+                    parts.append("PBLOCK resource shortage detected. Re-analyze fabric with expanded bounds or switch strategy.")
+                elif reason == "fanout_post_eval_missing":
+                    parts.append("Fanout optimization applied. Complete: open_checkpoint -> route_design -> report_timing_summary.")
+                else:
+                    parts.append(
+                        f"Strategy '{unfinished['strategy']}' was in progress "
+                        f"(last tool: {unfinished['last_tool']}, "
+                        f"{unfinished['tool_count']} calls). Resume or adjust."
+                    )
             else:
                 parts.append("Build upon existing progress. Do NOT reload the design.")
             return " ".join(parts)
@@ -1988,13 +2145,29 @@ STRICTLY FORBIDDEN:
             "- Continue from where the previous model left off",
         ]
         if unfinished["was_interrupted"]:
-            lines.extend([
-                "",
-                f"**Interrupted Strategy:** The previous iteration was executing "
-                f"'{unfinished['strategy']}' (last step: {unfinished['last_tool']}, "
-                f"{unfinished['tool_count']} tool calls) when it ended.",
-                "Consider resuming this strategy from the last step or switching to a better approach.",
-            ])
+            reason = unfinished.get("reason", "")
+            if reason == "pblock_validation_failed":
+                lines.extend([
+                    "",
+                    "**PBLOCK Resource Shortage:** The pblock region lacks sufficient resources.",
+                    "- Re-run analyze_fabric_for_pblock with expanded bounds or a shifted region.",
+                    "- Or switch to a different strategy (PhysOpt/Fanout).",
+                ])
+            elif reason == "fanout_post_eval_missing":
+                lines.extend([
+                    "",
+                    "**Fanout Optimization Applied:** Post-optimization evaluation is missing.",
+                    "- Must run: open_checkpoint -> route_design -> report_timing_summary.",
+                    "- Verify timing impact before proceeding.",
+                ])
+            else:
+                lines.extend([
+                    "",
+                    f"**Interrupted Strategy:** The previous iteration was executing "
+                    f"'{unfinished['strategy']}' (last step: {unfinished['last_tool']}, "
+                    f"{unfinished['tool_count']} tool calls) when it ended.",
+                    "Consider resuming this strategy from the last step or switching to a better approach.",
+                ])
         lines.append(
             "- Use SWITCH_STRATEGY (not DONE) when you have exhausted your current approach but WNS is still negative."
         )
@@ -2507,28 +2680,34 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             target_tool = arguments.get("tool_name", "")
 
             candidates = []
-            for (it, rd), txt in self._raw_tool_outputs.items():
+            for (it, rd), (tname, txt) in self._raw_tool_outputs.items():
                 if it == iteration and (round_idx is None or rd == round_idx):
-                    candidates.append(((it, rd), txt))
+                    candidates.append(((it, rd), tname, txt))
 
-            # Filter by tool_name if specified (search raw output for the tool name pattern)
+            # Filter by tool_name if specified (using stored tool name for exact match)
             if target_tool and candidates:
                 filtered = []
-                for (it, rd), txt in candidates:
-                    # For raw output, we can't know the original tool name from stored text,
-                    # but we can look for tool call syntax in the raw text
-                    if target_tool.replace("vivado_", "").replace("rapidwright_", "") in txt[:2000]:
-                        filtered.append(((it, rd), txt))
+                for (it, rd), tname, txt in candidates:
+                    if tname == target_tool:
+                        filtered.append(((it, rd), tname, txt))
+                if not filtered:
+                    # Fallback: text-based search for backward compatibility
+                    search_key = target_tool.replace("vivado_", "").replace("rapidwright_", "")
+                    for (it, rd), tname, txt in candidates:
+                        if search_key in txt[:2000]:
+                            filtered.append(((it, rd), tname, txt))
                 if filtered:
                     candidates = filtered
+                else:
+                    candidates = []  # No match via either method
 
             if not candidates:
                 return json.dumps({"error": f"No raw output found for iteration={iteration}, round={round_idx}, tool={target_tool}"})
 
             # Return most recent matching output
             candidates.sort(key=lambda x: (x[0][0], x[0][1]), reverse=True)
-            (it, rd), txt = candidates[0]
-            return f"[Raw tool output from iteration {it}, round {rd} ({len(txt)} chars)]\n\n{txt}"
+            (it, rd), tname, txt = candidates[0]
+            return f"[Raw tool output from iteration {it}, round {rd} ({len(txt)} chars, tool: {tname})]\n\n{txt}"
 
         # Parse server prefix from tool name
         if tool_name.startswith("rapidwright_"):
@@ -3536,7 +3715,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         raw_result = result
                         result = self._summarize_tool_result(tool_name, raw_result)
                         # Store full raw output in side buffer for on-demand retrieval
-                        self._raw_tool_outputs[(self.iteration, tool_round)] = raw_result
+                        self._raw_tool_outputs[(self.iteration, tool_round)] = (tool_name, raw_result)
                         # FIFO eviction when buffer exceeds limit
                         if len(self._raw_tool_outputs) > self._raw_tool_output_max:
                             oldest_key = min(self._raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))

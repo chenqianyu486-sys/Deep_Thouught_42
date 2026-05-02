@@ -551,6 +551,96 @@ def extract_critical_path_cells(
         return json.dumps(all_paths)
 
 
+def extract_critical_path_pins(
+    num_paths: int = 10,
+    output_file: str = None,
+    timeout: float = 600.0
+) -> str:
+    """
+    Extract pin-level paths from critical timing paths for net detour analysis.
+
+    Parses timing report to get ordered list of pin names on each critical path.
+    Output is JSON format directly consumable by RapidWright's analyze_net_detour.
+
+    pin_paths format: ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+
+    Args:
+        num_paths: Number of critical paths to extract
+        output_file: Optional path to write JSON output to file instead of returning it
+        timeout: Command timeout in seconds
+
+    Returns:
+        JSON string with pin paths data
+    """
+    import re
+    import json
+
+    # Generate detailed timing report
+    cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
+
+    try:
+        timing_report = run_tcl_command(cmd, timeout=timeout)
+    except Exception as e:
+        return json.dumps({"error": f"Error generating timing report: {str(e)}"})
+
+    # Split into individual paths by Slack header
+    path_sections = re.split(r'Slack \(', timing_report)
+
+    all_pin_paths = []
+
+    for path_section in path_sections[1:]:  # Skip first (header)
+        pin_paths = []
+        in_data_path = False
+
+        for line in path_section.split('\n'):
+            stripped = line.strip()
+
+            # Detect data path section boundaries
+            if re.match(r'^-{3,}', stripped) and not in_data_path:
+                in_data_path = True
+                continue
+            if re.match(r'^-{3,}', stripped) and in_data_path:
+                break  # End of data path section
+
+            if not in_data_path:
+                continue
+
+            # Match hierarchical pin names: cell_path/pin_suffix
+            # e.g., "inst/LUT6/I0", "ff_reg/D", "design_i/inst/O"
+            parts = stripped.split()
+            for part in parts:
+                pin_match = re.match(
+                    r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$',
+                    part
+                )
+                if pin_match:
+                    full_pin = f"{pin_match.group(1)}/{pin_match.group(2)}"
+                    if full_pin not in pin_paths:  # Deduplicate within path
+                        pin_paths.append(full_pin)
+                    break  # One pin per line
+
+        if len(pin_paths) >= 2:  # Only include paths with at least 2 pins
+            all_pin_paths.append(pin_paths)
+
+    result = {
+        "status": "success",
+        "path_count": len(all_pin_paths),
+        "pin_paths": all_pin_paths,
+    }
+
+    if output_file:
+        try:
+            import os
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            result["output_file"] = output_file
+        except Exception as e:
+            return json.dumps({"error": f"Error writing to file: {str(e)}"})
+
+    return json.dumps(result)
+
+
 def report_utilization_for_pblock(timeout: float = 300.0) -> str:
     """
     Get detailed resource utilization report for pblock sizing.
@@ -1204,6 +1294,34 @@ async def list_tools():
             }
         ),
         Tool(
+            name="extract_critical_path_pins",
+            description="""Extract pin-level paths from critical timing paths for net detour analysis.
+
+            Parses timing report to get ordered list of pin names on each critical path.
+            Output is JSON that can be passed to RapidWright's analyze_net_detour.
+
+            pin_paths format: ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
+            This pin-level detail is required for net detour analysis, unlike extract_critical_path_cells
+            which only extracts cell names.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "num_paths": {
+                        "type": "number",
+                        "description": "Number of critical paths to extract (default: 10)"
+                    },
+                    "output_file": {
+                        "type": "string",
+                        "description": "Path to write JSON output to file (optional)"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 600)"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="create_and_apply_pblock",
             description="""Create a pblock (area constraint) and apply it to the design.
             
@@ -1569,6 +1687,13 @@ async def call_tool(name: str, arguments: dict):
             timeout = arguments.get("timeout", 600)
             
             output = extract_critical_path_cells(num_paths, output_file, timeout)
+            return [TextContent(type="text", text=output)]
+        elif name == "extract_critical_path_pins":
+            num_paths = arguments.get("num_paths", 10)
+            output_file = arguments.get("output_file")
+            timeout = arguments.get("timeout", 600)
+
+            output = extract_critical_path_pins(num_paths, output_file, timeout)
             return [TextContent(type="text", text=output)]
         
         elif name == "report_utilization_for_pblock":

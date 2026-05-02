@@ -20,6 +20,13 @@ from mcp.server import Server
 from mcp.types import Tool, TextContent, GetPromptResult, PromptMessage
 import mcp.server.stdio
 
+# === Fix: ensure project root is on sys.path so skills/ package is importable ===
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_script_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+# ===========================================================================
+
 import rapidwright_tools as rw
 
 # Import sanitization utilities
