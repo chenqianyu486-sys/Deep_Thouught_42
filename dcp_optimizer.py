@@ -1088,6 +1088,7 @@ class DCPOptimizer(DCPOptimizerBase):
   resource_utilization: [{resource_util_str}]
   strategy_sequence: [{strategy_seq_str}]
   remaining_strategies: [{remaining_str}]
+  stagnation: {self.global_no_improvement} consecutive no-improvement iterations
   clock_period: {clock_period_str}
   input_dcp: {input_dcp_str}
   next_model: {next_model}
@@ -2265,6 +2266,50 @@ class DCPOptimizer(DCPOptimizerBase):
         )
         return "\n".join(lines)
 
+    def _build_stagnation_signal(self) -> str:
+        """Build prominent stagnation signal when optimization is not improving.
+
+        When global_no_improvement >= 1, returns a structured warning that explicitly
+        tells the LLM to STOP optimizing and re-diagnose. Returns empty string when
+        no stagnation detected.
+        """
+        if self.global_no_improvement < 1:
+            return ""
+
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        if best_wns is not None and best_wns >= 0:
+            return ""  # WNS target already met, no stagnation concern
+
+        # Build WNS trajectory from recent narratives
+        recent_entries = self._iteration_narratives[-3:]
+        trajectory_parts = []
+        for e in recent_entries:
+            delta = e['wns_delta']
+            delta_str = f"{delta:+.4f}" if delta else "+0.0000"
+            trajectory_parts.append(
+                f"iter{e['iteration']}({e['outcome'].upper()[:3]}): "
+                f"{e['wns_before']:.3f}->{e['wns_after']:.3f}ns({delta_str}) "
+                f"{e['strategy_label']}"
+            )
+        trajectory = "\n".join(trajectory_parts) if trajectory_parts else "N/A"
+
+        current_wns = self._get_current_wns()
+        wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+
+        return (
+            f"\n=== STAGNATION SIGNAL ===\n"
+            f"⚠ {self.global_no_improvement} consecutive iterations WITHOUT WNS improvement. "
+            f"Current WNS: {wns_str}.\n"
+            f"Recent trajectory:\n{trajectory}\n\n"
+            f"Your current optimization approach has STOPPED producing results. "
+            f"You MUST re-diagnose from scratch before applying any strategy:\n"
+            f"1. Call report_timing_summary and extract_critical_path_cells to gather current signal data\n"
+            f"2. Match observed signals against the SCENARIO_DETECTION_MATRIX\n"
+            f"3. Form a hypothesis about the dominant timing obstacle\n"
+            f"4. Select a strategy based on the hypothesis (not the one that just failed)\n"
+            f"DO NOT repeat the same strategy. DO NOT use DONE. DO NOT skip diagnosis.\n"
+        )
+
     def _build_skill_recommendation(self) -> str:
         """Analyze current state and recommend a strategy skill tool.
 
@@ -2272,6 +2317,21 @@ class DCPOptimizer(DCPOptimizerBase):
         or empty string if no clear recommendation.
         """
         failed = set(self._compat.failed_strategies)
+
+        # [META-COGNITION] Stagnation: recommend diagnosis instead of optimization
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        if self.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
+            if "PBLOCK" not in failed:
+                return ("Recommended skill: rapidwright_analyze_pblock_region "
+                        "[DIAGNOSTIC - triggered by stagnation]. "
+                        "Analyze FPGA fabric to understand timing obstacles before selecting strategy.")
+            if "Fanout" not in failed:
+                return ("Recommended skill: rapidwright_execute_fanout_strategy "
+                        "[DIAGNOSTIC - triggered by stagnation]. "
+                        "Check high-fanout nets as potential hidden obstacle.")
+            return ("Recommended skill: rapidwright_analyze_net_detour "
+                    "[DIAGNOSTIC - triggered by stagnation]. "
+                    "Analyze placement detour issues on critical paths.")
 
         # Check spread data for distributed scenario
         if "PBLOCK" not in failed and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
@@ -2287,8 +2347,16 @@ class DCPOptimizer(DCPOptimizerBase):
         if "Fanout" not in failed and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
             max_fanout = max(n[1] for n in self.high_fanout_nets[:5]) if self.high_fanout_nets else 0
             if max_fanout > 100:
-                skill_name = STRATEGY_SKILL_MAP.get("Fanout", "fanout_strategy")
-                return f"Recommended skill: rapidwright_execute_{skill_name} (matches high_fanout scenario, max_fanout={max_fanout})"
+                return (
+                    "Recommended skill: rapidwright_execute_fanout_strategy "
+                    f"(matches high_fanout scenario, max_fanout={max_fanout}). "
+                    "Prerequisite: First call vivado_get_critical_high_fanout_nets "
+                    "to get the list of high fanout nets with fanout counts, "
+                    "then call the skill with nets set to that list. "
+                    "The tool splits high-fanout nets internally and writes a checkpoint — "
+                    "you must then call vivado_open_checkpoint, vivado_route_design, "
+                    "and vivado_report_timing_summary yourself."
+                )
 
         # Check for repeated no-improvement with physopt → suggest analysis skill (not a strategy, no filter needed)
         if self.global_no_improvement >= 2 and self._iteration_narratives:
@@ -2400,6 +2468,20 @@ class DCPOptimizer(DCPOptimizerBase):
             else:
                 goal = continuation_prefix + "Severe violation. Consider aggressive strategies."
 
+        # [META-COGNITION] Stagnation override: replace goal with re-diagnosis instruction
+        if self.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
+            current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+            goal = (
+                f"⚠ STAGNATION DETECTED: {self.global_no_improvement} consecutive iterations without improvement. "
+                f"Current WNS={current_wns_str}. Your current approach is NOT WORKING.\n"
+                f"STOP executing optimization strategies. You MUST initiate a fresh diagnosis cycle:\n"
+                f"1. Gather current timing data (report_timing_summary, extract_critical_path_cells)\n"
+                f"2. Analyze what has changed and why prior strategies failed\n"
+                f"3. Form a new hypothesis about the dominant timing obstacle\n"
+                f"4. Select a strategy that has NOT been tried yet\n"
+                f"Do NOT repeat the same pattern."
+            )
+
         # Append skill recommendation if available
         skill_rec = self._build_skill_recommendation()
         if skill_rec and best_wns is not None and best_wns < 0:
@@ -2426,6 +2508,8 @@ class DCPOptimizer(DCPOptimizerBase):
         directive = self._build_continuation_directive(unfinished, is_worker=False)
         skill_rec = self._build_skill_recommendation()
         skill_rec_section = f"\n=== RECOMMENDED SKILL ===\n{skill_rec}\n" if skill_rec else ""
+        stagnation_signal = self._build_stagnation_signal()
+        stagnation_section = f"{stagnation_signal}\n" if stagnation_signal else ""
 
         handoff = f"""**ITERATION HANDOFF - Planner**
 
@@ -2453,7 +2537,7 @@ class DCPOptimizer(DCPOptimizerBase):
 === FAILED STRATEGIES ===
 {failed_strategies}
 {skill_rec_section}
-=== SKILL INVOCATIONS ===
+{stagnation_section}=== SKILL INVOCATIONS ===
 {self._build_skill_invocation_summary(self.iteration) or "(none)"}
 {self._format_analysis_section()}=== INCOMING MODEL ===
 You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
@@ -2527,7 +2611,7 @@ Exit: {exit_label}
 === AVOID ===
 {failed_strategies}
 {skill_rec_section}
-=== SKILL INVOCATIONS ===
+{stagnation_section}=== SKILL INVOCATIONS ===
 {self._build_skill_invocation_summary(self.iteration) or "(none)"}
 Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff

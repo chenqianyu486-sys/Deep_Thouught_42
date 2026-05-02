@@ -117,6 +117,15 @@ SKILL_GUIDANCE = {
         "advantage": "Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns",
         "condition": "Need to create pblock but optimal region unknown",
     },
+    "execute_fanout_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "List of high fanout nets from vivado_get_critical_high_fanout_nets: [{\"net_name\": str, \"fanout\": int}, ...]",
+        "output": "Mutated netlist with split high-fanout nets + StrategyPlan with remaining Vivado steps",
+        "condition": "High fanout nets present (fanout > 100), no path spread",
+        "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
+        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
+        "note": "split_factor is calculated internally as max(3, min(8, fanout // 100)) — do NOT provide it",
+    },
     "analyze_pblock_region": {
         "category": "ANALYSIS",
         "input": "target_lut_count, target_ff_count from vivado_report_utilization_for_pblock",

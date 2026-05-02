@@ -13,7 +13,7 @@ rules:
     - "Auto rollback if WNS regresses"
     - "Stop after 5 consecutive iterations with no WNS improvement"
   params:
-    split_factor: "fanout/100 (min 3, max 8)"
+    split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
 
 # ── Response Format ──
 # Placed early: every response MUST follow this YAML output format.
