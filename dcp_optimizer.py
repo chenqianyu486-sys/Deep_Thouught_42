@@ -5066,6 +5066,13 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         self.skip_skills = skip_skills
         self.skill_test_results: list[dict] = []
     
+    def _check_test_exit(self, step_name: str) -> bool:
+        """Check if user requested exit via console 'quit'. Returns True if exit was requested."""
+        if self._check_exit_requested():
+            print(f"\n[TEST] ⏹ User requested exit — stopping before: {step_name}")
+            return True
+        return False
+
     async def start_servers(self):
         """Start and connect to both MCP servers."""
         await super().start_servers(log_prefix="[TEST]")
@@ -5259,20 +5266,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=120.0)
             print(f"RapidWright init result:\n{result[:500]}...")
             logger.info(f"RapidWright init result: {result}")
-            
+
+            if self._check_test_exit("Step 1: Open input DCP in Vivado"):
+                return False
+
             # ================================================================
             # Step 1: Open the input DCP in Vivado
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 1: Open input DCP in Vivado")
             print("-"*60)
-            
+
             result = await self.call_vivado_tool("open_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"Open checkpoint result:\n{result}")
             logger.info(f"Open checkpoint result: {result}")
-            
+
+            if self._check_test_exit("Step 2: Report timing in Vivado"):
+                return False
+
             # ================================================================
             # Step 2: Report timing in Vivado
             # ================================================================
@@ -5299,14 +5312,17 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 if initial_fmax is not None:
                     print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
             print()
-            
+
+            if self._check_test_exit("Step 3: Get critical high fanout nets"):
+                return False
+
             # ================================================================
             # Step 3: Get critical high fanout nets
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 3: Get critical high fanout nets")
             print("-"*60)
-            
+
             result = await self.call_vivado_tool("get_critical_high_fanout_nets", {
                 "num_paths": 50,
                 "min_fanout": 100,
@@ -5328,19 +5344,25 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"Will optimize {len(nets_to_optimize)} nets:")
             for net_name, fanout, path_count in nets_to_optimize:
                 print(f"  - {net_name} (fanout={fanout}, paths={path_count})")
-            
+
+            if self._check_test_exit("Step 4: Open DCP in RapidWright"):
+                return False
+
             # ================================================================
             # Step 4: Open the DCP in RapidWright
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 4: Open DCP in RapidWright")
             print("-"*60)
-            
+
             result = await self.call_rapidwright_tool("read_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"RapidWright read checkpoint result:\n{result}")
             logger.info(f"RapidWright read checkpoint: {result}")
+
+            if self._check_test_exit("Skill invocation tests"):
+                return False
 
             # ── Skill Invocation Tests ──────────────────────────────────────
             if not self.skip_skills:
@@ -5478,6 +5500,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 except Exception as e:
                     print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
+            if self._check_test_exit("Step 5: Fanout optimizations"):
+                return False
+
             # ================================================================
             # Step 5: Apply fanout optimization via skill (or raw tool)
             # ================================================================
@@ -5535,7 +5560,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     successful_optimizations = 0
 
                 print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
-            
+
+            if self._check_test_exit("Step 6: Write DCP from RapidWright"):
+                return False
+
             # ================================================================
             # Step 6: Write DCP from RapidWright
             # ================================================================
@@ -5557,7 +5585,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             else:
                 print("WARNING: DCP file was not created!")
                 logger.warning("RapidWright DCP file not created")
-            
+
+            if self._check_test_exit("Step 7: Read RapidWright DCP into Vivado"):
+                return False
+
             # ================================================================
             # Step 7: Read RapidWright DCP into Vivado
             # ================================================================
@@ -5590,14 +5621,17 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 }, timeout=RAPIDWRIGHT_DCP_TIMEOUT)
                 print(f"Open RapidWright DCP result:\n{result}")
             logger.info(f"Open RapidWright DCP: {result}")
-            
+
+            if self._check_test_exit("Step 8: Route design in Vivado"):
+                return False
+
             # ================================================================
             # Step 8: Route the design in Vivado
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 8: Route design in Vivado")
             print("-"*60)
-            
+
             # First check route status
             result = await self.call_vivado_tool("report_route_status", {
                 "show_unrouted": True,
@@ -5668,6 +5702,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=300.0)
             print(f"Route status after routing:\n{result[:1500]}...")
             logger.info(f"Route status after routing: {result}")
+
+            if self._check_test_exit("Step 9: Report final timing"):
+                return False
 
             # ================================================================
             # Step 9: Report timing and compare WNS
@@ -5811,20 +5848,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=120.0)
             print(f"RapidWright init result:\n{result[:500]}...")
             logger.info(f"RapidWright init result: {result}")
-            
+
+            if self._check_test_exit("Step 1: Open input DCP in Vivado"):
+                return False
+
             # ================================================================
             # Step 1: Open the input DCP in Vivado
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 1: Open input DCP in Vivado")
             print("-"*60)
-            
+
             result = await self.call_vivado_tool("open_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"Open checkpoint result:\n{result}")
             logger.info(f"Open checkpoint result: {result}")
-            
+
+            if self._check_test_exit("Step 2: Report timing in Vivado"):
+                return False
+
             # ================================================================
             # Step 2: Report timing in Vivado (Initialize WNS)
             # ================================================================
@@ -5851,7 +5894,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 if initial_fmax is not None:
                     print(f"*** Initial achievable fmax: {initial_fmax:.2f} MHz ***")
             print()
-            
+
+            if self._check_test_exit("Step 3: Extract critical path cells"):
+                return False
+
             # ================================================================
             # Step 3: Extract critical path cells from Vivado
             # ================================================================
@@ -5867,14 +5913,17 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=600.0)
             print(f"Extract critical paths result:\n{result[:2000]}...")
             logger.info(f"Extract critical paths: {result}")
-            
+
+            if self._check_test_exit("Step 4: Analyze critical path spread"):
+                return False
+
             # ================================================================
             # Step 4: Open DCP in RapidWright and analyze critical path spread
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 4: Analyze critical path spread in RapidWright")
             print("-"*60)
-            
+
             # First, open the DCP in RapidWright
             result = await self.call_rapidwright_tool("read_checkpoint", {
                 "dcp_path": str(input_dcp.resolve())
@@ -5893,6 +5942,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             spread_result = result if isinstance(result, str) else str(result)
             pblock_recommended = "spread-out" in spread_result.lower() or "pblock" in spread_result.lower()
             print(f"\n*** Pblock optimization {'RECOMMENDED' if pblock_recommended else 'may not be needed'} ***")
+
+            if self._check_test_exit("Skill invocation tests"):
+                return False
 
             # ── Skill Invocation Tests ──────────────────────────────────────
             if not self.skip_skills:
@@ -6045,6 +6097,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 except Exception as e:
                     print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
+            if self._check_test_exit("Step 5: Use known-optimal pblock"):
+                return False
+
             # ================================================================
             # Step 5: Use known-optimal pblock for LogicNets design
             # ================================================================
@@ -6060,7 +6115,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"  Height: 195 SLICE rows (Y60 to Y254)")
             print(f"\nThis pblock was empirically determined to achieve timing closure")
             print(f"by constraining the spread-out design to a compact region.")
-            
+
+            if self._check_test_exit("Step 6: Unplace the design"):
+                return False
+
             # ================================================================
             # Step 6: Unplace the design in Vivado
             # ================================================================
@@ -6074,7 +6132,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=300.0)
             print(f"Unplace result:\n{result}")
             logger.info(f"Unplace result: {result}")
-            
+
+            if self._check_test_exit("Step 7: Create and apply pblock"):
+                return False
+
             # ================================================================
             # Step 7: Create and apply pblock to entire design
             # ================================================================
@@ -6090,7 +6151,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=300.0)
             print(f"Create and apply pblock result:\n{result}")
             logger.info(f"Create pblock result: {result}")
-            
+
+            if self._check_test_exit("Step 8: Place the design"):
+                return False
+
             # ================================================================
             # Step 8: Place the design in Vivado
             # ================================================================
@@ -6116,6 +6180,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             finally:
                 done_event.set()
                 heartbeat.stop()
+
+            if self._check_test_exit("Step 9: Route design"):
+                return False
 
             # ================================================================
             # Step 9: Route the design in Vivado
@@ -6204,7 +6271,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
             print(f"Route status after routing:\n{result[:1500]}...")
             logger.info(f"Route status after routing: {result}")
-            
+
+            if self._check_test_exit("Step 10: Report final timing"):
+                return False
+
             # ================================================================
             # Step 10: Report timing and compare WNS
             # ================================================================
@@ -6321,6 +6391,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         print("="*70)
         print(f"Input DCP:  {input_dcp}")
         print(f"Temp dir:   {self.temp_dir}")
+        print("[TEST] Type 'quit' and press Enter to exit gracefully at any time.")
         print("="*70 + "\n")
 
         overall_start = time.time()
@@ -6335,6 +6406,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=120.0)
             print(f"RapidWright init result:\n{result[:500]}...")
 
+            if self._check_test_exit("Skill test - Step 2: Open DCP"):
+                return False
+
             # Step 2: Open DCP in Vivado
             print("\n" + "-"*60)
             print("STEP 2: Open DCP in Vivado")
@@ -6343,6 +6417,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"Open checkpoint:\n{result}")
+
+            if self._check_test_exit("Skill test - Step 3: Timing and nets"):
+                return False
 
             # Step 3: Report timing + get high fanout nets
             print("\n" + "-"*60)
@@ -6358,6 +6435,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             self.high_fanout_nets = self.parse_high_fanout_nets(result)
             print(f"Found {len(self.high_fanout_nets)} high fanout nets")
 
+            if self._check_test_exit("Skill test - Step 4: Open DCP in RW"):
+                return False
+
             # Step 4: Open DCP in RapidWright
             print("\n" + "-"*60)
             print("STEP 4: Open DCP in RapidWright")
@@ -6366,6 +6446,9 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 "dcp_path": str(input_dcp.resolve())
             }, timeout=600.0)
             print(f"RapidWright read checkpoint:\n{result[:300]}...")
+
+            if self._check_test_exit("Skill test - Step 5: Skill invocations"):
+                return False
 
             # ── Skill Invocations ──────────────────────────────────────
             # Get pin paths for analyze_net_detour
@@ -6563,9 +6646,11 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
     if "corundum" in dcp_name or dcp_name == "demo_corundum_25g_misses_timing.dcp":
         design_type = "corundum"
         print(f"[TEST] Detected Corundum design - using high fanout optimization flow")
+        print(f"[TEST] Type 'quit' and press Enter to exit gracefully at any time.")
     elif "logicnets" in dcp_name or dcp_name == "logicnets_jscl.dcp":
         design_type = "logicnets"
         print(f"[TEST] Detected LogicNets design - using pblock optimization flow")
+        print(f"[TEST] Type 'quit' and press Enter to exit gracefully at any time.")
     else:
         print(f"\n[TEST] ERROR: Unsupported DCP file: {input_dcp.name}")
         print(f"[TEST] Test mode requires one of the two example DCPs:")
