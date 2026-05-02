@@ -19,8 +19,8 @@ fpl26_optimization_contest/
 │   ├── agent_context.py          # AgentContextManager - 多Agent分支
 │   └── strategies/
 │       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断 + 过时时序报告替换
-│       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60
-│       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=20
+│       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60, preserve_role_turns=6
+│       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=40, preserve_role_turns=6
 ├── RapidWrightMCP/               # RapidWright MCP服务器
 │   ├── rapidwright_tools.py      # 工具函数实现
 │   ├── server.py                 # MCP服务器入口
@@ -59,9 +59,10 @@ DCPOptimizer._compress_context()  ← 单次触发点（LLM调用前）
 MemoryManager._compress("yaml_structured", context, model_tier)
          ↓
 YAMLStructuredCompressor:
-    - 正常模式: preserve_turns=40/min_importance=0.15 (worker), preserve_turns=60/min_importance=0.1 (planner)
-    - 激进模式(hard_limit触发): preserve_turns=10, min_importance=0.7
+    - 正常模式: preserve_turns=40/min_importance=0.15/preserve_role_turns=6 (worker), preserve_turns=60/min_importance=0.1/preserve_role_turns=6 (planner)
+    - 激进模式(hard_limit触发): preserve_turns=25(worker)/40(planner), min_importance=0.35(worker)/0.25(planner)
     - system消息始终保护
+    - preserve_role_turns=6: 最近6条消息保留原始API role（user/assistant/tool），不塞进YAML
     - 两轮预算分配: 60%高重要性 + 40%中等重要性
     - preserve_turns预留预算: ~1500 tokens/turn, 最多10K
     - 工具调用保留参数（最多5个）
@@ -76,7 +77,8 @@ YAMLStructuredCompressor:
 1. 分离system消息（受保护）
 2. HistoricalMemory.add(summary, importance=0.8)  ← 先归档
 3. WorkingMemory.clear()                        ← 再清空
-4. 添加system + 压缩后的非system消息            ← 重建
+4. 添加system + YAML摘要（旧消息）              ← YAML压缩
+5. 添加最近 preserve_role_turns=6 条消息        ← 保留原始 role（user/assistant/tool）
 ```
 
 ### 2.3 WNS/TNS状态注入（防压缩丢失）
@@ -98,6 +100,7 @@ API调用前 → _inject_wns_state_to_system_prompt()
 | TNS/Failing Endpoints | DCPOptimizer.latest_tns/latest_failing_endpoints | API调用时随 WNS 一同注入 |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 失败策略 | CompressionContext | 存入YAML输出 |
+| 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 
 ### 2.5 模型选择
 
@@ -199,15 +202,15 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 # Worker: 速度优化, 250K max
 worker:
   soft_threshold: 40K, hard_limit: 200K
-  token_budget: 35K, preserve_turns: 40/10(激进), min_importance: 0.15/0.7(激进)
-  max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
+  token_budget: 35K, preserve_turns: 40/25(激进), min_importance: 0.15/0.35(激进)
+  preserve_role_turns: 6, max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
   fallback_models: ["deepseek/deepseek-v4-flash", "stepfun/step-3.5-flash"]
 
 # Planner: 推理优化, 1M max
 planner:
   soft_threshold: 120K, hard_limit: 300K
-  token_budget: 100K, preserve_turns: 60/10(激进), min_importance: 0.1/0.7(激进)
-  max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
+  token_budget: 100K, preserve_turns: 60/40(激进), min_importance: 0.1/0.25(激进)
+  preserve_role_turns: 6, max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
   fallback_models: ["xiaomi/mimo-v2.5-pro"]
 ```
 
@@ -436,3 +439,16 @@ FIFO 淘汰（最多 50 条）。仅当 LLM 调 `vivado_get_raw_tool_output` 时
 - YAML 格式: `[Tool: vivado_phys_opt_design (iteration 3), wns=-0.939]`
 - 旧格式: 正则提取 WNS + 首行截断
 - 放在 timing report 压缩之后，系统消息分离之前
+
+**5. 压缩后角色保留** (yaml_structured_compress.py, 2026-05-02 新增)
+
+`preserve_role_turns=6`: 压缩后最近6条消息不进入YAML，而是保留原始API role：
+```python
+api_messages = [
+  system("SYSTEM_PROMPT + WNS state"),      # 系统指令
+  system("YAML compressed OLDER messages"),  # 旧消息YAML化
+  user("..."),                               # ← 保留role
+  assistant("...", tool_calls=[...]),        # ← 保留role
+  tool("..."),                               # ← 保留role
+]
+```

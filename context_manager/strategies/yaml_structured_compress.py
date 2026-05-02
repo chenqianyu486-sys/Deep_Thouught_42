@@ -324,7 +324,8 @@ class YAMLStructuredCompressor(CompressionStrategy):
         token_budget: int = 80_000,
         preserve_turns: int = 20,
         min_importance_threshold: float = 0.3,
-        max_chars_multiplier: float = 1.0
+        max_chars_multiplier: float = 1.0,
+        preserve_role_turns: int = 6
     ):
         """
         Args:
@@ -332,11 +333,15 @@ class YAMLStructuredCompressor(CompressionStrategy):
             preserve_turns: Number of recent turns to preserve
             min_importance_threshold: Minimum importance score to keep a message
             max_chars_multiplier: Multiplier for adaptive max_chars (0.5=aggressive, 1.0=normal)
+            preserve_role_turns: Number of recent messages to keep with original API roles
+                (user/assistant/tool) instead of embedding in YAML. This preserves
+                role-structured context for the LLM's API-level role processing.
         """
         self.token_budget = token_budget
         self.preserve_turns = preserve_turns
         self.min_importance_threshold = min_importance_threshold
         self.max_chars_multiplier = max_chars_multiplier
+        self.preserve_role_turns = preserve_role_turns
 
     def compress(self, messages: List[Message], context: CompressionContext) -> List[Message]:
         """Compress messages into YAML format with FPGA design state.
@@ -461,10 +466,23 @@ class YAMLStructuredCompressor(CompressionStrategy):
         # Sort by iteration/position to maintain order
         selected.sort(key=lambda x: x[0].metadata.get('index', 0))
 
-        # Build YAML structure
+        # === Split recent turns for API role preservation ===
+        # Keep the last `preserve_role_turns` messages as their original API roles
+        # (user/assistant/tool) so the LLM's API-level role processing works correctly.
+        # Older messages go into the YAML conversation block.
+        preserve_role_count = getattr(self, 'preserve_role_turns', 3)
+        if preserve_role_count > 0 and len(selected) > preserve_role_count:
+            role_preserved = selected[-preserve_role_count:]
+            yaml_selected = selected[:-preserve_role_count]
+        else:
+            # Not enough messages to separate — all messages are recent
+            role_preserved = []
+            yaml_selected = selected
+
+        # Build YAML structure from yaml_selected (older messages) only
         yaml_data = self._build_yaml_structure(
             system_msgs,
-            selected,
+            yaml_selected,
             context
         )
 
@@ -520,9 +538,11 @@ class YAMLStructuredCompressor(CompressionStrategy):
             metadata={'protected': True, 'compression_type': compression_label}
         )
 
-        # Keep system messages + summary
+        # Keep system messages + YAML summary + role-preserved messages
         result = [msg for msg, _, _ in system_msgs]
         result.append(summary_msg)
+        for msg, _, _ in role_preserved:
+            result.append(msg)
 
         # Calculate accurate token counts using tiktoken
         input_tokens = self._estimate_tokens(messages)
