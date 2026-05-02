@@ -369,6 +369,62 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `latest_tns: Optional[float]` — 最新 TNS（从 timing report / auto-eval 获取）
 - `latest_failing_endpoints: Optional[int]` — 最新失败端点计数
 
+### 5.5 Step YAML 状态追踪（2026-05-02 新增）
+
+**问题**：LLM 使用原生 tool calls 时，只返回工具调用，不返回 `step:` YAML 块中的状态控制数据（`step_id`, `result_status`, `flow_control`, `analysis`）。只有纯文本响应（无 tool_calls）才会进入 `_parse_action_from_yaml()` 解析 flow_control。
+
+**修复**：三处改动：
+
+1. **新增 `StepState` dataclass** + `_parse_step_yaml()` 统一解析器
+2. **每轮都解析 step YAML**：无论是否有 tool_calls，先解析 content 中的 step YAML
+3. **flow_control 先于工具执行检查**：若 flow_control 是 DONE/SWITCH_STRATEGY，跳过工具执行
+
+**新流程**：
+```
+LLM response arrives
+  ↓
+1. _parse_step_yaml(message.content)  →  StepState
+2. Log [STEP_STATE] (step_id, result_status, flow_control, scenario_match, hypothesis)
+3. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
+   → 警告矛盾信号（若同时有 tool_calls），跳过工具执行
+   → 跳转到 flow_control 处理
+   否则如果有 tool_calls
+   → 正常执行工具
+   否则（纯文本）
+   → 现有纯文本处理逻辑（不变）
+4. flow_control 分支使用已解析的 StepState（回退 _parse_action_from_yaml）
+5. DONE/SWITCH_STRATEGY 时将 analysis 存入 _last_analysis
+```
+
+**新增数据结构**：
+```python
+@dataclass
+class StepState:
+    step_id: Optional[int] = None
+    result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
+    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
+    analysis: dict = field(default_factory=dict)  # observed_signals, scenario_match, hypothesis, strategy_rationale
+    has_tool_calls: bool = False
+    raw_content: str = ""
+    parse_error: Optional[str] = None
+```
+
+**实例变量**：
+- `self._step_state: Optional[StepState]` — 最近一次解析的 step state
+- `self._last_analysis: dict` — 最近一次 DONE/SWITCH_STRATEGY 的 analysis
+
+**迭代叙事增强**：`_append_iteration_narrative()` 新增字段：
+- `result_status`: step state 中的 result_status
+- `scenario_match`: step state 中的 scenario_match
+
+**Handoff 增强**：`_generate_planner_handoff()` 新增 `=== LLM'S OWN ANALYSIS ===` 段，包含 LLM 自身的 scenario_match、hypothesis、strategy_rationale、observed_signals。
+
+**边界情况处理**：
+- `content=None + tool_calls` → 空 StepState，正常执行工具
+- 矛盾信号（DONE + tool_calls）→ 打印警告，flow_control 优先，不执行工具
+- 旧模型不输出 YAML → 空 StepState，回退到 `_parse_action_from_yaml`
+- 多轮工具调用 → 每轮都解析 step YAML，step_id 可用于追踪轮次
+
 ## 6. 429降级机制
 
 ```

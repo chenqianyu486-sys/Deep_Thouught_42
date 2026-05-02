@@ -27,6 +27,7 @@ from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import dataclass, field
 from typing import Optional
 
 from mcp import ClientSession, StdioServerParameters
@@ -132,6 +133,22 @@ class TaskCategory:
     INFORMATION = "information"    # Information tasks: queries, read-only
     OPTIMIZATION = "optimization"  # Optimization tasks: design decisions, placement optimization
     UNKNOWN = "unknown"
+
+
+@dataclass
+class StepState:
+    """Parsed step YAML state from an LLM response.
+
+    Carries the step control data (step_id, result_status, flow_control,
+    analysis) that the LLM includes in its response's step: YAML block.
+    """
+    step_id: Optional[int] = None
+    result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
+    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
+    analysis: dict = field(default_factory=dict)  # observed_signals, scenario_match, hypothesis, strategy_rationale
+    has_tool_calls: bool = False               # Whether native tool_calls were also present
+    raw_content: str = ""                      # Raw content for logging/debugging
+    parse_error: Optional[str] = None          # Set if YAML parsing failed
 
 # Task classification patterns
 INFORMATION_PATTERNS = ["get_", "read", "query", "check", "list", "show", "status", "report"]
@@ -764,6 +781,10 @@ class DCPOptimizer(DCPOptimizerBase):
         self._raw_tool_outputs: dict[tuple[int, int], str] = {}
         self._raw_tool_output_max = 50  # FIFO limit
 
+        # Step state tracking from LLM YAML responses
+        self._step_state: Optional[StepState] = None   # Most recent parsed step state
+        self._last_analysis: dict = field(default_factory=dict)  # Last analysis from SWITCH_STRATEGY/DONE
+
         # === Section 7.0: Context Manager Integration ===
         # Initialize EventBus for context change notifications
         self._event_bus = EventBus()
@@ -930,7 +951,10 @@ class DCPOptimizer(DCPOptimizerBase):
         (e.g., ~94K tokens in later iterations).
         """
         FORMAT_GUARD = """**CRITICAL OUTPUT FORMAT - READ FIRST:**
-You MUST output valid YAML starting with `step:` in every response.
+You MUST output valid YAML starting with `step:` in EVERY response, INCLUDING
+when using native function/tool calls. The `step:` YAML block goes in the
+response text alongside any native tool calls.
+
 Format:
   step:
     step_id: <N>
@@ -944,13 +968,18 @@ Format:
       scenario_match: <scenario_id|null>    # wide_lut|high_fanout|distributed|control_imbalance|congestion|mixed|null
       hypothesis: "<string>"
       strategy_rationale: "<string>"
+    # tool_calls section is OPTIONAL when using native function calls.
+    # The system extracts tool calls from the API's native mechanism.
+    # Still include tool_calls in YAML if NOT using native function calls.
     tool_calls:
       - function: tool_name
         parameters:
           key: value
+
 STRICTLY FORBIDDEN:
   - XML/HTML tags (</arg_value>, <tool_call>, <arg_key>, etc.) — NOT valid YAML
   - Markdown fences (```), free text, ASCII art, summaries
+  - Omitting the step: YAML block when using native tool calls
 
 """
         if "CRITICAL OUTPUT FORMAT" not in system_content:
@@ -1770,7 +1799,11 @@ STRICTLY FORBIDDEN:
             "wns_delta": wns_delta,
             "tool_count": len(tools_this_iter),
             "strategy_label": self._infer_strategy_from_tools(tools_this_iter),
-            "outcome": outcome
+            "outcome": outcome,
+            "result_status": (self._step_state.result_status
+                              if self._step_state else None),
+            "scenario_match": (self._step_state.analysis.get('scenario_match')
+                               if self._step_state and self._step_state.analysis else None)
         }
         self._iteration_narratives.append(entry)
         if len(self._iteration_narratives) > 20:
@@ -2102,9 +2135,31 @@ STRICTLY FORBIDDEN:
 === FAILED STRATEGIES ===
 {failed_strategies}
 {skill_rec_section}
-=== INCOMING MODEL ===
+{self._format_analysis_section()}=== INCOMING MODEL ===
 You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
+
+    def _format_analysis_section(self) -> str:
+        """Format the LLM's own analysis from the last step YAML for handoff context."""
+        if not self._last_analysis:
+            return ""
+        obs = self._last_analysis.get('observed_signals', {})
+        scenario = self._last_analysis.get('scenario_match', 'N/A')
+        hypothesis = self._last_analysis.get('hypothesis', '')
+        rationale = self._last_analysis.get('strategy_rationale', '')
+        parts = ["\n=== LLM'S OWN ANALYSIS ===\n"]
+        if scenario and scenario != 'N/A':
+            parts.append(f"- Scenario Match: {scenario}\n")
+        if hypothesis:
+            parts.append(f"- Hypothesis: {hypothesis[:200]}\n")
+        if rationale:
+            parts.append(f"- Strategy Rationale: {rationale[:200]}\n")
+        if obs:
+            obs_str = ", ".join(f"{k}={v}" for k, v in obs.items() if v is not None)
+            if obs_str:
+                parts.append(f"- Observed Signals: {obs_str}\n")
+        parts.append("\n")
+        return "".join(parts)
 
     def _generate_worker_handoff(self) -> str:
         """Generate lean handoff for worker models (250K context)."""
@@ -3081,6 +3136,67 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 return (action, flow_control)
         return (None, None)
 
+    @staticmethod
+    def _parse_step_yaml(content: str) -> StepState:
+        """Unified parser: extract full step YAML block from LLM response text.
+
+        Returns a StepState with whatever fields could be parsed. Never raises.
+        This is format-agnostic: works whether or not native tool_calls are present.
+        """
+        state = StepState(raw_content=content)
+        if not content or not content.strip():
+            return state
+
+        try:
+            # Strip XML tags and repair step: boundaries fused with tags
+            cleaned = re.sub(r'</?[^>]+>', '', content)
+            cleaned = re.sub(r'([^\n])(step:)', r'\1\n\2', cleaned)
+
+            blocks = re.split(r'\n(?=step:)', cleaned)
+            if not blocks:
+                return state
+
+            # Use the LAST step: block if multiple exist (LLM may emit intermediate
+            # reasoning blocks; the last one represents the final state)
+            block = blocks[-1].strip()
+            if not block.startswith('step:'):
+                block = 'step:\n' + block
+
+            data = yaml.safe_load(block)
+            if not isinstance(data, dict):
+                return state
+
+            step_data = data.get('step')
+            if not isinstance(step_data, dict):
+                step_data = data
+
+            # Extract each field independently (partial data is fine)
+            raw_sid = step_data.get('step_id')
+            if raw_sid is not None:
+                try:
+                    state.step_id = int(raw_sid)
+                except (ValueError, TypeError):
+                    pass
+
+            state.result_status = step_data.get('result_status')
+            state.flow_control = step_data.get('flow_control')
+
+            # Backward compat: top-level 'action' is aliased to flow_control
+            if not state.flow_control:
+                state.flow_control = step_data.get('action')
+
+            # Extract full analysis dict
+            analysis = step_data.get('analysis')
+            if isinstance(analysis, dict):
+                state.analysis = analysis
+
+        except yaml.YAMLError as e:
+            state.parse_error = str(e)[:200]
+        except Exception as e:
+            state.parse_error = f"{type(e).__name__}: {str(e)[:200]}"
+
+        return state
+
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -3339,95 +3455,128 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # 增强可观测性：打印 assistant 的回答
             logger.info(f"[ASSISTANT] {assistant_content}")
 
-            # [FIX] Fallback: parse tool calls from raw text for models that don't
-            # support native tool calling (try XML format first, then YAML format)
-            if not message.tool_calls:
-                text_calls = self._parse_text_tool_calls(assistant_content)
-                if not text_calls:
-                    text_calls = self._parse_yaml_tool_calls(assistant_content)
-                if text_calls:
-                    logger.info(f"Parsed {len(text_calls)} tool call(s) from raw text (XML/YAML fallback, model={current_model})")
-                    simulated = []
-                    for i, tc_data in enumerate(text_calls):
-                        tc = SimpleNamespace()
-                        tc.function = SimpleNamespace()
-                        tc.function.name = tc_data["name"]
-                        tc.function.arguments = json.dumps(tc_data["arguments"])
-                        tc.id = f"text_call_{self.llm_call_count}_{i}"
-                        simulated.append(tc)
-                    message.tool_calls = simulated
+            # === NEW: Always parse step YAML from every response ===
+            step_state = self._parse_step_yaml(assistant_content)
+            step_state.has_tool_calls = bool(message.tool_calls)
+            self._step_state = step_state
 
-            if message.tool_calls:
-                for tc in message.tool_calls:
-                    if not tc.function: continue
-                    tool_name = tc.function.name
-                    try:
-                        tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    except json.JSONDecodeError:
-                        tool_args = {}
+            if step_state.step_id is not None or step_state.flow_control is not None:
+                logger.info(
+                    f"[STEP_STATE] step_id={step_state.step_id}, "
+                    f"result_status={step_state.result_status}, "
+                    f"flow_control={step_state.flow_control}, "
+                    f"scenario={step_state.analysis.get('scenario_match', 'N/A')}, "
+                    f"hypothesis={str(step_state.analysis.get('hypothesis', ''))[:80]}, "
+                    f"tool_calls={step_state.has_tool_calls}"
+                )
+            if step_state.parse_error:
+                logger.warning(f"[STEP_PARSE] YAML parse error: {step_state.parse_error}")
 
-                    # [FIX] vivado_run_tcl routing issue: set current_task_type based on Tcl command content
-                    effective_task_type = tool_name
-                    if tool_name == "vivado_run_tcl":
-                        tcl_cmd = str(tool_args.get("command", "")).lower()
-                        # If Tcl command contains optimization keywords, use command name as task_type for correct classification
-                        if any(p in tcl_cmd for p in OPTIMIZATION_PATTERNS):
-                            # Extract first optimization command as task_type (e.g., place_design, phys_opt_design)
-                            for p in OPTIMIZATION_PATTERNS:
-                                if p in tcl_cmd:
-                                    effective_task_type = p
-                                    logger.info(f"Detected optimization Tcl command '{p}' in vivado_run_tcl, routing will use '{effective_task_type}'")
-                                    break
-                        else:
-                            effective_task_type = "vivado_run_tcl_info"  # Information-class Tcl uses different identifier
+            # Check flow_control BEFORE executing tools.
+            # If termination signal (DONE/SWITCH_STRATEGY), skip tool execution
+            # even when native tool_calls are present (contradictory but safe:
+            # the LLM should not request tools AND signal termination simultaneously).
+            flow_signal = step_state.flow_control
+            if flow_signal in ("DONE", "SWITCH_STRATEGY"):
+                content = assistant_content
+                if message.tool_calls:
+                    logger.warning(
+                        f"flow_control={flow_signal} with {len(message.tool_calls)} "
+                        f"native tool_calls -- prioritizing flow_control, "
+                        f"skipping tool execution"
+                    )
+                # Skip tool execution entirely, fall through to flow_control handling
+                # at lines 3562+ (section 4-5-6 below).
+            else:
+                # [FIX] Fallback: parse tool calls from raw text for models that don't
+                # support native tool calling (try XML format first, then YAML format)
+                if not message.tool_calls:
+                    text_calls = self._parse_text_tool_calls(assistant_content)
+                    if not text_calls:
+                        text_calls = self._parse_yaml_tool_calls(assistant_content)
+                    if text_calls:
+                        logger.info(f"Parsed {len(text_calls)} tool call(s) from raw text (XML/YAML fallback, model={current_model})")
+                        simulated = []
+                        for i, tc_data in enumerate(text_calls):
+                            tc = SimpleNamespace()
+                            tc.function = SimpleNamespace()
+                            tc.function.name = tc_data["name"]
+                            tc.function.arguments = json.dumps(tc_data["arguments"])
+                            tc.id = f"text_call_{self.llm_call_count}_{i}"
+                            simulated.append(tc)
+                        message.tool_calls = simulated
 
-                    result = await self.call_tool(tool_name, tool_args)
+                if message.tool_calls:
+                    for tc in message.tool_calls:
+                        if not tc.function: continue
+                        tool_name = tc.function.name
+                        try:
+                            tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                        except json.JSONDecodeError:
+                            tool_args = {}
 
-                    # [TOOL_SUMMARIZE] Store raw output, replace with structured summary
-                    raw_result = result
-                    result = self._summarize_tool_result(tool_name, raw_result)
-                    # Store full raw output in side buffer for on-demand retrieval
-                    self._raw_tool_outputs[(self.iteration, tool_round)] = raw_result
-                    # FIFO eviction when buffer exceeds limit
-                    if len(self._raw_tool_outputs) > self._raw_tool_output_max:
-                        oldest_key = min(self._raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
-                        del self._raw_tool_outputs[oldest_key]
+                        # [FIX] vivado_run_tcl routing issue: set current_task_type based on Tcl command content
+                        effective_task_type = tool_name
+                        if tool_name == "vivado_run_tcl":
+                            tcl_cmd = str(tool_args.get("command", "")).lower()
+                            # If Tcl command contains optimization keywords, use command name as task_type for correct classification
+                            if any(p in tcl_cmd for p in OPTIMIZATION_PATTERNS):
+                                # Extract first optimization command as task_type (e.g., place_design, phys_opt_design)
+                                for p in OPTIMIZATION_PATTERNS:
+                                    if p in tcl_cmd:
+                                        effective_task_type = p
+                                        logger.info(f"Detected optimization Tcl command '{p}' in vivado_run_tcl, routing will use '{effective_task_type}'")
+                                        break
+                            else:
+                                effective_task_type = "vivado_run_tcl_info"  # Information-class Tcl uses different identifier
 
-                    # Update current task type for next iteration's model routing decision
-                    self.current_task_type = effective_task_type
+                        result = await self.call_tool(tool_name, tool_args)
 
-                    # Intra-iteration model re-selection: check if task category changed
-                    # Only allow switch if we didn't have a pre-decided model (first iteration or fallback case)
-                    current_category = self.classify_task(self.current_task_type)
-                    start_category = self.classify_task(self._iteration_start_task_type)
-                    if self._iteration_handoff_injected and current_category != start_category:
-                        new_model = self._select_model(
-                            tool_name=self.current_task_type,
-                            context_complexity=context_complexity,
-                        )
-                        if new_model != current_model:
-                            logger.info(
-                                f"Intra-iteration model switch: {current_model} -> {new_model} "
-                                f"(task: {self._iteration_start_task_type} -> {self.current_task_type}, "
-                                f"category: {start_category} -> {current_category})"
+                        # [TOOL_SUMMARIZE] Store raw output, replace with structured summary
+                        raw_result = result
+                        result = self._summarize_tool_result(tool_name, raw_result)
+                        # Store full raw output in side buffer for on-demand retrieval
+                        self._raw_tool_outputs[(self.iteration, tool_round)] = raw_result
+                        # FIFO eviction when buffer exceeds limit
+                        if len(self._raw_tool_outputs) > self._raw_tool_output_max:
+                            oldest_key = min(self._raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
+                            del self._raw_tool_outputs[oldest_key]
+
+                        # Update current task type for next iteration's model routing decision
+                        self.current_task_type = effective_task_type
+
+                        # Intra-iteration model re-selection: check if task category changed
+                        # Only allow switch if we didn't have a pre-decided model (first iteration or fallback case)
+                        current_category = self.classify_task(self.current_task_type)
+                        start_category = self.classify_task(self._iteration_start_task_type)
+                        if self._iteration_handoff_injected and current_category != start_category:
+                            new_model = self._select_model(
+                                tool_name=self.current_task_type,
+                                context_complexity=context_complexity,
                             )
-                            current_model = new_model
-                            self.last_used_model = new_model
+                            if new_model != current_model:
+                                logger.info(
+                                    f"Intra-iteration model switch: {current_model} -> {new_model} "
+                                    f"(task: {self._iteration_start_task_type} -> {self.current_task_type}, "
+                                    f"category: {start_category} -> {current_category})"
+                                )
+                                current_model = new_model
+                                self.last_used_model = new_model
 
-                    # Track tool errors for failure classification
-                    result_lower = result.lower() if result else ""
-                    if "error" in result_lower and "success" not in result_lower:
-                        self.iteration_tool_errors.append({
-                            "tool": tool_name,
-                            "result": result[:2000]  # Store truncated result for analysis
+                        # Track tool errors for failure classification
+                        result_lower = result.lower() if result else ""
+                        if "error" in result_lower and "success" not in result_lower:
+                            self.iteration_tool_errors.append({
+                                "tool": tool_name,
+                                "result": result[:2000]  # Store truncated result for analysis
+                            })
+
+                        # [Phase 2] Add tool result via compat (each tool result is a separate message)
+                        self._compat.add_message("tool", result, {
+                            "tool_call_id": tc.id,
+                            "name": tool_name
                         })
-
-                    # [Phase 2] Add tool result via compat (each tool result is a separate message)
-                    self._compat.add_message("tool", result, {
-                        "tool_call_id": tc.id,
-                        "name": tool_name
-                    })
-                continue  # Loop continues to process tool results
+                    continue  # Loop continues to process tool results
 
             # 4. No tool call, update improvement tracking
             content = message.content or ""
@@ -3477,7 +3626,19 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # [FIX] When LLM signals flow_control=DONE, it means "I've finished my analysis for
             # this iteration" - NOT "exit the optimization". The system should properly end
             # this iteration and move to the next one with updated context.
-            action, flow_control = self._parse_action_from_yaml(content)
+            # Use pre-parsed StepState if available (avoids re-parsing YAML),
+            # fall back to legacy _parse_action_from_yaml for backward compat.
+            if self._step_state and self._step_state.flow_control:
+                action = self._step_state.result_status
+                flow_control = self._step_state.flow_control
+            else:
+                action, flow_control = self._parse_action_from_yaml(content)
+
+            # Store analysis data when DONE/SWITCH_STRATEGY is signaled
+            if flow_control in ("DONE", "SWITCH_STRATEGY") and self._step_state:
+                self._last_analysis = self._step_state.analysis
+                logger.info(f"[ANALYSIS] Stored last analysis: scenario={self._last_analysis.get('scenario_match', 'N/A')}")
+
             if flow_control == "DONE" or action == "DONE":
                 logger.info(f"LLM signaled DONE (action={action}, flow_control={flow_control})")
                 # Check if target fmax (WNS >= 0) is met

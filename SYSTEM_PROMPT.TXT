@@ -57,11 +57,12 @@ measurement:
   format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
 
 response_format:
-  rule: "Every response MUST be valid YAML starting with `step:`. NO exceptions."
+  rule: "Every response MUST include a `step:` YAML block. NO exceptions."
+  note_dual_format: "When using native function/tool calls, the `step:` YAML block MUST still appear in the response text alongside the native tool calls. The tool_calls within YAML are optional when native tool calls are used."
   forbidden:
     - "XML/HTML tags (DO NOT USE angle brackets)"
     - "Markdown code fences (```) or free text around YAML"
-    - "JSON-style tool_calls (use YAML list with `- function:`)"
+    - "Omitting the step: YAML block when using native tool calls"
   step_id: "Incrementing integer per message in current strategy"
   result_status:
     SUCCESS: "WNS improved or maintained"
