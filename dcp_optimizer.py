@@ -5171,7 +5171,30 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         self.final_wns = None
         self.skip_skills = skip_skills
         self.skill_test_results: list[dict] = []
-    
+        # Console exit monitoring (mirrors DCPOptimizer setup)
+        self._user_exit_requested = threading.Event()
+        self._async_exit_requested = asyncio.Event()
+        # Start console reader thread
+        def _read_console():
+            try:
+                while True:
+                    line = sys.stdin.readline()
+                    if not line:
+                        break
+                    if line.strip().lower() == "quit":
+                        logger.info("User requested exit via console 'quit' command")
+                        self._user_exit_requested.set()
+                        self._async_exit_requested.set()
+                        break
+            except Exception:
+                pass
+        t = threading.Thread(target=_read_console, daemon=True)
+        t.start()
+
+    def _check_exit_requested(self) -> bool:
+        """Check if user requested exit. Returns True if exit requested."""
+        return self._user_exit_requested.is_set()
+
     def _check_test_exit(self, step_name: str) -> bool:
         """Check if user requested exit via console 'quit'. Returns True if exit was requested."""
         if self._check_exit_requested():
