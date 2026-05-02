@@ -10,22 +10,40 @@ fpl26_optimization_contest/
 ├── validate_dcps.py              # DCP等价性验证器
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── requirements.txt
+├── CLAUDE.md                     # 项目指令文件
+├── strategy_library.py           # 策略库
 ├── context_manager/              # 内存管理模块
+│   ├── __init__.py
 │   ├── manager.py                # MemoryManager - 中心编排，单次_compress()触发
 │   ├── estimator.py              # TokenEstimator (tiktoken)
 │   ├── events.py                 # EventBus - 订阅/取消订阅
 │   ├── lightyaml.py              # YAML解析器
 │   ├── interfaces.py             # 核心数据类
 │   ├── agent_context.py          # AgentContextManager - 多Agent分支
+│   ├── compat.py                  # 兼容性包装
+│   ├── logging_config.py          # 日志配置
+│   ├── stores/                    # 存储层
+│   │   ├── __init__.py
+│   │   └── memory_store.py
+│   ├── memory/                    # 内存实现
+│   │   ├── __init__.py
+│   │   ├── historical_memory.py
+│   │   └── working_memory.py
 │   └── strategies/
+│       ├── __init__.py
+│       ├── base.py                # 压缩策略基类
 │       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断 + 过时时序报告替换
 │       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60, preserve_role_turns=6
 │       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=40, preserve_role_turns=6
 ├── RapidWrightMCP/               # RapidWright MCP服务器
 │   ├── rapidwright_tools.py      # 工具函数实现
 │   ├── server.py                 # MCP服务器入口
-│   └── test_server.py            # 服务器测试
+│   ├── test_server.py            # 服务器测试
+│   └── requirements.txt
 ├── VivadoMCP/                    # Vivado MCP服务器
+│   ├── vivado_mcp_server.py      # Vivado MCP服务器实现
+│   ├── test_vivado_mcp.py        # 测试
+│   └── requirements.txt
 ├── skills/                       # Skill框架（Skill Descriptor v3 规范实现）
 │   ├── __init__.py                  # 导出所有公共符号
 │   ├── base.py                      # Skill基类、SkillMetadata、SkillResult、ParameterSpec
@@ -44,6 +62,7 @@ fpl26_optimization_contest/
 │   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 │   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
 │   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
+│   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
 │   └── test_skill_framework.py      # 28项集成测试（注册/执行/遥测/错误/幂等/追踪）
@@ -122,18 +141,20 @@ WORKER: tencent/hy3-preview:free (250K context, 快速执行)
 
 ### 2.5.1 模型选择维度（`_select_model()`）
 
-评分系统（6维度，加权得分高的模型胜出，margin=2防止震荡）：
+评分系统（8维度变量，前2个已注释，当前6个生效，加权得分高的模型胜出，margin=2防止震荡）：
 
 | 维度 | 条件 | Planner得分 | Worker得分 |
 |------|------|-----------|-----------|
-| 1. 上下文复杂度 | >=6 | +2 | - |
-| 2. 历史能力 | >=70%成功率 | - | +2 |
-| 3. 历史能力 | <30%成功率 | +2 | - |
-| 4. 连续失败 | >=2次 | +4 | - |
-| 5. 连续成功 | >=3次 | - | +1 |
-| 6. 全局无改善 | >=2.5次 | - | +1 |
-| 7. 上下文容量 | >=60% worker限制 | +2 | - |
-| 8. WNS状态 | 严重倒退(>-2.0ns) | +3 | - |
+| 1. 工具映射 | - | - | - (已注释) |
+| 2. 任务类别 | - | - | - (已注释) |
+| 3. 上下文复杂度 | >=6 | +2 | +1 (<3) |
+| 4. 历史能力 | >=70%成功率 | - | +2 |
+| 5. 历史能力 | <30%成功率 | +2 | - |
+| 6. 连续失败 | >=2次 | +4 | - |
+| 7. 连续成功 | >=3次 | - | +1 |
+| 8. 全局无改善 | >=2.5次 | - | +1 |
+| 9. 上下文容量 | >=60% worker限制 | +2 | - |
+| 10. WNS状态 | 严重倒退(>-2.0ns) | +3 | - |
 
 
 ### 2.6 Skill 机制
@@ -161,11 +182,13 @@ skills/
 ├── telemetry.py                    # SkillTelemetry + SkillExecutionTimer
 ├── net_detour_optimization.py      # Skill类 + 纯函数
 ├── smart_region_search.py          # Skill类 + 纯函数
-│   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
-│   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
-│   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
-├── descriptors/                    # 自动生成的 JSON 描述符文件
-└── test_skill_framework.py         # 28 项测试（含编排/执行/遥测/错误/幂等）
+├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
+├── physopt_strategy.py          # Skill类：Physical Optimization 策略
+├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
+├── SKILL_SPECIFICATION.md        # Skill规范文档
+├── descriptors/                 # 自动生成的JSON描述符文件（含test_mock_skill）
+├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
+└── test_skill_framework.py      # 28项集成测试（含test_mock_skill）
 
 已注册 Skills:
 ├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率（READ-ONLY）
@@ -173,7 +196,8 @@ skills/
 ├── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索（READ-ONLY）
 ├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
-└── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization 策略
+├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization 策略
+└── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
 
 Skill 超时映射（三层）:
 | Skill | @skill decorator `timeout_ms` | JSON descriptor `defaultMs/maxMs` | 测试调用 `timeout` |
@@ -181,9 +205,11 @@ Skill 超时映射（三层）:
 | smart_region | 600000 (10min) | 600000 / 720000 | 600.0 |
 | pblock_strategy | 600000 (10min) | 600000 / 720000 | 600.0 |
 | net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
-| physopt_strategy | 30000 (30s) | 30000 / 60000 | 360.0 |
+| physopt_strategy | **360000** (6min) ⚠️ | 30000 / 60000 | 360.0 |
 | fanout_strategy | 300000 (5min) | 300000 / 600000 | 300.0 * nets |
-| optimize_cell | 360000 (6min) | 360000 / 420000 | 360.0 |
+| optimize_cell | **60000** (1min) ⚠️ | 360000 / 420000 | 360.0 |
+
+⚠️ physopt_strategy 和 optimize_cell 的 @skill decorator timeout_ms 与 JSON descriptor 不一致，疑似遗留值。
 
 三层超时的作用域:
 1. **@skill decorator** — 技能框架内部心跳检测阈值（skills/*.py）
@@ -251,20 +277,26 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 
 ## 4. 配置（model_config.yaml）
 
+> **注意**: YAML文件中的值与compress.py中硬编码的token_budget不一致。实际生效值以compress.py为准（worker=35K, planner=100K），YAML中的token_budget为80K/80K。
+
 ```yaml
 # Worker: 速度优化, 250K max
 worker:
-  soft_threshold: 40K, hard_limit: 200K
-  token_budget: 35K, preserve_turns: 40/25(激进), min_importance: 0.15/0.35(激进)
-  preserve_role_turns: 6, max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
-  fallback_models: ["deepseek/deepseek-v4-flash", "stepfun/step-3.5-flash"]
+  soft_threshold: 175K, hard_limit: 200K
+  token_budget: 35K (compress.py硬编码), YAML中为80K
+  preserve_turns: 40, preserve_turns_aggressive: 10
+  min_importance: 0.15, min_importance_aggressive: 0.7
+  preserve_role_turns: 6
+  fallback_models: ["deepseek/deepseek-v4-flash", "xiaomi/mimo-v2-flash"]
 
 # Planner: 推理优化, 1M max
 planner:
-  soft_threshold: 120K, hard_limit: 300K
-  token_budget: 100K, preserve_turns: 60/40(激进), min_importance: 0.1/0.25(激进)
-  preserve_role_turns: 6, max_chars_multiplier: 1.0 (正常) / 0.5 (激进)
-  fallback_models: ["xiaomi/mimo-v2.5-pro"]
+  soft_threshold: 200K, hard_limit: 300K
+  token_budget: 100K (compress.py硬编码), YAML中为80K
+  preserve_turns: 60, preserve_turns_aggressive: 10
+  min_importance: 0.1, min_importance_aggressive: 0.7
+  preserve_role_turns: 6
+  fallback_models: ["qwen/qwen3.6-plus", "xiaomi/mimo-v2.5-pro"]
 ```
 
 ## 5. 迭代控制
@@ -444,15 +476,17 @@ class StepState:
 
 ### 5.6 失败策略追踪增强（2026-05-02 新增）
 
-**新增 `record_failure()` 调用点**（共 6 处触发点）：
+**新增 `record_failure()` 调用点**（共 8 处触发点）：
 
 | 触发点 | 记录的策略 | 条件 |
 |--------|-----------|------|
 | SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
-| 工具调用异常 | 工具所属策略 | 工具名匹配已知策略工具 |
-| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字 |
-| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed |
-| Routing 失败 | PlaceRoute | `route_design`/`place_design` 失败 |
+| 工具调用超时 | 工具所属策略 | 工具超时（dcp_optimizer.py:3146） |
+| 工具调用异常 | 工具所属策略 | 工具执行抛出异常（dcp_optimizer.py:3204） |
+| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字（dcp_optimizer.py:4084） |
+| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed（dcp_optimizer.py:4088） |
+| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval（dcp_optimizer.py:2177） |
+| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败（非超时，dcp_optimizer.py:4431） |
 | 策略中断检测 | PBLOCK/Fanout | `_detect_interrupted_strategy()` 检测到验证缺失 |
 
 **`failed_strategies` 的使用**：
