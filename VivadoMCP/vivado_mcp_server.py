@@ -600,12 +600,19 @@ def extract_critical_path_pins(
             stripped = line.strip()
 
             # Detect data path section boundaries
+            # Vivado timing report per-path structure:
+            #   ---1---  clock launch path (source_FF/C)
+            #   ---2---  logic data path (source_FF/Q → ... → dest_FF/D)  ← we need this
+            #   ---3---  capture clock path (dest_FF/C, setup/hold check)
+            #   ---4---  slack calculation
             if re.match(r'^-{3,}', stripped):
                 dash_count += 1
-                if not in_data_path:
-                    in_data_path = True
+                if dash_count == 1:
+                    continue  # Skip clock launch section (---1 to ---2)
+                elif dash_count == 2:
+                    in_data_path = True  # Enter logic data path (---2 to ---3)
                     continue
-                else:
+                elif dash_count >= 3:
                     break  # End of data path section
 
             if not in_data_path:
