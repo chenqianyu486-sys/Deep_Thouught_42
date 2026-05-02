@@ -297,12 +297,55 @@ class Skill(ABC):
         _heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
         _heartbeat_thread.start()
 
-        # ── Execute ────────────────────────────────────────────
+        # ── Execute with timeout enforcement ──────────────────
+        import concurrent.futures as _cfutures
+
+        _timeout_seconds = meta.timeout_ms / 1000.0
+        _timed_out = False
+
         with SkillExecutionTimer() as timer:
-            result = self.execute(context, **kwargs)
+            _executor = _cfutures.ThreadPoolExecutor(max_workers=1)
+            try:
+                _future = _executor.submit(self.execute, context, **kwargs)
+                result = _future.result(timeout=_timeout_seconds)
+            except _cfutures.TimeoutError:
+                _timed_out = True
+                result = SkillResult(
+                    success=False,
+                    data=None,
+                    error=f"Skill '{skill_name}' timed out after {meta.timeout_ms}ms",
+                    error_code=SkillErrorCode.SKILL_TIMEOUT,
+                )
+            finally:
+                _executor.shutdown(wait=False)
 
         _stop_heartbeat.set()
         _heartbeat_thread.join(timeout=0.5)
+
+        if _timed_out:
+            _latency_ms = timer.duration_ms
+            _logger.error(
+                f"[SKILL_TIMEOUT] '{skill_name}' timed out after {_latency_ms:.0f}ms "
+                f"(limit: {meta.timeout_ms}ms, heartbeats: {_heartbeat_count[0]})",
+                extra={
+                    "skill_name": skill_name,
+                    "skill_id": skill_id,
+                    "call_id": call_id,
+                    "skill_duration_ms": round(_latency_ms, 2),
+                    "heartbeat_count": _heartbeat_count[0],
+                    "outcome": "timeout",
+                    "timeout_ms": meta.timeout_ms,
+                }
+            )
+            SkillTelemetry.record_execution(
+                skill_name=skill_name,
+                duration_ms=_latency_ms,
+                status=ExecutionStatus.FAILURE,
+                error=result.error,
+                error_code=SkillErrorCode.SKILL_TIMEOUT,
+                params_summary=params_summary,
+            )
+            return result
 
         latency_ms = timer.duration_ms
         outcome = "success" if result.success else "error"

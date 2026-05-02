@@ -9,8 +9,8 @@
     "cell_placement"
   ],
   "timeout": {
-    "defaultMs": 60000,
-    "maxMs": 120000
+    "defaultMs": 360000,
+    "maxMs": 420000
   },
   "authentication": {
     "type": "none"

@@ -2899,7 +2899,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         heartbeat_task, heartbeat_count = self._start_tool_heartbeat(tool_name, start_time)
         try:
-            result = await session.call_tool(actual_name, arguments)
+            # Add timeout enforcement for RapidWright MCP calls
+            if tool_name.startswith("rapidwright_"):
+                result = await asyncio.wait_for(
+                    session.call_tool(actual_name, arguments),
+                    timeout=360.0
+                )
+            else:
+                result = await session.call_tool(actual_name, arguments)
             # Cancel heartbeat task on completion
             heartbeat_task.cancel()
             try:
@@ -3105,7 +3112,67 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         )
 
             return result_text
-            
+
+        except asyncio.TimeoutError:
+            error_occurred = True
+            elapsed_time = time.time() - start_time
+
+            # Cancel heartbeat task on timeout
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
+            error_msg = f"Tool '{tool_name}' timed out after {elapsed_time:.1f}s"
+
+            # Record failed tool call via compat
+            self._compat.add_tool_result(
+                tool_name=tool_name,
+                result=error_msg,
+                wns=None,
+                error=True,
+                extra_fields={
+                    "elapsed_time": elapsed_time,
+                    "error_message": error_msg,
+                    "is_optimization": False,
+                }
+            )
+
+            # Record as failed strategy
+            tool_strategy = self._infer_strategy_from_tools([tool_name])
+            if tool_strategy not in ("Information", "Unknown"):
+                self._compat.record_failure(tool_strategy)
+
+            # Skill invocation tracking (timeout path)
+            if tool_name in SKILL_TOOL_MAP:
+                skill_name = SKILL_TOOL_MAP[tool_name]
+                self.skill_invocation_log.append({
+                    "iteration": self.iteration,
+                    "tool_name": tool_name,
+                    "skill_name": skill_name,
+                    "wns": None,
+                    "error": True,
+                    "error_message": error_msg,
+                    "elapsed_time": elapsed_time,
+                    "timestamp": time.time(),
+                })
+                logger.warning(
+                    "[SKILL_INVOCATION] '%s' TIMED OUT after %.1fs",
+                    skill_name, elapsed_time,
+                    extra={
+                        "skill_name": skill_name,
+                        "tool_name": tool_name,
+                        "iteration": self.iteration,
+                        "error": True,
+                        "elapsed_time": round(elapsed_time, 2),
+                    }
+                )
+
+            logger.error("[TOOL_TIMEOUT] %s", error_msg)
+            return json.dumps({"error": error_msg})
+
         except Exception as e:
             error_occurred = True
             elapsed_time = time.time() - start_time
@@ -5281,21 +5348,31 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 print("\n" + "-"*60)
                 print("STEP 4.1: [SKILL] Test analyze_net_detour")
                 print("-"*60)
+                pins_result = ""
                 try:
                     # Get pin paths from Vivado for analysis
                     pins_result = await self.call_vivado_tool("extract_critical_path_pins", {
                         "num_paths": 5
                     }, timeout=300.0)
                     if pins_result.strip() and pins_result.strip() != "(no output)":
-                        pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
-                        if len(pin_lines) >= 2:
+                        try:
+                            import json as _json
+                            pins_data = _json.loads(pins_result)
+                            pin_paths_array = pins_data.get("pin_paths", [])
+                        except Exception:
+                            pin_paths_array = []
+                        if pin_paths_array and len(pin_paths_array) > 0:
+                            pin_paths = pin_paths_array[0]
+                            print(f"[TEST] Using {len(pin_paths)} pins from critical path (of {len(pin_paths_array)} paths found)")
                             skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
-                                "pin_paths": pin_lines,
+                                "pin_paths": pin_paths,
                                 "detour_threshold": 2.0
                             }, timeout=120.0)
                             self._verify_skill_result("analyze_net_detour", skill_result)
+                        else:
+                            print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
                 except Exception as e:
-                    print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+                    print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
                 # Step 4.2: Test smart_region_search
                 print("\n" + "-"*60)
@@ -5336,6 +5413,38 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     self._verify_skill_result("execute_physopt_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
+
+                # Step 4.5: optimize_cell_placement
+                print("\n" + "-"*60)
+                print("STEP 4.5: [SKILL] optimize_cell_placement")
+                print("-"*60)
+                try:
+                    cell_names = []
+                    if pins_result.strip() and pins_result.strip() != "(no output)":
+                        try:
+                            import json as _json
+                            pins_data = _json.loads(pins_result)
+                            pin_paths_list = pins_data.get("pin_paths", [])
+                        except Exception:
+                            pin_paths_list = []
+                        if pin_paths_list and len(pin_paths_list) > 0:
+                            pp = pin_paths_list[0]
+                            seen = set()
+                            for p in pp:
+                                cell = p.split("/")[0] if "/" in p else p
+                                if cell not in seen:
+                                    seen.add(cell)
+                                    cell_names.append(cell)
+                            cell_names = cell_names[:5]
+                    if cell_names:
+                        sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                            "cell_names": cell_names,
+                        }, timeout=360.0)
+                        self._verify_skill_result("optimize_cell_placement", sr)
+                    else:
+                        print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                except Exception as e:
+                    print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
             # ================================================================
             # Step 5: Apply fanout optimization via skill (or raw tool)
@@ -5759,20 +5868,30 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 print("\n" + "-"*60)
                 print("STEP 4.1: [SKILL] Test analyze_net_detour")
                 print("-"*60)
+                pins_result = ""
                 try:
                     pins_result = await self.call_vivado_tool("extract_critical_path_pins", {
                         "num_paths": 5
                     }, timeout=300.0)
                     if pins_result.strip() and pins_result.strip() != "(no output)":
-                        pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
-                        if len(pin_lines) >= 2:
+                        try:
+                            import json as _json
+                            pins_data = _json.loads(pins_result)
+                            pin_paths_array = pins_data.get("pin_paths", [])
+                        except Exception:
+                            pin_paths_array = []
+                        if pin_paths_array and len(pin_paths_array) > 0:
+                            pin_paths = pin_paths_array[0]
+                            print(f"[TEST] Using {len(pin_paths)} pins from critical path (of {len(pin_paths_array)} paths found)")
                             skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
-                                "pin_paths": pin_lines,
+                                "pin_paths": pin_paths,
                                 "detour_threshold": 2.0
                             }, timeout=120.0)
                             self._verify_skill_result("analyze_net_detour", skill_result)
+                        else:
+                            print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
                 except Exception as e:
-                    print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+                    print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
                 # Step 4.2: Test smart_region_search
                 print("\n" + "-"*60)
@@ -5829,6 +5948,38 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     self._verify_skill_result("execute_fanout_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
+
+                # Step 4.6: optimize_cell_placement
+                print("\n" + "-"*60)
+                print("STEP 4.6: [SKILL] optimize_cell_placement")
+                print("-"*60)
+                try:
+                    cell_names = []
+                    if pins_result.strip() and pins_result.strip() != "(no output)":
+                        try:
+                            import json as _json
+                            pins_data = _json.loads(pins_result)
+                            pin_paths_list = pins_data.get("pin_paths", [])
+                        except Exception:
+                            pin_paths_list = []
+                        if pin_paths_list and len(pin_paths_list) > 0:
+                            pp = pin_paths_list[0]
+                            seen = set()
+                            for p in pp:
+                                cell = p.split("/")[0] if "/" in p else p
+                                if cell not in seen:
+                                    seen.add(cell)
+                                    cell_names.append(cell)
+                            cell_names = cell_names[:5]
+                    if cell_names:
+                        sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                            "cell_names": cell_names,
+                        }, timeout=360.0)
+                        self._verify_skill_result("optimize_cell_placement", sr)
+                    else:
+                        print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+                except Exception as e:
+                    print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
             # ================================================================
             # Step 5: Use known-optimal pblock for LogicNets design
@@ -6167,15 +6318,24 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("STEP 5.1: [SKILL] analyze_net_detour")
             print("-"*60)
             if pins_result.strip() and pins_result.strip() != "(no output)":
-                pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
-                if len(pin_lines) >= 2:
+                try:
+                    import json as _json
+                    pins_data = _json.loads(pins_result)
+                    pin_paths_array = pins_data.get("pin_paths", [])
+                except Exception:
+                    pin_paths_array = []
+                if pin_paths_array and len(pin_paths_array) > 0:
+                    pin_paths = pin_paths_array[0]
+                    print(f"[TEST] Using {len(pin_paths)} pins from critical path (of {len(pin_paths_array)} paths found)")
                     try:
                         sr = await self.call_rapidwright_tool("analyze_net_detour", {
-                            "pin_paths": pin_lines, "detour_threshold": 2.0
+                            "pin_paths": pin_paths, "detour_threshold": 2.0
                         }, timeout=120.0)
                         self._verify_skill_result("analyze_net_detour", sr)
                     except Exception as e:
-                        print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+                        print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
+                else:
+                    print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
             else:
                 print("[TEST] ⚠ analyze_net_detour skipped: no pin paths available")
 
@@ -6234,6 +6394,38 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
             else:
                 print("[TEST] ⚠ execute_fanout_strategy skipped: no high fanout nets found")
+
+            # Step 5.6: optimize_cell_placement
+            print("\n" + "-"*60)
+            print("STEP 5.6: [SKILL] optimize_cell_placement")
+            print("-"*60)
+            try:
+                cell_names = []
+                if pins_result.strip() and pins_result.strip() != "(no output)":
+                    try:
+                        import json as _json
+                        pins_data = _json.loads(pins_result)
+                        pin_paths_list = pins_data.get("pin_paths", [])
+                    except Exception:
+                        pin_paths_list = []
+                    if pin_paths_list and len(pin_paths_list) > 0:
+                        pp = pin_paths_list[0]
+                        seen = set()
+                        for p in pp:
+                            cell = p.split("/")[0] if "/" in p else p
+                            if cell not in seen:
+                                seen.add(cell)
+                                cell_names.append(cell)
+                        cell_names = cell_names[:5]
+                if cell_names:
+                    sr = await self.call_rapidwright_tool("optimize_cell_placement", {
+                        "cell_names": cell_names,
+                    }, timeout=360.0)
+                    self._verify_skill_result("optimize_cell_placement", sr)
+                else:
+                    print("[TEST] ⚠ optimize_cell_placement skipped: no cell names available")
+            except Exception as e:
+                print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
 
             # Summary
             elapsed = time.time() - overall_start

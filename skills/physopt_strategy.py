@@ -120,7 +120,7 @@ def generate_physopt_plan(
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",
     side_effects=[],
-    timeout_ms=30000,
+    timeout_ms=360000,
     parameters=[
         ParameterSpec("directive", str,
                       "phys_opt_design directive: Default, Explore, AggressiveExplore, or AddRetime",
