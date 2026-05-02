@@ -5371,7 +5371,19 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                            print(f"[TEST] Raw pins_result (first 2000 chars): {str(pins_result)[:2000]}")
+                            try:
+                                import json as _json2
+                                _data = _json2.loads(pins_result)
+                                print(f"[TEST] debug_has_slack={_data.get('debug_has_slack', '?')}")
+                                print(f"[TEST] debug_report_length={_data.get('debug_report_length', '?')}")
+                                print(f"[TEST] debug_num_path_sections={_data.get('debug_num_slack_sections', '?')}")
+                                if "debug_per_path" in _data:
+                                    print(f"[TEST] per-path debug: {_data['debug_per_path']}")
+                                report_snippet = _data.get("debug_timing_report", "")
+                                if report_snippet:
+                                    print(f"[TEST] debug_timing_report:\n{report_snippet}")
+                            except Exception:
+                                print(f"[TEST] Raw pins_result: {str(pins_result)[:500]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 
@@ -5910,7 +5922,19 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                            print(f"[TEST] Raw pins_result (first 2000 chars): {str(pins_result)[:2000]}")
+                            try:
+                                import json as _json2
+                                _data = _json2.loads(pins_result)
+                                print(f"[TEST] debug_has_slack={_data.get('debug_has_slack', '?')}")
+                                print(f"[TEST] debug_report_length={_data.get('debug_report_length', '?')}")
+                                print(f"[TEST] debug_num_path_sections={_data.get('debug_num_slack_sections', '?')}")
+                                if "debug_per_path" in _data:
+                                    print(f"[TEST] per-path debug: {_data['debug_per_path']}")
+                                report_snippet = _data.get("debug_timing_report", "")
+                                if report_snippet:
+                                    print(f"[TEST] debug_timing_report:\n{report_snippet}")
+                            except Exception:
+                                print(f"[TEST] Raw pins_result: {str(pins_result)[:500]}")
                 except Exception as e:
                     print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
 

@@ -587,20 +587,26 @@ def extract_critical_path_pins(
     path_sections = re.split(r'Slack \(', timing_report)
 
     all_pin_paths = []
+    debug_per_path = []
 
     for path_section in path_sections[1:]:  # Skip first (header)
         pin_paths = []
         in_data_path = False
+        dash_count = 0
+        pin_match_count = 0
+        last_part_checks = []
 
         for line in path_section.split('\n'):
             stripped = line.strip()
 
             # Detect data path section boundaries
-            if re.match(r'^-{3,}', stripped) and not in_data_path:
-                in_data_path = True
-                continue
-            if re.match(r'^-{3,}', stripped) and in_data_path:
-                break  # End of data path section
+            if re.match(r'^-{3,}', stripped):
+                dash_count += 1
+                if not in_data_path:
+                    in_data_path = True
+                    continue
+                else:
+                    break  # End of data path section
 
             if not in_data_path:
                 continue
@@ -608,6 +614,7 @@ def extract_critical_path_pins(
             # Match hierarchical pin names: cell_path/pin_suffix
             # e.g., "inst/LUT6/I0", "ff_reg/D", "design_i/inst/O"
             parts = stripped.split()
+            matched_this_line = False
             for part in parts:
                 pin_match = re.match(
                     r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$',
@@ -617,7 +624,24 @@ def extract_critical_path_pins(
                     full_pin = f"{pin_match.group(1)}/{pin_match.group(2)}"
                     if full_pin not in pin_paths:  # Deduplicate within path
                         pin_paths.append(full_pin)
+                    pin_match_count += 1
+                    matched_this_line = True
                     break  # One pin per line
+
+            # Debug: sample first few non-matching parts for diagnosis
+            if not matched_this_line and len(last_part_checks) < 3 and parts:
+                last_part_checks.append(parts[:min(3, len(parts))])
+
+        path_debug = {
+            "in_data_path": in_data_path,
+            "dash_lines_found": dash_count,
+            "pin_match_count": pin_match_count,
+            "pins_collected": len(pin_paths),
+        }
+        # Only include part_samples when no pins were matched, to keep output clean
+        if pin_match_count == 0 and last_part_checks:
+            path_debug["part_samples"] = last_part_checks[:3]
+        debug_per_path.append(path_debug)
 
         if len(pin_paths) >= 2:  # Only include paths with at least 2 pins
             all_pin_paths.append(pin_paths)
@@ -628,11 +652,13 @@ def extract_critical_path_pins(
         "pin_paths": all_pin_paths,
     }
 
-    # Debug: when 0 paths found, include timing report snippet for diagnosis
+    # Debug: when 0 paths found, include timing report snippet and path debug
     if not all_pin_paths:
-        result["debug_timing_report"] = timing_report[:3000]
+        result["debug_timing_report"] = timing_report[:5000]
         result["debug_has_slack"] = "Slack (" in timing_report
         result["debug_report_length"] = len(timing_report)
+        result["debug_num_slack_sections"] = len(path_sections[1:])
+        result["debug_per_path"] = debug_per_path
 
     if output_file:
         try:
