@@ -1,0 +1,71 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.pblock_strategy@1.0.0",
+  "displayName": "PBLOCK-Based Re-placement Strategy",
+  "description": "Analyze design and generate PBLOCK re-placement plan. READ-ONLY. Uses smart_region_search to find optimal fabric region, then returns structured execution plan with Vivado TCL steps. Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 120000,
+    "maxMs": 240000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "target_lut_count": {
+        "type": "integer",
+        "description": "Current LUT usage from Vivado report_utilization_for_pblock"
+      },
+      "target_ff_count": {
+        "type": "integer",
+        "description": "Current FF usage from Vivado report_utilization_for_pblock"
+      },
+      "target_dsp_count": {
+        "type": "integer",
+        "description": "Current DSP usage",
+        "default": 0
+      },
+      "target_bram_count": {
+        "type": "integer",
+        "description": "Current BRAM usage",
+        "default": 0
+      },
+      "resource_multiplier": {
+        "type": "number",
+        "description": "Buffer multiplier for resource targets",
+        "default": 1.5
+      }
+    },
+    "required": [
+      "target_lut_count",
+      "target_ff_count"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

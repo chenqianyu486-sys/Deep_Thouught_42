@@ -38,8 +38,12 @@ fpl26_optimization_contest/
 │   ├── tracing.py                   # 追踪属性：SkillTraceAttributes（OTel兼容）
 │   ├── descriptor.py                # JSON描述符生成/导出
 │   ├── validate_descriptors.py      # CI验证套件（Schema/Enum/Description检查）
+│   ├── strategy_plan.py             # 共享数据结构：StrategyPlan, StrategyStep
 │   ├── net_detour_optimization.py   # Skill类 + 纯函数：绕路比率分析 + 重心放置优化
 │   ├── smart_region_search.py       # Skill类 + 纯函数：智能PBlock区域搜索
+│   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
+│   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
+│   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
 │   └── test_skill_framework.py      # 28项集成测试（注册/执行/遥测/错误/幂等/追踪）
@@ -148,10 +152,14 @@ skills/
 ├── tracing.py                      # 追踪属性：SkillTraceAttributes
 ├── descriptor.py                   # JSON 描述符生成/导出 → skills/descriptors/*.json
 ├── validate_descriptors.py         # CI 验证套件（Schema/Enum/Description 检查）
+│   ├── strategy_plan.py             # 共享数据结构：StrategyPlan, StrategyStep
 │
 ├── telemetry.py                    # SkillTelemetry + SkillExecutionTimer
 ├── net_detour_optimization.py      # Skill类 + 纯函数
 ├── smart_region_search.py          # Skill类 + 纯函数
+│   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
+│   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
+│   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
 ├── descriptors/                    # 自动生成的 JSON 描述符文件
 └── test_skill_framework.py         # 28 项测试（含编排/执行/遥测/错误/幂等）
 

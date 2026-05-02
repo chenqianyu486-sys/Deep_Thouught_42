@@ -50,7 +50,6 @@ from context_manager.logging_config import (
     sanitize_payload, DynamicLogLevelManager, HeartbeatLogger, PromptLogger
 )
 from config_loader import get_model_config_loader, ModelConfigData
-from strategy_library import get_strategy_catalog, get_strategy_details, get_scenario_guide
 
 
 def _create_model_context_config(data: ModelConfigData) -> ModelContextConfig:
@@ -710,10 +709,6 @@ class DCPOptimizer(DCPOptimizerBase):
         self._iteration_narratives: list[dict] = []     # Progressive iteration summary for handoff
         self._strategy_sequence: list[str] = []          # Ordered strategy labels for state summary
 
-        # Strategy content injection state (for layered system prompt)
-        self._injected_strategy_label: Optional[str] = None  # What strategy content is injected
-        self._strategy_switch_pending: bool = False           # SWITCH_STRATEGY was issued, needs re-injection
-
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
         self.checkpoint_saving_enabled = True     # Enable checkpoint saving for iteration rollback
@@ -1054,74 +1049,6 @@ STRICTLY FORBIDDEN:
             if match:
                 insert_pos = match.end()
                 system_content = system_content[:insert_pos] + "\n\n" + state_section + system_content[insert_pos:]
-
-        return system_content
-
-    def _inject_strategy_content(self, system_content: str) -> str:
-        """Inject strategy content on-demand based on current state.
-
-        State machine:
-          None ------------> "CATALOG"  (first iteration: inject strategy catalog)
-          "CATALOG" --------> "STRATEGY:{name}"  (strategy detected: inject details)
-          "STRATEGY:{old}" -> "STRATEGY:{new}"   (strategy changed: inject new details)
-          (any) ------------> "CATALOG"          (after SWITCH_STRATEGY: re-inject catalog)
-
-        Strategy details are injected as a **Strategy Content:** block at the end
-        of the system content. Compression will strip it, and this method will
-        re-inject on the next LLM call.
-
-        Returns:
-            Modified system_content with appended strategy block (if needed).
-        """
-        # After SWITCH_STRATEGY: reset and re-inject catalog for re-evaluation
-        if self._strategy_switch_pending:
-            self._injected_strategy_label = None
-            self._strategy_switch_pending = False
-
-        # Determine current strategy from recent tool calls
-        tools_this_iter = [
-            t.get('tool_name', '')
-            for t in self._compat.tool_call_details
-            if t.get('iteration') == self.iteration
-        ]
-        current_strategy = self._infer_strategy_from_tools(tools_this_iter)
-
-        # Decide what to inject
-        strategy_block = ""
-        new_label = self._injected_strategy_label
-
-        if self._injected_strategy_label is None and self.iteration >= 1:
-            # First injection: give the model the strategy catalog
-            strategy_block = get_strategy_catalog()
-            # Also include scenario guide on first iteration for initial analysis
-            if self.iteration <= 1:
-                scenario_guide = get_scenario_guide()
-                strategy_block = scenario_guide + "\n\n" + strategy_block
-            new_label = "CATALOG"
-
-        elif (current_strategy not in ("Unknown", "Information", "PlaceRoute")
-              and self._injected_strategy_label != f"STRATEGY:{current_strategy}"):
-            # Real strategy identified and details not yet injected
-            details = get_strategy_details(current_strategy)
-            if details:
-                strategy_block = details
-                new_label = f"STRATEGY:{current_strategy}"
-
-        # Apply injection: append or replace existing strategy block
-        if strategy_block:
-            marker = "\n\n**Strategy Content:**"
-            if "**Strategy Content:**" in system_content:
-                # Replace existing block (keep marker, replace content)
-                import re
-                system_content = re.sub(
-                    r'\n\*\*Strategy Content:\*\*.*',
-                    f'{marker}\n{strategy_block}',
-                    system_content,
-                    flags=re.DOTALL
-                )
-            else:
-                system_content += f'{marker}\n{strategy_block}'
-            self._injected_strategy_label = new_label
 
         return system_content
 
@@ -1776,11 +1703,11 @@ STRICTLY FORBIDDEN:
     def _infer_strategy_from_tools(self, tools: list[str]) -> str:
         """Deduce strategy label from tool sequence."""
         tool_str = " ".join(tools).lower()
-        if "create_and_apply_pblock" in tool_str or "convert_fabric_region_to_pblock" in tool_str:
+        if "pblock_strategy" in tool_str or "create_and_apply_pblock" in tool_str or "convert_fabric_region_to_pblock" in tool_str:
             return "PBLOCK"
-        if "phys_opt_design" in tool_str:
+        if "physopt_strategy" in tool_str or "phys_opt_design" in tool_str:
             return "PhysOpt"
-        if "optimize_fanout" in tool_str:
+        if "fanout_strategy" in tool_str or "optimize_fanout" in tool_str:
             return "Fanout"
         if "place_design" in tool_str or "route_design" in tool_str:
             return "PlaceRoute"
@@ -3148,8 +3075,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             if api_messages and api_messages[0].get("role") == "system":
                 system_content = api_messages[0].get("content", "")
                 updated_content = self._inject_wns_state_to_system_prompt(system_content)
-                # Inject strategy content on-demand (layered loading)
-                updated_content = self._inject_strategy_content(updated_content)
                 api_messages[0]["content"] = updated_content
 
             # Inject iteration handoff prompt or first-iteration starting context
@@ -3476,9 +3401,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # this iteration" - NOT "exit the optimization". The system should properly end
             # this iteration and move to the next one with updated context.
             action, flow_control = self._parse_action_from_yaml(content)
-            # Track SWITCH_STRATEGY for strategy content re-injection
-            if flow_control == "SWITCH_STRATEGY" or action == "SWITCH_STRATEGY":
-                self._strategy_switch_pending = True
             if flow_control == "DONE" or action == "DONE":
                 logger.info(f"LLM signaled DONE (action={action}, flow_control={flow_control})")
                 # Check if target fmax (WNS >= 0) is met

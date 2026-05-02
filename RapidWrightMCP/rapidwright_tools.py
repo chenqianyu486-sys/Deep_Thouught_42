@@ -1898,3 +1898,190 @@ def smart_region_search(
         logger.error(f"Error in smart region search: {e}")
         return {"error": str(e)}
 
+
+def _strategy_step_to_dict(step) -> dict:
+    """Convert a StrategyStep dataclass to a plain dict for JSON serialization."""
+    return {
+        "step_name": step.step_name,
+        "platform": step.platform,
+        "params": step.params,
+        "description": step.description,
+        "executed": step.executed,
+        "expected_duration_seconds": step.expected_duration_seconds,
+    }
+
+
+def _strategy_plan_to_dict(plan) -> dict:
+    """Convert a StrategyPlan dataclass to a plain dict for JSON serialization."""
+    return {
+        "strategy_name": plan.strategy_name,
+        "status": plan.status,
+        "message": plan.message,
+        "preconditions_satisfied": plan.preconditions_satisfied,
+        "analysis_summary": plan.analysis_summary,
+        "steps": [_strategy_step_to_dict(s) for s in plan.steps],
+        "error_details": plan.error_details,
+    }
+
+
+def execute_pblock_strategy(
+    target_lut_count: int,
+    target_ff_count: int,
+    target_dsp_count: int = 0,
+    target_bram_count: int = 0,
+    resource_multiplier: float = 1.5,
+) -> dict:
+    """Generate PBLOCK re-placement plan using RapidWright fabric analysis.
+
+    Args:
+        target_lut_count: Current LUT usage from Vivado
+        target_ff_count: Current FF usage from Vivado
+        target_dsp_count: Current DSP usage
+        target_bram_count: Current BRAM usage
+        resource_multiplier: Buffer multiplier (default 1.5x)
+
+    Returns:
+        Dictionary with strategy plan including pblock_ranges
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("pblock_strategy")
+        if skill is None:
+            return {"error": "Skill 'pblock_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            target_lut_count=target_lut_count,
+            target_ff_count=target_ff_count,
+            target_dsp_count=target_dsp_count,
+            target_bram_count=target_bram_count,
+            resource_multiplier=resource_multiplier,
+        )
+
+        if not result.success:
+            return {"error": result.error}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing pblock strategy: {e}")
+        return {"error": str(e)}
+
+
+def execute_physopt_strategy(
+    directive: str = "Default",
+    design_is_routed: bool = True,
+) -> dict:
+    """Generate PhysOpt execution plan for Vivado.
+
+    Args:
+        directive: phys_opt_design directive
+        design_is_routed: Whether the design is currently routed
+
+    Returns:
+        Dictionary with structured execution plan
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("physopt_strategy")
+        if skill is None:
+            return {"error": "Skill 'physopt_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            directive=directive,
+            design_is_routed=design_is_routed,
+        )
+
+        if not result.success:
+            return {"error": result.error}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing physopt strategy: {e}")
+        return {"error": str(e)}
+
+
+def execute_fanout_strategy(
+    nets: list[dict],
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "fanout_opt",
+) -> dict:
+    """Execute fanout optimization and return Vivado execution plan.
+
+    Runs optimize_fanout_batch and write_checkpoint in RapidWright,
+    then returns a plan with remaining Vivado steps.
+
+    Args:
+        nets: List of {"net_name": str, "fanout": int}
+        temp_dir: Directory for intermediate checkpoint
+        checkpoint_prefix: Checkpoint filename prefix
+
+    Returns:
+        Dictionary with execution results and remaining plan
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("fanout_strategy")
+        if skill is None:
+            return {"error": "Skill 'fanout_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            nets=nets,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing fanout strategy: {e}")
+        return {"error": str(e)}
+

@@ -37,10 +37,14 @@ from skills.idempotency import IdempotencyStore
 from skills.descriptor import export_all, write_descriptor, read_descriptor
 from skills.tracing import SkillTraceAttributes
 from skills.validate_descriptors import validate_descriptor
+from skills.strategy_plan import StrategyPlan, StrategyStep
 
 # Import submodules to trigger @skill decorators
 from skills import net_detour_optimization
 from skills import smart_region_search
+from skills import pblock_strategy
+from skills import physopt_strategy
+from skills import fanout_strategy
 
 __all__ = [
     "Skill",
@@ -65,4 +69,6 @@ __all__ = [
     "write_descriptor",
     "read_descriptor",
     "validate_descriptor",
+    "StrategyPlan",
+    "StrategyStep",
 ]

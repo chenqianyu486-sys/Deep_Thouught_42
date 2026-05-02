@@ -466,6 +466,114 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["target_lut_count", "target_ff_count"]
             }
+        ),
+        Tool(
+            name="execute_pblock_strategy",
+            description="""Generate PBLOCK re-placement plan using RapidWright fabric analysis.
+
+            Analyzes the FPGA fabric to find the optimal region for a PBLOCK constraint,
+            generates pblock ranges, and returns a structured execution plan covering
+            both completed RapidWright analysis and pending Vivado steps.
+
+            Requires: report_utilization_for_pblock run first to get resource counts.
+            Input: resource counts from Vivado utilization report.
+            Output: structured plan with pblock_ranges and ordered Vivado steps.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_lut_count": {
+                        "type": "integer",
+                        "description": "Current LUT usage from Vivado report_utilization_for_pblock"
+                    },
+                    "target_ff_count": {
+                        "type": "integer",
+                        "description": "Current FF usage from Vivado report_utilization_for_pblock"
+                    },
+                    "target_dsp_count": {
+                        "type": "integer",
+                        "description": "Current DSP usage (default: 0)",
+                        "default": 0
+                    },
+                    "target_bram_count": {
+                        "type": "integer",
+                        "description": "Current BRAM usage (default: 0)",
+                        "default": 0
+                    },
+                    "resource_multiplier": {
+                        "type": "number",
+                        "description": "Buffer multiplier for resource targets (default: 1.5)",
+                        "default": 1.5
+                    }
+                },
+                "required": ["target_lut_count", "target_ff_count"]
+            }
+        ),
+        Tool(
+            name="execute_physopt_strategy",
+            description="""Generate PhysOpt execution plan for Vivado.
+
+            Returns a structured plan for running physical optimization in Vivado,
+            including phys_opt_design, route_design, and report_timing_summary steps.
+
+            Trigger: 1-2 critical paths with spread but no high fanout.
+            Input: directive for phys_opt_design.
+            Output: structured plan with ordered Vivado steps.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directive": {
+                        "type": "string",
+                        "description": "phys_opt_design directive (Default, Explore, AggressiveExplore, AddRetime, etc.)",
+                        "default": "Default"
+                    },
+                    "design_is_routed": {
+                        "type": "boolean",
+                        "description": "Whether the design is currently routed",
+                        "default": True
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_fanout_strategy",
+            description="""Execute fanout optimization and return Vivado execution plan.
+
+            Runs optimize_fanout_batch and write_checkpoint in RapidWright to split
+            high fanout nets, then returns a plan with remaining Vivado steps
+            (open_checkpoint, route_design, report_timing_summary).
+
+            MUTATING: modifies design net topology and writes checkpoint file.
+            Trigger: High fanout nets present (fanout > 100), no path spread.
+            Input: list of nets with fanout counts.
+            Output: optimization results + structured plan with remaining Vivado steps.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "nets": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "net_name": {"type": "string"},
+                                "fanout": {"type": "integer"}
+                            },
+                            "required": ["net_name", "fanout"]
+                        },
+                        "description": "List of net configs: [{\"net_name\": ..., \"fanout\": ...}]"
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for intermediate checkpoint",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "fanout_opt"
+                    }
+                },
+                "required": ["nets"]
+            }
         )
     ]
 
@@ -594,6 +702,28 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 target_bram_count=arguments.get("target_bram_count", 0),
                 reference_col=arguments.get("reference_col"),
                 reference_row=arguments.get("reference_row")
+            )
+
+        elif name == "execute_pblock_strategy":
+            result = rw.execute_pblock_strategy(
+                target_lut_count=arguments["target_lut_count"],
+                target_ff_count=arguments["target_ff_count"],
+                target_dsp_count=arguments.get("target_dsp_count", 0),
+                target_bram_count=arguments.get("target_bram_count", 0),
+                resource_multiplier=arguments.get("resource_multiplier", 1.5),
+            )
+
+        elif name == "execute_physopt_strategy":
+            result = rw.execute_physopt_strategy(
+                directive=arguments.get("directive", "Default"),
+                design_is_routed=arguments.get("design_is_routed", True),
+            )
+
+        elif name == "execute_fanout_strategy":
+            result = rw.execute_fanout_strategy(
+                nets=arguments["nets"],
+                temp_dir=arguments.get("temp_dir", "temp"),
+                checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
             )
 
         else:

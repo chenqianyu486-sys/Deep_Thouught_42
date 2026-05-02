@@ -1,0 +1,66 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.fanout_strategy@1.0.0",
+  "displayName": "High Fanout Net Optimization Strategy",
+  "description": "Split high fanout nets using RapidWright and return Vivado execution plan. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: High fanout nets present (fanout > 100), no path spread.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "net_topology",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 300000,
+    "maxMs": 600000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "nets": {
+        "type": "array",
+        "description": "List of net configs: [{\"net_name\": str, \"fanout\": int}, ...]"
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for intermediate checkpoint",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Checkpoint filename prefix",
+        "default": "fanout_opt",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "nets"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

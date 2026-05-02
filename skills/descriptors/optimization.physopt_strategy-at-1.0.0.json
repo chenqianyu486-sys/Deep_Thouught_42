@@ -1,0 +1,55 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.physopt_strategy@1.0.0",
+  "displayName": "Physical Optimization Strategy",
+  "description": "Generate PhysOpt execution plan for Vivado. READ-ONLY. Physical optimization improves timing by replicating cells, retiming, and swapping LUT pins. Trigger: 1-2 critical paths with spread but no high fanout.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 30000,
+    "maxMs": 60000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "directive": {
+        "type": "string",
+        "description": "phys_opt_design directive: Default, Explore, AggressiveExplore, or AddRetime",
+        "default": "Default",
+        "minLength": 1
+      },
+      "design_is_routed": {
+        "type": "boolean",
+        "description": "Whether the design is currently routed",
+        "default": true
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

@@ -86,6 +86,13 @@ STRATEGY_LABEL_MAP = {
     "Fanout": "Fanout",
 }
 
+# Map strategy names to registered skill identifiers
+STRATEGY_SKILL_MAP = {
+    "PBLOCK": "pblock_strategy",
+    "PhysOpt": "physopt_strategy",
+    "Fanout": "fanout_strategy",
+}
+
 # ── Skill Guidance ──────────────────────────────────────────────
 
 SKILL_GUIDANCE = {
