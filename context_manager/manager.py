@@ -314,6 +314,15 @@ class MemoryManager:
                     extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,
                            "trace_id": get_trace_id()}
                 )
+            elif self._best_wns > -1.0:
+                # best_wns already close to convergence — trust the improvement
+                self._best_wns = wns
+                logger.info(
+                    "[TOOL_RESULT] New best WNS (near convergence): %.3f",
+                    wns,
+                    extra={"tool_name": tool_name, "wns": wns, "iteration": self._iteration,
+                           "trace_id": get_trace_id()}
+                )
             elif self._best_wns > float('-inf') and self._best_wns < -0.01 and wns > abs(self._best_wns) * 10:
                 logger.warning(
                     "[TOOL_RESULT] WNS %.3f rejected (unrealistic jump from %.3f)",

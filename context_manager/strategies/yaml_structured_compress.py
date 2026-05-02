@@ -418,9 +418,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
         wns_trend = 'stable'
         if context.best_wns is not None and context.current_wns is not None:
             if context.current_wns < context.best_wns:
-                wns_trend = 'improving'
-            elif context.current_wns > context.best_wns:
                 wns_trend = 'degrading'
+            elif context.current_wns > context.best_wns:
+                wns_trend = 'improving'
 
         # Apply WNS trend weight to tool results
         scored = [

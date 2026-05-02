@@ -278,6 +278,17 @@ ROUTING_FAILURE_PHRASES = [
     "unroutable", "exceeds", "congestion"
 ]
 
+# MCP tool name → registered skill name mapping for observability
+SKILL_TOOL_MAP: dict[str, str] = {
+    "rapidwright_analyze_net_detour": "net_detour",
+    "rapidwright_optimize_cell_placement": "optimize_cell",
+    "rapidwright_smart_region_search": "smart_region",
+    "rapidwright_execute_pblock_strategy": "pblock_strategy",
+    "rapidwright_execute_physopt_strategy": "physopt_strategy",
+    "rapidwright_execute_fanout_strategy": "fanout_strategy",
+}
+SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
+
 
 # === Section 6: DCPOptimizerBase — Shared Base Class ===
 
@@ -705,6 +716,9 @@ class DCPOptimizer(DCPOptimizerBase):
         self.latest_wns: Optional[float] = None  # Cache for O(1) _get_current_wns()
         self.latest_tns: Optional[float] = None  # Latest TNS from timing reports
         self.latest_failing_endpoints: Optional[int] = None  # Latest failing endpoint count
+        # Track TNS/failing_endpoints at the time best_wns was recorded, for rollback
+        self._best_wns_tns: Optional[float] = None
+        self._best_wns_failing_endpoints: Optional[int] = None
         self.current_task_type = ""  # Current task type
         # Task type success rate tracking (task_type -> {success: int, total: int})
         self.task_type_stats: dict[str, dict[str, int]] = {}
@@ -726,6 +740,11 @@ class DCPOptimizer(DCPOptimizerBase):
         self._iteration_handoff_injected: bool = False  # Whether handoff prompt was already injected
         self._iteration_narratives: list[dict] = []     # Progressive iteration summary for handoff
         self._strategy_sequence: list[str] = []          # Ordered strategy labels for state summary
+
+        # === Skill observability tracking ===
+        self.skill_invocation_log: list[dict] = []       # Per-invocation skill call tracking
+        self.skill_recommendation_log: list[dict] = []    # Recommendation-to-execution funnel tracking
+        self._last_skill_rec_iteration: Optional[int] = None  # Dedup guard for recommendation logging
 
         # === Section 7.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
@@ -2004,6 +2023,45 @@ STRICTLY FORBIDDEN:
                 lines.append(f"- {s}")
         return "\n".join(lines)
 
+    def _build_skill_invocation_summary(self, iteration: int) -> str:
+        """Build per-iteration skill invocation summary for handoff context.
+
+        Args:
+            iteration: The iteration to summarize.
+
+        Returns:
+            Formatted string for inclusion in handoff, or empty string.
+        """
+        calls = [
+            s for s in self.skill_invocation_log
+            if s.get("iteration") == iteration
+        ]
+        if not calls:
+            return ""
+
+        lines = ["=== SKILL INVOCATIONS ==="]
+        for call in calls:
+            wns_str = (
+                f"WNS={call['wns']:.3f}ns"
+                if call.get("wns") is not None
+                else "no WNS"
+            )
+            err_str = " [ERROR]" if call.get("error") else ""
+            lines.append(
+                f"- {call['skill_name']}: {wns_str}, "
+                f"{call['elapsed_time']:.1f}s{err_str}"
+            )
+
+        # Append recommendation acceptance status for this iteration
+        for rec in self.skill_recommendation_log:
+            if rec.get("iteration") == iteration and rec.get("recommended_skill"):
+                status = "ACCEPTED" if rec.get("accepted") else "not accepted"
+                lines.append(
+                    f"- Recommendation: {rec['recommended_skill']} [{status}]"
+                )
+
+        return "\n".join(lines)
+
     def _detect_unfinished_strategy(self) -> dict:
         """Detect if previous iteration's strategy was interrupted mid-execution.
 
@@ -2207,6 +2265,50 @@ STRICTLY FORBIDDEN:
 
         return ""
 
+    def _parse_recommended_skill(self, rec_text: str) -> tuple[str, str]:
+        """Parse recommendation string to extract recommended tool and skill name.
+
+        Args:
+            rec_text: The recommendation string from _build_skill_recommendation().
+
+        Returns:
+            Tuple of (recommended_tool_name, recommended_skill_name).
+        """
+        for tool_name, skill_name in SKILL_TOOL_MAP.items():
+            if tool_name in rec_text or skill_name in rec_text:
+                return tool_name, skill_name
+        return "", ""
+
+    def _log_skill_recommendation(self, rec_text: str) -> None:
+        """Log a skill recommendation for funnel tracking.
+
+        Deduplicates: only logs once per iteration.
+        """
+        if self._last_skill_rec_iteration == self.iteration:
+            return
+        self._last_skill_rec_iteration = self.iteration
+
+        rec_tool, rec_skill = self._parse_recommended_skill(rec_text)
+        entry = {
+            "iteration": self.iteration,
+            "recommendation_text": rec_text,
+            "recommended_tool": rec_tool,
+            "recommended_skill": rec_skill,
+            "accepted": False,
+            "accepted_at_entry": None,
+            "timestamp": time.time(),
+        }
+        self.skill_recommendation_log.append(entry)
+        logger.info(
+            "[SKILL_RECOMMENDATION] Iteration %d: recommended '%s' (tool=%s)",
+            self.iteration, rec_skill or "N/A", rec_tool or "N/A",
+            extra={
+                "iteration": self.iteration,
+                "recommended_skill": rec_skill,
+                "recommended_tool": rec_tool,
+            }
+        )
+
     def _build_data_driven_goal(self) -> str:
         """Build data-driven next goal from WNS trajectory and strategy effects."""
         current_wns = self._get_current_wns()
@@ -2262,6 +2364,9 @@ STRICTLY FORBIDDEN:
         skill_rec = self._build_skill_recommendation()
         if skill_rec and best_wns is not None and best_wns < 0:
             goal += f"\n{skill_rec}"
+        # Log recommendation for funnel tracking (deduplicated per iteration)
+        if skill_rec:
+            self._log_skill_recommendation(skill_rec)
         return goal
 
     def _generate_planner_handoff(self) -> str:
@@ -2308,6 +2413,8 @@ STRICTLY FORBIDDEN:
 === FAILED STRATEGIES ===
 {failed_strategies}
 {skill_rec_section}
+=== SKILL INVOCATIONS ===
+{self._build_skill_invocation_summary(self.iteration) or "(none)"}
 {self._format_analysis_section()}=== INCOMING MODEL ===
 You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
@@ -2380,6 +2487,8 @@ Exit: {exit_label}
 === AVOID ===
 {failed_strategies}
 {skill_rec_section}
+=== SKILL INVOCATIONS ===
+{self._build_skill_invocation_summary(self.iteration) or "(none)"}
 Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
 
@@ -2785,6 +2894,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                     logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                     self.best_wns = current_wns
                                     self._best_wns_iteration = self.iteration
+                                    self._best_wns_tns = timing_info.get("tns")
+                                    self._best_wns_failing_endpoints = timing_info.get("failing_endpoints")
                                     wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
                                 else:
                                     logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -2800,6 +2911,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                             logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                             self.best_wns = current_wns
                                             self._best_wns_iteration = self.iteration
+                                            self._best_wns_tns = self.latest_tns
+                                            self._best_wns_failing_endpoints = self.latest_failing_endpoints
                                             wns_measured = current_wns
                                         else:
                                             logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -2831,6 +2944,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             logger.info(f"New best WNS: {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                             self.best_wns = current_wns
                             self._best_wns_iteration = self.iteration
+                            self._best_wns_tns = timing_info.get("tns")
+                            self._best_wns_failing_endpoints = timing_info.get("failing_endpoints")
                         else:
                             logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                     else:
@@ -2864,6 +2979,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 logger.info(f"New best WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (improved from {self.best_wns:.3f} ns)")
                                 self.best_wns = current_wns
                                 self._best_wns_iteration = self.iteration
+                                self._best_wns_tns = self.latest_tns
+                                self._best_wns_failing_endpoints = self.latest_failing_endpoints
                             else:
                                 logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                         else:
@@ -2890,7 +3007,51 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     "is_optimization": is_optimization
                 }
             )
-            
+
+            # ── Skill invocation tracking ──────────────────────────
+            if tool_name in SKILL_TOOL_MAP:
+                skill_name = SKILL_TOOL_MAP[tool_name]
+                inv_entry = {
+                    "iteration": self.iteration,
+                    "tool_name": tool_name,
+                    "skill_name": skill_name,
+                    "wns": wns_measured,
+                    "error": False,
+                    "elapsed_time": elapsed_time,
+                    "timestamp": time.time(),
+                }
+                self.skill_invocation_log.append(inv_entry)
+
+                wns_str = (f"WNS={wns_measured:.3f}ns"
+                          if wns_measured is not None else "no WNS")
+                logger.info(
+                    "[SKILL_INVOCATION] '%s' | %s | %.1fs",
+                    skill_name, wns_str, elapsed_time,
+                    extra={
+                        "skill_name": skill_name,
+                        "tool_name": tool_name,
+                        "iteration": self.iteration,
+                        "wns": wns_measured,
+                        "elapsed_time": round(elapsed_time, 2),
+                        "skill_invocation_index": len(self.skill_invocation_log) - 1,
+                    }
+                )
+
+                # Check recommendation-to-execution funnel
+                if (self.skill_recommendation_log and
+                        self.skill_recommendation_log[-1].get("iteration") == self.iteration and
+                        not self.skill_recommendation_log[-1].get("accepted")):
+                    last_rec = self.skill_recommendation_log[-1]
+                    rec_tool = last_rec.get("recommended_tool", "")
+                    if rec_tool and (tool_name == rec_tool or skill_name in rec_tool):
+                        last_rec["accepted"] = True
+                        last_rec["accepted_at_entry"] = len(self.skill_invocation_log) - 1
+                        logger.info(
+                            "[SKILL_RECOMMENDATION_ACCEPTED] '%s' accepted in iteration %d",
+                            skill_name, self.iteration,
+                            extra={"skill_name": skill_name, "iteration": self.iteration}
+                        )
+
             return result_text
             
         except Exception as e:
@@ -2917,6 +3078,31 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     "is_optimization": False
                 }
             )
+
+            # ── Skill invocation tracking (error path) ────────────
+            if tool_name in SKILL_TOOL_MAP:
+                skill_name = SKILL_TOOL_MAP[tool_name]
+                self.skill_invocation_log.append({
+                    "iteration": self.iteration,
+                    "tool_name": tool_name,
+                    "skill_name": skill_name,
+                    "wns": None,
+                    "error": True,
+                    "error_message": str(e),
+                    "elapsed_time": elapsed_time,
+                    "timestamp": time.time(),
+                })
+                logger.warning(
+                    "[SKILL_INVOCATION] '%s' FAILED after %.1fs: %s",
+                    skill_name, elapsed_time, str(e),
+                    extra={
+                        "skill_name": skill_name,
+                        "tool_name": tool_name,
+                        "iteration": self.iteration,
+                        "error": True,
+                        "elapsed_time": round(elapsed_time, 2),
+                    }
+                )
 
             logger.error(f"Tool call failed: {e}")
             return json.dumps({"error": str(e)})
@@ -2972,6 +3158,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         self.latest_failing_endpoints = timing_info["failing_endpoints"]
         self.best_wns = self.initial_wns if self.initial_wns is not None else float('-inf')
         self._best_wns_iteration = 0  # Track initial state as iteration 0
+        self._best_wns_tns = timing_info["tns"]
+        self._best_wns_failing_endpoints = timing_info["failing_endpoints"]
 
         # NOTE (Issue 7): _sync_state_to_memory_manager() is NOT called here.
         # MemoryManager._initial_wns/_best_wns remain at default values (None/-inf).
@@ -4026,6 +4214,17 @@ CRITICAL OPTIMIZATION RULES:
                 self._print_optimization_summary()
                 return False
 
+            # [Bug 4] Snapshot WNS state before get_completion(), for rollback on verification failure
+            self._wns_snapshot = {
+                "best_wns": self.best_wns,
+                "_best_wns_iteration": self._best_wns_iteration,
+                "latest_wns": self.latest_wns,
+                "latest_tns": self.latest_tns,
+                "latest_failing_endpoints": self.latest_failing_endpoints,
+                "_best_wns_tns": self._best_wns_tns,
+                "_best_wns_failing_endpoints": self._best_wns_failing_endpoints,
+            }
+
             try:
                 result = await self.get_completion()
                 if result is None:
@@ -4157,6 +4356,17 @@ CRITICAL OPTIMIZATION RULES:
                 # If check failed after all retries, do not count this iteration - skip to next round without updating counters
                 if not (checkpoint_success and get_wns_success):
                     logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
+                    # [Bug 4] Restore WNS state from snapshot taken before get_completion()
+                    snap = getattr(self, '_wns_snapshot', None)
+                    if snap:
+                        self.best_wns = snap["best_wns"]
+                        self._best_wns_iteration = snap["_best_wns_iteration"]
+                        self.latest_wns = snap["latest_wns"]
+                        self.latest_tns = snap["latest_tns"]
+                        self.latest_failing_endpoints = snap["latest_failing_endpoints"]
+                        self._best_wns_tns = snap["_best_wns_tns"]
+                        self._best_wns_failing_endpoints = snap["_best_wns_failing_endpoints"]
+                        logger.info(f"Restored WNS state from snapshot: best={self.best_wns}, latest={self.latest_wns}")
                     continue
 
                 # [FIX] Determine WNS improvement AFTER checkpoint/get_wns confirms the actual WNS.
@@ -4240,6 +4450,12 @@ CRITICAL OPTIMIZATION RULES:
                             print("\n✗ Final DCP validation FAILED")
 
                     self._print_optimization_summary()
+                    # Export skill telemetry for persistent storage
+                    try:
+                        from skills.telemetry import SkillTelemetry
+                        SkillTelemetry.export_to_json(str(self.temp_dir / "skill_telemetry.json"))
+                    except Exception as tele_err:
+                        logger.warning("Failed to export skill telemetry: %s", tele_err)
                     return True
                     
             except Exception as e:
@@ -4252,6 +4468,12 @@ CRITICAL OPTIMIZATION RULES:
         
         logger.warning("Reached maximum iterations")
         self.end_time = time.time()
+        # Export skill telemetry for persistent storage
+        try:
+            from skills.telemetry import SkillTelemetry
+            SkillTelemetry.export_to_json(str(self.temp_dir / "skill_telemetry.json"))
+        except Exception as tele_err:
+            logger.warning("Failed to export skill telemetry: %s", tele_err)
         self._print_optimization_summary(max_iterations_reached=True)
         return False
 
@@ -4316,7 +4538,25 @@ CRITICAL OPTIMIZATION RULES:
             },
             "per_llm_call_details": self.api_call_details,
             "per_tool_call_details": self.tool_call_details,
-            "per_compression_details": self.compression_details
+            "per_compression_details": self.compression_details,
+            "skill_invocations": {
+                "total_skill_calls": len(self.skill_invocation_log),
+                "skill_call_counts": {
+                    name: sum(
+                        1 for s in self.skill_invocation_log
+                        if s.get("skill_name") == name
+                    )
+                    for name in sorted(set(
+                        s.get("skill_name", "") for s in self.skill_invocation_log
+                    ))
+                },
+                "skill_invocation_details": self.skill_invocation_log,
+                "skill_recommendation_details": self.skill_recommendation_log,
+                "recommendation_acceptance_count": sum(
+                    1 for r in self.skill_recommendation_log if r.get("accepted")
+                ),
+                "recommendation_total": len(self.skill_recommendation_log),
+            },
         }
         
         with open(output_path, 'w') as f:
@@ -4394,6 +4634,32 @@ CRITICAL OPTIMIZATION RULES:
                             print(f"    Last error:      {m['last_error']}")
         except Exception:
             pass
+
+        # Skill invocation summary (optimizer-level tracking with WNS context)
+        if self.skill_invocation_log:
+            print(f"\nSKILL INVOCATIONS:")
+            from collections import Counter
+            skill_counts = Counter(s.get("skill_name", "?") for s in self.skill_invocation_log)
+            for skill_name, count in skill_counts.most_common():
+                wns_vals = [
+                    s["wns"] for s in self.skill_invocation_log
+                    if s.get("skill_name") == skill_name and s.get("wns") is not None
+                ]
+                wns_str = f", avg WNS={sum(wns_vals)/len(wns_vals):.3f}ns" if wns_vals else ""
+                errors = sum(
+                    1 for s in self.skill_invocation_log
+                    if s.get("skill_name") == skill_name and s.get("error")
+                )
+                err_str = f", {errors} errors" if errors else ""
+                print(f"  {skill_name}: {count} calls{wns_str}{err_str}")
+
+            accepted = sum(
+                1 for r in self.skill_recommendation_log if r.get("accepted")
+            )
+            total_recs = len(self.skill_recommendation_log)
+            if total_recs > 0:
+                pct = 100.0 * accepted / total_recs
+                print(f"  Recommendation acceptance: {accepted}/{total_recs} ({pct:.0f}%)")
 
         # Tool call summary
         if self.tool_call_details:
@@ -4505,7 +4771,7 @@ CRITICAL OPTIMIZATION RULES:
     # === Section 7.X: DCP Validation Helpers ===
 
     async def _rollback_to_best_checkpoint(self) -> bool:
-        """Rollback to best known checkpoint with existence validation. Returns True on success."""
+        """Rollback to best known checkpoint with existence validation and WNS verification. Returns True on success."""
         best_iter = self._best_wns_iteration
         if best_iter is None:
             logger.error("No best checkpoint iteration recorded, cannot rollback")
@@ -4513,17 +4779,55 @@ CRITICAL OPTIMIZATION RULES:
 
         ckpt_path = self._get_intermediate_checkpoint_path(best_iter)
         if not ckpt_path.exists():
+            if best_iter == 0 and hasattr(self, 'input_dcp') and self.input_dcp.exists():
+                logger.warning(f"Best checkpoint {ckpt_path} does not exist, falling back to input DCP")
+                try:
+                    await self.call_tool("vivado_open_checkpoint", {"dcp_path": str(self.input_dcp.resolve())})
+                    # Verify WNS after rollback
+                    await self._verify_wns_after_rollback()
+                    return True
+                except Exception as e:
+                    logger.error(f"Rollback to input DCP failed: {e}")
+                    return False
             logger.error(f"Best checkpoint {ckpt_path} does not exist, cannot rollback")
             return False
 
         try:
-            await self.call_tool("vivado_open_checkpoint", {"checkpoint_path": str(ckpt_path)})
-            self.latest_wns = self.best_wns
-            logger.info(f"Rolled back to best checkpoint: {ckpt_path} (WNS={self.best_wns:.3f})")
+            await self.call_tool("vivado_open_checkpoint", {"dcp_path": str(ckpt_path.resolve())})
+            # Verify WNS after rollback (Bug 2: don't trust cached value blindly)
+            await self._verify_wns_after_rollback()
             return True
         except Exception as e:
             logger.error(f"Rollback to best checkpoint failed: {e}")
             return False
+
+    async def _verify_wns_after_rollback(self) -> None:
+        """Verify WNS after checkpoint rollback, restoring cached TNS/endpoints."""
+        try:
+            wns_result = await self.call_tool("vivado_get_wns", {})
+            if wns_result and wns_result.strip() not in ("", "(no output)", "PARSE_ERROR"):
+                verified_wns = float(wns_result.strip())
+                if self._is_valid_wns(verified_wns):
+                    logger.info(f"Rollback WNS verified: {verified_wns:.3f} (cached best: {self.best_wns:.3f})")
+                    self.latest_wns = verified_wns
+                    if verified_wns > self.best_wns:
+                        self.best_wns = verified_wns
+                else:
+                    logger.warning(f"Rollback WNS verification returned invalid value: {verified_wns}, using cached best_wns={self.best_wns:.3f}")
+                    self.latest_wns = self.best_wns
+            else:
+                logger.warning(f"Rollback WNS verification failed ({wns_result}), using cached best_wns={self.best_wns:.3f}")
+                self.latest_wns = self.best_wns
+        except Exception as e:
+            logger.warning(f"Rollback WNS verification exception: {e}, using cached best_wns={self.best_wns:.3f}")
+            self.latest_wns = self.best_wns
+
+        # Also restore TNS/failing_endpoints from cached values (Bug 3)
+        if self._best_wns_tns is not None:
+            self.latest_tns = self._best_wns_tns
+        if self._best_wns_failing_endpoints is not None:
+            self.latest_failing_endpoints = self._best_wns_failing_endpoints
+        logger.info(f"Rollback state restored: WNS={self.latest_wns:.3f}, TNS={self.latest_tns}, endpoints={self.latest_failing_endpoints}")
 
     def _get_intermediate_checkpoint_path(self, iteration: int) -> Path:
         """Get path for intermediate checkpoint with iteration number."""

@@ -10,7 +10,7 @@ Provides logging, metrics, and execution tracking for skills.
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 
@@ -35,17 +35,25 @@ class SkillExecutionRecord:
     error: Optional[str] = None
     error_code: str = ""  # Canonical error code from SkillErrorCode
     params_summary: str = ""  # Sanitized params for logging
+    wns: Optional[float] = None  # WNS value at time of execution (optimizer context)
+    iteration: int = 0  # Optimizer iteration number
+    extra: dict = field(default_factory=dict)  # Extensible metadata
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "skill_name": self.skill_name,
             "timestamp": self.timestamp.isoformat(),
             "duration_ms": round(self.duration_ms, 2),
             "status": self.status.value,
             "error": self.error,
             "error_code": self.error_code,
-            "params_summary": self.params_summary
+            "params_summary": self.params_summary,
+            "wns": self.wns,
+            "iteration": self.iteration,
         }
+        if self.extra:
+            d["extra"] = self.extra
+        return d
 
 
 @dataclass
@@ -256,6 +264,50 @@ class SkillTelemetry:
             "skills_tracked": len(cls._metrics),
             "recent_executions": len(cls._records)
         }
+
+
+    @classmethod
+    def export_to_json(cls, filepath: Optional[str] = None) -> dict:
+        """Export all telemetry to a JSON-serializable dict.
+
+        Args:
+            filepath: Optional file path to write JSON output.
+
+        Returns:
+            Dict with summary, metrics, and recent executions.
+        """
+        import json
+        data = {
+            "export_timestamp": datetime.now().isoformat(),
+            "summary": cls.get_execution_summary(),
+            "metrics": cls.get_all_metrics(),
+            "recent_executions": [r.to_dict() for r in cls._records],
+        }
+        if filepath:
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        return data
+
+    @classmethod
+    def clear_older_than(cls, hours: float = 24) -> int:
+        """Remove records older than the specified number of hours.
+
+        Args:
+            hours: Age threshold in hours.
+
+        Returns:
+            Number of records removed.
+        """
+        cutoff = datetime.now() - timedelta(hours=hours)
+        before = len(cls._records)
+        cls._records = [r for r in cls._records if r.timestamp >= cutoff]
+        # Rebuild metrics from remaining records
+        cls._metrics.clear()
+        for r in cls._records:
+            if r.skill_name not in cls._metrics:
+                cls._metrics[r.skill_name] = SkillMetrics(skill_name=r.skill_name)
+            cls._metrics[r.skill_name].record(r)
+        return before - len(cls._records)
 
 
 def sanitize_params_for_logging(params: dict, max_length: int = 100) -> str:
