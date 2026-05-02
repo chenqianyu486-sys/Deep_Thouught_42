@@ -1924,14 +1924,14 @@ def _strategy_plan_to_dict(plan) -> dict:
     }
 
 
-def execute_pblock_strategy(
+def analyze_pblock_region(
     target_lut_count: int,
     target_ff_count: int,
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
 ) -> dict:
-    """Generate PBLOCK re-placement plan using RapidWright fabric analysis.
+    """Analyze FPGA fabric to find optimal PBLOCK region. READ-ONLY.
 
     Args:
         target_lut_count: Current LUT usage from Vivado
@@ -1941,16 +1941,16 @@ def execute_pblock_strategy(
         resource_multiplier: Buffer multiplier (default 1.5x)
 
     Returns:
-        Dictionary with strategy plan including pblock_ranges
+        Dict with region, pblock_ranges, estimated_resources, next_steps
     """
     global _current_design
 
     if not _initialized:
-        logger.warning("execute_pblock_strategy: RapidWright not initialized")
+        logger.warning("analyze_pblock_region: RapidWright not initialized")
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
     if _current_design is None:
-        logger.warning("execute_pblock_strategy: No design loaded")
+        logger.warning("analyze_pblock_region: No design loaded")
         return {"error": "No design loaded. Use read_checkpoint first."}
 
     try:
@@ -1958,7 +1958,7 @@ def execute_pblock_strategy(
 
         skill = SkillRegistry.get("pblock_strategy")
         if skill is None:
-            logger.warning("execute_pblock_strategy: Skill 'pblock_strategy' not found in registry")
+            logger.warning("analyze_pblock_region: Skill 'pblock_strategy' not found in registry")
             return {"error": "Skill 'pblock_strategy' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
@@ -1974,17 +1974,16 @@ def execute_pblock_strategy(
         if not result.success:
             error_msg = result.error
             if error_msg is None and result.data is not None:
-                error_msg = getattr(result.data, 'message', None)
+                error_msg = result.data.get("message") if isinstance(result.data, dict) else None
             return {"error": error_msg or "Unknown error"}
 
-        plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return result.data
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")
         return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error executing pblock strategy: {e}")
+        logger.error(f"Error analyzing pblock region: {e}")
         return {"error": str(e)}
 
 

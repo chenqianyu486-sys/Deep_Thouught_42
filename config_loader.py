@@ -28,6 +28,8 @@ class ModelConfigData:
     cost_hard_limit: float = 1.0  # USD hard limit (combined planner+worker budget)
     min_importance_threshold: float = 0.3
     min_importance_threshold_aggressive: float = 0.8  # Default for aggressive mode
+    preserve_turns_hard_limit: int = 20
+    min_importance_threshold_hard_limit: float = 0.5
     history_retrieval_limit: int = 5
     history_retrieval_min_importance: float = 0.6
     fallback_models: list[str] = None  # Fallback models for 429 handling
@@ -88,6 +90,8 @@ class ModelConfigLoader:
             cost_hard_limit=config['worker'].get('cost_hard_limit', 1.0),
             min_importance_threshold=config['worker']['min_importance_threshold'],
             min_importance_threshold_aggressive=config['worker'].get('min_importance_threshold_aggressive', 0.8),
+            preserve_turns_hard_limit=config['worker'].get('preserve_turns_hard_limit', 25),
+            min_importance_threshold_hard_limit=config['worker'].get('min_importance_threshold_hard_limit', 0.35),
             history_retrieval_limit=config['worker']['history_retrieval_limit'],
             history_retrieval_min_importance=config['worker']['history_retrieval_min_importance'],
             fallback_models=config['worker'].get('fallback_models', []),
@@ -105,6 +109,8 @@ class ModelConfigLoader:
             cost_hard_limit=config['planner'].get('cost_hard_limit', 1.0),
             min_importance_threshold=config['planner']['min_importance_threshold'],
             min_importance_threshold_aggressive=config['planner'].get('min_importance_threshold_aggressive', 0.8),
+            preserve_turns_hard_limit=config['planner'].get('preserve_turns_hard_limit', 40),
+            min_importance_threshold_hard_limit=config['planner'].get('min_importance_threshold_hard_limit', 0.25),
             history_retrieval_limit=config['planner']['history_retrieval_limit'],
             history_retrieval_min_importance=config['planner']['history_retrieval_min_importance'],
             fallback_models=config['planner'].get('fallback_models', []),

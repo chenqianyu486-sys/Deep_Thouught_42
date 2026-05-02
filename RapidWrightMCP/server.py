@@ -52,7 +52,7 @@ app = Server("rapidwright-mcp")
 
 # Tools that perform real computation/optimization (expected >>1s execution time)
 COMPLEX_TOOLS = {
-    "execute_pblock_strategy",
+    "analyze_pblock_region",
     "execute_physopt_strategy",
     "execute_fanout_strategy",
     "analyze_net_detour",
@@ -457,7 +457,7 @@ async def list_tools() -> list[Tool]:
             columns (URAM, HPIO, etc.) and prioritizing high-density columns.
 
             Single tool call replaces 12+ LLM interaction rounds for pblock selection.
-            Priority: Call this before execute_pblock_strategy to find the optimal region.""",
+            Priority: Call this standalone for pblock selection. Use analyze_pblock_region for the combined analysis+planning tool.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -492,17 +492,21 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="execute_pblock_strategy",
-            description="""Generate PBLOCK re-placement plan using RapidWright fabric analysis.
+            name="analyze_pblock_region",
+            description="""Analyze FPGA fabric to find the optimal PBLOCK region for re-placement.
 
-            Analyzes the FPGA fabric to find the optimal region for a PBLOCK constraint,
-            generates pblock ranges, and returns a structured execution plan covering
-            both completed RapidWright analysis and pending Vivado steps.
+            READ-ONLY analysis. Uses smart_region_search to find the optimal
+            contiguous fabric region that fits the design's resource needs (with buffer
+            multiplier). Returns region coordinates, pblock_ranges string, estimated
+            resources, and suggested next steps for Vivado execution.
 
-            Requires: report_utilization_for_pblock run first to get resource counts.
+            Prerequisite: call vivado_report_utilization_for_pblock first to get
+            current LUT/FF/DSP/BRAM counts.
             Input: resource counts from Vivado utilization report.
-            Output: structured plan with pblock_ranges and ordered Vivado steps.
-            Priority: Prefer this over manual analyze_fabric+convert_fabric_region when avg_distance > 70.""",
+            Output: region coordinates, pblock_ranges string, estimated resources,
+                    and next_steps (Vivado tools you must call yourself).
+            Priority: Use when avg_distance > 70 (distributed scenario) or
+                      recommendation == 'PBLOCK'.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -731,7 +735,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 reference_row=arguments.get("reference_row")
             )
 
-        elif name == "execute_pblock_strategy":
+        elif name == "analyze_pblock_region":
             # Validate required parameters before calling
             missing_params = []
             if "target_lut_count" not in arguments:
@@ -747,7 +751,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                             "then retry with target_lut_count and target_ff_count set to those values.",
                 }
             else:
-                result = rw.execute_pblock_strategy(
+                result = rw.analyze_pblock_region(
                     target_lut_count=arguments["target_lut_count"],
                     target_ff_count=arguments["target_ff_count"],
                     target_dsp_count=arguments.get("target_dsp_count", 0),

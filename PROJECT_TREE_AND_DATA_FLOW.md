@@ -115,6 +115,7 @@ API调用前 → _inject_wns_state_to_system_prompt()
     - 追加"Current Optimization State:"块（含 WNS/TNS/failing_endpoints/best_checkpoint/next_model）
     - 追加数据驱动scenario hint（avg_distance>70 → "distributed"场景 → PBLOCK推荐）
     - 追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）
+    - 不再注入 FORMAT_GUARD（已改为 User message 机制，见 5.7）
     → 模型始终看到当前状态，不依赖working memory
 ```
 
@@ -128,6 +129,7 @@ API调用前 → _inject_wns_state_to_system_prompt()
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败）|
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
+| step: YAML 格式要求 | ① User message（会话起始）② System reminder（每API调用前） | 双重注入：User role 高注意力权重 + 末尾 System 贴近生成点 |
 
 ### 2.5 模型选择
 
@@ -221,13 +223,14 @@ Skill 超时映射（三层）:
 │   ├── Step1 DIAGNOSE: analyze_net_detour → 找出绕路比>2.0的cell
 │   ├── Step2 FIX: optimize_cell_placement → 移动到连接质心
 │   └── Step3 CONTAIN: smart_region_search + strategy skills → 地理约束
-├── 策略型 (pblock/physopt/fanout): 封装完整多步策略工作流，一键式执行
-│   ├── execute_pblock_strategy: avg_distance>70 → 含smart_region+unplace+place+route
+├── 策略型 (physopt/fanout): 封装完整多步策略工作流，一键式执行
+│   ├── analyze_pblock_region: avg_distance>70 → READ-ONLY分析, 返回pblock_ranges (LLM自行调Vivado工具串)
+│   │   └── Vivado工具串: place_design -unplace → create_and_apply_pblock → place_design → route_design → report_timing_summary
 │   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
 │   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+checkpoint+route
 
 Skill 推荐机制 (_build_skill_recommendation()):
-├── avg_distance > 70 AND PBLOCK not failed  → rapidwright_execute_pblock_strategy
+├── avg_distance > 70 AND PBLOCK not failed  → rapidwright_analyze_pblock_region
 ├── max_fanout > 100 AND Fanout not failed   → rapidwright_execute_fanout_strategy
 ├── no_improvement >=2 + physopt tried       → rapidwright_analyze_net_detour（分析型）
 ├── WNS > -2.0 AND PhysOpt not failed        → rapidwright_execute_physopt_strategy
@@ -483,16 +486,48 @@ class StepState:
 | SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
 | 工具调用超时 | 工具所属策略 | 工具超时（dcp_optimizer.py:3146） |
 | 工具调用异常 | 工具所属策略 | 工具执行抛出异常（dcp_optimizer.py:3204） |
-| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字（dcp_optimizer.py:4084） |
-| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed（dcp_optimizer.py:4088） |
-| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval（dcp_optimizer.py:2177） |
-| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败（非超时，dcp_optimizer.py:4431） |
+| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字（dcp_optimizer.py:4062） |
+| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed（dcp_optimizer.py:4073） |
+| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval（dcp_optimizer.py:2164） |
+| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败（非超时，dcp_optimizer.py:4453） |
 | 策略中断检测 | PBLOCK/Fanout | `_detect_interrupted_strategy()` 检测到验证缺失 |
 
 **`failed_strategies` 的使用**：
 - `_build_skill_recommendation()`: 跳过已失败策略的推荐（PBLOCK/Fanout/PhysOpt 分别检查）
 - `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩，不受迭代年龄限制
 - `_is_failed_strategy_tool_result()`: 按工具名模式匹配（PBLOCK→pblock, PhysOpt→phys_opt, Fanout→fanout/optimize_fanout, PlaceRoute→place_design/route_design）
+
+### 5.7 step: YAML 格式要求双重注入（2026-05-03 新增）
+
+**问题**：`_inject_format_requirement_to_system_prompt()` 将 FORMAT_GUARD 预置到 system prompt 开头，但长上下文（~94K tokens）中该指令容易被淹没。
+
+**方案**：双重注入，兼顾注意力权重与位置近端性：
+
+**注入 1 — User Message（一次性，会话起始）**
+```
+optimize() 中:
+1. system_prompt  →  system prompt（不含 FORMAT_GUARD）
+2. user(FORMAT_GUARD)  ← 新增：完整的 YAML 格式定义
+3. user(initial_optimization_instructions)
+```
+- User role 消息的注意力权重大于 System role 内容
+- 只需注入一次，不需要重复
+- 代码位置: [dcp_optimizer.py:4325-4353](dcp_optimizer.py#L4325-L4353)
+
+**注入 2 — System Reminder（每 LLM API 调用前）**
+```
+get_completion() 中:
+messages 末尾追加:
+  {"role": "system", "content": "REMINDER: Your response MUST start with 'step:' ..."}
+```
+- 极简内容（<10 tokens），几乎不增加成本
+- 始终在 messages 最后一条，贴近模型生成点
+- 压缩删掉也没关系——下次调用前会重新注入
+- 代码位置: [dcp_optimizer.py:3786](dcp_optimizer.py#L3786)
+
+**清理**：
+- 删除了 `_inject_format_requirement_to_system_prompt()` 方法
+- `_inject_wns_state_to_system_prompt()` 不再注入格式要求
 
 ## 6. 429降级机制
 

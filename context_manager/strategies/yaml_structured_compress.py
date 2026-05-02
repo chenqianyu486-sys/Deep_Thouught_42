@@ -394,16 +394,29 @@ class YAMLStructuredCompressor(CompressionStrategy):
         previous_tier = getattr(context, 'previous_model_tier', None)
         force_aggressive = getattr(context, 'force_aggressive', False)
 
-        # Get tier-aware parameters from instance attributes (set by subclasses)
-        # These can be overridden by model_config if available
-        preserve_turns = getattr(self, 'preserve_turns', 25)
-        min_importance_threshold = getattr(self, 'min_importance_threshold', 0.2)
+        # Read all compression budget parameters from model_config when available.
+        # model_config is always set in production (see _build_compression_context in dcp_optimizer.py).
+        # The fallback path covers tests and direct API usage.
+        if model_config:
+            preserve_turns = model_config.preserve_turns
+            min_importance_threshold = model_config.min_importance_threshold
+            effective_token_budget = model_config.token_budget
+            if force_aggressive:
+                preserve_turns = model_config.preserve_turns_hard_limit
+                min_importance_threshold = model_config.min_importance_threshold_hard_limit
+        else:
+            # Fallback defaults when no model_config is available
+            preserve_turns = 20
+            min_importance_threshold = 0.3
+            effective_token_budget = 80_000
+            if force_aggressive:
+                preserve_turns = 5
+                min_importance_threshold = 0.8
+
+        # max_chars_multiplier is not a tier-specific budget parameter; stays as instance attribute
         max_chars_multiplier = getattr(self, 'max_chars_multiplier', 1.0)
 
-        # Hard limit level: more aggressive than soft threshold but preserves more than full aggressive
         if force_aggressive:
-            preserve_turns = getattr(self, 'preserve_turns_hard_limit', 25)
-            min_importance_threshold = getattr(self, 'min_importance_threshold_hard_limit', 0.35)
             logger.info("[COMPRESS] Hard limit level compression: preserve_turns=%d, threshold=%.2f",
                        preserve_turns, min_importance_threshold)
 
@@ -421,9 +434,6 @@ class YAMLStructuredCompressor(CompressionStrategy):
                 preserve_turns = min(preserve_turns + 10, 60)
                 logger.info("[COMPRESS] Model switch detected: worker->planner, adjusted threshold=%.2f, preserve_turns=%d",
                            min_importance_threshold, preserve_turns)
-
-        # Use model's token budget if available
-        effective_token_budget = model_config.token_budget if model_config else self.token_budget
 
         logger.info(
             "[COMPRESS] Starting compression: preserve_turns=%s, threshold=%s",

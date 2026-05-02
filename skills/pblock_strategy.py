@@ -2,18 +2,18 @@
 # SPDX-License-Identifier: Apache 2.0
 
 """
-PBLOCK-Based Re-placement Strategy Skill.
+PBLOCK Region Analysis Skill.
 
 Analyzes FPGA fabric using RapidWright to find optimal pblock region,
-generates pblock ranges, and returns a structured execution plan
-with both completed (RapidWright) and pending (Vivado) steps.
+generates pblock ranges, and returns analysis data (region coordinates,
+pblock_ranges string, estimated resources) with suggested next steps.
+READ-ONLY — no design modification.
 """
 import logging
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
-from skills.strategy_plan import StrategyPlan, StrategyStep
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ def generate_pblock_plan(
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
-) -> StrategyPlan:
-    """Generate a PBLOCK re-placement plan using RapidWright fabric analysis.
+) -> dict:
+    """Analyze FPGA fabric to find optimal PBLOCK region.
 
     Args:
         design: RapidWright Design object
@@ -37,30 +37,28 @@ def generate_pblock_plan(
         resource_multiplier: Buffer multiplier for resource targets (default 1.5x)
 
     Returns:
-        StrategyPlan with executed RapidWright steps and pending Vivado steps
+        Dict with status, region, pblock_ranges, estimated_resources, next_steps
     """
     if design is None:
         logger.warning("generate_pblock_plan: design is None")
-        return StrategyPlan(
-            strategy_name="PBLOCK",
-            status="error",
-            message="Design not loaded",
-            preconditions_satisfied=False,
-            error_details="context.design is None",
-        )
+        return {
+            "status": "error",
+            "message": "Design not loaded",
+            "error_details": "context.design is None",
+        }
 
     if target_lut_count <= 0 or target_ff_count <= 0:
-        return StrategyPlan(
-            strategy_name="PBLOCK",
-            status="skipped",
-            message=f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} (must be positive). "
-                    f"Run report_utilization_for_pblock first to get actual resource counts.",
-            preconditions_satisfied=False,
-            analysis_summary={
-                "target_lut_count": target_lut_count,
-                "target_ff_count": target_ff_count,
+        return {
+            "status": "skipped",
+            "message": f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} (must be positive). "
+                       f"Run report_utilization_for_pblock first to get actual resource counts.",
+            "target_resources": {
+                "luts": target_lut_count,
+                "ffs": target_ff_count,
+                "dsps": target_dsp_count,
+                "brams": target_bram_count,
             },
-        )
+        }
 
     # Apply resource multiplier
     adjusted_lut = int(target_lut_count * resource_multiplier)
@@ -84,153 +82,83 @@ def generate_pblock_plan(
         region_error = str(e)
 
     if region_error or region_result is None:
-        return StrategyPlan(
-            strategy_name="PBLOCK",
-            status="error",
-            message=f"Smart region search failed: {region_error or 'unknown error'}",
-            preconditions_satisfied=False,
-            error_details=region_error,
-            analysis_summary={
-                "target_lut_count": target_lut_count,
-                "target_ff_count": target_ff_count,
-                "resource_multiplier": resource_multiplier,
+        return {
+            "status": "error",
+            "message": f"Smart region search failed: {region_error or 'unknown error'}",
+            "error_details": region_error,
+            "target_resources": {
+                "luts": target_lut_count, "ffs": target_ff_count,
+                "dsps": target_dsp_count, "brams": target_bram_count,
             },
-        )
+            "resource_multiplier": resource_multiplier,
+        }
 
     if region_result.status != "success":
-        return StrategyPlan(
-            strategy_name="PBLOCK",
-            status="error",
-            message=f"Region search did not succeed: {region_result.message}",
-            preconditions_satisfied=False,
-            error_details=region_result.message,
-            analysis_summary={
-                "region_status": region_result.status,
-                "target_resources": {
-                    "luts": adjusted_lut, "ffs": adjusted_ff,
-                    "dsps": adjusted_dsp, "brams": adjusted_bram,
-                },
+        return {
+            "status": "error",
+            "message": f"Region search did not succeed: {region_result.message}",
+            "error_details": region_result.message,
+            "target_resources": {
+                "luts": adjusted_lut, "ffs": adjusted_ff,
+                "dsps": adjusted_dsp, "brams": adjusted_bram,
             },
-        )
+            "region_status": region_result.status,
+        }
 
-    # Build pblock name
     pblock_name = "pblock_tight"
 
-    # Build the full PBLOCK execution plan
-    steps = [
-        StrategyStep(
-            step_name="report_utilization_for_pblock",
-            platform="Vivado",
-            params={"timeout": 300.0},
-            description="Get current resource utilization from Vivado",
-            executed=False,
-            expected_duration_seconds=30,
-        ),
-        StrategyStep(
-            step_name="analyze_fabric_for_pblock",
-            platform="RapidWright",
-            params={
-                "target_lut_count": adjusted_lut,
-                "target_ff_count": adjusted_ff,
-                "target_dsp_count": adjusted_dsp,
-                "target_bram_count": adjusted_bram,
-            },
-            description="Analyze FPGA fabric for optimal pblock region",
-            executed=True,
-            expected_duration_seconds=60,
-        ),
-        StrategyStep(
-            step_name="convert_fabric_region_to_pblock",
-            platform="RapidWright",
-            params={"use_clock_regions": False},
-            description="Convert fabric region to Vivado pblock ranges",
-            executed=True,
-            expected_duration_seconds=30,
-        ),
-        StrategyStep(
-            step_name="place_design",
-            platform="Vivado",
-            params={"directive": "unplace"},
-            description="Unplace all cells before applying pblock constraint",
-            executed=False,
-            expected_duration_seconds=60,
-        ),
-        StrategyStep(
-            step_name="create_and_apply_pblock",
-            platform="Vivado",
-            params={
-                "pblock_name": pblock_name,
-                "ranges": region_result.pblock_ranges,
-                "is_soft": False,
-                "validate_resources": True,
-            },
-            description="Create and apply pblock constraint",
-            executed=False,
-            expected_duration_seconds=30,
-        ),
-        StrategyStep(
-            step_name="place_design",
-            platform="Vivado",
-            params={},
-            description="Re-place cells within pblock",
-            executed=False,
-            expected_duration_seconds=300,
-        ),
-        StrategyStep(
-            step_name="route_design",
-            platform="Vivado",
-            params={},
-            description="Route design after re-placement",
-            executed=False,
-            expected_duration_seconds=300,
-        ),
-        StrategyStep(
-            step_name="report_timing_summary",
-            platform="Vivado",
-            params={},
-            description="Verify timing after PBLOCK re-placement",
-            executed=False,
-            expected_duration_seconds=60,
-        ),
-    ]
-
-    return StrategyPlan(
-        strategy_name="PBLOCK",
-        status="ready",
-        message=f"PBLOCK plan ready. Region: cols {region_result.col_min}-{region_result.col_max}, "
-                f"rows {region_result.row_min}-{region_result.row_max}",
-        preconditions_satisfied=True,
-        analysis_summary={
-            "region": {
-                "col_min": region_result.col_min,
-                "col_max": region_result.col_max,
-                "row_min": region_result.row_min,
-                "row_max": region_result.row_max,
-                "center_col": region_result.center_col,
-                "center_row": region_result.center_row,
-            },
-            "estimated_resources": {
-                "luts": region_result.estimated_luts,
-                "ffs": region_result.estimated_ffs,
-                "dsps": region_result.estimated_dsps,
-                "brams": region_result.estimated_brams,
-            },
-            "pblock_ranges": region_result.pblock_ranges,
-            "pblock_name": pblock_name,
-            "resource_multiplier": resource_multiplier,
+    return {
+        "status": "success",
+        "message": (f"PBLOCK region found: cols {region_result.col_min}-{region_result.col_max}, "
+                     f"rows {region_result.row_min}-{region_result.row_max}. "
+                     f"Estimated resources: {region_result.estimated_luts:,} LUTs, "
+                     f"{region_result.estimated_ffs:,} FFs, "
+                     f"{region_result.estimated_dsps} DSPs, "
+                     f"{region_result.estimated_brams} BRAMs."),
+        "region": {
+            "col_min": region_result.col_min,
+            "col_max": region_result.col_max,
+            "row_min": region_result.row_min,
+            "row_max": region_result.row_max,
+            "center_col": region_result.center_col,
+            "center_row": region_result.center_row,
+            "columns_used": region_result.columns_used,
+            "rows_used": region_result.rows_used,
         },
-        steps=steps,
-    )
+        "pblock_ranges": region_result.pblock_ranges,
+        "pblock_name": pblock_name,
+        "estimated_resources": {
+            "luts": region_result.estimated_luts,
+            "ffs": region_result.estimated_ffs,
+            "dsps": region_result.estimated_dsps,
+            "brams": region_result.estimated_brams,
+        },
+        "target_resources": {
+            "luts": adjusted_lut,
+            "ffs": adjusted_ff,
+            "dsps": adjusted_dsp,
+            "brams": adjusted_bram,
+        },
+        "resource_multiplier": resource_multiplier,
+        "next_steps": [
+            "vivado: place_design -unplace",
+            "vivado: create_and_apply_pblock with pblock_ranges above, pblock_name=pblock_tight, is_soft=false",
+            "vivado: place_design (re-place cells within pblock constraint)",
+            "vivado: route_design",
+            "vivado: report_timing_summary (verify WNS improvement after PBLOCK re-placement)",
+        ],
+    }
 
 
 @skill(
     name="pblock_strategy",
     namespace="optimization",
     version="1.0.0",
-    display_name="PBLOCK-Based Re-placement Strategy",
-    description="Analyze design and generate PBLOCK re-placement plan. READ-ONLY. "
-                "Uses smart_region_search to find optimal fabric region, "
-                "then returns structured execution plan with Vivado TCL steps. "
+    display_name="PBLOCK Region Analysis",
+    description="Analyze FPGA fabric to find optimal PBLOCK region for re-placement. "
+                "READ-ONLY analysis. Returns region coordinates, pblock_ranges string, "
+                "and estimated resources. Use the returned pblock_ranges to call Vivado "
+                "tools (create_and_apply_pblock, place_design, route_design) yourself. "
                 "Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",
@@ -252,21 +180,22 @@ def generate_pblock_plan(
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class PblockStrategySkill(Skill):
-    """Skill for PBLOCK-Based Re-placement strategy planning."""
+    """Skill for PBLOCK region analysis. Returns region data, not a StrategyPlan."""
 
     def execute(self, context: SkillContext,
                 target_lut_count: int, target_ff_count: int,
                 target_dsp_count: int = 0, target_bram_count: int = 0,
                 resource_multiplier: float = 1.5) -> SkillResult:
         try:
-            plan = generate_pblock_plan(
+            result = generate_pblock_plan(
                 context.design,
                 target_lut_count, target_ff_count,
                 target_dsp_count, target_bram_count,
                 resource_multiplier,
             )
-            error_msg = plan.message if plan.status == "error" else None
-            return SkillResult(success=(plan.status != "error"), data=plan, error=error_msg)
+            is_error = result.get("status") == "error"
+            error_msg = result.get("message") if is_error else None
+            return SkillResult(success=not is_error, data=result, error=error_msg)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
 

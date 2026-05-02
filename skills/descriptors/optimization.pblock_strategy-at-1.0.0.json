@@ -2,8 +2,8 @@
   "$schema": "https://spec.example.com/skill-descriptor-v3.json",
   "specVersion": "3.0",
   "id": "optimization.pblock_strategy@1.0.0",
-  "displayName": "PBLOCK-Based Re-placement Strategy",
-  "description": "Analyze design and generate PBLOCK re-placement plan. READ-ONLY. Uses smart_region_search to find optimal fabric region, then returns structured execution plan with Vivado TCL steps. Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
+  "displayName": "PBLOCK Region Analysis",
+  "description": "Analyze FPGA fabric to find optimal PBLOCK region for re-placement. READ-ONLY. Uses smart_region_search to find optimal fabric region, returns region coordinates, pblock_ranges string, estimated resources and suggested Vivado next steps. Use the returned pblock_ranges to call Vivado tools yourself. Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {
@@ -48,7 +48,18 @@
   },
   "returns": {
     "type": "object",
-    "additionalProperties": false
+    "description": "Analysis data (NOT a StrategyPlan). Region coordinates, pblock_ranges, resource estimates, and next_steps.",
+    "properties": {
+      "status": {"type": "string", "enum": ["success", "error", "skipped"]},
+      "message": {"type": "string"},
+      "region": {"type": "object", "description": "col_min, col_max, row_min, row_max, center_col, center_row, columns_used, rows_used"},
+      "pblock_ranges": {"type": "string", "description": "Vivado-compatible pblock range string"},
+      "pblock_name": {"type": "string"},
+      "estimated_resources": {"type": "object", "description": "luts, ffs, dsps, brams"},
+      "target_resources": {"type": "object", "description": "luts, ffs, dsps, brams (with multiplier applied)"},
+      "resource_multiplier": {"type": "number"},
+      "next_steps": {"type": "array", "items": {"type": "string"}, "description": "Vivado tools to call after analysis"}
+    }
   },
   "errors": [
     {

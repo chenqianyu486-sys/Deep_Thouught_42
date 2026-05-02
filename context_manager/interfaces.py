@@ -70,6 +70,8 @@ class ModelContextConfig:
     preserve_turns_aggressive: int = 3
     min_importance_threshold: float = 0.3
     min_importance_threshold_aggressive: float = 0.8
+    preserve_turns_hard_limit: int = 20
+    min_importance_threshold_hard_limit: float = 0.5
     history_retrieval_limit: int = 5
     history_retrieval_min_importance: float = 0.6
 

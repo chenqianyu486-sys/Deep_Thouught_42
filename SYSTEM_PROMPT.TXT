@@ -76,7 +76,7 @@ scenarios:
 x-profiles:
   - &profile-pblock
     strategy: pblock
-    skill: execute_pblock_strategy
+    skill: analyze_pblock_region
   - &profile-physopt
     strategy: physopt
     skill: execute_physopt_strategy
@@ -121,9 +121,11 @@ strategies:
     - "Step 2 - FIX: Call optimize_cell_placement for cells with high detour, then write_checkpoint and route"
     - "Step 3 - CONTAIN: Call smart_region_search + strategy skills for geographic clustering"
   strategy_skills:
-    execute_pblock_strategy:
-      description: "PBLOCK-Based Re-placement via SmartRegion search"
-      replaces: "manual analyze_fabric + convert_fabric + place sequence"
+    analyze_pblock_region:
+      description: "Analyze FPGA fabric to find optimal PBLOCK region (READ-ONLY)"
+      returns: "region coordinates, pblock_ranges string, estimated resources"
+      post_action: "After this, YOU must call vivado: place_design -unplace, create_and_apply_pblock, place_design, route_design, report_timing_summary"
+      replaces: "manual analyze_fabric + convert_fabric + place sequence planning"
     execute_physopt_strategy:
       description: "Physical Optimization via Vivado phys_opt_design"
       replaces: "manual phys_opt_design + route sequence"
@@ -131,8 +133,10 @@ strategies:
       description: "High Fanout Net Optimization via RapidWright"
       replaces: "manual optimize_fanout_batch + checkpoint sequence"
   selection_guide: >
-    When starting a new strategy (flow_control=CONTINUE after SWITCH_STRATEGY or iteration start),
-    prefer calling execute_*_strategy tools over manually sequencing individual Vivado/RapidWright tools.
+    When starting a new strategy, prefer calling strategy/analysis tools over manually
+    sequencing individual tools. For PBLOCK: call analyze_pblock_region (RapidWright analysis),
+    then call Vivado tools yourself with the returned pblock_ranges.
+    For PhysOpt/Fanout: call execute_*_strategy tools as before.
     Strategy skills encapsulate the complete multi-tool workflow, validate preconditions, and return
     structured execution plans. Only fall back to individual tools if the strategy skill fails.
     See strategy_selection table for scenario-to-strategy mapping.

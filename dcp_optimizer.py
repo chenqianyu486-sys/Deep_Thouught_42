@@ -73,6 +73,8 @@ def _create_model_context_config(data: ModelConfigData) -> ModelContextConfig:
         preserve_turns_aggressive=data.preserve_turns_aggressive,
         min_importance_threshold=data.min_importance_threshold,
         min_importance_threshold_aggressive=data.min_importance_threshold_aggressive,
+        preserve_turns_hard_limit=data.preserve_turns_hard_limit,
+        min_importance_threshold_hard_limit=data.min_importance_threshold_hard_limit,
         history_retrieval_limit=data.history_retrieval_limit,
         history_retrieval_min_importance=data.history_retrieval_min_importance,
     )
@@ -283,7 +285,7 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_analyze_net_detour": "net_detour",
     "rapidwright_optimize_cell_placement": "optimize_cell",
     "rapidwright_smart_region_search": "smart_region",
-    "rapidwright_execute_pblock_strategy": "pblock_strategy",
+    "rapidwright_analyze_pblock_region": "pblock_strategy",
     "rapidwright_execute_physopt_strategy": "physopt_strategy",
     "rapidwright_execute_fanout_strategy": "fanout_strategy",
 }
@@ -997,48 +999,6 @@ class DCPOptimizer(DCPOptimizerBase):
         """Get latest WNS - O(1) from cached instance variable."""
         return self.latest_wns
 
-    def _inject_format_requirement_to_system_prompt(self, system_content: str) -> str:
-        """Prepend YAML format requirement to system prompt on every LLM call.
-
-        Prevents LLM from forgetting YAML output format when context grows large
-        (e.g., ~94K tokens in later iterations).
-        """
-        FORMAT_GUARD = """**CRITICAL OUTPUT FORMAT - READ FIRST:**
-You MUST output valid YAML starting with `step:` in EVERY response, INCLUDING
-when using native function/tool calls. The `step:` YAML block goes in the
-response text alongside any native tool calls.
-
-Format:
-  step:
-    step_id: <N>
-    result_status: SUCCESS|PARTIAL|FAIL
-    flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
-    analysis:                                      # Required when SWITCH_STRATEGY or starting a new strategy
-      observed_signals:
-        avg_distance: <float|null>
-        max_fanout: <int|null>
-        failing_endpoints: <int|null>
-      scenario_match: <scenario_id|null>    # wide_lut|high_fanout|distributed|control_imbalance|congestion|mixed|null
-      hypothesis: "<string>"
-      strategy_rationale: "<string>"
-    # tool_calls section is OPTIONAL when using native function calls.
-    # The system extracts tool calls from the API's native mechanism.
-    # Still include tool_calls in YAML if NOT using native function calls.
-    tool_calls:
-      - function: tool_name
-        parameters:
-          key: value
-
-STRICTLY FORBIDDEN:
-  - XML/HTML tags (</arg_value>, <tool_call>, <arg_key>, etc.) — NOT valid YAML
-  - Markdown fences (```), free text, ASCII art, summaries
-  - Omitting the step: YAML block when using native tool calls
-
-"""
-        if "CRITICAL OUTPUT FORMAT" not in system_content:
-            system_content = FORMAT_GUARD + system_content
-        return system_content
-
     def _inject_wns_state_to_system_prompt(self, system_content: str) -> str:
         """Inject current WNS/state into system prompt to prevent context loss after compression.
 
@@ -1048,7 +1008,6 @@ STRICTLY FORBIDDEN:
         - iteration (current iteration)
         - clock_period
         """
-        system_content = self._inject_format_requirement_to_system_prompt(system_content)
         import re
 
         current_wns = self._get_current_wns()
@@ -1776,8 +1735,36 @@ STRICTLY FORBIDDEN:
             except Exception:
                 pass
 
+        elif tool_name == "rapidwright_analyze_pblock_region":
+            # Plain analysis dict (not StrategyPlan)
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data.get('error', 'unknown')[:200]}")
+                    status = "error"
+                else:
+                    status_val = data.get("status", "unknown")
+                    summary_parts.append(f"Analysis: {status_val}")
+                    if data.get("message"):
+                        summary_parts.append(data["message"][:200])
+                    if "region" in data:
+                        r = data["region"]
+                        summary_parts.append(
+                            f"Region: cols {r.get('col_min')}-{r.get('col_max')}, "
+                            f"rows {r.get('row_min')}-{r.get('row_max')}"
+                        )
+                        key_details["region"] = data["region"]
+                    if data.get("pblock_ranges"):
+                        key_details["pblock_ranges"] = data["pblock_ranges"]
+                    if data.get("estimated_resources"):
+                        key_details["estimated_resources"] = data["estimated_resources"]
+                    if data.get("next_steps"):
+                        key_details["next_steps"] = data["next_steps"]
+            except Exception:
+                pass
+
         elif tool_name in ("rapidwright_execute_fanout_strategy",
-                           "rapidwright_execute_pblock_strategy",
                            "rapidwright_execute_physopt_strategy"):
             # Parse StrategyPlan JSON for pending steps
             try:
@@ -1943,7 +1930,7 @@ STRICTLY FORBIDDEN:
     def _infer_strategy_from_tools(self, tools: list[str]) -> str:
         """Deduce strategy label from tool sequence."""
         tool_str = " ".join(tools).lower()
-        if "pblock_strategy" in tool_str or "create_and_apply_pblock" in tool_str or "convert_fabric_region_to_pblock" in tool_str:
+        if "analyze_pblock" in tool_str or "pblock_strategy" in tool_str or "create_and_apply_pblock" in tool_str or "convert_fabric_region_to_pblock" in tool_str:
             return "PBLOCK"
         if "physopt_strategy" in tool_str or "phys_opt_design" in tool_str:
             return "PhysOpt"
@@ -2281,7 +2268,7 @@ STRICTLY FORBIDDEN:
     def _build_skill_recommendation(self) -> str:
         """Analyze current state and recommend a strategy skill tool.
 
-        Returns a string like 'Recommended skill: rapidwright_execute_pblock_strategy'
+        Returns a string like 'Recommended skill: rapidwright_analyze_pblock_region'
         or empty string if no clear recommendation.
         """
         failed = set(self._compat.failed_strategies)
@@ -2290,10 +2277,11 @@ STRICTLY FORBIDDEN:
         if "PBLOCK" not in failed and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
             if avg_dist and avg_dist > 70:
-                skill_name = STRATEGY_SKILL_MAP.get("PBLOCK", "pblock_strategy")
-                return (f"Recommended skill: rapidwright_execute_{skill_name} (matches distributed scenario, avg_distance={avg_dist:.1f} > 70). "
+                return (f"Recommended skill: rapidwright_analyze_pblock_region (matches distributed scenario, avg_distance={avg_dist:.1f} > 70). "
                         f"Prerequisite: First call vivado_report_utilization_for_pblock to get current LUT/FF/DSP/BRAM counts, "
-                        f"then call the skill with target_lut_count and target_ff_count set to those values.")
+                        f"then call the skill with target_lut_count and target_ff_count set to those values. "
+                        f"The tool returns pblock_ranges — you must then call vivado_create_and_apply_pblock, "
+                        f"vivado_place_design, vivado_route_design, and vivado_report_timing_summary yourself.")
 
         # Check high fanout nets
         if "Fanout" not in failed and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
@@ -3751,16 +3739,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 return content, is_done
             iteration_start_wns = self.best_wns
 
-            # 1. Inject failed strategies via compat
-            if self._compat.failed_strategies:
-                last_msg = self.messages[-1] if self.messages else None
-                already_notified = last_msg and "has been tried and showed no effect" in last_msg.get("content", "")
-                if not already_notified:
-                    self._compat.add_message(
-                        "user",
-                        f"Note: The following strategies have been tried and showed no effect (avoid repetition): {', '.join(self._compat.failed_strategies[-3:])}"
-                    )
-
             # Re-enable compression and compress before LLM call
             self._compress_context()
 
@@ -3799,6 +3777,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     api_messages.insert(1, first_msg)
                     logger.info("Injected first iteration starting context")
                 self._iteration_handoff_injected = True
+
+            # Inject short format reminder as last system message before API call
+            # Ensures the YAML format instruction is always near the generation point,
+            # regardless of how long the context has grown.
+            api_messages.append({
+                "role": "system",
+                "content": "REMINDER: Your response MUST start with 'step:' (valid YAML block). See format instructions at conversation start."
+            })
 
             # Log prompt for observability
             self._prompt_logger.log_prompt(
@@ -4332,6 +4318,42 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         
         # Initialize conversation with analysis results via compat (Phase 2)
         self._compat.add_message("system", system_prompt)
+
+        # Inject YAML format requirement as the FIRST user message (not system prompt prefix)
+        # User role messages get higher attention weight and are less likely to be forgotten
+        # in long contexts compared to content buried in the system prompt.
+        FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
+You MUST output valid YAML starting with `step:` in EVERY response, INCLUDING
+when using native function/tool calls. The `step:` YAML block goes in the
+response text alongside any native tool calls.
+
+Format:
+  step:
+    step_id: <N>
+    result_status: SUCCESS|PARTIAL|FAIL
+    flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
+    analysis:
+      observed_signals:
+        avg_distance: <float|null>
+        max_fanout: <int|null>
+        failing_endpoints: <int|null>
+      scenario_match: <scenario_id|null>
+      hypothesis: "<string>"
+      strategy_rationale: "<string>"
+    tool_calls:
+      - function: tool_name
+        parameters:
+          key: value
+
+STRICTLY FORBIDDEN:
+  - XML/HTML tags - NOT valid YAML
+  - Markdown fences, free text, ASCII art, summaries
+  - Omitting the step: YAML block when using native tool calls
+
+Maintain this output format throughout the entire conversation.
+"""
+        self._compat.add_message("user", FORMAT_GUARD)
+
         initial_user_content = f"""Optimize this FPGA design for timing.
 
 PATHS:
@@ -5207,7 +5229,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"[TEST] ⚠ Skill '{skill_name}' returned error: {data['error']}")
             return data
 
-        # StrategyPlan format
+        # StrategyPlan format (physopt / fanout)
         if "strategy_name" in data:
             status = data.get("status", "unknown")
             steps = data.get("steps", [])
@@ -5217,6 +5239,26 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 print(f"[TEST]   - {s['step_name']} ({s.get('platform', '?')}){mark}")
             if data.get("analysis_summary"):
                 print(f"[TEST]   analysis: {_json.dumps(data['analysis_summary'], ensure_ascii=False)[:200]}")
+        # PBLOCK analysis format (plain dict with region + pblock_ranges)
+        elif "region" in data and "pblock_ranges" in data:
+            status = data.get("status", "unknown")
+            region = data.get("region", {})
+            er = data.get("estimated_resources", {})
+            tr = data.get("target_resources", {})
+            print(f"[TEST] ✓ Skill '{skill_name}' | status: {status}")
+            print(f"[TEST]   region: cols {region.get('col_min')}-{region.get('col_max')}, "
+                  f"rows {region.get('row_min')}-{region.get('row_max')}")
+            print(f"[TEST]   estimated: {er.get('luts', '?')} LUTs, {er.get('ffs', '?')} FFs, "
+                  f"{er.get('dsps', 0)} DSPs, {er.get('brams', 0)} BRAMs")
+            print(f"[TEST]   target:    {tr.get('luts', '?')} LUTs, {tr.get('ffs', '?')} FFs, "
+                  f"{tr.get('dsps', 0)} DSPs, {tr.get('brams', 0)} BRAMs (x{data.get('resource_multiplier', '?')})")
+            if data.get("pblock_ranges"):
+                print(f"[TEST]   pblock_ranges: {data['pblock_ranges'][:120]}...")
+            next_steps = data.get("next_steps", [])
+            if next_steps:
+                print(f"[TEST]   next_steps ({len(next_steps)}):")
+                for ns in next_steps:
+                    print(f"[TEST]     → {ns}")
         elif "status" in data:
             print(f"[TEST] ✓ Skill '{skill_name}' | status: {data.get('status')} | "
                   f"message: {data.get('message', '')}")
@@ -5422,19 +5464,19 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 except Exception as e:
                     print(f"[TEST] ⚠ smart_region_search skipped: {e}")
 
-                # Step 4.3: Test execute_pblock_strategy
+                # Step 4.3: Test analyze_pblock_region
                 print("\n" + "-"*60)
-                print("STEP 4.3: [SKILL] Test execute_pblock_strategy")
+                print("STEP 4.3: [SKILL] Test analyze_pblock_region")
                 print("-"*60)
                 try:
-                    skill_result = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                    skill_result = await self.call_rapidwright_tool("analyze_pblock_region", {
                         "target_lut_count": 50000,
                         "target_ff_count": 50000,
                         "resource_multiplier": 1.5,
                     }, timeout=600.0)
-                    self._verify_skill_result("execute_pblock_strategy", skill_result)
+                    self._verify_skill_result("analyze_pblock_region", skill_result)
                 except Exception as e:
-                    print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+                    print(f"[TEST] ⚠ analyze_pblock_region skipped: {e}")
 
                 # Step 4.4: Test execute_physopt_strategy
                 print("\n" + "-"*60)
@@ -6003,19 +6045,19 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 except Exception as e:
                     print(f"[TEST] ⚠ smart_region_search skipped: {e}")
 
-                # Step 4.3: Test execute_pblock_strategy
+                # Step 4.3: Test analyze_pblock_region
                 print("\n" + "-"*60)
-                print("STEP 4.3: [SKILL] Test execute_pblock_strategy")
+                print("STEP 4.3: [SKILL] Test analyze_pblock_region")
                 print("-"*60)
                 try:
-                    skill_result = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                    skill_result = await self.call_rapidwright_tool("analyze_pblock_region", {
                         "target_lut_count": 50000,
                         "target_ff_count": 5000,
                         "resource_multiplier": 1.5,
                     }, timeout=600.0)
-                    self._verify_skill_result("execute_pblock_strategy", skill_result)
+                    self._verify_skill_result("analyze_pblock_region", skill_result)
                 except Exception as e:
-                    print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+                    print(f"[TEST] ⚠ analyze_pblock_region skipped: {e}")
 
                 # Step 4.4: Test execute_physopt_strategy
                 print("\n" + "-"*60)
@@ -6383,7 +6425,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         3. Report timing and get high fanout nets
         4. Open DCP in RapidWright
         5. Invoke all registered skills (analyze_net_detour, smart_region_search,
-           execute_pblock_strategy, execute_physopt_strategy, execute_fanout_strategy)
+           analyze_pblock_region, execute_physopt_strategy, execute_fanout_strategy)
         6. Print skill test summary
         """
         print("\n" + "="*70)
@@ -6511,18 +6553,18 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             except Exception as e:
                 print(f"[TEST] ⚠ smart_region_search skipped: {e}")
 
-            # Step 5.3: execute_pblock_strategy
+            # Step 5.3: analyze_pblock_region
             print("\n" + "-"*60)
-            print("STEP 5.3: [SKILL] execute_pblock_strategy")
+            print("STEP 5.3: [SKILL] analyze_pblock_region")
             print("-"*60)
             try:
-                sr = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                sr = await self.call_rapidwright_tool("analyze_pblock_region", {
                     "target_lut_count": 50000, "target_ff_count": 50000,
                     "resource_multiplier": 1.5,
                 }, timeout=600.0)
-                self._verify_skill_result("execute_pblock_strategy", sr)
+                self._verify_skill_result("analyze_pblock_region", sr)
             except Exception as e:
-                print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+                print(f"[TEST] ⚠ analyze_pblock_region skipped: {e}")
 
             # Step 5.4: execute_physopt_strategy
             print("\n" + "-"*60)

@@ -4,7 +4,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "stepfun/step-3.5-flash"  # Default Flash model name
+  model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -13,10 +13,12 @@ worker:
   preserve_turns_aggressive: 10  # Recent turns to preserve in aggressive mode
   min_importance_threshold: 0.15    # Minimum importance score (normal mode)
   min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
+  preserve_turns_hard_limit: 25       # Recent turns to preserve in hard limit mode
+  min_importance_threshold_hard_limit: 0.35  # Minimum importance score (hard limit mode)
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "deepseek/deepseek-v4-flash"
+    - "stepfun/step-3.5-flash"
     - "xiaomi/mimo-v2-flash"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 
@@ -31,6 +33,8 @@ planner:
   preserve_turns_aggressive: 10  # Recent turns to preserve in aggressive mode
   min_importance_threshold: 0.1    # Minimum importance score (normal mode)
   min_importance_threshold_aggressive: 0.7  # Minimum importance score (aggressive mode)
+  preserve_turns_hard_limit: 40       # Recent turns to preserve in hard limit mode
+  min_importance_threshold_hard_limit: 0.25  # Minimum importance score (hard limit mode)
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
