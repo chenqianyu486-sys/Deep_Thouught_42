@@ -628,6 +628,10 @@ def extract_critical_path_pins(
         "pin_paths": all_pin_paths,
     }
 
+    # Debug: when 0 paths found, include timing report snippet for diagnosis
+    if not all_pin_paths:
+        result["debug_timing_report"] = timing_report[:1000]
+
     if output_file:
         try:
             import os

@@ -175,6 +175,21 @@ skills/
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
 └── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization 策略
 
+Skill 超时映射（三层）:
+| Skill | @skill decorator `timeout_ms` | JSON descriptor `defaultMs/maxMs` | 测试调用 `timeout` |
+|-------|-------------------------------|-----------------------------------|-------------------|
+| smart_region | 600000 (10min) | 600000 / 720000 | 600.0 |
+| pblock_strategy | 600000 (10min) | 600000 / 720000 | 600.0 |
+| net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
+| physopt_strategy | 30000 (30s) | 30000 / 60000 | 360.0 |
+| fanout_strategy | 300000 (5min) | 300000 / 600000 | 300.0 * nets |
+| optimize_cell | 360000 (6min) | 360000 / 420000 | 360.0 |
+
+三层超时的作用域:
+1. **@skill decorator** — 技能框架内部心跳检测阈值（skills/*.py）
+2. **JSON descriptor** — 声明性元数据，供外部系统参考（skills/descriptors/*.json）
+3. **测试调用 timeout** — asyncio.wait_for 实际截止时间（dcp_optimizer.py call_rapidwright_tool）
+
 分析型 vs 策略型 Skill:
 ├── 分析型 (net_detour/optimize_cell/smart_region): 诊断+微观优化，推荐工作流三步走
 │   ├── Step1 DIAGNOSE: analyze_net_detour → 找出绕路比>2.0的cell

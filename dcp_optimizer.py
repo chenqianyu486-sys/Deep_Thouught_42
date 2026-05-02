@@ -5397,7 +5397,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "target_lut_count": 50000,
                         "target_ff_count": 50000,
                         "resource_multiplier": 1.5,
-                    }, timeout=360.0)
+                    }, timeout=600.0)
                     self._verify_skill_result("execute_pblock_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
@@ -5936,7 +5936,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "target_lut_count": 50000,
                         "target_ff_count": 5000,
                         "resource_multiplier": 1.5,
-                    }, timeout=360.0)
+                    }, timeout=600.0)
                     self._verify_skill_result("execute_pblock_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
@@ -6387,7 +6387,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             try:
                 sr = await self.call_rapidwright_tool("smart_region_search", {
                     "target_lut_count": 50000, "target_ff_count": 50000,
-                }, timeout=120.0)
+                }, timeout=600.0)
                 self._verify_skill_result("smart_region_search", sr)
             except Exception as e:
                 print(f"[TEST] ⚠ smart_region_search skipped: {e}")
@@ -6400,7 +6400,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 sr = await self.call_rapidwright_tool("execute_pblock_strategy", {
                     "target_lut_count": 50000, "target_ff_count": 50000,
                     "resource_multiplier": 1.5,
-                }, timeout=360.0)
+                }, timeout=600.0)
                 self._verify_skill_result("execute_pblock_strategy", sr)
             except Exception as e:
                 print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
