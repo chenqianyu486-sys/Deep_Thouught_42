@@ -4,7 +4,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "qwen/qwen3.5-flash-02-23"  # Default Flash model name
+  model_name: "stepfun/step-3.5-flash"  # Default Flash model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -16,14 +16,13 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "stepfun/step-3.5-flash"
     - "deepseek/deepseek-v4-flash"
     - "xiaomi/mimo-v2-flash"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 
 planner:
   model_tier: "planner"
-  model_name: "qwen/qwen3.5-flash-02-23"    # Default Pro model name
+  model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
@@ -35,6 +34,6 @@ planner:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "deepseek/deepseek-v4-flash"
-    - "xiaomi/mimo-v2.5"
+    - "qwen/qwen3.6-plus"
+    - "xiaomi/mimo-v2.5-pro"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)
