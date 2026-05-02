@@ -2116,12 +2116,14 @@ STRICTLY FORBIDDEN:
                 _pblock_failed = True
 
         # [Fix 6] Detect missing post-fanout evaluation: optimize_fanout was used
-        # but route_design + report_timing_summary are absent from the tool sequence.
+        # but place_design + route_design + report_timing_summary are absent.
+        # Fanout changes netlist, so placement must be re-run before route.
         _fanout_post_eval_missing = False
         if any("optimize_fanout" in t for t in tool_names):
+            has_place = any("place_design" in t for t in tool_names)
             has_route = any("route_design" in t for t in tool_names)
             has_timing = any("report_timing_summary" in t for t in tool_names[-3:])
-            if not (has_route and has_timing):
+            if not (has_place and has_route and has_timing):
                 _fanout_post_eval_missing = True
 
         if _pblock_failed:
@@ -2188,7 +2190,7 @@ STRICTLY FORBIDDEN:
                 if reason == "pblock_validation_failed":
                     parts.append("PBLOCK resource shortage detected. Re-analyze fabric with expanded bounds or switch strategy.")
                 elif reason == "fanout_post_eval_missing":
-                    parts.append("Fanout optimization applied. Complete: open_checkpoint -> route_design -> report_timing_summary.")
+                    parts.append("Fanout optimization applied. Complete: open_checkpoint -> place_design -> route_design -> report_timing_summary.")
                 else:
                     parts.append(
                         f"Strategy '{unfinished['strategy']}' was in progress "
@@ -2219,7 +2221,7 @@ STRICTLY FORBIDDEN:
                 lines.extend([
                     "",
                     "**Fanout Optimization Applied:** Post-optimization evaluation is missing.",
-                    "- Must run: open_checkpoint -> route_design -> report_timing_summary.",
+                    "- Must run: open_checkpoint -> place_design -> route_design -> report_timing_summary.",
                     "- Verify timing impact before proceeding.",
                 ])
             else:

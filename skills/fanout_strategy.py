@@ -128,6 +128,14 @@ def execute_fanout_optimization(
             expected_duration_seconds=30,
         ),
         StrategyStep(
+            step_name="place_design",
+            platform="Vivado",
+            params={},
+            description="Re-place design after fanout netlist changes",
+            executed=False,
+            expected_duration_seconds=120,
+        ),
+        StrategyStep(
             step_name="route_design",
             platform="Vivado",
             params={},
