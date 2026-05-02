@@ -934,8 +934,15 @@ Format:
   step:
     step_id: <N>
     result_status: SUCCESS|PARTIAL|FAIL
-    key_metrics: {...}
     flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
+    analysis:                                      # Required when SWITCH_STRATEGY or starting a new strategy
+      observed_signals:
+        avg_distance: <float|null>
+        max_fanout: <int|null>
+        failing_endpoints: <int|null>
+      scenario_match: <scenario_id|null>    # wide_lut|high_fanout|distributed|control_imbalance|congestion|mixed|null
+      hypothesis: "<string>"
+      strategy_rationale: "<string>"
     tool_calls:
       - function: tool_name
         parameters:
@@ -1049,6 +1056,16 @@ STRICTLY FORBIDDEN:
             if match:
                 insert_pos = match.end()
                 system_content = system_content[:insert_pos] + "\n\n" + state_section + system_content[insert_pos:]
+
+        # Append data-driven scenario hint from initial analysis
+        if hasattr(self, 'critical_path_spread') and self.critical_path_spread:
+            avg_dist = self.critical_path_spread.get('avg_distance', 0)
+            if avg_dist and avg_dist > 70:
+                system_content += (
+                    f"\n**Data-Driven Scenario Hint:** avg_distance={avg_dist:.1f} > 70-tile threshold -> "
+                    f"matches scenario 'distributed' (Distributed Logic). "
+                    f"Recommended strategy: PBLOCK-Based Re-placement."
+                )
 
         return system_content
 
@@ -1857,7 +1874,7 @@ STRICTLY FORBIDDEN:
         # 1. Exit reason suggests premature end
         # 2. Strategy is actionable (not Information/Unknown)
         # 3. Last 2 tool calls do NOT include report_timing_summary (incomplete cycle)
-        interrupted_exits = {"tool_round_limit", "flow_control_done_next_iteration"}
+        interrupted_exits = {"tool_round_limit", "flow_control_done_next_iteration", "switch_strategy"}
         is_actionable = strategy not in ("Information", "Unknown")
         cycle_complete = any("report_timing_summary" in t for t in tool_names[-2:])
 
@@ -2775,6 +2792,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     "avg_distance": spread_data.get("avg_max_distance", 0),
                     "paths_analyzed": spread_data.get("paths_analyzed", 0)
                 }
+                self.critical_path_spread = critical_path_spread_info
                 print(f"✓ Critical path spread analyzed:")
                 print(f"  - Max distance: {critical_path_spread_info['max_distance']} tiles")
                 print(f"  - Avg distance: {critical_path_spread_info['avg_distance']:.1f} tiles")
@@ -3000,6 +3018,12 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 step_data = data
             action = step_data.get('action')
             flow_control = step_data.get('flow_control')
+            # Log analysis section if present (optional observability)
+            analysis_data = step_data.get('analysis')
+            if analysis_data and isinstance(analysis_data, dict):
+                scenario = analysis_data.get('scenario_match', 'unknown')
+                hypothesis = analysis_data.get('hypothesis', '')
+                logger.info(f"LLM analysis: scenario={scenario}, hypothesis={hypothesis[:100] if hypothesis else 'none'}")
             if action or flow_control:
                 return (action, flow_control)
         return (None, None)
@@ -3420,6 +3444,26 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     # Set flag to indicate iteration should end, not continue in tight loop
                     self._end_iteration_on_return = True
                 # Fall through to exit get_completion()
+            elif flow_control == "SWITCH_STRATEGY" or action == "SWITCH_STRATEGY":
+                logger.info(f"LLM signaled SWITCH_STRATEGY (action={action}, flow_control={flow_control})")
+                # System-enforced: end current iteration, force re-analysis next iteration
+                if self._is_done_reason is None:
+                    self._is_done_reason = "switch_strategy"
+                self._end_iteration_on_return = True
+                # Inject analysis-forcing prompt for next iteration
+                current_wns = self._get_current_wns()
+                wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+                self._compat.add_message(
+                    "user",
+                    f"SYSTEM ENFORCED SWITCH: The previous model signaled SWITCH_STRATEGY while WNS={wns_str}. "
+                    f"Strategy switch triggered. You MUST start this iteration with structured analysis:\n"
+                    f"1. Call report_timing_summary and extract_critical_path_cells to gather current signal data\n"
+                    f"2. Match observed signals against the strategy_library SCENARIO_DETECTION_MATRIX\n"
+                    f"3. Form a hypothesis about the dominant timing obstacle\n"
+                    f"4. Select a strategy based on the hypothesis and justify it in your analysis section\n"
+                    f"DO NOT repeat the same strategy that just failed. DO NOT use DONE before analysis is complete."
+                )
+                logger.info("Injected analysis-forcing prompt after SWITCH_STRATEGY")
             elif not is_done:
                 logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")
                 continue

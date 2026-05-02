@@ -51,12 +51,11 @@ response_format:
     SUCCESS: "WNS improved or maintained"
     PARTIAL: "Executed but insufficient"
     FAIL: "WNS regression or tool error"
-  key_metrics: "Actual numbers after timing steps; null for non-timing steps"
   flow_control:
     CONTINUE: "Next step in current strategy"
     RETRY: "Modify params and retry (max 3)"
     ROLLBACK: "Revert to best checkpoint"
-    SWITCH_STRATEGY: "Abandon current, request new strategy"
+    SWITCH_STRATEGY: "Current strategy exhausted. You MUST stop all tool calls. The system will end this iteration and start a new one. Next iteration MUST begin with analysis before selecting a new strategy."
     DONE: "WNS >= 0 achieved, optimization complete"
   flow_rules:
     - "DONE ONLY valid when WNS >= 0"
@@ -67,13 +66,20 @@ response_format:
     step:
       step_id: <N>
       result_status: SUCCESS|PARTIAL|FAIL
-      key_metrics: {{wns: <float>, tns: <float>, failing_endpoints: <int>}}
       flow_control: CONTINUE|SWITCH_STRATEGY|DONE
+      analysis:
+        observed_signals:
+          avg_distance: <float|null>
+          max_fanout: <int|null>
+          failing_endpoints: <int|null>
+        scenario_match: <scenario_id|null>
+        hypothesis: "<string>"
+        strategy_rationale: "<string>"
       tool_calls:
         - function: <tool_name>
           parameters:
             key: value
-  note: "For RETRY or ROLLBACK, set flow_control accordingly. SWITCH_STRATEGY example: result_status=PARTIAL, flow_control=SWITCH_STRATEGY (no tool_calls needed). DONE example: result_status=SUCCESS, key_metrics={{wns: 0.125, tns: 0.0}}, flow_control=DONE."
+  note: "For RETRY or ROLLBACK, set flow_control accordingly. SWITCH_STRATEGY example: result_status=PARTIAL, flow_control=SWITCH_STRATEGY (no tool_calls needed). DONE example: result_status=SUCCESS, flow_control=DONE."
   self_check: "No XML/fences; starts with `step:` at col 0; 2-space indent; valid flow_control; no trailing text"
 
 timing_ops:
