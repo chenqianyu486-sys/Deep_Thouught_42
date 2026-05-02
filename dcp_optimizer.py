@@ -45,6 +45,7 @@ from context_manager.estimator import ContextEstimator
 from context_manager.events import EventBus
 from context_manager.interfaces import EventType as CMEventType, ContextEvent as CMContextEvent, RetrievalQuery as CMRetrievalQuery
 from context_manager.lightyaml import LightYAML
+from strategy_library import STRATEGY_SKILL_MAP
 from context_manager.logging_config import (
     setup_logging, set_trace_id, get_trace_id, set_job_context,
     sanitize_payload, DynamicLogLevelManager, HeartbeatLogger, PromptLogger
@@ -1067,6 +1068,11 @@ STRICTLY FORBIDDEN:
                     f"Recommended strategy: PBLOCK-Based Re-placement."
                 )
 
+        # Inject analysis skill guidance from strategy_library (once per session)
+        if "Skill Catalog" not in system_content:
+            from strategy_library import get_skill_guide
+            system_content += f"\n\n{get_skill_guide()}"
+
         return system_content
 
     def _build_compression_context(
@@ -1961,6 +1967,40 @@ STRICTLY FORBIDDEN:
         )
         return "\n".join(lines)
 
+    def _build_skill_recommendation(self) -> str:
+        """Analyze current state and recommend a strategy skill tool.
+
+        Returns a string like 'Recommended skill: rapidwright_execute_pblock_strategy'
+        or empty string if no clear recommendation.
+        """
+        # Check spread data for distributed scenario
+        if hasattr(self, 'critical_path_spread') and self.critical_path_spread:
+            avg_dist = self.critical_path_spread.get('avg_distance', 0)
+            if avg_dist and avg_dist > 70:
+                skill_name = STRATEGY_SKILL_MAP.get("PBLOCK", "pblock_strategy")
+                return f"Recommended skill: rapidwright_execute_{skill_name} (matches distributed scenario, avg_distance={avg_dist:.1f} > 70)"
+
+        # Check high fanout nets
+        if hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
+            max_fanout = max(n[1] for n in self.high_fanout_nets[:5]) if self.high_fanout_nets else 0
+            if max_fanout > 100:
+                skill_name = STRATEGY_SKILL_MAP.get("Fanout", "fanout_strategy")
+                return f"Recommended skill: rapidwright_execute_{skill_name} (matches high_fanout scenario, max_fanout={max_fanout})"
+
+        # Check for repeated no-improvement with physopt → suggest analysis skill
+        if self.global_no_improvement >= 2 and self._iteration_narratives:
+            recent_labels = [e.get('strategy_label', '') for e in self._iteration_narratives[-3:]]
+            if any('physopt' in s.lower() for s in recent_labels):
+                return "Recommended skill: rapidwright_analyze_net_detour (multiple phys_opt iterations without improvement, check for placement detour issues on critical paths)"
+
+        # Default: moderate WNS suggests physopt
+        current_wns = self._get_current_wns()
+        if current_wns is not None and current_wns > -2.0:
+            skill_name = STRATEGY_SKILL_MAP.get("PhysOpt", "physopt_strategy")
+            return f"Recommended skill: rapidwright_execute_{skill_name} (moderate WNS={current_wns:.3f}, suitable for physical optimization)"
+
+        return ""
+
     def _build_data_driven_goal(self) -> str:
         """Build data-driven next goal from WNS trajectory and strategy effects."""
         current_wns = self._get_current_wns()
@@ -1980,34 +2020,43 @@ STRICTLY FORBIDDEN:
                 continuation_prefix += "Model signaled DONE prematurely. "
             continuation_prefix += "Resume or adjust.\n"
 
+        # Build base goal message
         if not self._iteration_narratives:
             if best_wns is not None and best_wns >= 0:
-                return continuation_prefix + "WNS target met. Focus on further optimization."
+                goal = continuation_prefix + "WNS target met. Focus on further optimization."
             elif best_wns is not None and best_wns > -0.5:
-                return continuation_prefix + "Close to target. Fine-tuning critical paths."
+                goal = continuation_prefix + "Close to target. Fine-tuning critical paths."
             elif best_wns is not None and best_wns > -2.0:
-                return continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
+                goal = continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
             else:
-                return "Severe violation. Consider aggressive strategies."
-        recent = self._iteration_narratives[-5:]
-        improved = [e for e in recent if e['outcome'] == 'improved']
-        regressed = [e for e in recent if e['outcome'] == 'regression']
+                goal = "Severe violation. Consider aggressive strategies."
+        else:
+            recent = self._iteration_narratives[-5:]
+            improved = [e for e in recent if e['outcome'] == 'improved']
+            regressed = [e for e in recent if e['outcome'] == 'regression']
 
-        if best_wns is not None and best_wns >= 0:
-            return continuation_prefix + "WNS target met. Focus on further optimization."
-        if not improved and regressed:
-            return continuation_prefix + f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
-        if improved:
-            last_improved_tools = [
-                t.get('tool_name', '')
-                for t in self._compat.tool_call_details
-                if t.get('iteration') == improved[-1]['iteration']
-            ]
-            strategy = self._infer_strategy_from_tools(last_improved_tools)
-            return continuation_prefix + f"Last success via {strategy}. Continue or refine approach."
-        if best_wns is not None and best_wns > -2.0:
-            return continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
-        return continuation_prefix + "Severe violation. Consider aggressive strategies."
+            if best_wns is not None and best_wns >= 0:
+                goal = continuation_prefix + "WNS target met. Focus on further optimization."
+            elif not improved and regressed:
+                goal = continuation_prefix + f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
+            elif improved:
+                last_improved_tools = [
+                    t.get('tool_name', '')
+                    for t in self._compat.tool_call_details
+                    if t.get('iteration') == improved[-1]['iteration']
+                ]
+                strategy = self._infer_strategy_from_tools(last_improved_tools)
+                goal = continuation_prefix + f"Last success via {strategy}. Continue or refine approach."
+            elif best_wns is not None and best_wns > -2.0:
+                goal = continuation_prefix + "Moderate violation. Consider phys_opt or PBLOCK."
+            else:
+                goal = continuation_prefix + "Severe violation. Consider aggressive strategies."
+
+        # Append skill recommendation if available
+        skill_rec = self._build_skill_recommendation()
+        if skill_rec and best_wns is not None and best_wns < 0:
+            goal += f"\n{skill_rec}"
+        return goal
 
     def _generate_planner_handoff(self) -> str:
         """Generate rich handoff for planner models (1M context)."""
@@ -2024,6 +2073,8 @@ STRICTLY FORBIDDEN:
         unfinished = self._detect_unfinished_strategy()
         exit_reason = self._build_exit_reason_section()
         directive = self._build_continuation_directive(unfinished, is_worker=False)
+        skill_rec = self._build_skill_recommendation()
+        skill_rec_section = f"\n=== RECOMMENDED SKILL ===\n{skill_rec}\n" if skill_rec else ""
 
         handoff = f"""**ITERATION HANDOFF - Planner**
 
@@ -2050,7 +2101,7 @@ STRICTLY FORBIDDEN:
 
 === FAILED STRATEGIES ===
 {failed_strategies}
-
+{skill_rec_section}
 === INCOMING MODEL ===
 You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
@@ -2069,6 +2120,8 @@ You are the Planner for this iteration. Current WNS/checkpoint/clock values are 
         goal = self._build_data_driven_goal()
         unfinished = self._detect_unfinished_strategy()
         directive = self._build_continuation_directive(unfinished, is_worker=True)
+        skill_rec = self._build_skill_recommendation()
+        skill_rec_section = f"\n=== RECOMMENDED SKILL ===\n{skill_rec}\n" if skill_rec else ""
 
         exit_labels = {
             "tool_round_limit": "ToolRoundLimit",
@@ -2098,7 +2151,7 @@ Exit: {exit_label}
 
 === AVOID ===
 {failed_strategies}
-
+{skill_rec_section}
 Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
 
@@ -3453,8 +3506,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 # Inject analysis-forcing prompt for next iteration
                 current_wns = self._get_current_wns()
                 wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
-                self._compat.add_message(
-                    "user",
+                enforced_msg = (
                     f"SYSTEM ENFORCED SWITCH: The previous model signaled SWITCH_STRATEGY while WNS={wns_str}. "
                     f"Strategy switch triggered. You MUST start this iteration with structured analysis:\n"
                     f"1. Call report_timing_summary and extract_critical_path_cells to gather current signal data\n"
@@ -3463,6 +3515,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                     f"4. Select a strategy based on the hypothesis and justify it in your analysis section\n"
                     f"DO NOT repeat the same strategy that just failed. DO NOT use DONE before analysis is complete."
                 )
+                # Append skill recommendation
+                skill_rec = self._build_skill_recommendation()
+                if skill_rec:
+                    enforced_msg += f"\n\n{skill_rec}"
+                self._compat.add_message("user", enforced_msg)
                 logger.info("Injected analysis-forcing prompt after SWITCH_STRATEGY")
             elif not is_done:
                 logger.info(f"LLM returned no tool calls (is_done=False), continuing to next round in same iteration...")

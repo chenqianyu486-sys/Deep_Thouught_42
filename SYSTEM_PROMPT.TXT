@@ -28,7 +28,23 @@ strategies:
     - strategy_1: "PBLOCK-Based Re-placement (physical constraint)"
     - strategy_2: "Physical Optimization (1-2 paths with spread)"
     - strategy_3: "High Fanout Net Optimization (fanout nets, no spread)"
-  skills: [analyze_net_detour, optimize_cell_placement, smart_region_search]
+  analysis_skills:
+    analyze_net_detour: "READ-ONLY. Compute detour_ratio=routed_distance/manhattan_distance. USE WHEN: WNS stuck with >3 LUT cascade levels or repeated phys_opt shows no improvement. Input: pin_paths from extract_critical_path_pins."
+    optimize_cell_placement: "MUTATING. Move cells to centroid of connections. USE WHEN: analyze_net_detour found cells with detour_ratio > 2.0. Requires: write_checkpoint after execution."
+    smart_region_search: "READ-ONLY. Find optimal rectangular pblock region. USE WHEN: creating a pblock constraint and optimal region is unknown. Input: resource counts from utilization report."
+  skill_workflow:
+    - "Step 1 - DIAGNOSE: Call analyze_net_detour to identify placement problems on critical paths"
+    - "Step 2 - FIX: Call optimize_cell_placement for cells with high detour, then write_checkpoint and route"
+    - "Step 3 - CONTAIN: Call smart_region_search + strategy skills for geographic clustering"
+  strategy_skills:
+    execute_pblock_strategy: "PBLOCK-Based Re-placement via SmartRegion search. USE WHEN: avg_distance > 70 or scenario=distributed. Replaces manual analyze_fabric+convert_fabric+place sequence."
+    execute_physopt_strategy: "Physical Optimization via Vivado phys_opt_design. USE WHEN: 1-2 critical paths with spread, WNS > -2.0. Replaces manual phys_opt_design+route sequence."
+    execute_fanout_strategy: "High Fanout Net Optimization via RapidWright. USE WHEN: high_fanout nets (fo>100) present, no spread. Replaces manual optimize_fanout_batch+checkpoint sequence."
+  selection_guide: >
+    When starting a new strategy (flow_control=CONTINUE after SWITCH_STRATEGY or iteration start),
+    prefer calling execute_*_strategy tools over manually sequencing individual Vivado/RapidWright tools.
+    Strategy skills encapsulate the complete multi-tool workflow, validate preconditions, and return
+    structured execution plans. Only fall back to individual tools if the strategy skill fails.
 
 tool_reference:
   vivado: [open_checkpoint, write_checkpoint, report_route_status, report_timing_summary, get_wns, place_design, route_design, phys_opt_design, run_tcl, restart_vivado, get_critical_high_fanout_nets, write_edif, extract_critical_path_cells, report_utilization_for_pblock, create_and_apply_pblock, write_verilog_simulation, vivado_get_raw_tool_output]

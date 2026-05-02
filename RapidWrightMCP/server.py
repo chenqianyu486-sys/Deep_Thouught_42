@@ -381,7 +381,8 @@ async def list_tools() -> list[Tool]:
             Input is a pin-path list as produced by Vivado's extract_critical_path_pins:
             ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
 
-            Requires design to be loaded via read_checkpoint first.""",
+            Requires design to be loaded via read_checkpoint first.
+            Priority: Call this when WNS is stuck and critical paths have >3 LUT levels, or after multiple phys_opt/route cycles without improvement.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -411,7 +412,8 @@ async def list_tools() -> list[Tool]:
             5. Place cell and re-route intra-site wiring
 
             After optimization, use write_checkpoint to save and Vivado to re-route
-            and verify timing improvement.""",
+            and verify timing improvement.
+            Priority: Call this after analyze_net_detour identifies cells with detour_ratio > 2.0.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -433,7 +435,8 @@ async def list_tools() -> list[Tool]:
             from a reference point (or design center of mass), avoiding delay-heavy
             columns (URAM, HPIO, etc.) and prioritizing high-density columns.
 
-            Single tool call replaces 12+ LLM interaction rounds for pblock selection.""",
+            Single tool call replaces 12+ LLM interaction rounds for pblock selection.
+            Priority: Call this before execute_pblock_strategy to find the optimal region.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -477,7 +480,8 @@ async def list_tools() -> list[Tool]:
 
             Requires: report_utilization_for_pblock run first to get resource counts.
             Input: resource counts from Vivado utilization report.
-            Output: structured plan with pblock_ranges and ordered Vivado steps.""",
+            Output: structured plan with pblock_ranges and ordered Vivado steps.
+            Priority: Prefer this over manual analyze_fabric+convert_fabric_region when avg_distance > 70.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -517,7 +521,8 @@ async def list_tools() -> list[Tool]:
 
             Trigger: 1-2 critical paths with spread but no high fanout.
             Input: directive for phys_opt_design.
-            Output: structured plan with ordered Vivado steps.""",
+            Output: structured plan with ordered Vivado steps.
+            Priority: Prefer this over manual phys_opt_design when WNS > -2.0 and 1-2 paths with spread.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -545,7 +550,8 @@ async def list_tools() -> list[Tool]:
             MUTATING: modifies design net topology and writes checkpoint file.
             Trigger: High fanout nets present (fanout > 100), no path spread.
             Input: list of nets with fanout counts.
-            Output: optimization results + structured plan with remaining Vivado steps.""",
+            Output: optimization results + structured plan with remaining Vivado steps.
+            Priority: Prefer this over manual optimize_fanout_batch when high_fanout nets (fo>100) dominate timing.""",
             inputSchema={
                 "type": "object",
                 "properties": {

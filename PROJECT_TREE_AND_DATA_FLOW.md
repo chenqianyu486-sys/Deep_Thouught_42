@@ -4,7 +4,7 @@
 
 ```
 fpl26_optimization_contest/
-├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发
+├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发、_build_skill_recommendation()
 ├── config_loader.py              # 模型配置加载器（单例）
 ├── model_config.yaml             # 模型层级与fallback配置
 ├── validate_dcps.py              # DCP等价性验证器
@@ -92,6 +92,8 @@ API调用前 → _inject_wns_state_to_system_prompt()
     - 更新wns_ns、clock_period_ns
     - 注入 current_tns、failing_endpoints（2026-05-01 新增）
     - 追加"Current Optimization State:"块（含 WNS/TNS/failing_endpoints/best_checkpoint/next_model）
+    - 追加数据驱动scenario hint（avg_distance>70 → "distributed"场景 → PBLOCK推荐）
+    - 追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）
     → 模型始终看到当前状态，不依赖working memory
 ```
 
@@ -164,9 +166,35 @@ skills/
 └── test_skill_framework.py         # 28 项测试（含编排/执行/遥测/错误/幂等）
 
 已注册 Skills:
-├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率
+├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率（READ-ONLY）
 ├── placement.optimize_cell@1.0.0       # 基于重心优化单元布局（non-idempotent）
-└── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索
+├── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索（READ-ONLY）
+├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
+├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
+└── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization 策略
+
+分析型 vs 策略型 Skill:
+├── 分析型 (net_detour/optimize_cell/smart_region): 诊断+微观优化，推荐工作流三步走
+│   ├── Step1 DIAGNOSE: analyze_net_detour → 找出绕路比>2.0的cell
+│   ├── Step2 FIX: optimize_cell_placement → 移动到连接质心
+│   └── Step3 CONTAIN: smart_region_search + strategy skills → 地理约束
+├── 策略型 (pblock/physopt/fanout): 封装完整多步策略工作流，一键式执行
+│   ├── execute_pblock_strategy: avg_distance>70 → 含smart_region+unplace+place+route
+│   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
+│   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+checkpoint+route
+
+Skill 推荐机制 (_build_skill_recommendation()):
+├── avg_distance > 70     → rapidwright_execute_pblock_strategy
+├── max_fanout > 100      → rapidwright_execute_fanout_strategy
+├── no_improvement >=2 + physopt tried → rapidwright_analyze_net_detour（分析型）
+├── WNS > -2.0            → rapidwright_execute_physopt_strategy
+└── 以上均不匹配          → 空（不推荐）
+
+Skill 推荐注入点:
+├── _build_data_driven_goal() → 追加在NEXT OPTIMIZATION GOAL末尾
+├── _generate_planner_handoff() → 新增=== RECOMMENDED SKILL ===段
+├── _generate_worker_handoff() → 新增=== RECOMMENDED SKILL ===段
+└── SWITCH_STRATEGY 处理器 → 注入消息末尾追加skill推荐
 
 调用链:
 Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get()
@@ -256,10 +284,11 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `_generate_planner_handoff()`: Planner (1M context) → 完整迭代轨迹 + 策略分析 + 数据驱动目标 + 退出原因 + 续接指令（~500-800 tokens）
 - `_generate_worker_handoff()`: Worker (250K context) → 最近3迭代浓缩 + 续接指令 + 退出标签（~200-300 tokens）
 - **Planner handoff 结构**:
-  - `=== EXIT REASON ===`: 上一轮退出原因（Tool Round Limit / Premature DONE / Cost Limit）+ 当前 WNS
+  - `=== EXIT REASON ===`: 上一轮退出原因（Tool Round Limit / Premature DONE / Cost Limit / Strategy Switch）+ 当前 WNS
   - `=== CONTINUATION DIRECTIVE ===`: 显式续接指令（"不要从头重启，从中断处继续"）+ 中断策略详情
   - `=== ITERATION TRAJECTORY ===`: 完整迭代轨迹
-  - `=== NEXT OPTIMIZATION GOAL ===`: 含 continuation 前缀的数据驱动目标
+  - `=== NEXT OPTIMIZATION GOAL ===`: 含 continuation 前缀的数据驱动目标（WNS未收敛时追加skill推荐）
+  - `=== RECOMMENDED SKILL ===`: 基于 spread/fanout/WNS轨迹 推荐的具体skill工具名
 - **Worker handoff 结构**:
   - `=== CONTINUATION ===`: 单行续接指令 + Exit 标签
   - `=== RECENT TRAJECTORY (last 3) ===`: 最近 3 次迭代浓缩
@@ -295,6 +324,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 **语义澄清**:
 - `flow_control: DONE` ≠ 退出信号
 - `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化
+- `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽，系统强制执行迭代切换，注入分析引导（含skill推荐）+ 强制下一轮先分析再选策略
+- `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换
 - 真正退出条件 = 达到目标 fmax（WNS >= 0）
 
 **修复**: `get_completion()` 中新增 `_parse_action_from_yaml()` 解析 `action`/`flow_control`：
@@ -310,6 +341,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | LLM 返回 `flow_control: DONE`，WNS=-0.538 | 继续在同一迭代内空转，产生垃圾输出 | 正确识别为迭代完成，进入下一迭代 |
 | LLM 返回 `flow_control: DONE`，WNS>=0 | 继续空转 | 正确退出优化 |
 | LLM 返回无 tool_calls，无 DONE 信号 | continue 回循环 | 沿用原有逻辑 |
+| LLM 返回 `flow_control: SWITCH_STRATEGY` | 与CONTINUE同处理，继续循环 | 强制结束迭代 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
+| LLM 连续调用 physopt 无改进 | 继续循环调用physopt | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
 ### 5.4 flow_control=DONE 优化补丁（2026-05-01）
 
@@ -369,6 +402,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 | `tool_round_limit` | 22轮工具调用达限 |
 | `user_requested` | 用户输入quit |
 | `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |
+| `switch_strategy` | LLM返回SWITCH_STRATEGY，系统强制执行迭代切换，下一轮分析后选新策略 |
 
 ## 11. DCP验证
 
