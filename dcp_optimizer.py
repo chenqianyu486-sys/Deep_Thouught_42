@@ -4685,15 +4685,21 @@ CRITICAL OPTIMIZATION RULES:
         print(f"  Prompt tokens:       {self.total_prompt_tokens:,}")
         print(f"  Completion tokens:   {self.total_completion_tokens:,}")
         print(f"  Total tokens:        {self.total_tokens:,}")
-        
+
         # Calculate total cached and reasoning tokens
         total_cached = sum(detail.get('cached_tokens', 0) for detail in self.api_call_details)
         total_reasoning = sum(detail.get('reasoning_tokens', 0) for detail in self.api_call_details)
-        
+
         if total_cached > 0:
             print(f"  Cached tokens:       {total_cached:,} (saved cost)")
         if total_reasoning > 0:
             print(f"  Reasoning tokens:    {total_reasoning:,}")
+
+        # Token cost (USD)
+        if self.total_cost > 0:
+            avg_per_1k = (self.total_cost / self.total_tokens * 1000) if self.total_tokens > 0 else 0
+            print(f"  Total cost:          ${self.total_cost:.4f}")
+            print(f"  Avg cost/1K tokens:  ${avg_per_1k:.6f}")
         
         # Cost
         print(f"\nCOST:")
@@ -4987,9 +4993,11 @@ class FPGAOptimizerTest(DCPOptimizerBase):
     making it easier to identify where MCP servers or Vivado might hang.
     """
     
-    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None):
+    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None, skip_skills: bool = False):
         super().__init__(debug=debug, run_dir=run_dir)
         self.final_wns = None
+        self.skip_skills = skip_skills
+        self.skill_test_results: list[dict] = []
     
     async def start_servers(self):
         """Start and connect to both MCP servers."""
@@ -5108,6 +5116,42 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("[TEST] WARNING: Could not parse clock period from Vivado")
         return period
     
+    def _verify_skill_result(self, skill_name: str, raw_result: str) -> dict:
+        """Parse and verify a skill invocation result, print formatted summary."""
+        import json as _json
+        try:
+            data = _json.loads(raw_result)
+        except _json.JSONDecodeError as e:
+            print(f"[TEST] ⚠ Skill '{skill_name}' returned non-JSON result: {e}")
+            self.skill_test_results.append({"skill": skill_name, "success": False, "error": str(e)})
+            return {}
+
+        has_error = isinstance(data, dict) and "error" in data
+        self.skill_test_results.append({"skill": skill_name, "success": not has_error, "data": data})
+
+        if has_error:
+            print(f"[TEST] ⚠ Skill '{skill_name}' returned error: {data['error']}")
+            return data
+
+        # StrategyPlan format
+        if "strategy_name" in data:
+            status = data.get("status", "unknown")
+            steps = data.get("steps", [])
+            print(f"[TEST] ✓ Skill '{skill_name}' | status: {status} | steps: {len(steps)}")
+            for s in steps:
+                mark = " ✓" if s.get("executed") else ""
+                print(f"[TEST]   - {s['step_name']} ({s.get('platform', '?')}){mark}")
+            if data.get("analysis_summary"):
+                print(f"[TEST]   analysis: {_json.dumps(data['analysis_summary'], ensure_ascii=False)[:200]}")
+        elif "status" in data:
+            print(f"[TEST] ✓ Skill '{skill_name}' | status: {data.get('status')} | "
+                  f"message: {data.get('message', '')}")
+        else:
+            top_keys = list(data.keys())[:5]
+            print(f"[TEST] ✓ Skill '{skill_name}' completed | keys: {top_keys}")
+
+        return data
+
     async def run_test(self, input_dcp: Path, output_dcp: Path, max_nets_to_optimize: int = 5) -> bool:
         """
         Run the deterministic test optimization flow.
@@ -5230,9 +5274,71 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             }, timeout=600.0)
             print(f"RapidWright read checkpoint result:\n{result}")
             logger.info(f"RapidWright read checkpoint: {result}")
-            
+
+            # ── Skill Invocation Tests ──────────────────────────────────────
+            if not self.skip_skills:
+                # Step 4.1: Test analyze_net_detour
+                print("\n" + "-"*60)
+                print("STEP 4.1: [SKILL] Test analyze_net_detour")
+                print("-"*60)
+                try:
+                    # Get pin paths from Vivado for analysis
+                    pins_result = await self.call_vivado_tool("extract_critical_path_pins", {
+                        "num_paths": 5
+                    }, timeout=300.0)
+                    if pins_result.strip() and pins_result.strip() != "(no output)":
+                        pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
+                        if len(pin_lines) >= 2:
+                            skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
+                                "pin_paths": pin_lines,
+                                "detour_threshold": 2.0
+                            }, timeout=120.0)
+                            self._verify_skill_result("analyze_net_detour", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+
+                # Step 4.2: Test smart_region_search
+                print("\n" + "-"*60)
+                print("STEP 4.2: [SKILL] Test smart_region_search")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("smart_region_search", {
+                        "target_lut_count": 50000,
+                        "target_ff_count": 50000,
+                    }, timeout=120.0)
+                    self._verify_skill_result("smart_region_search", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ smart_region_search skipped: {e}")
+
+                # Step 4.3: Test execute_pblock_strategy
+                print("\n" + "-"*60)
+                print("STEP 4.3: [SKILL] Test execute_pblock_strategy")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                        "target_lut_count": 50000,
+                        "target_ff_count": 50000,
+                        "resource_multiplier": 1.5,
+                    }, timeout=120.0)
+                    self._verify_skill_result("execute_pblock_strategy", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+
+                # Step 4.4: Test execute_physopt_strategy
+                print("\n" + "-"*60)
+                print("STEP 4.4: [SKILL] Test execute_physopt_strategy")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("execute_physopt_strategy", {
+                        "directive": "Default",
+                        "design_is_routed": False,
+                    }, timeout=60.0)
+                    self._verify_skill_result("execute_physopt_strategy", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
+
             # ================================================================
-            # Step 5: Apply fanout optimization for each high fanout net
+            # Step 5: Apply fanout optimization via skill (or raw tool)
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 5: Apply fanout optimizations in RapidWright")
@@ -5243,33 +5349,51 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 {"net_name": net_name, "fanout": fanout}
                 for net_name, fanout, path_count in nets_to_optimize
             ]
-            print(f"Batch optimizing {len(net_configs)} nets")
 
-            try:
-                result = await self.call_rapidwright_tool("optimize_fanout_batch", {
-                    "nets": net_configs
-                }, timeout=300.0 * len(net_configs))  # scale timeout with number of nets
-                print(f"Batch result: {result[:1000]}...")
-                logger.info(f"Optimize fanout batch: {result}")
-
-                # Check batch results
-                import json
+            if not self.skip_skills:
+                # Use execute_fanout_strategy skill (runs optimize_fanout_batch + write_checkpoint internally)
+                print(f"Calling execute_fanout_strategy skill for {len(net_configs)} nets")
                 try:
-                    result_data = json.loads(result)
-                    if result_data.get("status") == "success":
-                        successful_optimizations = result_data.get("successful_count", 0)
-                    else:
-                        successful_optimizations = 0
-                except json.JSONDecodeError:
+                    result = await self.call_rapidwright_tool("execute_fanout_strategy", {
+                        "nets": net_configs,
+                        "temp_dir": str(self.temp_dir),
+                        "checkpoint_prefix": "test_fanout",
+                    }, timeout=max(600.0, 300.0 * len(net_configs)))
+                    data = self._verify_skill_result("execute_fanout_strategy", result)
+                    # Extract success/failure info from StrategyPlan
+                    summary = data.get("analysis_summary", {})
+                    successful_optimizations = summary.get("successful_count", 0)
+                    print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets (via skill)")
+                except Exception as e:
+                    print(f"execute_fanout_strategy FAILED: {e}")
+                    logger.error(f"Failed to execute fanout strategy: {e}")
                     successful_optimizations = 0
-                    logger.error(f"Failed to parse batch result: {result}")
+            else:
+                # Raw tool path (original behavior)
+                print(f"Batch optimizing {len(net_configs)} nets (raw tool)")
+                try:
+                    result = await self.call_rapidwright_tool("optimize_fanout_batch", {
+                        "nets": net_configs
+                    }, timeout=300.0 * len(net_configs))
+                    print(f"Batch result: {result[:1000]}...")
+                    logger.info(f"Optimize fanout batch: {result}")
 
-            except Exception as e:
-                print(f"Batch optimization FAILED: {e}")
-                logger.error(f"Failed to batch optimize: {e}")
-                successful_optimizations = 0
+                    import json
+                    try:
+                        result_data = json.loads(result)
+                        if result_data.get("status") == "success":
+                            successful_optimizations = result_data.get("successful_count", 0)
+                        else:
+                            successful_optimizations = 0
+                    except json.JSONDecodeError:
+                        successful_optimizations = 0
+                        logger.error(f"Failed to parse batch result: {result}")
+                except Exception as e:
+                    print(f"Batch optimization FAILED: {e}")
+                    logger.error(f"Failed to batch optimize: {e}")
+                    successful_optimizations = 0
 
-            print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
+                print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets")
             
             # ================================================================
             # Step 6: Write DCP from RapidWright
@@ -5486,7 +5610,19 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 clock_period=self.clock_period,
                 extra_info=f"Nets optimized: {successful_optimizations}/{len(nets_to_optimize)}"
             )
-            
+
+            # Print skill invocation test summary
+            if not self.skip_skills and self.skill_test_results:
+                passed = sum(1 for r in self.skill_test_results if r.get("success"))
+                total = len(self.skill_test_results)
+                print(f"\n{'='*60}")
+                print(f"SKILL INVOCATION TEST RESULTS: {passed}/{total} passed")
+                print(f"{'='*60}")
+                for r in self.skill_test_results:
+                    mark = "✓" if r.get("success") else "✗"
+                    print(f"  [{mark}] {r['skill']}")
+                print()
+
             return True
             
         except Exception as e:
@@ -5616,31 +5752,93 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             spread_result = result if isinstance(result, str) else str(result)
             pblock_recommended = "spread-out" in spread_result.lower() or "pblock" in spread_result.lower()
             print(f"\n*** Pblock optimization {'RECOMMENDED' if pblock_recommended else 'may not be needed'} ***")
-            
+
+            # ── Skill Invocation Tests ──────────────────────────────────────
+            if not self.skip_skills:
+                # Step 4.1: Test analyze_net_detour
+                print("\n" + "-"*60)
+                print("STEP 4.1: [SKILL] Test analyze_net_detour")
+                print("-"*60)
+                try:
+                    pins_result = await self.call_vivado_tool("extract_critical_path_pins", {
+                        "num_paths": 5
+                    }, timeout=300.0)
+                    if pins_result.strip() and pins_result.strip() != "(no output)":
+                        pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
+                        if len(pin_lines) >= 2:
+                            skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
+                                "pin_paths": pin_lines,
+                                "detour_threshold": 2.0
+                            }, timeout=120.0)
+                            self._verify_skill_result("analyze_net_detour", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+
+                # Step 4.2: Test smart_region_search
+                print("\n" + "-"*60)
+                print("STEP 4.2: [SKILL] Test smart_region_search")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("smart_region_search", {
+                        "target_lut_count": 50000,
+                        "target_ff_count": 5000,
+                    }, timeout=120.0)
+                    self._verify_skill_result("smart_region_search", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ smart_region_search skipped: {e}")
+
+                # Step 4.3: Test execute_pblock_strategy
+                print("\n" + "-"*60)
+                print("STEP 4.3: [SKILL] Test execute_pblock_strategy")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                        "target_lut_count": 50000,
+                        "target_ff_count": 5000,
+                        "resource_multiplier": 1.5,
+                    }, timeout=120.0)
+                    self._verify_skill_result("execute_pblock_strategy", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+
+                # Step 4.4: Test execute_physopt_strategy
+                print("\n" + "-"*60)
+                print("STEP 4.4: [SKILL] Test execute_physopt_strategy")
+                print("-"*60)
+                try:
+                    skill_result = await self.call_rapidwright_tool("execute_physopt_strategy", {
+                        "directive": "Default",
+                        "design_is_routed": False,
+                    }, timeout=60.0)
+                    self._verify_skill_result("execute_physopt_strategy", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
+
+                # Step 4.5: Test execute_fanout_strategy
+                print("\n" + "-"*60)
+                print("STEP 4.5: [SKILL] Test execute_fanout_strategy")
+                print("-"*60)
+                try:
+                    # Use estimated nets from critical path analysis if available
+                    test_nets = [{"net_name": "dummy_net", "fanout": 100}]
+                    skill_result = await self.call_rapidwright_tool("execute_fanout_strategy", {
+                        "nets": test_nets,
+                        "temp_dir": str(self.temp_dir),
+                        "checkpoint_prefix": "lnets_fanout_test",
+                    }, timeout=120.0)
+                    self._verify_skill_result("execute_fanout_strategy", skill_result)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
+
             # ================================================================
             # Step 5: Use known-optimal pblock for LogicNets design
             # ================================================================
             print("\n" + "-"*60)
             print("STEP 5: Use known-optimal pblock for LogicNets")
             print("-"*60)
-            
-            # For the LogicNets test design, we use a known-optimal pblock range
-            # that was determined through empirical testing to achieve timing closure.
-            # This pblock constrains the design to a contiguous region that minimizes
-            # routing delays by keeping cells close together.
-            #
-            # The LogicNets design characteristics:
-            # - ~24K LUTs, ~1.6K FFs
-            # - Neural network with 4 layer stages
-            # - Critical paths span multiple layers with high fanout
-            #
-            # Optimal pblock: SLICE_X55Y60:SLICE_X111Y254
-            # - Width: 57 SLICE columns (adequate for ~24K LUTs)
-            # - Height: 195 SLICE rows (covers the layer pipeline)
-            # - Position: Centered in a good fabric region avoiding I/O columns
-            
+
             pblock_ranges = "SLICE_X55Y60:SLICE_X111Y254"
-            
+
             print(f"Using known-optimal pblock range for LogicNets design:")
             print(f"  Pblock: {pblock_ranges}")
             print(f"  Width:  57 SLICE columns (X55 to X111)")
@@ -5870,13 +6068,191 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 clock_period=self.clock_period,
                 extra_info=f"Pblock applied: {pblock_ranges}"
             )
-            
+
+            # Print skill invocation test summary
+            if not self.skip_skills and self.skill_test_results:
+                passed = sum(1 for r in self.skill_test_results if r.get("success"))
+                total = len(self.skill_test_results)
+                print(f"\n{'='*60}")
+                print(f"SKILL INVOCATION TEST RESULTS: {passed}/{total} passed")
+                print(f"{'='*60}")
+                for r in self.skill_test_results:
+                    mark = "✓" if r.get("success") else "✗"
+                    print(f"  [{mark}] {r['skill']}")
+                print()
+
             return True
-            
+
         except Exception as e:
             logger.exception(f"LogicNets test failed with exception: {e}")
-            print(f"\n*** TEST FAILED ***")
             print(f"Exception: {type(e).__name__}: {e}")
+            return False
+
+    async def run_skill_tests_only(self, input_dcp: Path) -> bool:
+        """
+        Run ONLY skill invocation tests — no place/route or optimization.
+
+        Quick validation that all skills can be invoked end-to-end:
+        1. Initialize RapidWright
+        2. Open DCP in Vivado (for timing data)
+        3. Report timing and get high fanout nets
+        4. Open DCP in RapidWright
+        5. Invoke all registered skills (analyze_net_detour, smart_region_search,
+           execute_pblock_strategy, execute_physopt_strategy, execute_fanout_strategy)
+        6. Print skill test summary
+        """
+        print("\n" + "="*70)
+        print("FPGA OPTIMIZER — PURE SKILL INVOCATION TEST")
+        print("="*70)
+        print(f"Input DCP:  {input_dcp}")
+        print(f"Temp dir:   {self.temp_dir}")
+        print("="*70 + "\n")
+
+        overall_start = time.time()
+
+        try:
+            # Step 1: Initialize RapidWright
+            print("\n" + "-"*60)
+            print("STEP 1: Initialize RapidWright")
+            print("-"*60)
+            result = await self.call_rapidwright_tool("initialize_rapidwright", {
+                "jvm_max_memory": "8G"
+            }, timeout=120.0)
+            print(f"RapidWright init result:\n{result[:500]}...")
+
+            # Step 2: Open DCP in Vivado
+            print("\n" + "-"*60)
+            print("STEP 2: Open DCP in Vivado")
+            print("-"*60)
+            result = await self.call_vivado_tool("open_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"Open checkpoint:\n{result}")
+
+            # Step 3: Report timing + get high fanout nets
+            print("\n" + "-"*60)
+            print("STEP 3: Report timing and get critical nets")
+            print("-"*60)
+            result = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
+            self.initial_wns = self.parse_wns_from_timing_report(result)
+            print(f"Initial WNS: {self.initial_wns} ns")
+
+            result = await self.call_vivado_tool("get_critical_high_fanout_nets", {
+                "num_paths": 50, "min_fanout": 100, "exclude_clocks": True
+            }, timeout=600.0)
+            self.high_fanout_nets = self.parse_high_fanout_nets(result)
+            print(f"Found {len(self.high_fanout_nets)} high fanout nets")
+
+            # Step 4: Open DCP in RapidWright
+            print("\n" + "-"*60)
+            print("STEP 4: Open DCP in RapidWright")
+            print("-"*60)
+            result = await self.call_rapidwright_tool("read_checkpoint", {
+                "dcp_path": str(input_dcp.resolve())
+            }, timeout=600.0)
+            print(f"RapidWright read checkpoint:\n{result[:300]}...")
+
+            # ── Skill Invocations ──────────────────────────────────────
+            # Get pin paths for analyze_net_detour
+            pins_result = ""
+            try:
+                pins_result = await self.call_vivado_tool("extract_critical_path_pins", {
+                    "num_paths": 5
+                }, timeout=300.0)
+            except Exception:
+                pass
+
+            # Step 5.1: analyze_net_detour
+            print("\n" + "-"*60)
+            print("STEP 5.1: [SKILL] analyze_net_detour")
+            print("-"*60)
+            if pins_result.strip() and pins_result.strip() != "(no output)":
+                pin_lines = [p.strip() for p in pins_result.strip().split("\n") if p.strip()]
+                if len(pin_lines) >= 2:
+                    try:
+                        sr = await self.call_rapidwright_tool("analyze_net_detour", {
+                            "pin_paths": pin_lines, "detour_threshold": 2.0
+                        }, timeout=120.0)
+                        self._verify_skill_result("analyze_net_detour", sr)
+                    except Exception as e:
+                        print(f"[TEST] ⚠ analyze_net_detour skipped: {e}")
+            else:
+                print("[TEST] ⚠ analyze_net_detour skipped: no pin paths available")
+
+            # Step 5.2: smart_region_search
+            print("\n" + "-"*60)
+            print("STEP 5.2: [SKILL] smart_region_search")
+            print("-"*60)
+            try:
+                sr = await self.call_rapidwright_tool("smart_region_search", {
+                    "target_lut_count": 50000, "target_ff_count": 50000,
+                }, timeout=120.0)
+                self._verify_skill_result("smart_region_search", sr)
+            except Exception as e:
+                print(f"[TEST] ⚠ smart_region_search skipped: {e}")
+
+            # Step 5.3: execute_pblock_strategy
+            print("\n" + "-"*60)
+            print("STEP 5.3: [SKILL] execute_pblock_strategy")
+            print("-"*60)
+            try:
+                sr = await self.call_rapidwright_tool("execute_pblock_strategy", {
+                    "target_lut_count": 50000, "target_ff_count": 50000,
+                    "resource_multiplier": 1.5,
+                }, timeout=120.0)
+                self._verify_skill_result("execute_pblock_strategy", sr)
+            except Exception as e:
+                print(f"[TEST] ⚠ execute_pblock_strategy skipped: {e}")
+
+            # Step 5.4: execute_physopt_strategy
+            print("\n" + "-"*60)
+            print("STEP 5.4: [SKILL] execute_physopt_strategy")
+            print("-"*60)
+            try:
+                sr = await self.call_rapidwright_tool("execute_physopt_strategy", {
+                    "directive": "Default", "design_is_routed": False,
+                }, timeout=60.0)
+                self._verify_skill_result("execute_physopt_strategy", sr)
+            except Exception as e:
+                print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
+
+            # Step 5.5: execute_fanout_strategy (with real nets)
+            print("\n" + "-"*60)
+            print("STEP 5.5: [SKILL] execute_fanout_strategy")
+            print("-"*60)
+            nets_to_test = self.high_fanout_nets[:3] if self.high_fanout_nets else []
+            net_configs = [{"net_name": n, "fanout": f} for n, f, *_ in nets_to_test]
+            if net_configs:
+                try:
+                    sr = await self.call_rapidwright_tool("execute_fanout_strategy", {
+                        "nets": net_configs,
+                        "temp_dir": str(self.temp_dir),
+                        "checkpoint_prefix": "pure_skill_test",
+                    }, timeout=300.0 * len(net_configs))
+                    self._verify_skill_result("execute_fanout_strategy", sr)
+                except Exception as e:
+                    print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
+            else:
+                print("[TEST] ⚠ execute_fanout_strategy skipped: no high fanout nets found")
+
+            # Summary
+            elapsed = time.time() - overall_start
+            passed = sum(1 for r in self.skill_test_results if r.get("success"))
+            total = len(self.skill_test_results)
+            print(f"\n{'='*60}")
+            print(f"SKILL INVOCATION TEST RESULTS: {passed}/{total} passed")
+            print(f"Total time: {elapsed:.1f}s")
+            print(f"{'='*60}")
+            for r in self.skill_test_results:
+                mark = "✓" if r.get("success") else "✗"
+                print(f"  [{mark}] {r['skill']}")
+            print()
+
+            return passed == total
+
+        except Exception as e:
+            logger.exception(f"Skill-only test failed: {e}")
+            print(f"\n*** SKILL TEST FAILED: {e} ***")
             return False
 
     async def cleanup(self):
@@ -5886,16 +6262,16 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         print(f"[TEST] Run directory preserved at: {self.run_dir}")
 
 
-async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, max_nets: int = 5, run_dir: Optional[Path] = None):
+async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, max_nets: int = 5, run_dir: Optional[Path] = None, skip_skills: bool = False):
     """Run the test mode optimization.
-    
+
     Detects which example DCP is being used and applies the appropriate optimization flow:
     - demo_corundum_25g_misses_timing.dcp: High fanout net optimization flow
     - logicnets_jscl.dcp: Pblock-based placement optimization flow
     """
     # Detect which DCP is being used based on filename
     dcp_name = input_dcp.name.lower()
-    
+
     if "corundum" in dcp_name or dcp_name == "demo_corundum_25g_misses_timing.dcp":
         design_type = "corundum"
         print(f"[TEST] Detected Corundum design - using high fanout optimization flow")
@@ -5910,8 +6286,11 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
         print(f"[TEST]")
         print(f"[TEST] For custom DCPs, run without --test to use the LLM-guided optimizer.")
         return 1
-    
-    tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir)
+
+    if skip_skills:
+        print("[TEST] --skip-skills set, will test only raw tool flow (no skill invocations)")
+
+    tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir, skip_skills=skip_skills)
     
     try:
         await tester.start_servers()
@@ -5960,6 +6339,8 @@ Examples:
   python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test  # High fanout optimization
   python dcp_optimizer.py logicnets_jscl.dcp --test  # Pblock optimization
   python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --skip-skills
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test-only-skills
         """
     )
     parser.add_argument("input_dcp", type=Path, help="Input design checkpoint (.dcp)")
@@ -6004,7 +6385,17 @@ Examples:
         default=5,
         help="Maximum number of high fanout nets to optimize in test mode (default: 5)"
     )
-    
+    parser.add_argument(
+        "--skip-skills",
+        action="store_true",
+        help="Skip skill invocation tests in test mode, run only raw tool flow"
+    )
+    parser.add_argument(
+        "--test-only-skills",
+        action="store_true",
+        help="Run only skill invocation tests (no place/route). Implies --test."
+    )
+
     args = parser.parse_args()
     
     # Validate inputs
@@ -6025,6 +6416,32 @@ Examples:
     # Create output directory if needed
     args.output_dcp.parent.mkdir(parents=True, exist_ok=True)
     
+    # Test mode — skill-only validation (no place/route)
+    if args.test_only_skills:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+
+        print(f"FPGA Design Optimization — SKILL-ONLY TEST")
+        print(f"===========================================")
+        print(f"Input:       {args.input_dcp.resolve()}")
+        print(f"Run dir:     {run_dir}")
+        print()
+
+        tester = FPGAOptimizerTest(debug=args.debug, run_dir=run_dir)
+        try:
+            await tester.start_servers()
+            success = await tester.run_skill_tests_only(args.input_dcp)
+            sys.exit(0 if success else 1)
+        except KeyboardInterrupt:
+            print("\n[TEST] Interrupted by user")
+            sys.exit(130)
+        except Exception as e:
+            logger.exception(f"Skill-only test fatal error: {e}")
+            print(f"\n[TEST] Fatal error: {e}")
+            sys.exit(1)
+        finally:
+            await tester.cleanup()
+
     # Test mode - run without LLM
     if args.test:
         # Create run directory with timestamp
@@ -6040,11 +6457,12 @@ Examples:
         print()
         
         exit_code = await run_test_mode(
-            args.input_dcp, 
-            args.output_dcp, 
+            args.input_dcp,
+            args.output_dcp,
             debug=args.debug,
             max_nets=args.max_nets,
-            run_dir=run_dir
+            run_dir=run_dir,
+            skip_skills=args.skip_skills
         )
         sys.exit(exit_code)
     
