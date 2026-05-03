@@ -132,6 +132,7 @@ strategies:
     execute_fanout_strategy:
       description: "High Fanout Net Optimization via RapidWright"
       replaces: "manual optimize_fanout_batch + checkpoint sequence"
+      note: "If vivado_get_critical_high_fanout_nets output is truncated, call vivado_get_cached_high_fanout_nets to retrieve the complete net list from cache (no Vivado call)."
   selection_guide: >
     When starting a new strategy, prefer calling strategy/analysis tools over manually
     sequencing individual tools. For PBLOCK: call analyze_pblock_region (RapidWright analysis),
@@ -160,6 +161,7 @@ tool_reference:
     - create_and_apply_pblock
     - write_verilog_simulation
     - vivado_get_raw_tool_output
+    - vivado_get_cached_high_fanout_nets
   rapidwright:
     - initialize_rapidwright
     - get_supported_devices

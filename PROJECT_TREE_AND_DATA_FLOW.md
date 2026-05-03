@@ -77,11 +77,38 @@ add_message(role, content)
          ↓
 WorkingMemory.add_message()  # 无自动压缩
          ↓
-DCPOptimizer._compress_context()  ← 单次触发点（LLM调用前）
+DCPOptimizer._compress_context()  ← token阈值触发（软/硬阈值）
          ↓
 MemoryManager._compress("yaml_structured", context, model_tier)
          ↓
 YAMLStructuredCompressor:
+
+--- API 调用前（每轮必走）---
+
+DCPOptimizer._prepare_api_messages()
+         ↓
+1. get_formatted_for_api()  ← 从 MemoryManager 获取消息列表
+         ↓
+2. _auto_compact_messages()  ← 轻量去重，不受 token 阈值控制
+   - 重复 FORMAT BLOCKADE/REMINDER → 仅保留最新 1 条
+   - 重复 REFLECTION CHECKPOINT → 仅保留最新 1 条
+   - 重复 REPETITION DETECTED → 仅保留最新 1 条
+   - 重复 SYSTEM NOTICE → 仅保留最新 1 条
+   - 连续同名工具结果 → 仅保留最后一条
+         ↓
+3. 增强系统提示词（scenario hint + skill catalog）
+         ↓
+4. 注入迭代交接提示词（迭代边界）
+         ↓
+5. 注入 FORMAT BLOCKADE / REMINDER（末尾，贴近生成点）
+         ↓
+6. 注入/替换上下文快照（_inject_context_snapshot）
+   - current_best_wns / remaining_violation / active_strategy
+   - failed_strategies / do_not_repeat
+   - iteration_history（新增：最近5次迭代WNS轨迹）
+         ↓
+LLM API Call
+```
     - 正常模式: preserve_turns=40/min_importance=0.15/preserve_role_turns=6 (worker), preserve_turns=60/min_importance=0.1/preserve_role_turns=6 (planner)
     - 激进模式(hard_limit触发): preserve_turns=25(worker)/40(planner), min_importance=0.35(worker)/0.25(planner)
     - system消息始终保护
@@ -131,6 +158,10 @@ _build_context_snapshot() 从现有实例变量构建 YAML：
     failed_strategies: []
     do_not_repeat:
       - "phys_opt_design (already called 12 times with no improvement)"
+    iteration_history:
+      - "iter1: IMP WNS -0.500 -> -0.352 (+0.148) PBLOCK"
+      - "iter2: UNC WNS -0.352 -> -0.352 (+0.000) PhysOpt"
+      - "iter3: REG WNS -0.352 -> -0.380 (-0.028) Fanout"
     ↓
 _inject_context_snapshot(api_messages):
     1. 扫描 api_messages 查找以 "# === FPGA Context Snapshot ==="
@@ -142,9 +173,10 @@ _inject_context_snapshot(api_messages):
 
 **设计要点**：
 - **User 角色**：不同于旧的 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
-- **紧凑格式**：仅 6 个字段，~150 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）
+- **紧凑格式**：仅 7 个字段，~180 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）；`iteration_history` 展示最近 5 次迭代 WNS 轨迹
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
+- **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}: {IMP|UNC|REG} WNS {before} -> {after} ({delta}) {strategy_label}`
 
 ### 2.4 关键信息保护
 

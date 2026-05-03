@@ -1247,6 +1247,15 @@ class DCPOptimizer(DCPOptimizerBase):
         else:
             lines.append("do_not_repeat: []")
 
+        # --- iteration_history: recent WNS trajectory ---
+        narrative_lines = self._format_narrative(max_entries=5).split('\n')
+        if narrative_lines and narrative_lines[0] != "No iteration history available.":
+            lines.append("iteration_history:")
+            for nl in narrative_lines:
+                lines.append(f"  - \"{nl.strip()}\"")
+        else:
+            lines.append("iteration_history: []")
+
         return "\n".join(lines)
 
     def _inject_context_snapshot(self, api_messages: list[dict]) -> None:
@@ -1279,6 +1288,102 @@ class DCPOptimizer(DCPOptimizerBase):
 
         api_messages.insert(insert_idx, {"role": "user", "content": snapshot_yaml})
 
+    def _auto_compact_messages(self, api_messages: list[dict]) -> list[dict]:
+        """Lightweight deduplication of redundant messages before API call.
+
+        Removes duplicate format reminders, reflection checkpoints, repetition
+        warnings, and redundant consecutive tool results — preserving only the
+        latest instance of each redundant pattern.
+
+        This runs on every API call regardless of token threshold, unlike the
+        heavier YAML compression which only triggers at soft/hard limits.
+        """
+        if not api_messages:
+            return api_messages
+
+        remove_indices: set[int] = set()
+
+        # --- 1. Deduplicate FORMAT BLOCKADE / REMINDER (system messages) ---
+        format_indices = [
+            i for i, msg in enumerate(api_messages)
+            if msg.get("role") == "system"
+            and isinstance(msg.get("content"), str)
+            and (msg["content"].startswith("FORMAT BLOCKADE:")
+                 or msg["content"].startswith("REMINDER:"))
+        ]
+        # Keep only the last one
+        for i in format_indices[:-1]:
+            remove_indices.add(i)
+
+        # --- 2. Deduplicate REFLECTION CHECKPOINT (user messages) ---
+        reflection_indices = [
+            i for i, msg in enumerate(api_messages)
+            if msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
+            and msg["content"].startswith("REFLECTION CHECKPOINT")
+        ]
+        for i in reflection_indices[:-1]:
+            remove_indices.add(i)
+
+        # --- 3. Deduplicate REPETITION DETECTED (user messages) ---
+        repetition_indices = [
+            i for i, msg in enumerate(api_messages)
+            if msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
+            and msg["content"].startswith("REPETITION DETECTED:")
+        ]
+        for i in repetition_indices[:-1]:
+            remove_indices.add(i)
+
+        # --- 4. Deduplicate SYSTEM NOTICE / corrective feedback (user messages) ---
+        notice_indices = [
+            i for i, msg in enumerate(api_messages)
+            if msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
+            and msg["content"].startswith("SYSTEM NOTICE:")
+        ]
+        for i in notice_indices[:-1]:
+            remove_indices.add(i)
+
+        # --- 5. Compress consecutive same-tool results (tool messages) ---
+        # If the same tool appears consecutively (same role=name),
+        # keep only the latest entry. Catches tight loops like 3x
+        # consecutive phys_opt_design calls with no user/system message
+        # in between. Iteration boundaries naturally break consecutiveness
+        # due to interleaving handoff/format messages.
+        tool_msgs = [
+            (i, msg) for i, msg in enumerate(api_messages)
+            if msg.get("role") == "tool"
+            and msg.get("name")
+        ]
+        for j in range(len(tool_msgs) - 1):
+            i_curr, curr = tool_msgs[j]
+            i_next, nxt = tool_msgs[j + 1]
+            # Same tool name consecutively → current is redundant
+            if curr["name"] == nxt["name"]:
+                remove_indices.add(i_curr)
+
+        if not remove_indices:
+            return api_messages
+
+        compacted = [
+            msg for i, msg in enumerate(api_messages)
+            if i not in remove_indices
+        ]
+        removed_count = len(remove_indices)
+        if removed_count:
+            logger.info(
+                "[AUTO_COMPACT] Removed %d redundant messages (format=%d, reflection=%d, "
+                "repetition=%d, notice=%d, tool_dup=%d)",
+                removed_count,
+                len([i for i in format_indices[:-1] if i in remove_indices]),
+                len([i for i in reflection_indices[:-1] if i in remove_indices]),
+                len([i for i in repetition_indices[:-1] if i in remove_indices]),
+                len([i for i in notice_indices[:-1] if i in remove_indices]),
+                len([i for i in remove_indices if api_messages[i].get("role") == "tool"]),
+            )
+        return compacted
+
     def _prepare_api_messages(self) -> list[dict]:
         """Assemble and prepare messages for LLM API call.
 
@@ -1288,6 +1393,9 @@ class DCPOptimizer(DCPOptimizerBase):
         """
         # Step 1: Get base messages from MemoryManager
         api_messages = self._compat.get_formatted_for_api()
+
+        # Step 1b: Lightweight deduplication before further processing
+        api_messages = self._auto_compact_messages(api_messages)
 
         # Step 2: Augment system prompt with scenario hint and skill catalog (static context)
         # Dynamic WNS state is injected via _inject_context_snapshot (Step 5) as a user message
@@ -3256,6 +3364,35 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             }
         })
 
+        # Register internal tool: retrieve cached high-fanout nets from initial analysis
+        self.tools.append({
+            "type": "function",
+            "function": {
+                "name": "vivado_get_cached_high_fanout_nets",
+                "description": "Retrieve cached high-fanout nets from initial analysis "
+                               "(no Vivado call, no truncation risk). "
+                               "Use this when vivado_get_critical_high_fanout_nets output is "
+                               "truncated or incomplete — this returns the complete cached "
+                               "net list without re-querying Vivado. "
+                               "Data was collected during initial analysis with "
+                               "num_paths=50, min_fanout=100.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_nets": {
+                            "type": "integer",
+                            "description": "Maximum number of nets to return (0 = return all cached nets)"
+                        },
+                        "min_fanout": {
+                            "type": "integer",
+                            "description": "Minimum fanout threshold to filter (optional)"
+                        }
+                    }
+                },
+                "strict": False
+            }
+        })
+
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call on the appropriate MCP server."""
         # Internal tool: retrieve raw tool output from side buffer
@@ -3293,6 +3430,36 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             candidates.sort(key=lambda x: (x[0][0], x[0][1]), reverse=True)
             (it, rd), tname, txt = candidates[0]
             return f"[Raw tool output from iteration {it}, round {rd} ({len(txt)} chars, tool: {tname})]\n\n{txt}"
+
+        # Internal tool: retrieve cached high-fanout nets from initial analysis
+        if tool_name == "vivado_get_cached_high_fanout_nets":
+            nets = getattr(self, 'high_fanout_nets', None)
+            if not nets:
+                return json.dumps({"error": "No cached high-fanout nets available. Initial analysis may not have completed."})
+
+            max_nets = arguments.get("max_nets", 0)
+            min_fanout = arguments.get("min_fanout", 0)
+
+            # Apply filters
+            filtered = nets
+            if min_fanout > 0:
+                filtered = [(n, f, p) for n, f, p in filtered if f >= min_fanout]
+
+            if max_nets > 0:
+                filtered = filtered[:max_nets]
+
+            # Build output
+            output_lines = [
+                "=== Cached High-Fanout Nets (from initial analysis) ===",
+                f"Total cached: {len(nets)}, showing: {len(filtered)}",
+                "",
+                "Rank  Paths  Fanout  Net Name",
+                "----  -----  ------  --------------------",
+            ]
+            for i, (net_name, fanout, path_count) in enumerate(filtered, 1):
+                output_lines.append(f"{i:<4}  {path_count:<5}  {fanout:<6}  {net_name}")
+
+            return "\n".join(output_lines)
 
         # Parse server prefix from tool name
         if tool_name.startswith("rapidwright_"):
