@@ -116,11 +116,11 @@ def generate_pblock_plan(
             "error_details": "context.design is None",
         }
 
-    if target_lut_count <= 0 or target_ff_count <= 0:
+    if target_lut_count <= 0:
         return {
             "status": "skipped",
             "message": (
-                f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} "
+                f"Invalid resource targets: LUT={target_lut_count} "
                 f"(must be positive). Run report_utilization_for_pblock first to get "
                 f"actual resource counts."
             ),

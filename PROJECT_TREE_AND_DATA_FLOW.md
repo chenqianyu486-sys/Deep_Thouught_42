@@ -106,44 +106,34 @@ YAMLStructuredCompressor:
 5. 添加最近 preserve_role_turns=6 条消息        ← 保留原始 role（user/assistant/tool）
 ```
 
-### 2.3 WNS/TNS状态注入（防压缩丢失）
+### 2.3 WNS/TNS状态注入（已迁移至上下文快照）
 
 ```
 API调用前 → _inject_wns_state_to_system_prompt()
-    - 更新wns_ns、clock_period_ns
-    - 注入 current_tns、failing_endpoints
-    - 追加"Current Optimization State:"块（含 WNS/TNS/failing_endpoints/best_checkpoint/next_model）
     - 追加数据驱动scenario hint（avg_distance>70 → "distributed"场景 → PBLOCK推荐）
     - 追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）
-    - 不再注入 FORMAT_GUARD（已改为 User message 机制，见 5.7）
-    → 模型始终看到当前状态，不依赖working memory
+    → 仅处理静态上下文增强，不再注入WNS状态
+
+WNS动态状态 → 已迁移至 _build_context_snapshot()，作为 user message 注入（见 2.3.1）
 ```
 
-### 2.3.1 Agent 上下文快照注入（新增）
+### 2.3.1 Agent 上下文快照注入（user message，紧凑 YAML）
 
 ```
 API调用前 → _prepare_api_messages() 中末尾调用 _inject_context_snapshot()
     ↓
 _build_context_snapshot() 从现有实例变量构建 YAML：
-    primary_goal: "Achieve WNS >= 0.000 ns"
-    current_wns: "-0.352 ns"
-    best_wns: "-0.120 ns (iter 5, PhysOpt)"
-    remaining_violation: "0.352 ns"
-    iteration: 7
-    active_strategy: "PhysOpt"
-    strategy_state: "PLATEAUED"
-    stagnation: 3
-    strategy_sequence: ["PBLOCK", "Fanout", "PhysOpt"]
-    failed_strategies:
-      - "PBLOCK: execution_failure"
-      - "Fanout: tns_degraded"
+    # === FPGA Context Snapshot ===
+    primary_goal: "Achieve WNS >= 0 ns"
+    current_best_wns: "-0.978 ns"
+    remaining_violation: "0.978 ns"
+    active_strategy: "PBLOCK (ACTIVE) -> PhysOpt (PLATEAUED)"
+    failed_strategies: []
     do_not_repeat:
-      - "phys_opt_design (12 calls, delta 0.0023 ns)"
-    wns_milestones:
-      - "-0.120 ns @ iter 5 (PhysOpt)"
+      - "phys_opt_design (already called 12 times with no improvement)"
     ↓
 _inject_context_snapshot(api_messages):
-    1. 扫描 api_messages 查找以 "# === FPGA Timing Optimization Agent Context Snapshot ==="
+    1. 扫描 api_messages 查找以 "# === FPGA Context Snapshot ==="
        开头的 user 消息 → 找到则移除（防止累积）
     2. 调用 _build_context_snapshot() 构建新 YAML
     3. 在第一个非 system 消息位置插入新的 user 消息
@@ -151,24 +141,22 @@ _inject_context_snapshot(api_messages):
 ```
 
 **设计要点**：
-- **User 角色**：不同于 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
+- **User 角色**：不同于旧的 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
+- **紧凑格式**：仅 6 个字段，~150 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
-- **轻量级**：20-30 行 YAML，~300-500 tokens
 - **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_state` 推导**：`failed_strategy_names` 中有 → `"FAILED"`；`global_no_improvement >= 2` 且策略未变 → `"PLATEAUED"`；否则 `"ACTIVE"`
 
 ### 2.4 关键信息保护
 
 | 类型 | 存储位置 | 保护机制 |
 |------|----------|----------|
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
-| WNS状态 | MemoryManager（独立于WM） | API调用时注入 |
-| TNS/Failing Endpoints | DCPOptimizer.latest_tns/latest_failing_endpoints | API调用时随 WNS 一同注入 |
+| WNS/TNS/策略状态 | 上下文快照（user message，独立于压缩系统） | 通过 `_build_context_snapshot()` → `_inject_context_snapshot()` 每 API 调用前注入为第一条 user 消息 |
+| 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败） |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
-| 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败）|
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 | step: YAML 格式要求 | ① User message（会话起始）② System prompt 头部压印（每API调用前）③ System reminder/blockade（每API调用前） | 三重防御：User role 高注意力 + System prompt 前导压印 + 末尾贴近生成点；连续2次失败升级为 FORMAT BLOCKADE |
-| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_wns/best_wns/active_strategy/failed_strategies/do_not_repeat/wns_milestones |
+| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_best_wns/active_strategy(含状态)/failed_strategies/do_not_repeat |
 | 工具重复检测 | DCPOptimizer._recent_tools（滑动窗口） | 连续>=3次相同工具且WNS总变化<0.05ns时，注入 REPETITION DETECTED 警告 |
 | 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT，要求LLM评估策略有效性并显式 justify CONTINUE vs SWITCH_STRATEGY |
 | Pblock合规性 | Vivado MCP 返回 + Summarizer 解析 | `create_and_apply_pblock` 追加 cells 计数；`_summarize_tool_result()` 解析 `cells_in_pblock`/`cells_in_design`，部分成功时设置 `status=partial`、添加 `compliance` 字段 |

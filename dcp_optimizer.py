@@ -1142,138 +1142,11 @@ class DCPOptimizer(DCPOptimizerBase):
         return self.latest_wns
 
     def _inject_wns_state_to_system_prompt(self, system_content: str) -> str:
-        """Inject current WNS/state into system prompt to prevent context loss after compression.
+        """Augment system prompt with static context: scenario hints and skill catalog.
 
-        Updates the YAML metadata section in system prompt with current:
-        - current_wns (from latest_wns)
-        - best_wns (best achieved so far)
-        - iteration (current iteration)
-        - clock_period
+        WNS dynamic state is injected separately via _build_context_snapshot as a
+        user message — this method only handles static/once-per-session augmentations.
         """
-        import re
-
-        current_wns = self._get_current_wns()
-        best_wns = self.best_wns if self.best_wns > float('-inf') else None
-        iteration = self.iteration
-        clock_period = self.clock_period
-
-        # Update wns_ns in timing section
-        if current_wns is not None:
-            before = system_content
-            system_content = re.sub(
-                r'(wns_ns:\s*)[-+]?\d+\.?\d*',
-                f'\\g<1>{current_wns:.3f}',
-                system_content
-            )
-            if before == system_content:
-                logger.warning(
-                    "WNS injection: wns_ns pattern did not match system prompt — WNS may be stale in LLM context",
-                    extra={"current_wns": current_wns, "iteration": self.iteration}
-                )
-
-        # Update clock_period_ns in timing section
-        if clock_period is not None:
-            before = system_content
-            system_content = re.sub(
-                r'(clock_period_ns:\s*)[-+]?\d+\.?\d*',
-                f'\\g<1>{clock_period:.3f}',
-                system_content
-            )
-            if before == system_content:
-                logger.warning(
-                    "WNS injection: clock_period_ns pattern did not match system prompt",
-                    extra={"clock_period": clock_period, "iteration": self.iteration}
-                )
-
-        # Define known strategy catalog for remaining_strategies computation
-        ALL_STRATEGIES = {"PBLOCK", "PhysOpt", "Fanout", "PlaceRoute", "CellPlacement", "IncrementalRoute"}
-
-        # Add or update current optimization state section after the YAML block
-        current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
-        best_wns_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
-        clock_period_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
-        current_tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "N/A"
-        failing_eps_str = str(self.latest_failing_endpoints) if self.latest_failing_endpoints is not None else "N/A"
-        # Format resource utilization
-        if self.resource_utilization:
-            ru = self.resource_utilization
-            resource_util_str = f"LUT={ru['LUT']}, FF={ru['FF']}, DSP={ru['DSP']}, BRAM={ru['BRAM']}"
-        else:
-            resource_util_str = "N/A"
-        best_wns_iter = self._best_wns_iteration
-
-        # current_wns origin hint
-        current_wns_origin = ""
-        if current_wns is not None and best_wns is not None and abs(current_wns - best_wns) < 0.0001:
-            current_wns_origin = " (restored from best)"
-        elif current_wns is not None:
-            current_wns_origin = " (new)"
-
-        # best_wns strategy hint from iteration narratives
-        best_wns_strategy = ""
-        if best_wns_iter is not None:
-            for entry in self._iteration_narratives:
-                if entry["iteration"] == best_wns_iter:
-                    strat = entry.get("strategy_label", "")
-                    if strat and strat not in ("Information", "Unknown"):
-                        best_wns_strategy = f" via {strat}"
-                    break
-
-        # Format strategy_sequence compactly
-        seq = self._strategy_sequence[-8:]  # Last 8 entries
-        strategy_seq_str = ", ".join(seq) if seq else "none"
-
-        # Compute remaining_strategies
-        tried = set(self._strategy_sequence)
-        tried.update(self._compat.failed_strategy_names)
-        remaining = sorted(ALL_STRATEGIES - tried)
-        remaining_str = ", ".join(remaining) if remaining else "none"
-
-        best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
-        input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
-        next_model = self._next_iteration_model or self.last_used_model or "worker"
-
-        # Build WNS milestones history summary (last 5)
-        wns_history_parts = []
-        for m in self._wns_milestones[-5:]:
-            verified_mark = "✓" if m.verified else "?"
-            entry = f"{verified_mark}{m.achieved_wns:.3f}ns@iter{m.iteration}"
-            if m.strategy_label:
-                entry += f"[{m.strategy_label}]"
-            wns_history_parts.append(entry)
-        wns_history_str = ", ".join(wns_history_parts) if wns_history_parts else "none"
-
-        state_section = f"""**Current Optimization State:**
-  iteration: {iteration}
-  best_wns: {best_wns_str} (achieved at iteration {best_wns_iter}{best_wns_strategy})
-  best_checkpoint: {best_dcp_str}
-  current_wns: {current_wns_str}{current_wns_origin}
-  current_tns: {current_tns_str}
-  failing_endpoints: {failing_eps_str}
-  resource_utilization: [{resource_util_str}]
-  strategy_sequence: [{strategy_seq_str}]
-  remaining_strategies: [{remaining_str}]
-  stagnation: {self.global_no_improvement} consecutive no-improvement iterations
-  clock_period: {clock_period_str}
-  input_dcp: {input_dcp_str}
-  next_model: {next_model}
-  wns_history: {wns_history_str}
-  diagnostic_paused: {str(self._paused_for_diagnostics).lower()}
-"""
-
-        # Check if "Current Optimization State" already exists
-        if "Current Optimization State:" in system_content:
-            # Replace existing state section
-            pattern = r'\*\*Current Optimization State:\*\*[^\n]*\n(?:[^\n]*\n)*?'
-            system_content = re.sub(pattern, state_section, system_content)
-        else:
-            # Append after the YAML code block
-            yaml_end_pattern = r'(```)\s*$'
-            match = re.search(yaml_end_pattern, system_content, re.MULTILINE)
-            if match:
-                insert_pos = match.end()
-                system_content = system_content[:insert_pos] + "\n\n" + state_section + system_content[insert_pos:]
-
         # Append data-driven scenario hint from initial analysis
         if hasattr(self, 'critical_path_spread') and self.critical_path_spread:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
@@ -1294,19 +1167,15 @@ class DCPOptimizer(DCPOptimizerBase):
     # === Section 8.3.2: Context Snapshot Injection ===
 
     def _build_context_snapshot(self) -> str:
-        """Build YAML context snapshot of current optimization state.
+        """Build compact YAML context snapshot of current optimization state.
 
         Injected as the first user message before every LLM call.
-        All fields are derived from existing instance variables — no new state.
+        Old snapshot detected by header and removed before fresh injection.
         """
         current_wns = self._get_current_wns()
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
-        iteration = self.iteration
 
-        # --- current_wns ---
-        current_wns_str = f"{current_wns:.3f} ns" if current_wns is not None else "N/A"
-
-        # --- best_wns ---
+        # --- current_best_wns ---
         if best_wns is not None:
             best_wns_iter = self._best_wns_iteration
             best_wns_label = ""
@@ -1315,11 +1184,11 @@ class DCPOptimizer(DCPOptimizerBase):
                     if entry.get("iteration") == best_wns_iter:
                         strat = entry.get("strategy_label", "")
                         if strat and strat not in ("Information", "Unknown"):
-                            best_wns_label = f", {strat}"
+                            best_wns_label = f" via {strat}"
                         break
-            best_wns_str = f"{best_wns:.3f} ns (iter {best_wns_iter}{best_wns_label})" if best_wns_iter else f"{best_wns:.3f} ns"
+            cb_wns = f"{best_wns:.3f} ns{best_wns_label}"
         else:
-            best_wns_str = "N/A"
+            cb_wns = "N/A"
 
         # --- remaining_violation ---
         if current_wns is not None and current_wns < 0:
@@ -1328,33 +1197,26 @@ class DCPOptimizer(DCPOptimizerBase):
         else:
             remaining_str = "N/A"
 
-        # --- active_strategy & strategy_state ---
-        active_strategy = self._strategy_sequence[-1] if self._strategy_sequence else "None"
+        # --- active_strategy: strategy -> strategy ... with state annotations ---
         failed_names = self._compat.failed_strategy_names
-        if active_strategy in failed_names:
-            strategy_state = "FAILED"
-        elif self.global_no_improvement >= 2:
-            # Check that the last N narratives show the same strategy
-            same_strategy = True
-            if len(self._strategy_sequence) >= 3:
-                last_three = self._strategy_sequence[-3:]
-                same_strategy = len(set(last_three)) == 1
-            strategy_state = "PLATEAUED" if same_strategy else "STALLED"
-        else:
-            strategy_state = "ACTIVE"
-
-        # --- strategy_sequence (last 8) ---
-        seq = self._strategy_sequence[-8:]
-        seq_yaml = ", ".join(f'"{s}"' for s in seq) if seq else ""
+        strategy_parts = []
+        for s in self._strategy_sequence[-4:]:
+            if s in failed_names:
+                strategy_parts.append(f"{s} (FAILED)")
+            elif self.global_no_improvement >= 2:
+                strategy_parts.append(f"{s} (PLATEAUED)")
+            else:
+                strategy_parts.append(f"{s} (ACTIVE)")
+        active_strategy = " -> ".join(strategy_parts) if strategy_parts else "None"
 
         # --- failed_strategies ---
-        failed_yaml_lines = []
+        failed_lines = []
         for fs in self._compat.failed_strategies:
             name = fs.get("strategy", "?")
             reason = fs.get("reason", "unknown")
-            failed_yaml_lines.append(f'  - "{name}: {reason}"')
+            failed_lines.append(f'  - "{name} ({reason})"')
 
-        # --- do_not_repeat (aggregated from tool_call_details) ---
+        # --- do_not_repeat (tool called many times with flat WNS) ---
         dnr_entries = []
         tool_stats: dict[str, list[float]] = {}
         for td in self._compat.tool_call_details:
@@ -1366,30 +1228,17 @@ class DCPOptimizer(DCPOptimizerBase):
             if len(wns_values) > 3:
                 delta = max(wns_values) - min(wns_values)
                 if delta < 0.01:
-                    dnr_entries.append(f'  - "{tool_name} ({len(wns_values)} calls, delta {delta:.4f} ns)"')
-        # --- wns_milestones (last 5) ---
-        milestone_lines = []
-        for m in self._wns_milestones[-5:]:
-            label = f" ({m.strategy_label})" if m.strategy_label else ""
-            milestone_lines.append(f'  - "{m.achieved_wns:.3f} ns @ iter {m.iteration}{label}"')
+                    dnr_entries.append(f'  - "{tool_name} (already called {len(wns_values)} times with no improvement)"')
 
         lines = []
-        lines.append("# === FPGA Timing Optimization Agent Context Snapshot ===")
-        lines.append(f'primary_goal: "Achieve WNS >= 0.000 ns"')
-        lines.append(f'current_wns: "{current_wns_str}"')
-        lines.append(f'best_wns: "{best_wns_str}"')
+        lines.append("# === FPGA Context Snapshot ===")
+        lines.append('primary_goal: "Achieve WNS >= 0 ns"')
+        lines.append(f'current_best_wns: "{cb_wns}"')
         lines.append(f'remaining_violation: "{remaining_str}"')
-        lines.append(f"iteration: {iteration}")
         lines.append(f'active_strategy: "{active_strategy}"')
-        lines.append(f'strategy_state: "{strategy_state}"')
-        lines.append(f"stagnation: {self.global_no_improvement}")
-        if seq_yaml:
-            lines.append(f"strategy_sequence: [{seq_yaml}]")
-        else:
-            lines.append("strategy_sequence: []")
-        if failed_yaml_lines:
+        if failed_lines:
             lines.append("failed_strategies:")
-            lines.extend(failed_yaml_lines)
+            lines.extend(failed_lines)
         else:
             lines.append("failed_strategies: []")
         if dnr_entries:
@@ -1397,12 +1246,6 @@ class DCPOptimizer(DCPOptimizerBase):
             lines.extend(dnr_entries[:5])
         else:
             lines.append("do_not_repeat: []")
-        if milestone_lines:
-            lines.append("wns_milestones:")
-            lines.extend(milestone_lines)
-        else:
-            lines.append("wns_milestones: []")
-        lines.append("# === Snapshot End ===")
 
         return "\n".join(lines)
 
@@ -1413,7 +1256,7 @@ class DCPOptimizer(DCPOptimizerBase):
         prevent accumulation, then inserts a fresh snapshot after all
         system messages.
         """
-        SNAPSHOT_HEADER = "# === FPGA Timing Optimization Agent Context Snapshot ==="
+        SNAPSHOT_HEADER = "# === FPGA Context Snapshot ==="
 
         # Find and remove existing snapshot message
         for i, msg in enumerate(api_messages):
@@ -1439,14 +1282,15 @@ class DCPOptimizer(DCPOptimizerBase):
     def _prepare_api_messages(self) -> list[dict]:
         """Assemble and prepare messages for LLM API call.
 
-        Combines: message assembly, WNS state injection into system prompt,
-        iteration handoff injection, format blockade injection,
-        and context snapshot injection.
+        Combines: message assembly, system prompt augmentations (scenario hint,
+        skill catalog), iteration handoff injection, format blockade injection,
+        and context snapshot (user message, refreshed each call).
         """
         # Step 1: Get base messages from MemoryManager
         api_messages = self._compat.get_formatted_for_api()
 
-        # Step 2: Inject current WNS state into system message to prevent context loss after compression
+        # Step 2: Augment system prompt with scenario hint and skill catalog (static context)
+        # Dynamic WNS state is injected via _inject_context_snapshot (Step 5) as a user message
         if api_messages and api_messages[0].get("role") == "system":
             system_content = api_messages[0].get("content", "")
             updated_content = self._inject_wns_state_to_system_prompt(system_content)
@@ -4188,10 +4032,12 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         """
         results = []
 
-        # Strip XML tags that LLMs sometimes mix into YAML output, and repair
-        # step: boundaries fused with tags (e.g. "</arg_value>step:")
+        # Strip XML tags and Markdown formatting that LLMs mix into YAML output,
+        # and repair step: boundaries fused with tags (e.g. "</arg_value>step:")
         content = re.sub(r'</?[^>]+>', '', content)
-        content = re.sub(r'([^\n])(step:)', r'\1\n\2', content)
+        content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)  # **bold** -> text
+        content = re.sub(r'`(.+?)`', r'\1', content)          # `code` -> text
+        content = re.sub(r'([^a-zA-Z0-9_\s])(step:)', r'\1\n\2', content)
 
         # Split on step: boundaries to handle multi-step YAML responses
         blocks = re.split(r'\n(?=step:)', content)
@@ -4249,6 +4095,9 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         Returns:
             (action, flow_control) tuple - either may be None if not found
         """
+        # Strip Markdown formatting that can break YAML parsing
+        content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)
+        content = re.sub(r'`(.+?)`', r'\1', content)
         blocks = re.split(r'\n(?=step:)', content)
         for block in blocks:
             block = block.strip()
@@ -4289,9 +4138,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             return state
 
         try:
-            # Strip XML tags and repair step: boundaries fused with tags
+            # Strip XML tags, Markdown formatting, and repair fused step: boundaries
             cleaned = re.sub(r'</?[^>]+>', '', content)
-            cleaned = re.sub(r'([^\n])(step:)', r'\1\n\2', cleaned)
+            cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)  # **bold** -> text
+            cleaned = re.sub(r'`(.+?)`', r'\1', cleaned)         # `code` -> text
+            # Only insert newline before step: when fused to a non-word char (e.g. >step:)
+            # Avoids splitting natural language like "next step:" or "first step:"
+            cleaned = re.sub(r'([^a-zA-Z0-9_\s])(step:)', r'\1\n\2', cleaned)
 
             blocks = re.split(r'\n(?=step:)', cleaned)
             if not blocks:
