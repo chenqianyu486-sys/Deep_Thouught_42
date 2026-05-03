@@ -566,16 +566,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="execute_fanout_strategy",
-            description="""Execute fanout optimization and return Vivado execution plan.
+            description="""Execute fanout optimization directly in RapidWright.
 
             Runs optimize_fanout_batch and write_checkpoint in RapidWright to split
-            high fanout nets, then returns a plan with remaining Vivado steps
-            (open_checkpoint, route_design, report_timing_summary).
+            high fanout nets, then reports optimization results.
+            After this, run vivado_open_checkpoint, vivado_place_design,
+            vivado_route_design, and vivado_report_timing_summary in Vivado.
 
             MUTATING: modifies design net topology and writes checkpoint file.
             Trigger: High fanout nets present (fanout > 100), no path spread.
             Input: list of nets with fanout counts.
-            Output: optimization results + structured plan with remaining Vivado steps.
+            Output: optimization results (nets_processed, successful_count, failed_count, checkpoint_path).
             Priority: Prefer this over manual optimize_fanout_batch when high_fanout nets (fo>100) dominate timing.""",
             inputSchema={
                 "type": "object",

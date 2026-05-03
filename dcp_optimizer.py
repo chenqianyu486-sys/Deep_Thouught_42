@@ -805,7 +805,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self.WORKER_DOWNGRADE_THRESHOLD = 3           # Worker consecutive successes before downgrade
         self.WORKER_UPGRADE_THRESHOLD = 2            # Cumulative failures before upgrade
         self.GLOBAL_NO_IMPROVEMENT_LIMIT = 3         # Global no-improvement limit
-        self.MAX_TOOL_ROUNDS_PER_ITERATION = 50      # Max tool-calling rounds per iteration
+        self.MAX_TOOL_ROUNDS_PER_ITERATION = 80      # Max tool-calling rounds per iteration
         
         # Track token usage and costs
         self.total_prompt_tokens = 0
@@ -1765,8 +1765,35 @@ class DCPOptimizer(DCPOptimizerBase):
             except Exception:
                 pass
 
-        elif tool_name in ("rapidwright_execute_fanout_strategy",
-                           "rapidwright_execute_physopt_strategy"):
+        elif tool_name == "rapidwright_execute_fanout_strategy":
+            # Direct execution result (nets_processed, successful_count, etc.)
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data.get('error', 'unknown')[:200]}")
+                    status = "error"
+                elif data.get("skipped"):
+                    summary_parts.append(f"Skipped: {data.get('message', '')[:200]}")
+                    status = "skipped"
+                else:
+                    successful = data.get("successful_count", 0)
+                    failed = data.get("failed_count", 0)
+                    total = data.get("nets_processed", 0)
+                    ckpt = data.get("checkpoint_path", "")
+                    summary_parts.append(
+                        f"Fanout: {successful}/{total} nets optimized"
+                        + (f", {failed} failed" if failed else "")
+                    )
+                    key_details["successful_count"] = successful
+                    key_details["failed_count"] = failed
+                    key_details["checkpoint_path"] = ckpt
+                    if data.get("results"):
+                        key_details["results"] = data["results"]
+            except Exception:
+                pass
+
+        elif tool_name == "rapidwright_execute_physopt_strategy":
             # Parse StrategyPlan JSON for pending steps
             try:
                 import json as _json
@@ -2581,6 +2608,8 @@ You are the Planner for this iteration. Current WNS/checkpoint/clock values are 
         directive = self._build_continuation_directive(unfinished, is_worker=True)
         skill_rec = self._build_skill_recommendation()
         skill_rec_section = f"\n=== RECOMMENDED SKILL ===\n{skill_rec}\n" if skill_rec else ""
+        stagnation_signal = self._build_stagnation_signal()
+        stagnation_section = f"{stagnation_signal}\n" if stagnation_signal else ""
 
         exit_labels = {
             "tool_round_limit": "ToolRoundLimit",
@@ -3867,7 +3896,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # regardless of how long the context has grown.
             api_messages.append({
                 "role": "system",
-                "content": "REMINDER: Your response MUST start with 'step:' (valid YAML block). See format instructions at conversation start."
+                "content": "REMINDER: Your response MUST contain a 'step:' YAML block (chain-of-thought natural language is OK before it). See format instructions at conversation start."
             })
 
             # Log prompt for observability
@@ -4407,9 +4436,12 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         # User role messages get higher attention weight and are less likely to be forgotten
         # in long contexts compared to content buried in the system prompt.
         FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
-You MUST output valid YAML starting with `step:` in EVERY response, INCLUDING
-when using native function/tool calls. The `step:` YAML block goes in the
-response text alongside any native tool calls.
+Every response MUST contain a valid `step:` YAML block that carries ALL process
+control directives. Flow control (step_id, result_status, flow_control, analysis,
+tool_calls) goes INSIDE the `step:` block, NOT in the natural-language reasoning text.
+Natural-language chain-of-thought reasoning before the `step:` block is acceptable.
+INCLUDING when using native function/tool calls — the `step:` YAML block must still
+appear in the response text alongside any native tool calls.
 
 Format:
   step:
@@ -4431,8 +4463,8 @@ Format:
 
 STRICTLY FORBIDDEN:
   - XML/HTML tags - NOT valid YAML
-  - Markdown fences, free text, ASCII art, summaries
-  - Omitting the step: YAML block when using native tool calls
+  - Markdown code fences ``` around the YAML block
+  - Omitting the step: YAML block entirely
 
 Maintain this output format throughout the entire conversation.
 """
@@ -5336,8 +5368,29 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print(f"[TEST] ⚠ Skill '{skill_name}' returned error: {data['error']}")
             return data
 
-        # StrategyPlan format (physopt / fanout)
-        if "strategy_name" in data:
+        # Fanout direct execution result
+        if "nets_processed" in data:
+            successful = data.get("successful_count", 0)
+            failed = data.get("failed_count", 0)
+            total = data.get("nets_processed", 0)
+            ckpt = data.get("checkpoint_path", "")
+            skipped = data.get("skipped", False)
+            if skipped:
+                print(f"[TEST] ✓ Skill '{skill_name}' | skipped: {data.get('message', '')}")
+            else:
+                print(f"[TEST] ✓ Skill '{skill_name}' | optimized: {successful}/{total} nets"
+                      + (f", {failed} failed" if failed else "")
+                      + (f" | checkpoint: {ckpt}" if ckpt else ""))
+            results = data.get("results", [])
+            if results:
+                for r in results[:3]:
+                    print(f"[TEST]   - {r.get('net_name', '?')}: "
+                          f"fanout {r.get('original_fanout', '?')} → split_factor {r.get('split_factor', '?')}")
+                if len(results) > 3:
+                    print(f"[TEST]   ... and {len(results) - 3} more")
+
+        # StrategyPlan format (physopt)
+        elif "strategy_name" in data:
             status = data.get("status", "unknown")
             steps = data.get("steps", [])
             print(f"[TEST] ✓ Skill '{skill_name}' | status: {status} | steps: {len(steps)}")
@@ -5675,9 +5728,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "checkpoint_prefix": "test_fanout",
                     }, timeout=max(600.0, 300.0 * len(net_configs)))
                     data = self._verify_skill_result("execute_fanout_strategy", result)
-                    # Extract success/failure info from StrategyPlan
-                    summary = data.get("analysis_summary", {})
-                    successful_optimizations = summary.get("successful_count", 0)
+                    successful_optimizations = data.get("successful_count", 0)
                     print(f"\nSuccessfully optimized {successful_optimizations}/{len(nets_to_optimize)} nets (via skill)")
                 except Exception as e:
                     print(f"execute_fanout_strategy FAILED: {e}")

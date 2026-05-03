@@ -61,7 +61,7 @@ fpl26_optimization_contest/
 │   ├── smart_region_search.py       # Skill类 + 纯函数：智能PBlock区域搜索
 │   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 │   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
-│   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
+│   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -186,7 +186,7 @@ skills/
 ├── smart_region_search.py          # Skill类 + 纯函数
 ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
-├── fanout_strategy.py           # Skill类：High Fanout Net Optimization 策略
+├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
 ├── SKILL_SPECIFICATION.md        # Skill规范文档
 ├── descriptors/                 # 自动生成的JSON描述符文件（含test_mock_skill）
 ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -198,7 +198,7 @@ skills/
 ├── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索（READ-ONLY）
 ├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
-├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization 策略
+├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization
 └── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
 
 Skill 超时映射（三层）:
@@ -223,11 +223,11 @@ Skill 超时映射（三层）:
 │   ├── Step1 DIAGNOSE: analyze_net_detour → 找出绕路比>2.0的cell
 │   ├── Step2 FIX: optimize_cell_placement → 移动到连接质心
 │   └── Step3 CONTAIN: smart_region_search + strategy skills → 地理约束
-├── 策略型 (physopt/fanout): 封装完整多步策略工作流，一键式执行
+├── 策略型 (physopt): 封装完整多步策略工作流，一键式执行
 │   ├── analyze_pblock_region: avg_distance>70 → READ-ONLY分析, 返回pblock_ranges (LLM自行调Vivado工具串)
 │   │   └── Vivado工具串: place_design -unplace → create_and_apply_pblock → place_design → route_design → report_timing_summary
 │   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
-│   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+checkpoint+route
+│   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+write_checkpoint, 返回优化结果(LLM自行调Vivado工具串)
 
 Skill 推荐机制 (_build_skill_recommendation()):
 ├── avg_distance > 70 AND PBLOCK not failed  → rapidwright_analyze_pblock_region
@@ -490,7 +490,7 @@ class StepState:
 | PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed（dcp_optimizer.py:4073） |
 | Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval（dcp_optimizer.py:2164） |
 | 路由失败 | PlaceRoute | `route_design`/`place_design` 失败（非超时，dcp_optimizer.py:4453） |
-| 策略中断检测 | PBLOCK/Fanout | `_detect_interrupted_strategy()` 检测到验证缺失 |
+| 策略中断检测 | PBLOCK/Fanout | `_detect_unfinished_strategy()` 检测到验证缺失 |
 
 **`failed_strategies` 的使用**：
 - `_build_skill_recommendation()`: 跳过已失败策略的推荐（PBLOCK/Fanout/PhysOpt 分别检查）
@@ -518,7 +518,7 @@ optimize() 中:
 ```
 get_completion() 中:
 messages 末尾追加:
-  {"role": "system", "content": "REMINDER: Your response MUST start with 'step:' ..."}
+  {"role": "system", "content": "REMINDER: Your response MUST contain a 'step:' YAML block ..."}
 ```
 - 极简内容（<10 tokens），几乎不增加成本
 - 始终在 messages 最后一条，贴近模型生成点
@@ -528,6 +528,8 @@ messages 末尾追加:
 **清理**：
 - 删除了 `_inject_format_requirement_to_system_prompt()` 方法
 - `_inject_wns_state_to_system_prompt()` 不再注入格式要求
+
+**2026-05-03 更新**：放宽格式约束。原规则要求"每条 response 必须以 `step:` 开头"，改为"response 中必须包含一个 `step:` YAML 控制块"。允许在 `step:` 块之前输出自然语言思维链推理，降低 LLM 因格式约束而产生的认知负担。解析代码（`_parse_step_yaml` 等）已支持从文本中任意位置提取最后一个 `step:` 块。
 
 ## 6. 429降级机制
 

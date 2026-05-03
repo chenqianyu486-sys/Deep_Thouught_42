@@ -2044,10 +2044,10 @@ def execute_fanout_strategy(
     temp_dir: str = "temp",
     checkpoint_prefix: str = "fanout_opt",
 ) -> dict:
-    """Execute fanout optimization and return Vivado execution plan.
+    """Execute fanout optimization directly.
 
     Runs optimize_fanout_batch and write_checkpoint in RapidWright,
-    then returns a plan with remaining Vivado steps.
+    and returns the optimization results.
 
     Args:
         nets: List of {"net_name": str, "fanout": int}
@@ -2055,7 +2055,8 @@ def execute_fanout_strategy(
         checkpoint_prefix: Checkpoint filename prefix
 
     Returns:
-        Dictionary with execution results and remaining plan
+        Dictionary with optimization results (nets_processed, successful_count,
+        failed_count, checkpoint_path, results)
     """
     global _current_design
 
@@ -2081,13 +2082,9 @@ def execute_fanout_strategy(
         )
 
         if not result.success:
-            error_msg = result.error
-            if error_msg is None and result.data is not None:
-                error_msg = getattr(result.data, 'message', None)
-            return {"error": error_msg or "Unknown error"}
+            return {"error": result.error or "Unknown error"}
 
-        plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return result.data  # Already a plain dict
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")

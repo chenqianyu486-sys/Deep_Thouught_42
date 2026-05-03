@@ -16,14 +16,14 @@ rules:
     split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
 
 # ── Response Format ──
-# Placed early: every response MUST follow this YAML output format.
+# Placed early: every response MUST contain a step: YAML block for process control.
 response_format:
-  rule: "Every response MUST start with `step:` at column 0 — a valid YAML block. NO exceptions."
+  rule: "Every response MUST contain a `step:` YAML block (valid YAML) that carries all process control directives. The `step:` block is the structured process control section — place flow control (step_id, result_status, flow_control, analysis, tool_calls) INSIDE it, NOT in the natural-language reasoning text. Preceding natural-language chain-of-thought reasoning is acceptable and will not interfere with parsing."
   note: "When using native function/tool calls, the `step:` YAML block MUST still appear in the response text alongside the native tool calls."
   forbidden:
     - "XML/HTML tags (DO NOT USE angle brackets)"
-    - "Markdown code fences ``` or free text around YAML"
-    - "Omitting the step: YAML block"
+    - "Markdown code fences ``` around the YAML block"
+    - "Omitting the step: YAML block entirely"
   template: |
     step:
       step_id: <N>

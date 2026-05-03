@@ -120,7 +120,7 @@ SKILL_GUIDANCE = {
     "execute_fanout_strategy": {
         "category": "OPTIMIZATION",
         "input": "List of high fanout nets from vivado_get_critical_high_fanout_nets: [{\"net_name\": str, \"fanout\": int}, ...]",
-        "output": "Mutated netlist with split high-fanout nets + StrategyPlan with remaining Vivado steps",
+        "output": "Optimization results: nets_processed, successful_count, failed_count, checkpoint_path, per-net results",
         "condition": "High fanout nets present (fanout > 100), no path spread",
         "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",

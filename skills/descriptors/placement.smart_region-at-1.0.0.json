@@ -8,7 +8,7 @@
   "sideEffects": [],
   "timeout": {
     "defaultMs": 600000,
-    "maxMs": 720000
+    "maxMs": 1200000
   },
   "authentication": {
     "type": "none"

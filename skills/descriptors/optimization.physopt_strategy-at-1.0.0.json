@@ -7,8 +7,8 @@
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {
-    "defaultMs": 30000,
-    "maxMs": 60000
+    "defaultMs": 360000,
+    "maxMs": 720000
   },
   "authentication": {
     "type": "none"

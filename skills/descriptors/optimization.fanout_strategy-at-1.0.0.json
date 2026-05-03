@@ -2,8 +2,8 @@
   "$schema": "https://spec.example.com/skill-descriptor-v3.json",
   "specVersion": "3.0",
   "id": "optimization.fanout_strategy@1.0.0",
-  "displayName": "High Fanout Net Optimization Strategy",
-  "description": "Split high fanout nets using RapidWright and return Vivado execution plan. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: High fanout nets present (fanout > 100), no path spread.",
+  "displayName": "High Fanout Net Optimization",
+  "description": "Split high fanout nets using RapidWright and write checkpoint. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: High fanout nets present (fanout > 100), no path spread.",
   "idempotency": "non-idempotent",
   "sideEffects": [
     "net_topology",
