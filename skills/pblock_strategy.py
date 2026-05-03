@@ -375,7 +375,7 @@ def generate_pblock_plan(
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",
     side_effects=[],
-    timeout_ms=600000,
+    timeout_ms=60000,
     parameters=[
         ParameterSpec("target_lut_count", int,
                       "Current LUT usage from Vivado report_utilization_for_pblock"),

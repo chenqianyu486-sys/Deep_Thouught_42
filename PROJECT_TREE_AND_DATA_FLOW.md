@@ -204,8 +204,8 @@ skills/
 Skill 超时映射（三层）:
 | Skill | @skill decorator `timeout_ms` | JSON descriptor `defaultMs/maxMs` | 测试调用 `timeout` |
 |-------|-------------------------------|-----------------------------------|-------------------|
-| smart_region | 600000 (10min) | 600000 / 720000 | 600.0 |
-| pblock_strategy | 600000 (10min) | 600000 / 720000 | 600.0 |
+| smart_region | **60000** (1min) | 60000 / 120000 | 60.0 |
+| pblock_strategy | **60000** (1min) | 60000 / 120000 | 60.0 |
 | net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
 | physopt_strategy | **360000** (6min) ⚠️ | 30000 / 60000 | 360.0 |
 | fanout_strategy | 300000 (5min) | 300000 / 600000 | 300.0 * nets |

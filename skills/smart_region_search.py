@@ -784,7 +784,7 @@ def _build_advice(est: dict, target_lut: int, target_ff: int,
     category=SkillCategory.PLACEMENT,
     idempotency="safe",
     side_effects=[],
-    timeout_ms=600000,
+    timeout_ms=60000,
     parameters=[
         ParameterSpec("target_lut_count", int, "Required number of LUTs"),
         ParameterSpec("target_ff_count", int, "Required number of FFs"),
