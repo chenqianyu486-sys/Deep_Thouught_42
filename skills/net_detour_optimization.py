@@ -11,12 +11,15 @@ This module provides pure functions for:
 The skill layer contains pure functions; MCP tool wrappers delegate to these.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -298,6 +301,8 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
 
     # Group pins by cell to identify data paths
     cell_groups = _group_pins_by_cell(pin_paths)
+    if not cell_groups:
+        logger.warning("[DIAG] _group_pins_by_cell returned 0 groups (pin_paths len=%d)", len(pin_paths))
 
     results = {}
 
@@ -370,6 +375,10 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
 
     # Sort by max_detour_ratio descending
     sorted_results = dict(sorted(results.items(), key=lambda x: x[1].max_detour_ratio, reverse=True))
+
+    if not sorted_results:
+        logger.warning("[DIAG] analyze_net_detour: 0 results after processing %d cell groups (threshold=%.1f)",
+                       len(cell_groups), detour_threshold)
 
     return sorted_results
 

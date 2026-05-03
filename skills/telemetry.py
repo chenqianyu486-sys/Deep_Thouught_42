@@ -131,6 +131,12 @@ class SkillTelemetry:
     _records: list[SkillExecutionRecord] = []
     _metrics: dict[str, SkillMetrics] = {}
     _max_records: int = 1000  # Keep last 1000 records
+    _current_wns: Optional[float] = None  # Latest known WNS for correlating skill executions with timing state
+
+    @classmethod
+    def set_current_wns(cls, wns: Optional[float]) -> None:
+        """Set the latest known WNS so skill telemetry records carry timing context."""
+        cls._current_wns = wns
 
     @classmethod
     def reset(cls) -> None:
@@ -146,7 +152,8 @@ class SkillTelemetry:
         status: ExecutionStatus,
         error: Optional[str] = None,
         error_code: str = "",
-        params_summary: str = ""
+        params_summary: str = "",
+        wns: Optional[float] = None,
     ) -> SkillExecutionRecord:
         """Record a skill execution.
 
@@ -157,10 +164,13 @@ class SkillTelemetry:
             error: Error message if failed
             error_code: Canonical error code from SkillErrorCode
             params_summary: Sanitized parameter summary for logging
+            wns: WNS value at time of execution. If None, uses the class-level _current_wns.
 
         Returns:
             The created execution record
         """
+        if wns is None:
+            wns = cls._current_wns
         record = SkillExecutionRecord(
             skill_name=skill_name,
             timestamp=datetime.now(),
@@ -168,7 +178,8 @@ class SkillTelemetry:
             status=status,
             error=error,
             error_code=error_code,
-            params_summary=params_summary
+            params_summary=params_summary,
+            wns=wns,
         )
 
         # Store record (with limit)

@@ -38,7 +38,7 @@ except ImportError:
     print("Error: openai package not installed. Please run: pip install openai", file=sys.stderr)
     sys.exit(1)
 
-# === Section 7.0: Context Manager Integration ===
+# === Section 2: Context Manager Integration ===
 from context_manager import MemoryManager, AgentContextManager, YAMLStructuredCompressor
 from context_manager.compat import DCPOptimizerCompat
 from context_manager.interfaces import CompressionContext as CMCompressionContext, ModelContextConfig, Message as CMMessage
@@ -90,13 +90,13 @@ PLANNER_CONTEXT_CONFIG: ModelContextConfig = _create_model_context_config(_plann
 DEFAULT_MODEL_PLANNER: str = _planner_data.model_name
 DEFAULT_MODEL_WORKER: str = _worker_data.model_name
 
-# === Section 2: Logging & Constants ===
+# === Section 3: Logging & Constants ===
 
 # Configure logging with centralized setup
 setup_logging(level="INFO", use_json=False)  # use_json=False for readable console output
 logger = logging.getLogger(__name__)
 
-# === Section 2.1: Model Context Configurations (loaded from model_config.yaml) ===
+# === Section 3.1: Model Context Configurations (loaded from model_config.yaml) ===
 # Model tier to config mapping
 MODEL_CONTEXT_CONFIGS = {
     "worker": WORKER_CONTEXT_CONFIG,
@@ -119,7 +119,7 @@ CONTEXT_HARD_LIMIT = _worker_data.hard_limit  # deprecated
 RECENT_TURNS_TO_KEEP = 20              # number of recent messages to keep during compression (maintains conversation continuity)
 TOOL_RESULT_TRUNCATE = 30000           # tool result truncation threshold (retains key info after type-based filtering)
 
-# === Section 5.1: Token Estimation ===
+# === Section 3.2: Token Estimation ===
 # Note: All context/prompts must be in English for consistent token estimation.
 # Token estimation uses English approximation: ~4 chars per token.
 
@@ -127,7 +127,7 @@ def _estimate_tokens_char_based(text: str) -> int:
     """Estimate tokens using character count (English: ~4 chars/token)."""
     return len(text) // 4
 
-# === Section 3: Task Classification ===
+# === Section 4: Task Classification ===
 
 # Task classification constants
 class TaskCategory:
@@ -158,7 +158,7 @@ OPTIMIZATION_PATTERNS = ["optimize", "improve", "place", "route", "synthesize",
                           "floorplan", "create", "modify", "fix", "debug", "analyze"]
 
 
-# === Section 4: Model Tier & Tool Mapping ===
+# === Section 5: Model Tier & Tool Mapping ===
 
 class ModelTier:
     PLANNER = "planner"
@@ -187,7 +187,7 @@ TOOL_MODEL_MAPPING = {
 }
 
 
-# === Section 5: Utility Functions ===
+# === Section 6: Utility Functions ===
 
 
 def parse_timing_summary_static(timing_report: str) -> dict:
@@ -292,7 +292,7 @@ SKILL_TOOL_MAP: dict[str, str] = {
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
 
-# === Section 6: DCPOptimizerBase — Shared Base Class ===
+# === Section 7: DCPOptimizerBase — Shared Base Class ===
 
 class DCPOptimizerBase:
     """Base class with shared functionality for FPGA optimization."""
@@ -523,7 +523,7 @@ class DCPOptimizerBase:
         
         logger.info(f"Run directory preserved at: {self.run_dir}")
 
-    # === Section 6.1: Timing Utilities ===
+    # === Section 7.1: Timing Utilities ===
 
     def calculate_fmax(self, wns: Optional[float], clock_period: Optional[float]) -> Optional[float]:
         """
@@ -623,7 +623,7 @@ class DCPOptimizerBase:
         
         return nets
 
-    # === Section 6.2: Result Formatting & Reporting ===
+    # === Section 7.2: Result Formatting & Reporting ===
 
     def _format_fmax_results(
         self,
@@ -717,7 +717,7 @@ class DCPOptimizerBase:
         print("="*70)
 
 
-# === Section 7: DCPOptimizer — LLM-Driven Optimization Agent ===
+# === Section 8: DCPOptimizer — LLM-Driven Optimization Agent ===
 
 class DCPOptimizer(DCPOptimizerBase):
     """FPGA Design Optimization Agent using RapidWright and Vivado MCPs."""
@@ -782,20 +782,20 @@ class DCPOptimizer(DCPOptimizerBase):
         self.skill_recommendation_log: list[dict] = []    # Recommendation-to-execution funnel tracking
         self._last_skill_rec_iteration: Optional[int] = None  # Dedup guard for recommendation logging
 
-        # === Section 7.X: DCP Validation ===
+        # === Section 8.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
         self.checkpoint_saving_enabled = True     # Enable checkpoint saving for iteration rollback
         self.validation_interval = 5            # Run Phase 1 every N iterations
         self.validation_report_dir = self.temp_dir / "validation_reports"
 
-        # === Section 7.1: Context Compression & Model Switching State ===
+        # === Section 8.1: Context Compression & Model Switching State ===
         # Simplified model switching mechanism - only uses two counters for model selection
         self.worker_consecutive_success = 0          # Worker consecutive success count (for downgrade)
         self.worker_consecutive_failures = 0         # Worker cumulative failure count (for upgrade)
         self.global_no_improvement = 0               # Global consecutive no-improvement count
         self.iteration_tool_errors = []              # Tool errors in current iteration for failure classification
 
-        # === Section 7.1.1: Console Exit Intervention ===
+        # === Section 8.1.1: Console Exit Intervention ===
         self._user_exit_requested = threading.Event()
         self._async_exit_requested = asyncio.Event()
         self._console_reader_started = False
@@ -840,7 +840,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self._step_state: Optional[StepState] = None   # Most recent parsed step state
         self._last_analysis: dict = field(default_factory=dict)  # Last analysis from SWITCH_STRATEGY/DONE
 
-        # === Section 7.0: Context Manager Integration ===
+        # === Section 8.2: Context Manager Integration ===
         # Initialize EventBus for context change notifications
         self._event_bus = EventBus()
 
@@ -868,7 +868,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self._event_compressed_token = self._event_bus.subscribe(CMEventType.CONTEXT_COMPRESSED, self._on_context_compressed)
         self._layer_promoted_token = self._event_bus.subscribe(CMEventType.LAYER_PROMOTED, self._on_layer_promoted)
 
-    # === Section 7.1.1: messages Property (Phase 2) ===
+    # === Section 8.2.1: messages Property (Phase 2) ===
     # Route all message access through DCPOptimizerCompat / MemoryManager
 
     @property
@@ -916,7 +916,7 @@ class DCPOptimizer(DCPOptimizerBase):
         """Proxy to compat tool_call_details (MemoryManager-backed). Read-only view."""
         return self._compat.tool_call_details
 
-    # === Section 7.2: Context Management ===
+    # === Section 8.3: Context Management ===
 
     def _estimate_context_length(self) -> int:
         """Rough estimate of current context length (character count proxy)"""
@@ -982,7 +982,7 @@ class DCPOptimizer(DCPOptimizerBase):
         complexity = base_score + iteration_factor + failure_factor + task_complexity_factor
         return int(min(complexity, 10))
 
-    # === Section 7.2.1: Context Manager Integration (Phase 1) ===
+    # === Section 8.3.1: State Sync & System Prompt Injection ===
 
     def _sync_state_to_memory_manager(self) -> None:
         """Sync DCPOptimizer state to MemoryManager for compression context."""
@@ -1017,19 +1017,31 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Update wns_ns in timing section
         if current_wns is not None:
+            before = system_content
             system_content = re.sub(
                 r'(wns_ns:\s*)[-+]?\d+\.?\d*',
                 f'\\g<1>{current_wns:.3f}',
                 system_content
             )
+            if before == system_content:
+                logger.warning(
+                    "WNS injection: wns_ns pattern did not match system prompt — WNS may be stale in LLM context",
+                    extra={"current_wns": current_wns, "iteration": self.iteration}
+                )
 
         # Update clock_period_ns in timing section
         if clock_period is not None:
+            before = system_content
             system_content = re.sub(
                 r'(clock_period_ns:\s*)[-+]?\d+\.?\d*',
                 f'\\g<1>{clock_period:.3f}',
                 system_content
             )
+            if before == system_content:
+                logger.warning(
+                    "WNS injection: clock_period_ns pattern did not match system prompt",
+                    extra={"clock_period": clock_period, "iteration": self.iteration}
+                )
 
         # Define known strategy catalog for remaining_strategies computation
         ALL_STRATEGIES = {"PBLOCK", "PhysOpt", "Fanout", "PlaceRoute", "CellPlacement", "IncrementalRoute"}
@@ -1156,6 +1168,8 @@ class DCPOptimizer(DCPOptimizerBase):
             previous_model_tier=self._get_previous_model_tier(),
             force_aggressive=force_aggressive
         )
+
+    # ---- Model Tier Inference & Fallback Management ----
 
     def _infer_model_tier(self, model_name: str) -> str:
         """Infer model tier from model name.
@@ -1303,6 +1317,8 @@ class DCPOptimizer(DCPOptimizerBase):
         config = MODEL_CONTEXT_CONFIGS.get(current_tier, WORKER_CONTEXT_CONFIG)
         return config, model_switched
 
+    # ---- Context Compression Engine ----
+
     def _compress_context(self):
         """Context compression with model-aware intelligent strategy.
 
@@ -1384,6 +1400,8 @@ class DCPOptimizer(DCPOptimizerBase):
         # Under threshold - record as skipped
         self.compression_skipped += 1
 
+    # ---- Console Exit Monitoring ----
+
     def _start_console_reader(self) -> None:
         """Start a background thread that listens for 'quit' on stdin to request graceful exit."""
         if self._console_reader_started:
@@ -1448,6 +1466,8 @@ class DCPOptimizer(DCPOptimizerBase):
 
         return response
 
+    # ---- Compression Event Handlers ----
+
     def _record_compression_event(self, trigger: str, tokens_before: int, tokens_after: int, iteration: int = 0) -> None:
         """Record structured compression event for observability.
 
@@ -1510,6 +1530,8 @@ class DCPOptimizer(DCPOptimizerBase):
         logger.info(
             f"[EventBus] LAYER_PROMOTED: layer={layer}, messages={message_count}"
         )
+
+    # ---- Tool Result Filtering & Summarization ----
 
     def _filter_tool_result(self, tool_name: str, result: str) -> str:
         """Retain key information based on tool type, truncate redundant content"""
@@ -1865,6 +1887,8 @@ class DCPOptimizer(DCPOptimizerBase):
 
         return '\n'.join(yaml_lines)
 
+    # ---- Complexity Estimation ----
+
     def _estimate_immediate_complexity(self, recent_messages: list) -> int:
         """
         Immediate complexity assessment: determine actual task complexity based on recent message content.
@@ -1922,6 +1946,8 @@ class DCPOptimizer(DCPOptimizerBase):
             complex_score += 5
 
         return complex_score >= 5
+
+    # ---- Iteration End & Handoff Prompt ----
 
     def _on_iteration_end(self, wns_improved: bool, model_used: str):
         """
@@ -2033,6 +2059,8 @@ class DCPOptimizer(DCPOptimizerBase):
                 self._strategy_sequence.append(strategy_label)
                 if len(self._strategy_sequence) > 20:
                     self._strategy_sequence.pop(0)
+
+    # ---- Summary & Analysis Builders ----
 
     def _format_narrative(self, max_entries: int = None) -> str:
         """Build progressive iteration summary from _iteration_narratives."""
@@ -2208,6 +2236,8 @@ class DCPOptimizer(DCPOptimizerBase):
 
         return result
 
+    # ---- Handoff Section Builders ----
+
     def _build_exit_reason_section(self) -> str:
         """Build human-readable exit reason for planner handoff context."""
         reason = self._is_done_reason or "unknown"
@@ -2352,6 +2382,8 @@ class DCPOptimizer(DCPOptimizerBase):
             f"DO NOT repeat the same strategy. DO NOT use DONE. DO NOT skip diagnosis.\n"
         )
 
+    # ---- Skill Recommendation ----
+
     def _build_skill_recommendation(self) -> str:
         """Analyze current state and recommend a strategy skill tool.
 
@@ -2458,6 +2490,8 @@ class DCPOptimizer(DCPOptimizerBase):
                 "recommended_tool": rec_tool,
             }
         )
+
+    # ---- Data-Driven Goal & Handoff Assembly ----
 
     def _build_data_driven_goal(self) -> str:
         """Build data-driven next goal from WNS trajectory and strategy effects."""
@@ -2660,6 +2694,8 @@ Exit: {exit_label}
 Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
 
+    # ---- Task Classification ----
+
     def classify_task(self, tool_name: str, arguments: dict = None) -> str:
         """Simplified: only distinguish OPTIMIZATION / INFORMATION / UNKNOWN"""
         if not tool_name:
@@ -2680,7 +2716,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         return TaskCategory.UNKNOWN
 
-    # === Section 7.3: Model Routing & Task Classification ===
+    # === Section 8.4: Model Routing & Task Classification ===
 
     def _is_trivial_task(self, task_type: str, context_complexity: int) -> bool:
         """
@@ -2899,7 +2935,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 if len(stats['failures']) > 10:
                     stats['failures'] = stats['failures'][-10:]
 
-    # === Section 7.4: Server & Tool Management ===
+    # === Section 8.5: Server & Tool Management ===
 
     async def start_servers(self):
         """Start and connect to both MCP servers."""
@@ -3000,6 +3036,15 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         start_time = time.time()
         wns_measured = None
         error_occurred = False
+
+        # Diagnostic log: capture analyze_net_detour pin_paths detail
+        if tool_name == "rapidwright_analyze_net_detour":
+            pin_paths = arguments.get("pin_paths", [])
+            threshold = arguments.get("detour_threshold", 2.0)
+            logger.info(
+                "[DIAG] analyze_net_detour args: pin_paths_len=%d, pin_paths_sample=%s, threshold=%.1f",
+                len(pin_paths), pin_paths[:5] if pin_paths else "EMPTY", threshold
+            )
 
         # Log MCP request with sanitized arguments
         sanitized_args = sanitize_payload(arguments)
@@ -3351,7 +3396,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         """Helper to call Vivado tools (for use with base class methods)."""
         return await self.call_tool(f"vivado_{tool_name}", arguments)
 
-    # === Section 7.5: Initial Design Analysis ===
+    # === Section 8.6: Initial Design Analysis ===
 
     async def perform_initial_analysis(self, input_dcp: Path) -> str:
         """
@@ -3606,7 +3651,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         return "---\n" + LightYAML.dump(data, trace_id=get_trace_id()) + "..."
 
-    # === Section 7.6: LLM Completion Loop ===
+    # === Section 8.7: LLM Completion Loop ===
 
     @staticmethod
     def _parse_text_tool_calls(content: str) -> list[dict]:
@@ -3821,6 +3866,47 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         return state
 
+    def _inject_yaml_format_error_feedback(self, parse_error: str) -> None:
+        """Inject corrective YAML format feedback into conversation for the LLM.
+
+        Called when _parse_step_yaml detects invalid YAML. The LLM sees the
+        specific error and a format reminder at the next API call.
+        """
+        feedback = (
+            "**YAML FORMAT ERROR DETECTED**\n\n"
+            "Your previous response contained an invalid `step:` YAML block:\n"
+            f"  {parse_error}\n\n"
+            "Reminder of the correct format (must appear in every response):\n"
+            "  step:\n"
+            "    step_id: <N>\n"
+            "    result_status: SUCCESS|PARTIAL|FAIL\n"
+            "    flow_control: CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK\n"
+            "    analysis:\n"
+            "      observed_signals:\n"
+            "        avg_distance: <float|null>\n"
+            "        max_fanout: <int|null>\n"
+            "        failing_endpoints: <int|null>\n"
+            "      scenario_match: <scenario_id|null>\n"
+            "      hypothesis: \"<string>\"\n"
+            "      strategy_rationale: \"<string>\"\n"
+            "    tool_calls:\n"
+            "      - function: <tool_name>\n"
+            "        parameters:\n"
+            "          key: value\n"
+            "\n"
+            "STRICTLY FORBIDDEN:\n"
+            "- XML/HTML tags\n"
+            "- Markdown code fences ``` around the YAML block\n"
+            "- Omitting the step: YAML block entirely\n"
+            "\n"
+            "Please correct the format in your next response."
+        )
+        self._compat.add_message("user", feedback)
+        logger.info(
+            "[FORMAT_FEEDBACK] Injected YAML format error feedback for LLM "
+            f"(parse_error={parse_error[:80]})"
+        )
+
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -3883,6 +3969,9 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 system_content = api_messages[0].get("content", "")
                 updated_content = self._inject_wns_state_to_system_prompt(system_content)
                 api_messages[0]["content"] = updated_content
+                # Sync latest WNS to SkillTelemetry for correlating skill executions with timing state
+                from skills.telemetry import SkillTelemetry
+                SkillTelemetry.set_current_wns(self.latest_wns)
 
             # Inject iteration handoff prompt or first-iteration starting context
             # Insert as standalone system message after primary system prompt for better attention weight
@@ -4093,6 +4182,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 )
             if step_state.parse_error:
                 logger.warning(f"[STEP_PARSE] YAML parse error: {step_state.parse_error}")
+                self._inject_yaml_format_error_feedback(step_state.parse_error)
 
             # Check flow_control BEFORE executing tools.
             # If termination signal (DONE/SWITCH_STRATEGY), skip tool execution
@@ -4389,7 +4479,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
             return content, is_done
 
-    # === Section 7.7: Optimization Workflow ===
+    # === Section 8.8: Optimization Workflow ===
 
     async def optimize(self, input_dcp: Path, output_dcp: Path) -> bool:
         """Run the optimization workflow."""
@@ -4672,7 +4762,7 @@ CRITICAL OPTIMIZATION RULES:
                     if snap:
                         self.best_wns = snap["best_wns"]
                         self._best_wns_iteration = snap["_best_wns_iteration"]
-                        self.latest_wns = snap["latest_wns"]
+                        self.latest_wns = self.best_wns  # best_wns reflects the rolled-back design state
                         self.latest_tns = snap["latest_tns"]
                         self.latest_failing_endpoints = snap["latest_failing_endpoints"]
                         self._best_wns_tns = snap["_best_wns_tns"]
@@ -4788,7 +4878,7 @@ CRITICAL OPTIMIZATION RULES:
         self._print_optimization_summary(max_iterations_reached=True)
         return False
 
-    # === Section 7.8: Reporting & Telemetry ===
+    # === Section 8.9: Reporting & Telemetry ===
 
     def save_token_usage_report(self, output_path: Path):
         """Save detailed token usage report to JSON file."""
@@ -5085,7 +5175,7 @@ CRITICAL OPTIMIZATION RULES:
             print(f"  Optimized DCP: {self.output_dcp}")
         print(f"  Run directory: {self.run_dir}")
 
-    # === Section 7.X: DCP Validation Helpers ===
+    # === Section 8.10: DCP Validation Helpers ===
 
     async def _rollback_to_best_checkpoint(self) -> bool:
         """Rollback to best known checkpoint with existence validation and WNS verification. Returns True on success."""
@@ -5203,7 +5293,7 @@ CRITICAL OPTIMIZATION RULES:
             return False
 
 
-# === Section 8: FPGAOptimizerTest — Deterministic Test Mode ===
+# === Section 9: FPGAOptimizerTest — Deterministic Test Mode ===
 
 class FPGAOptimizerTest(DCPOptimizerBase):
     """
@@ -6930,7 +7020,7 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
         await tester.cleanup()
 
 
-# === Section 9: Entry Point ===
+# === Section 10: Entry Point ===
 
 async def main():
     parser = argparse.ArgumentParser(

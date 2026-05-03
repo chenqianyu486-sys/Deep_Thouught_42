@@ -1680,10 +1680,14 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
         return {"error": "No design loaded. Use read_checkpoint first."}
 
     try:
+        logger.info("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f",
+                    len(pin_paths), _current_design is not None, detour_threshold)
+
         from skills import SkillRegistry, SkillContext
 
         skill = SkillRegistry.get("net_detour")
         if skill is None:
+            logger.warning("[DIAG] analyze_net_detour: skill 'net_detour' not found in registry")
             return {"error": "Skill 'net_detour' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
@@ -1707,12 +1711,15 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
                 "worst_sink_pin": res.worst_sink_pin
             }
 
-        return {
+        result_dict = {
             "status": "success",
             "cells_analyzed": len(results),
             "detour_threshold": detour_threshold,
             "results": results_dict
         }
+        logger.info("[DIAG] analyze_net_detour result: status=%s, cells_analyzed=%d",
+                    result_dict["status"], result_dict["cells_analyzed"])
+        return result_dict
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")

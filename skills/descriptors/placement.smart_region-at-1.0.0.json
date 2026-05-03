@@ -3,7 +3,7 @@
   "specVersion": "3.0",
   "id": "placement.smart_region@1.0.0",
   "displayName": "Smart Region Search",
-  "description": "Find optimal pblock region using greedy expansion from reference point. READ-ONLY. Input: target resource counts (LUT/FF/DSP/BRAM) and optional reference coordinates. Output: optimal rectangular region and pblock description in one call. Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns.",
+  "description": "Find optimal pblock region using sliding-window column search. READ-ONLY. Input: target resource counts (LUT/FF/DSP/BRAM) and optional reference coordinates. Output: optimal rectangular region with capacity diagnostics and multi-region split suggestions when single region is insufficient. Avoids delay-heavy columns and prioritizes minimal-width regions.",
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {

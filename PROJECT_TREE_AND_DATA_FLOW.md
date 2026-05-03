@@ -111,7 +111,7 @@ YAMLStructuredCompressor:
 ```
 API调用前 → _inject_wns_state_to_system_prompt()
     - 更新wns_ns、clock_period_ns
-    - 注入 current_tns、failing_endpoints（2026-05-01 新增）
+    - 注入 current_tns、failing_endpoints
     - 追加"Current Optimization State:"块（含 WNS/TNS/failing_endpoints/best_checkpoint/next_model）
     - 追加数据驱动scenario hint（avg_distance>70 → "distributed"场景 → PBLOCK推荐）
     - 追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）
@@ -134,8 +134,8 @@ API调用前 → _inject_wns_state_to_system_prompt()
 ### 2.5 模型选择
 
 ```
-PLANNER: openrouter/owl-alpha (1M context, 复杂推理)
-WORKER: tencent/hy3-preview:free (250K context, 快速执行)
+PLANNER: deepseek/deepseek-v4-pro (1M context, 复杂推理)
+WORKER: deepseek/deepseek-v4-flash (250K context, 快速执行)
 - 429降级: 按层级fallback列表，轮询+耗尽追踪
 - 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
 - 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
@@ -207,11 +207,9 @@ Skill 超时映射（三层）:
 | smart_region | **60000** (1min) | 60000 / 120000 | 60.0 |
 | pblock_strategy | **60000** (1min) | 60000 / 120000 | 60.0 |
 | net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
-| physopt_strategy | **360000** (6min) ⚠️ | 30000 / 60000 | 360.0 |
+| physopt_strategy | 360000 (6min) | 360000 / 720000 | 360.0 |
 | fanout_strategy | 300000 (5min) | 300000 / 600000 | 300.0 * nets |
-| optimize_cell | **60000** (1min) ⚠️ | 360000 / 420000 | 360.0 |
-
-⚠️ physopt_strategy 和 optimize_cell 的 @skill decorator timeout_ms 与 JSON descriptor 不一致，疑似遗留值。
+| optimize_cell | 60000 (1min) | 60000 / 120000 | 360.0 |
 
 三层超时的作用域:
 1. **@skill decorator** — 技能框架内部心跳检测阈值（skills/*.py）
@@ -229,12 +227,15 @@ Skill 超时映射（三层）:
 │   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
 │   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+write_checkpoint, 返回优化结果(LLM自行调Vivado工具串)
 
-Skill 推荐机制 (_build_skill_recommendation()):
-├── avg_distance > 70 AND PBLOCK not failed  → rapidwright_analyze_pblock_region
-├── max_fanout > 100 AND Fanout not failed   → rapidwright_execute_fanout_strategy
-├── no_improvement >=2 + physopt tried       → rapidwright_analyze_net_detour（分析型）
-├── WNS > -2.0 AND PhysOpt not failed        → rapidwright_execute_physopt_strategy
-└── 以上均不匹配                               → 空（不推荐）
+Skill 推荐机制 (`_build_skill_recommendation()`, 6 条件按优先级排列):
+├── stagnation (no_improvement>=1) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
+├── stagnation + Fanout not failed                    → rapidwright_execute_fanout_strategy [诊断]
+├── stagnation + 都失败                                → rapidwright_analyze_net_detour [诊断]
+├── avg_distance > 70 + PBLOCK not failed             → rapidwright_analyze_pblock_region
+├── max_fanout > 100 + Fanout not failed              → rapidwright_execute_fanout_strategy
+├── no_improvement>=2 + physopt tried                 → rapidwright_analyze_net_detour（分析型）
+├── WNS > -2.0 + PhysOpt not failed                   → rapidwright_execute_physopt_strategy
+└── 以上均不匹配                                        → 空（不推荐）
 
 Skill 推荐注入点:
 ├── _build_data_driven_goal() → 追加在NEXT OPTIMIZATION GOAL末尾
@@ -280,22 +281,20 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 
 ## 4. 配置（model_config.yaml）
 
-> **注意**: YAML文件中的值与compress.py中硬编码的token_budget不一致。实际生效值以compress.py为准（worker=35K, planner=100K），YAML中的token_budget为80K/80K。
-
 ```yaml
 # Worker: 速度优化, 250K max
 worker:
   soft_threshold: 175K, hard_limit: 200K
-  token_budget: 35K (compress.py硬编码), YAML中为80K
+  token_budget: 80K
   preserve_turns: 40, preserve_turns_aggressive: 10
   min_importance: 0.15, min_importance_aggressive: 0.7
   preserve_role_turns: 6
-  fallback_models: ["deepseek/deepseek-v4-flash", "xiaomi/mimo-v2-flash"]
+  fallback_models: ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
 
 # Planner: 推理优化, 1M max
 planner:
   soft_threshold: 200K, hard_limit: 300K
-  token_budget: 100K (compress.py硬编码), YAML中为80K
+  token_budget: 80K
   preserve_turns: 60, preserve_turns_aggressive: 10
   min_importance: 0.1, min_importance_aggressive: 0.7
   preserve_role_turns: 6
@@ -305,18 +304,18 @@ planner:
 ## 5. 迭代控制
 
 ```python
-MAX_TOOL_ROUNDS_PER_ITERATION = 50
+MAX_TOOL_ROUNDS_PER_ITERATION = 80
 GLOBAL_NO_IMPROVEMENT_LIMIT = 3
 WNS_TARGET_THRESHOLD = 0.0  # 0.0ns = 时序收敛
 
 迭代流程:
 1. get_completion() → LLM tool-calling 循环
 2. checkpoint 保存 + get_wns 确认 WNS → 更新 best_wns/latest_tns/latest_failing_endpoints
-3. [FIX] 计算 wns_improved → _on_iteration_end() → _prev_best_wns (在 checkpoint 确认后)
+3. 计算 wns_improved → _on_iteration_end() → _prev_best_wns (在 checkpoint 确认后)
 4. 中间验证 (每 N 迭代)
 5. 下一迭代
 
-继续条件: iteration<50 AND WNS<0 AND global_no_improvement<3 AND tool_rounds<=22
+继续条件: iteration<50 AND WNS<0 AND global_no_improvement<3 AND tool_rounds<=MAX_TOOL_ROUNDS_PER_ITERATION
          AND checkpoint保存成功 AND get_wns返回有效值
 
 WNS回归处理: WNS<0且差于best时自动回滚
@@ -326,170 +325,101 @@ WNS回归处理: WNS<0且差于best时自动回滚
 ### 5.1 迭代边界模型切换
 
 **机制**:
-- `_on_iteration_end()` 时调用 `_select_model()` 决定下一迭代使用的模型
-- 预定的模型存入 `self._next_iteration_model`
+- `_on_iteration_end()` 时调用 `_select_model()` 决定下一迭代模型，存入 `_next_iteration_model`
 - 下一迭代 `get_completion()` 开头直接使用预定模型，不再重新选择
-- 交接提示词（`_iteration_handoff_prompt`）在迭代结束时生成，模型分层专属
+- 交接提示词迭代结束时生成，模型分层专属
 
-**交接提示词（上下文工程优化）**:
-- `_generate_iteration_handoff_prompt()` → 分发器，根据 next_tier 调用对应生成器
-- `_generate_planner_handoff()`: Planner (1M context) → 完整迭代轨迹 + 策略分析 + 数据驱动目标 + 退出原因 + 续接指令（~500-800 tokens）
-- `_generate_worker_handoff()`: Worker (250K context) → 最近3迭代浓缩 + 续接指令 + 退出标签（~200-300 tokens）
-- **Planner handoff 结构**:
-  - `=== EXIT REASON ===`: 上一轮退出原因（Tool Round Limit / Premature DONE / Cost Limit / Strategy Switch）+ 当前 WNS
-  - `=== CONTINUATION DIRECTIVE ===`: 显式续接指令（"不要从头重启，从中断处继续"）+ 中断策略详情
-  - `=== ITERATION TRAJECTORY ===`: 完整迭代轨迹
-  - `=== NEXT OPTIMIZATION GOAL ===`: 含 continuation 前缀的数据驱动目标（WNS未收敛时追加skill推荐）
-  - `=== RECOMMENDED SKILL ===`: 基于 spread/fanout/WNS轨迹 推荐的具体skill工具名
-- **Worker handoff 结构**:
-  - `=== CONTINUATION ===`: 单行续接指令 + Exit 标签
-  - `=== RECENT TRAJECTORY (last 3) ===`: 最近 3 次迭代浓缩
-- 策略中断检测: `_detect_unfinished_strategy()` 分析上一轮 tool call，判断策略是否被 tool_round_limit / premature DONE 中断（检查最后 2 步是否有 report_timing_summary），信息注入 handoff 和 goal 前缀
-- 首次迭代上下文: 无 handoff 时自动注入 `**FIRST ITERATION** - Begin with initial design analysis...` 提示模型先分析再优化
-- Handoff 注入方式: 插入为独立 system message（index=1），而非 prepend 到 user message
-- 渐进式叙事: `_iteration_narratives[]` 记录每个迭代的结构化摘要（iteration, model, wns_delta, strategy_label, outcome），最多 20 条
-- 工具效果标注: `_build_tool_effect_summary()` → 工具名 + WNS 变化量（最近 8 条）
-- 失败策略标注: `_build_failed_strategy_summary()` → 策略名 + 失败迭代号 + 当时 WNS（最近 5 条）
-- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果生成目标，若检测到策略中断则在目标前拼接 `[CONTINUATION]` 前缀
-- WNS 状态单点注入: `_inject_wns_state_to_system_prompt()` 为唯一真源，handoff 引用之（消除字段重复）
-- `next_model` 注入到 "Current Optimization State" section
-- SYSTEM_PROMPT.TXT 新增 `iteration_handoff` 指导节，解释 handoff section 含义及续接规则
+**交接提示词**:
+- **Planner** (~500-800 tokens): `EXIT REASON` → `CONTINUATION DIRECTIVE` → `ITERATION TRAJECTORY` → `NEXT OPTIMIZATION GOAL` → `RECOMMENDED SKILL`
+- **Worker** (~200-300 tokens): `CONTINUATION` → `RECENT TRAJECTORY (last 3)`
+- 策略中断检测: `_detect_unfinished_strategy()` 检查最后 2 步是否有 report_timing_summary
+- 首次迭代: 注入 `**FIRST ITERATION** - Begin with initial design analysis...`
+- Handoff 注入: 独立 system message（index=1）
+- 辅助数据: `_iteration_narratives[]`（最多 20 条）、`_build_tool_effect_summary()`（最近 8 条）、`_build_failed_strategy_summary()`（最近 5 条）
+- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果
 
-**限制迭代内切换**:
-- 只有首次迭代或 fallback 场景才允许迭代内模型重新选择
-- 预定模型场景下，迭代内任务类别变化不会触发模型切换
+**限制迭代内切换**: 仅首次迭代或 fallback 场景允许迭代内模型重新选择。
 
-### 5.2 WNS解析修复（Bug Fix）
+### 5.2 WNS解析
 
-**问题**: `report_timing_summary` 在 `phys_opt_design` 后执行时，输出缓冲区包含前一个命令的残留内容（许可证消息、命令回显等），导致 `parse_timing_summary_static()` 无法找到 `WNS(ns) TNS(ns)` 头，行返回 `None`。
+`parse_timing_summary_static()` 会跳过许可证消息、命令回显和 info/warning 消息，在整个输出中搜索时序头，而非假设在开头。
 
-**修复**: `parse_timing_summary_static()` 增强了跳过非时序行的逻辑：
-- 跳过许可证消息 (`Attempting to get a license`, `Got license`)
-- 跳过 info/warning/error 消息 (`INFO:`, `WARNING:`, `ERROR:`, `Common 17-`)
-- 跳过命令回显 (`Command:`, `phys_opt_design`, `place_design`, `route_design`, `report_`)
-- 在整个输出中搜索时序头，而非假设在开头
+### 5.3 flow_control 信号处理
 
-### 5.3 flow_control=DONE 信号处理（Bug Fix）
-
-**问题**: LLM 返回 `action: DONE` 或 `flow_control: DONE` 时，系统只解析 `tool_calls:` 字段，忽略 YAML 中的 `action`/`flow_control` 字段。导致系统继续在同一迭代内循环调用 LLM，产生垃圾输出。
-
-**语义澄清**:
-- `flow_control: DONE` ≠ 退出信号
-- `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化
-- `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽，系统强制执行迭代切换，注入分析引导（含skill推荐）+ 强制下一轮先分析再选策略
+**语义定义**:
+- `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化（非退出信号）
+- `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽，系统强制执行迭代切换，注入分析引导 + skill推荐 + 强制下一轮先分析再选策略
 - `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换
-- 真正退出条件 = 达到目标 fmax（WNS >= 0）
+- 真正退出条件 = WNS >= 0
 
-**修复**: `get_completion()` 中新增 `_parse_action_from_yaml()` 解析 `action`/`flow_control`：
-- 解析方式与 `_parse_yaml_tool_calls()` 相同（block 分割 + yaml.safe_load）
-- 检测到 `flow_control == "DONE"` 或 `action == "DONE"` 时：
-  - 目标 fmax 已达成（WNS >= 0）→ `is_done=True`，退出优化
-  - 目标未达成 → 设置 `_end_iteration_on_return=True`，退出 `get_completion()`，主循环进入下一迭代
-- 不再在同一迭代内空转调用 LLM
+**行为矩阵**:
+| 场景 | 行为 |
+|------|------|
+| `flow_control: DONE`，WNS=-0.538 | 进入下一迭代 |
+| `flow_control: DONE`，WNS>=0 | 退出优化 |
+| 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理） |
+| `flow_control: SWITCH_STRATEGY` | 强制结束迭代 + 记录策略失败 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
+| 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
-**关键行为变化**:
-| 场景 | 修复前 | 修复后 |
-|------|--------|--------|
-| LLM 返回 `flow_control: DONE`，WNS=-0.538 | 继续在同一迭代内空转，产生垃圾输出 | 正确识别为迭代完成，进入下一迭代 |
-| LLM 返回 `flow_control: DONE`，WNS>=0 | 继续空转 | 正确退出优化 |
-| LLM 返回无 tool_calls，无 DONE 信号 | continue 回循环 | 沿用原有逻辑 |
-| LLM 返回 `flow_control: SWITCH_STRATEGY` | 与CONTINUE同处理，继续循环 | 强制结束迭代 + 记录当前策略为失败 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
-| LLM 连续调用 physopt 无改进 | 继续循环调用physopt | 降级推荐 analyze_net_detour 诊断绕路问题 |
+### 5.4 DONE 优化补丁
 
-### 5.4 flow_control=DONE 优化补丁（2026-05-01）
-
-**问题 1: WNS 改善判定时序错误**
-- `_on_iteration_end()` 和 `_prev_best_wns` 在 checkpoint/get_wns 之前执行，导致 `global_no_improvement` 可能使用 stale WNS 错误递增
-- **修复**: 将 `_on_iteration_end()` 和 `_prev_best_wns` 移到 checkpoint/get_wns 成功之后，确保 counter、model selection、handoff prompt 都使用确认后的 WNS
-
-**问题 2: get_completion() break→None 返回**
-- `user_requested`、`tool_round_limit`、`cost_limit` 等路径使用 `break` 退出 while 循环，导致 `get_completion()` 隐式返回 None
-- `optimize()` 将 None 统一当 `tool_round_limit` 处理，`cost_limit` 的真实原因丢失
-- **修复**: 所有 `break` 改为 `return content, is_done`，确保退出原因正确传递
-- `_is_done_reason` 覆盖添加 `if self._is_done_reason is None:` guard
-
-**问题 4: LLM 过早声明 DONE**
-- System Prompt 定义 `DONE: "Optimization complete"` 但系统实际将 WNS<0 时的 DONE 诠释为"迭代结束"——语义不匹配
-- TNS 和 failing_endpoints 未注入 Context，LLM 缺少对问题规模的全局感知
-- **修复**:
-  - `SYSTEM_PROMPT.TXT`: DONE 语义收紧为 `WNS >= 0 achieved`；新增 `flow_control_rules` 显式规则；新增 `strategy_exhausted` 示例（用 SWITCH_STRATEGY 替代 DONE）
-  - `_inject_wns_state_to_system_prompt()`: 注入 `current_tns` 和 `failing_endpoints` 到 Current Optimization State
-  - 新增 `latest_tns`、`latest_failing_endpoints` 实时追踪（auto-eval + report_timing_summary）
-  - `optimize()`: 检测到 `flow_control_done_next_iteration` 时注入 corrective feedback user message，告知下一 LLM "上轮过早 DONE，优化未完成"
+关键修复：
+- **WNS 改善判定时序**: `_on_iteration_end()` 和 `_prev_best_wns` 移到 checkpoint/get_wns 成功之后执行，确保 counter、model selection、handoff prompt 都使用确认后的 WNS
+- **退出原因传递**: 所有 `break` 改为 `return content, is_done`，确保 `cost_limit` 等退出原因正确传递
+- **LLM 过早 DONE 抑制**: SYSTEM_PROMPT 中 DONE 语义收紧为 `WNS >= 0 achieved`；注入 `current_tns` 和 `failing_endpoints` 让 LLM 感知问题规模
 
 **新增状态变量**:
-- `latest_tns: Optional[float]` — 最新 TNS（从 timing report / auto-eval 获取）
+- `latest_tns: Optional[float]` — 最新 TNS
 - `latest_failing_endpoints: Optional[int]` — 最新失败端点计数
 
-### 5.5 Step YAML 状态追踪（2026-05-02 新增）
+### 5.5 Step YAML 状态追踪
 
-**问题**：LLM 使用原生 tool calls 时，只返回工具调用，不返回 `step:` YAML 块中的状态控制数据（`step_id`, `result_status`, `flow_control`, `analysis`）。只有纯文本响应（无 tool_calls）才会进入 `_parse_action_from_yaml()` 解析 flow_control。
+每轮 LLM 响应到达后，先解析 content 中的 step YAML，flow_control 优先于工具执行。
 
-**修复**：三处改动：
-
-1. **新增 `StepState` dataclass** + `_parse_step_yaml()` 统一解析器
-2. **每轮都解析 step YAML**：无论是否有 tool_calls，先解析 content 中的 step YAML
-3. **flow_control 先于工具执行检查**：若 flow_control 是 DONE/SWITCH_STRATEGY，跳过工具执行
-
-**新流程**：
+**流程**：
 ```
 LLM response arrives
   ↓
-1. _parse_step_yaml(message.content)  →  StepState
-2. Log [STEP_STATE] (step_id, result_status, flow_control, scenario_match, hypothesis)
-3. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
-   → 警告矛盾信号（若同时有 tool_calls），跳过工具执行
-   → 跳转到 flow_control 处理
-   否则如果有 tool_calls
+1. _parse_step_yaml(message.content) → StepState
+2. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
+   → 跳过工具执行（即使同时有 tool_calls），跳转到 flow_control 处理
+   else if tool_calls
    → 正常执行工具
-   否则（纯文本）
-   → 现有纯文本处理逻辑（不变）
-4. flow_control 分支使用已解析的 StepState（回退 _parse_action_from_yaml）
-5. DONE/SWITCH_STRATEGY 时将 analysis 存入 _last_analysis
+   else （纯文本）
+   → 现有纯文本处理逻辑
+3. DONE/SWITCH_STRATEGY 时将 analysis 存入 _last_analysis
 ```
 
-**新增数据结构**：
+**StepState 数据结构**：
 ```python
 @dataclass
 class StepState:
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
     flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
-    analysis: dict = field(default_factory=dict)  # observed_signals, scenario_match, hypothesis, strategy_rationale
+    analysis: dict = field(default_factory=dict)
     has_tool_calls: bool = False
     raw_content: str = ""
     parse_error: Optional[str] = None
 ```
 
-**实例变量**：
-- `self._step_state: Optional[StepState]` — 最近一次解析的 step state
-- `self._last_analysis: dict` — 最近一次 DONE/SWITCH_STRATEGY 的 analysis
+**增强内容**: 迭代叙事新增 `result_status` 和 `scenario_match`；Planner handoff 新增 `=== LLM'S OWN ANALYSIS ===` 段。
 
-**迭代叙事增强**：`_append_iteration_narrative()` 新增字段：
-- `result_status`: step state 中的 result_status
-- `scenario_match`: step state 中的 scenario_match
+**边界情况**: content=None + tool_calls → 空 StepState；DONE + tool_calls → flow_control 优先；旧模型不输出 YAML → 回退 `_parse_action_from_yaml`。
 
-**Handoff 增强**：`_generate_planner_handoff()` 新增 `=== LLM'S OWN ANALYSIS ===` 段，包含 LLM 自身的 scenario_match、hypothesis、strategy_rationale、observed_signals。
+### 5.6 失败策略追踪
 
-**边界情况处理**：
-- `content=None + tool_calls` → 空 StepState，正常执行工具
-- 矛盾信号（DONE + tool_calls）→ 打印警告，flow_control 优先，不执行工具
-- 旧模型不输出 YAML → 空 StepState，回退到 `_parse_action_from_yaml`
-- 多轮工具调用 → 每轮都解析 step YAML，step_id 可用于追踪轮次
-
-### 5.6 失败策略追踪增强（2026-05-02 新增）
-
-**新增 `record_failure()` 调用点**（共 8 处触发点）：
+`record_failure()` 的 8 个触发点：
 
 | 触发点 | 记录的策略 | 条件 |
 |--------|-----------|------|
 | SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
-| 工具调用超时 | 工具所属策略 | 工具超时（dcp_optimizer.py:3146） |
-| 工具调用异常 | 工具所属策略 | 工具执行抛出异常（dcp_optimizer.py:3204） |
-| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字（dcp_optimizer.py:4062） |
-| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed（dcp_optimizer.py:4073） |
-| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval（dcp_optimizer.py:2164） |
-| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败（非超时，dcp_optimizer.py:4453） |
+| 工具调用超时 | 工具所属策略 | 工具超时 |
+| 工具调用异常 | 工具所属策略 | 工具执行抛出异常 |
+| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字 |
+| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed |
+| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval |
+| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败 |
 | 策略中断检测 | PBLOCK/Fanout | `_detect_unfinished_strategy()` 检测到验证缺失 |
 
 **`failed_strategies` 的使用**：
@@ -497,22 +427,18 @@ class StepState:
 - `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩，不受迭代年龄限制
 - `_is_failed_strategy_tool_result()`: 按工具名模式匹配（PBLOCK→pblock, PhysOpt→phys_opt, Fanout→fanout/optimize_fanout, PlaceRoute→place_design/route_design）
 
-### 5.7 step: YAML 格式要求双重注入（2026-05-03 新增）
+### 5.7 step: YAML 格式要求双重注入
 
-**问题**：`_inject_format_requirement_to_system_prompt()` 将 FORMAT_GUARD 预置到 system prompt 开头，但长上下文（~94K tokens）中该指令容易被淹没。
-
-**方案**：双重注入，兼顾注意力权重与位置近端性：
+双重注入策略，兼顾注意力权重与位置近端性：
 
 **注入 1 — User Message（一次性，会话起始）**
 ```
 optimize() 中:
-1. system_prompt  →  system prompt（不含 FORMAT_GUARD）
-2. user(FORMAT_GUARD)  ← 新增：完整的 YAML 格式定义
+1. system_prompt → system prompt
+2. user(FORMAT_GUARD)  ← 完整的 YAML 格式定义
 3. user(initial_optimization_instructions)
 ```
-- User role 消息的注意力权重大于 System role 内容
-- 只需注入一次，不需要重复
-- 代码位置: [dcp_optimizer.py:4325-4353](dcp_optimizer.py#L4325-L4353)
+User role 消息注意力权重大于 System role，只需注入一次。
 
 **注入 2 — System Reminder（每 LLM API 调用前）**
 ```
@@ -520,16 +446,9 @@ get_completion() 中:
 messages 末尾追加:
   {"role": "system", "content": "REMINDER: Your response MUST contain a 'step:' YAML block ..."}
 ```
-- 极简内容（<10 tokens），几乎不增加成本
-- 始终在 messages 最后一条，贴近模型生成点
-- 压缩删掉也没关系——下次调用前会重新注入
-- 代码位置: [dcp_optimizer.py:3786](dcp_optimizer.py#L3786)
+极简内容（<10 tokens），始终在 messages 最后一条，贴近模型生成点。
 
-**清理**：
-- 删除了 `_inject_format_requirement_to_system_prompt()` 方法
-- `_inject_wns_state_to_system_prompt()` 不再注入格式要求
-
-**2026-05-03 更新**：放宽格式约束。原规则要求"每条 response 必须以 `step:` 开头"，改为"response 中必须包含一个 `step:` YAML 控制块"。允许在 `step:` 块之前输出自然语言思维链推理，降低 LLM 因格式约束而产生的认知负担。解析代码（`_parse_step_yaml` 等）已支持从文本中任意位置提取最后一个 `step:` 块。
+**格式约束**: response 中必须包含一个 `step:` YAML 控制块（允许在 `step:` 块之前输出自然语言思维链推理）。解析代码已支持从文本中任意位置提取最后一个 `step:` 块。
 
 ## 6. 429降级机制
 
@@ -561,7 +480,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 | `cost_limit` | 达到$1.00硬限制 |
 | `wns_target_met` | WNS>=0.0（时序收敛） |
 | `max_iterations_reached` | 3次迭代无改进 |
-| `tool_round_limit` | 22轮工具调用达限 |
+| `tool_round_limit` | MAX_TOOL_ROUNDS_PER_ITERATION 轮工具调用达限 |
 | `user_requested` | 用户输入quit |
 | `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |
 | `switch_strategy` | LLM返回SWITCH_STRATEGY，系统强制执行迭代切换，下一轮分析后选新策略 |
@@ -594,8 +513,8 @@ tool call 入口:
 ## 12. 重要常量
 
 ```python
-WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 35K
-PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 100K
+WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
+PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
 COST_HARD_LIMIT = $1.00 (planner+worker合计)
 ```
 
@@ -644,7 +563,7 @@ FIFO 淘汰（最多 50 条）。仅当 LLM 调 `vivado_get_raw_tool_output` 时
 - 旧格式: 正则提取 WNS + 首行截断
 - 放在 timing report 压缩之后，系统消息分离之前
 
-**5. 压缩后角色保留** (yaml_structured_compress.py, 2026-05-02 新增)
+**5. 压缩后角色保留** (yaml_structured_compress.py)
 
 `preserve_role_turns=6`: 压缩后最近6条消息不进入YAML，而是保留原始API role：
 ```python

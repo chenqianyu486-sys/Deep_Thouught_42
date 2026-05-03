@@ -3,7 +3,7 @@
   "specVersion": "3.0",
   "id": "optimization.pblock_strategy@1.0.0",
   "displayName": "PBLOCK Region Analysis",
-  "description": "Analyze FPGA fabric to find optimal PBLOCK region for re-placement. READ-ONLY analysis. Returns region coordinates, pblock_ranges string, and estimated resources. Use the returned pblock_ranges to call Vivado tools (create_and_apply_pblock, place_design, route_design) yourself. Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
+  "description": "Analyze FPGA fabric to find optimal PBLOCK region for re-placement. READ-ONLY analysis. Returns region coordinates, pblock_ranges string, estimated resources, capacity validation (capacity_ok), deficit, advice, and next_steps (ONLY when capacity is sufficient). Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {
