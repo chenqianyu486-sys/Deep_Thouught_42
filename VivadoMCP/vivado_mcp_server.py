@@ -1668,22 +1668,27 @@ async def call_tool(name: str, arguments: dict):
             timeout = arguments.get("timeout", 60)
             wns_value = "PARSE_ERROR"
 
-            # Direct get_property call avoids large timing report output that
-            # can cause pexpect buffer issues and output cross-contamination
+            # Use report_timing instead of get_property WNS for cross-version reliability.
+            # get_property WNS [current_design] returns empty string when DCP was created
+            # by a different Vivado version (e.g., 2023.2 DCP opened in 2025.1), but
+            # report_timing always recomputes timing analysis from the routed design.
             output = run_tcl_command(
-                "puts [get_property WNS [current_design]]",
+                "report_timing -max_paths 1 -nworst 1 -return_string",
                 timeout=timeout
             )
             raw = output.strip()
             if raw:
-                try:
-                    parsed = float(raw)
+                import re
+                # Parse: "Slack (VIOLATED) :        -0.446ns  (required time - arrival time)"
+                slack_match = re.search(r'Slack\s+\((?:VIOLATED|MET)\)\s*:\s*(-?\d+\.?\d*)', raw)
+                if slack_match:
+                    parsed = float(slack_match.group(1))
                     if parsed == 0.0:
                         parsed = abs(parsed)
                     wns_value = str(parsed)
-                    logger.info(f"get_wns: parsed WNS={wns_value}")
-                except ValueError:
-                    logger.warning(f"get_wns: cannot parse WNS from output: {raw}")
+                    logger.info(f"get_wns: parsed WNS={wns_value} (from report_timing)")
+                else:
+                    logger.warning(f"get_wns: cannot parse Slack from report_timing output: {raw[:200]}")
 
             return [TextContent(type="text", text=wns_value)]
         
