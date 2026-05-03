@@ -18,6 +18,73 @@ from skills.skill_decorator import skill
 logger = logging.getLogger(__name__)
 
 
+def _build_deficit(estimated: dict, required_lut: int, required_ff: int) -> dict:
+    """Compute resource deficit (positive = shortfall)."""
+    return {
+        "luts": max(0, required_lut - estimated.get("luts", 0)),
+        "ffs": max(0, required_ff - estimated.get("ffs", 0)),
+        "dsps": max(0, 0),  # DSP/BRAM not primary gating
+        "brams": max(0, 0),
+    }
+
+
+def _build_advice_insufficient(deficit: dict, full_device: dict,
+                                required_lut: int, required_ff: int,
+                                resource_multiplier: float,
+                                multi_region: list | None = None) -> list[str]:
+    """Build advice array for insufficient capacity scenario."""
+    advice = []
+    lut_def = deficit.get("luts", 0)
+    ff_def = deficit.get("ffs", 0)
+
+    if resource_multiplier > 1.0:
+        advice.append(
+            f"Resource multiplier is {resource_multiplier}x — consider reducing it "
+            f"(e.g., 1.0x-1.2x) to lower the required resource target."
+        )
+
+    if lut_def > 0 or ff_def > 0:
+        advice.append(
+            f"Target resource exceeds region capacity by LUTs={lut_def:,}, FFs={ff_def:,}. "
+            f"Consider reducing target_lut_count / target_ff_count to match available resources."
+        )
+
+    full_luts = full_device.get("luts", 0)
+    full_ffs = full_device.get("ffs", 0)
+    if required_lut > full_luts or required_ff > full_ffs:
+        advice.append(
+            f"Required resources (LUTs={required_lut:,}, FFs={required_ff:,}) exceed "
+            f"entire device capacity (LUTs={full_luts:,}, FFs={full_ffs:,}). "
+            f"Consider upgrading to a larger device or splitting the design across multiple FPGAs."
+        )
+    else:
+        advice.append(
+            "Consider allowing cross-clock-region placement (non-contiguous region), "
+            "splitting the design into multiple pblocks, or relaxing timing constraints "
+            "to allow a wider placement spread."
+        )
+
+    if multi_region:
+        advice.append(
+            f"Multi-region split: {len(multi_region)} pblock groups suggested. "
+            f"See multi_region_suggestions for column assignments and per-group targets."
+        )
+
+    advice.append(
+        "If you continue with an undersized pblock, Vivado place_design will likely "
+        "fail with resource errors or produce unroutable results."
+    )
+    return advice
+
+
+def _build_advice_sufficient() -> list[str]:
+    """Build advice array for sufficient capacity scenario."""
+    return [
+        "Region capacity is sufficient for the target resources. "
+        "You can safely proceed with pblock creation and placement."
+    ]
+
+
 def generate_pblock_plan(
     design,
     target_lut_count: int,
@@ -26,7 +93,7 @@ def generate_pblock_plan(
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
 ) -> dict:
-    """Analyze FPGA fabric to find optimal PBLOCK region.
+    """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating.
 
     Args:
         design: RapidWright Design object
@@ -37,7 +104,9 @@ def generate_pblock_plan(
         resource_multiplier: Buffer multiplier for resource targets (default 1.5x)
 
     Returns:
-        Dict with status, region, pblock_ranges, estimated_resources, next_steps
+        Dict with status, region, pblock_ranges, estimated_resources,
+        target_resources, capacity_ok, deficit, advice, multi_region_suggestions,
+        next_steps. next_steps is non-null ONLY when capacity_ok == true.
     """
     if design is None:
         logger.warning("generate_pblock_plan: design is None")
@@ -50,8 +119,11 @@ def generate_pblock_plan(
     if target_lut_count <= 0 or target_ff_count <= 0:
         return {
             "status": "skipped",
-            "message": f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} (must be positive). "
-                       f"Run report_utilization_for_pblock first to get actual resource counts.",
+            "message": (
+                f"Invalid resource targets: LUT={target_lut_count}, FF={target_ff_count} "
+                f"(must be positive). Run report_utilization_for_pblock first to get "
+                f"actual resource counts."
+            ),
             "target_resources": {
                 "luts": target_lut_count,
                 "ffs": target_ff_count,
@@ -61,22 +133,29 @@ def generate_pblock_plan(
         }
 
     # Apply resource multiplier
-    adjusted_lut = int(target_lut_count * resource_multiplier)
-    adjusted_ff = int(target_ff_count * resource_multiplier)
-    adjusted_dsp = int(target_dsp_count * resource_multiplier)
-    adjusted_bram = int(target_bram_count * resource_multiplier)
+    required_lut = int(target_lut_count * resource_multiplier)
+    required_ff = int(target_ff_count * resource_multiplier)
+    required_dsp = int(target_dsp_count * resource_multiplier)
+    required_bram = int(target_bram_count * resource_multiplier)
 
-    # Step 1: Call smart_region_search for optimal pblock region
+    logger.info(
+        "analyze_pblock_region: target LUT=%d FF=%d DSP=%d BRAM=%d | "
+        "multiplier=%.1fx | required LUT=%d FF=%d DSP=%d BRAM=%d",
+        target_lut_count, target_ff_count, target_dsp_count, target_bram_count,
+        resource_multiplier, required_lut, required_ff, required_dsp, required_bram,
+    )
+
+    # Step 1: smart_region_search (sliding-window algorithm, O(N) fast)
     region_result = None
     region_error = None
     try:
         from skills.smart_region_search import smart_region_search
         region_result = smart_region_search(
             design,
-            target_lut_count=adjusted_lut,
-            target_ff_count=adjusted_ff,
-            target_dsp_count=adjusted_dsp,
-            target_bram_count=adjusted_bram,
+            target_lut_count=required_lut,
+            target_ff_count=required_ff,
+            target_dsp_count=required_dsp,
+            target_bram_count=required_bram,
         )
     except Exception as e:
         region_error = str(e)
@@ -87,66 +166,199 @@ def generate_pblock_plan(
             "message": f"Smart region search failed: {region_error or 'unknown error'}",
             "error_details": region_error,
             "target_resources": {
-                "luts": target_lut_count, "ffs": target_ff_count,
-                "dsps": target_dsp_count, "brams": target_bram_count,
+                "luts": required_lut, "ffs": required_ff,
+                "dsps": required_dsp, "brams": required_bram,
             },
             "resource_multiplier": resource_multiplier,
         }
 
-    if region_result.status != "success":
-        return {
-            "status": "error",
-            "message": f"Region search did not succeed: {region_result.message}",
-            "error_details": region_result.message,
-            "target_resources": {
-                "luts": adjusted_lut, "ffs": adjusted_ff,
-                "dsps": adjusted_dsp, "brams": adjusted_bram,
-            },
-            "region_status": region_result.status,
-        }
-
+    # Step 2: Extract region — use smart_region_search's own capacity assessment
+    region = {
+        "col_min": region_result.col_min,
+        "col_max": region_result.col_max,
+        "row_min": region_result.row_min,
+        "row_max": region_result.row_max,
+        "center_col": region_result.center_col,
+        "center_row": region_result.center_row,
+        "columns_used": region_result.columns_used,
+        "rows_used": region_result.rows_used,
+    }
+    pblock_ranges = region_result.pblock_ranges
     pblock_name = "pblock_tight"
 
-    return {
-        "status": "success",
-        "message": (f"PBLOCK region found: cols {region_result.col_min}-{region_result.col_max}, "
-                     f"rows {region_result.row_min}-{region_result.row_max}. "
-                     f"Estimated resources: {region_result.estimated_luts:,} LUTs, "
-                     f"{region_result.estimated_ffs:,} FFs, "
-                     f"{region_result.estimated_dsps} DSPs, "
-                     f"{region_result.estimated_brams} BRAMs."),
-        "region": {
-            "col_min": region_result.col_min,
-            "col_max": region_result.col_max,
-            "row_min": region_result.row_min,
-            "row_max": region_result.row_max,
-            "center_col": region_result.center_col,
-            "center_row": region_result.center_row,
-            "columns_used": region_result.columns_used,
-            "rows_used": region_result.rows_used,
-        },
-        "pblock_ranges": region_result.pblock_ranges,
-        "pblock_name": pblock_name,
-        "estimated_resources": {
-            "luts": region_result.estimated_luts,
-            "ffs": region_result.estimated_ffs,
-            "dsps": region_result.estimated_dsps,
-            "brams": region_result.estimated_brams,
-        },
-        "target_resources": {
-            "luts": adjusted_lut,
-            "ffs": adjusted_ff,
-            "dsps": adjusted_dsp,
-            "brams": adjusted_bram,
-        },
-        "resource_multiplier": resource_multiplier,
-        "next_steps": [
+    estimated = {
+        "luts": region_result.estimated_luts,
+        "ffs": region_result.estimated_ffs,
+        "dsps": region_result.estimated_dsps,
+        "brams": region_result.estimated_brams,
+    }
+    required = {
+        "luts": required_lut,
+        "ffs": required_ff,
+        "dsps": required_dsp,
+        "brams": required_bram,
+    }
+
+    capacity_ok = region_result.capacity_ok
+    multi_region = region_result.multi_region_suggestions
+
+    # Step 3: If insufficient, try fallback expansion
+    expanded = False
+    if not capacity_ok:
+        logger.info(
+            "analyze_pblock_region: initial region insufficient — "
+            "estimated LUT=%d FF=%d | required LUT=%d FF=%d. "
+            "Attempting fallback expansion.",
+            estimated["luts"], estimated["ffs"],
+            required_lut, required_ff,
+        )
+        try:
+            from skills.smart_region_search import expand_region_to_capacity
+            device = design.getDevice()
+            expanded_result = expand_region_to_capacity(
+                device, region, required_lut, required_ff,
+                required_dsp, required_bram,
+            )
+            if expanded_result.get("capacity_met"):
+                capacity_ok = True
+                expanded = True
+                region = {
+                    "col_min": expanded_result["col_min"],
+                    "col_max": expanded_result["col_max"],
+                    "row_min": expanded_result["row_min"],
+                    "row_max": expanded_result["row_max"],
+                    "center_col": (expanded_result["col_min"] + expanded_result["col_max"]) // 2,
+                    "center_row": (expanded_result["row_min"] + expanded_result["row_max"]) // 2,
+                    "columns_used": expanded_result["col_max"] - expanded_result["col_min"] + 1,
+                    "rows_used": expanded_result["row_max"] - expanded_result["row_min"] + 1,
+                }
+                estimated = {
+                    "luts": expanded_result["estimated_luts"],
+                    "ffs": expanded_result["estimated_ffs"],
+                    "dsps": expanded_result["estimated_dsps"],
+                    "brams": expanded_result["estimated_brams"],
+                }
+                from rapidwright_tools import convert_fabric_region_to_pblock_ranges
+                pb_result = convert_fabric_region_to_pblock_ranges(
+                    col_min=region["col_min"], col_max=region["col_max"],
+                    row_min=region["row_min"], row_max=region["row_max"],
+                    device_name=str(device.getName()),
+                )
+                if pb_result.get("status") == "success":
+                    pblock_ranges = pb_result.get("pblock_ranges", "")
+
+                logger.info(
+                    "analyze_pblock_region: fallback expansion succeeded — "
+                    "expanded to cols %d-%d, rows %d-%d. "
+                    "estimated LUT=%d FF=%d.",
+                    region["col_min"], region["col_max"],
+                    region["row_min"], region["row_max"],
+                    estimated["luts"], estimated["ffs"],
+                )
+            else:
+                region = {
+                    "col_min": expanded_result["col_min"],
+                    "col_max": expanded_result["col_max"],
+                    "row_min": expanded_result["row_min"],
+                    "row_max": expanded_result["row_max"],
+                    "center_col": (expanded_result["col_min"] + expanded_result["col_max"]) // 2,
+                    "center_row": (expanded_result["row_min"] + expanded_result["row_max"]) // 2,
+                    "columns_used": expanded_result["col_max"] - expanded_result["col_min"] + 1,
+                    "rows_used": expanded_result["row_max"] - expanded_result["row_min"] + 1,
+                }
+                estimated = {
+                    "luts": expanded_result["estimated_luts"],
+                    "ffs": expanded_result["estimated_ffs"],
+                    "dsps": expanded_result["estimated_dsps"],
+                    "brams": expanded_result["estimated_brams"],
+                }
+                logger.warning(
+                    "analyze_pblock_region: fallback expansion reached device edge, "
+                    "still insufficient. Max region estimated LUT=%d FF=%d.",
+                    estimated["luts"], estimated["ffs"],
+                )
+        except Exception as e:
+            logger.warning("Fallback expansion failed: %s", e)
+
+    # Step 4: Compute deficit, get full device resources
+    deficit = _build_deficit(estimated, required_lut, required_ff) if not capacity_ok else None
+
+    full_device = {}
+    try:
+        from skills.smart_region_search import estimate_full_device_resources
+        full_device = estimate_full_device_resources(design.getDevice())
+    except Exception:
+        pass
+
+    # Step 5: Build advice (use smart_region_search's advice as base, augment with our own)
+    if capacity_ok:
+        advice = _build_advice_sufficient()
+    else:
+        advice = _build_advice_insufficient(
+            deficit or {}, full_device, required_lut, required_ff,
+            resource_multiplier, multi_region,
+        )
+
+    # Step 6: Build next_steps — ONLY if capacity is sufficient
+    next_steps = None
+    if capacity_ok:
+        next_steps = [
             "vivado: place_design -unplace",
-            "vivado: create_and_apply_pblock with pblock_ranges above, pblock_name=pblock_tight, is_soft=false",
+            "vivado: create_and_apply_pblock with pblock_ranges above, "
+            "pblock_name=pblock_tight, is_soft=false",
             "vivado: place_design (re-place cells within pblock constraint)",
             "vivado: route_design",
             "vivado: report_timing_summary (verify WNS improvement after PBLOCK re-placement)",
-        ],
+        ]
+
+    # Build message
+    if capacity_ok:
+        qualifier = " (expanded via fallback)" if expanded else ""
+        msg = (
+            f"PBLOCK region found{qualifier}: cols {region['col_min']}-{region['col_max']}, "
+            f"rows {region['row_min']}-{region['row_max']}. "
+            f"Estimated: {estimated['luts']:,} LUTs, {estimated['ffs']:,} FFs, "
+            f"{estimated['dsps']} DSPs, {estimated['brams']} BRAMs. "
+            f"Capacity OK (target: {required_lut:,} LUTs x{resource_multiplier}, "
+            f"{required_ff:,} FFs x{resource_multiplier})."
+        )
+    else:
+        d_lut = deficit.get("luts", 0) if deficit else 0
+        d_ff = deficit.get("ffs", 0) if deficit else 0
+        msg = (
+            f"PBLOCK region insufficient: cols {region['col_min']}-{region['col_max']}, "
+            f"rows {region['row_min']}-{region['row_max']}. "
+            f"Estimated: {estimated['luts']:,} LUTs, {estimated['ffs']:,} FFs. "
+            f"Required: {required_lut:,} LUTs, {required_ff:,} FFs. "
+            f"Deficit: LUTs={d_lut:,}, FFs={d_ff:,}. "
+            f"Do NOT apply pblock — capacity insufficient."
+        )
+
+    logger.info(
+        "analyze_pblock_region: region [%d-%d, %d-%d] | "
+        "estimated LUT=%d FF=%d | required LUT=%d FF=%d | "
+        "capacity_ok=%s | deficit=%s | multi_region=%d",
+        region["col_min"], region["col_max"], region["row_min"], region["row_max"],
+        estimated["luts"], estimated["ffs"],
+        required_lut, required_ff,
+        capacity_ok, deficit,
+        len(multi_region) if multi_region else 0,
+    )
+
+    return {
+        "status": "success",
+        "message": msg,
+        "region": region,
+        "pblock_ranges": pblock_ranges,
+        "pblock_name": pblock_name,
+        "estimated_resources": estimated,
+        "target_resources": required,
+        "resource_multiplier": resource_multiplier,
+        "capacity_ok": capacity_ok,
+        "deficit": deficit,
+        "advice": advice,
+        "multi_region_suggestions": multi_region,
+        "next_steps": next_steps,
     }
 
 
@@ -157,8 +369,8 @@ def generate_pblock_plan(
     display_name="PBLOCK Region Analysis",
     description="Analyze FPGA fabric to find optimal PBLOCK region for re-placement. "
                 "READ-ONLY analysis. Returns region coordinates, pblock_ranges string, "
-                "and estimated resources. Use the returned pblock_ranges to call Vivado "
-                "tools (create_and_apply_pblock, place_design, route_design) yourself. "
+                "estimated resources, capacity validation (capacity_ok), deficit, advice, "
+                "and next_steps (ONLY when capacity is sufficient). "
                 "Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",

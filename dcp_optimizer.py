@@ -1760,6 +1760,21 @@ class DCPOptimizer(DCPOptimizerBase):
                         key_details["pblock_ranges"] = data["pblock_ranges"]
                     if data.get("estimated_resources"):
                         key_details["estimated_resources"] = data["estimated_resources"]
+                    if data.get("capacity_ok") is not None:
+                        key_details["capacity_ok"] = data["capacity_ok"]
+                        summary_parts.append(f"Capacity OK: {data['capacity_ok']}")
+                    if data.get("deficit"):
+                        key_details["deficit"] = data["deficit"]
+                        summary_parts.append(
+                            f"Deficit: LUTs={data['deficit'].get('luts', 0)}, "
+                            f"FFs={data['deficit'].get('ffs', 0)}"
+                        )
+                    if data.get("advice"):
+                        key_details["advice"] = data["advice"]
+                        summary_parts.append(f"Advice: {len(data['advice'])} suggestions")
+                    if data.get("multi_region_suggestions"):
+                        key_details["multi_region_suggestions"] = data["multi_region_suggestions"]
+                        summary_parts.append(f"Multi-region: {len(data['multi_region_suggestions'])} groups")
                     if data.get("next_steps"):
                         key_details["next_steps"] = data["next_steps"]
             except Exception:
@@ -5415,6 +5430,24 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             if data.get("pblock_ranges"):
                 print(f"[TEST]   pblock_ranges: {data['pblock_ranges'][:120]}...")
             next_steps = data.get("next_steps", [])
+            if data.get("capacity_ok") is not None:
+                print(f"[TEST]   capacity_ok: {data['capacity_ok']}")
+            if data.get("deficit"):
+                d = data["deficit"]
+                print(f"[TEST]   deficit: LUTs={d.get('luts', 0)}, FFs={d.get('ffs', 0)}, "
+                      f"DSPs={d.get('dsps', 0)}, BRAMs={d.get('brams', 0)}")
+            if data.get("advice"):
+                print(f"[TEST]   advice ({len(data['advice'])}):")
+                for a in data["advice"]:
+                    print(f"[TEST]     • {a}")
+            if data.get("multi_region_suggestions"):
+                mrs = data["multi_region_suggestions"]
+                print(f"[TEST]   multi_region_suggestions ({len(mrs)} groups):")
+                for mr in mrs:
+                    print(f"[TEST]     group {mr.get('group', '?')}: "
+                          f"cols {mr.get('cols', [])}, rows {mr.get('rows', [])}, "
+                          f"suggested LUTs={mr.get('suggested_target_luts', 0):,}, "
+                          f"FFs={mr.get('suggested_target_ffs', 0):,}")
             if next_steps:
                 print(f"[TEST]   next_steps ({len(next_steps)}):")
                 for ns in next_steps:

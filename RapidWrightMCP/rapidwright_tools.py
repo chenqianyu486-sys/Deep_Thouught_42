@@ -1931,7 +1931,7 @@ def analyze_pblock_region(
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
 ) -> dict:
-    """Analyze FPGA fabric to find optimal PBLOCK region. READ-ONLY.
+    """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating. READ-ONLY.
 
     Args:
         target_lut_count: Current LUT usage from Vivado
@@ -1941,7 +1941,8 @@ def analyze_pblock_region(
         resource_multiplier: Buffer multiplier (default 1.5x)
 
     Returns:
-        Dict with region, pblock_ranges, estimated_resources, next_steps
+        Dict with region, pblock_ranges, estimated_resources, target_resources,
+	        capacity_ok, deficit, advice, next_steps (null when capacity_ok=false)
     """
     global _current_design
 
