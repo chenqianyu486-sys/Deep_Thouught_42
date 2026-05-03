@@ -71,7 +71,7 @@ class MemoryManager:
         #     lambda event: self._check_compression(event)
         # )
 
-        self._failed_strategies: list[str] = []
+        self._failed_strategies: list[dict] = []  # {strategy, reason, tool, iteration, detail}
         self._tool_call_details: list[dict] = []
         self._best_wns: float = float('-inf')
         self._initial_wns: Optional[float] = None
@@ -266,8 +266,13 @@ class MemoryManager:
         )
 
     @property
-    def failed_strategies(self) -> list[str]:
+    def failed_strategies(self) -> list[dict]:
         return self._failed_strategies
+
+    @property
+    def failed_strategy_names(self) -> list[str]:
+        """Return only strategy names for backward compatibility."""
+        return [f["strategy"] for f in self._failed_strategies]
 
     @property
     def tool_call_details(self) -> list[dict]:
@@ -285,13 +290,24 @@ class MemoryManager:
     def iteration(self) -> int:
         return self._iteration
 
-    def record_failure(self, strategy: str) -> None:
-        if strategy not in self._failed_strategies:
-            self._failed_strategies.append(strategy)
+    def record_failure(self, strategy: str, reason: str = "unknown",
+                       tool: str = "", detail: str = "") -> None:
+        # Deduplicate: same strategy+reason combination only recorded once
+        existing = [f for f in self._failed_strategies if f.get("strategy") == strategy]
+        if not existing:
+            entry = {
+                "strategy": strategy,
+                "reason": reason,  # tool_error | execution_failure | strategy_ineffective
+                "tool": tool,
+                "iteration": self._iteration,
+                "detail": detail[:200]
+            }
+            self._failed_strategies.append(entry)
             logger.warning(
-                "[FAILED_STRATEGY] Recorded: %s (total failed: %d)",
-                strategy, len(self._failed_strategies),
-                extra={"strategy": strategy, "failed_count": len(self._failed_strategies),
+                "[FAILED_STRATEGY] Recorded: %s (reason=%s, tool=%s, total failed: %d)",
+                strategy, reason, tool, len(self._failed_strategies),
+                extra={"strategy": strategy, "reason": reason, "tool": tool,
+                       "failed_count": len(self._failed_strategies),
                        "trace_id": get_trace_id()}
             )
 

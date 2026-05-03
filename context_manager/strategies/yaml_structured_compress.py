@@ -206,19 +206,22 @@ class YAMLStructuredCompressor(CompressionStrategy):
         """Return the iteration number below which timing reports are considered outdated."""
         return current_iteration - OUTDATED_TIMING_ITERATION_GAP
 
-    def _is_failed_strategy_tool_result(self, msg: Message, failed_strategies: list[str]) -> bool:
+    def _is_failed_strategy_tool_result(self, msg: Message, failed_strategies: list) -> bool:
         """Check if a tool result corresponds to a known failed strategy.
 
         Tool messages from strategies that have been marked as failed are candidates
         for early compression, since the YAML blocked_strategies section provides
         the distilled summary.
+
+        Supports both legacy list[str] and new list[dict] formats.
         """
         if not failed_strategies or msg.role != MessageRole.TOOL:
             return False
 
         name_lower = (msg.name or "").lower()
         for fs in failed_strategies:
-            fs_lower = fs.lower()
+            fs_name = fs["strategy"] if isinstance(fs, dict) else fs
+            fs_lower = fs_name.lower()
             if fs_lower == "pblock" and ("pblock" in name_lower):
                 return True
             if fs_lower == "physopt" and ("phys_opt" in name_lower):

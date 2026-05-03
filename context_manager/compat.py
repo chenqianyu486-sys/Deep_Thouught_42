@@ -20,8 +20,13 @@ class DCPOptimizerCompat:
         ]
 
     @property
-    def failed_strategies(self) -> list[str]:
+    def failed_strategies(self) -> list[dict]:
         return self._mm.failed_strategies
+
+    @property
+    def failed_strategy_names(self) -> list[str]:
+        """Return only strategy names for backward compatibility."""
+        return self._mm.failed_strategy_names
 
     @property
     def tool_call_details(self) -> list[dict]:
@@ -54,9 +59,10 @@ class DCPOptimizerCompat:
         """Track tool call result."""
         self._mm.add_tool_result(tool_name, result, wns, error, extra_fields)
 
-    def record_failure(self, strategy: str) -> None:
-        """Record a failed strategy."""
-        self._mm.record_failure(strategy)
+    def record_failure(self, strategy: str, reason: str = "unknown",
+                       tool: str = "", detail: str = "") -> None:
+        """Record a failed strategy with reason classification."""
+        self._mm.record_failure(strategy, reason, tool, detail)
 
     def advance_iteration(self) -> None:
         """Advance iteration counter."""

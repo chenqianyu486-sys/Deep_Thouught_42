@@ -198,58 +198,69 @@ def sync_after_timeout(proc: pexpect.spawn) -> str:
         raise RuntimeError("Vivado appears to be hung. Use restart_vivado to recover.")
 
 
+def _run_single_tcl(proc, command: str, timeout: float) -> str:
+    """Execute a single Tcl command line and return its output."""
+    global _command_pending
+
+    cmd_log = command if len(command) < 200 else command[:200] + "..."
+    logger.info(f"Executing Tcl: {cmd_log}")
+
+    proc.sendline(command)
+
+    try:
+        proc.expect(VIVADO_PROMPT, timeout=timeout)
+        output = proc.before
+        lines = output.split("\n")
+        if lines and command in lines[0]:
+            output = "\n".join(lines[1:])
+        logger.info("Tcl command completed successfully")
+        return output.strip()
+    except pexpect.TIMEOUT:
+        _command_pending = True
+        logger.error(f"Tcl command timed out after {timeout}s: {cmd_log}")
+        raise
+
+
 def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     """
     Run a Tcl command in Vivado and return the output.
-    
+
+    Supports multi-line scripts: commands separated by newlines are executed
+    sequentially in the same Vivado session (variables persist across lines).
+
     Args:
-        command: Tcl command to execute
-        timeout: Timeout in seconds (None for default 300s)
-    
+        command: Tcl command(s) to execute
+        timeout: Timeout in seconds per line (None for default 300s)
+
     Returns:
         Command output as string
     """
     global _command_pending
-    
+
     proc = ensure_vivado()
-    
+
     # If a previous command timed out, wait for it to complete first
     if _command_pending:
         sync_output = sync_after_timeout(proc)
-        if sync_output:
-            # Previous command completed, we can continue
-            pass
-    
-    # Use provided timeout or default
+
     effective_timeout = timeout if timeout is not None else 300
-    
-    # Log the command (truncate if very long)
-    cmd_log = command if len(command) < 200 else command[:200] + "..."
-    logger.info(f"Executing Tcl command: {cmd_log}")
-    
-    # Send command
-    proc.sendline(command)
-    
-    try:
-        # Wait for prompt and capture output
-        proc.expect(VIVADO_PROMPT, timeout=effective_timeout)
-        
-        # Get output (everything between command echo and prompt)
-        output = proc.before
-        
-        # Remove the echoed command from output (first line)
-        lines = output.split("\n")
-        if lines and command in lines[0]:
-            output = "\n".join(lines[1:])
-        
-        logger.info(f"Command completed successfully")
-        return output.strip()
-    
-    except pexpect.TIMEOUT:
-        # Mark that we have a pending command
-        _command_pending = True
-        logger.error(f"Command timed out after {effective_timeout}s: {cmd_log}")
-        raise
+
+    # Split multi-line commands and execute sequentially
+    cmd_lines = [line.strip() for line in command.split("\n") if line.strip()]
+    if len(cmd_lines) > 1:
+        logger.info(f"Executing multi-line Tcl script ({len(cmd_lines)} lines)")
+        outputs = []
+        for i, line in enumerate(cmd_lines):
+            try:
+                out = _run_single_tcl(proc, line, effective_timeout)
+                if out:
+                    outputs.append(out)
+            except pexpect.TIMEOUT:
+                outputs.append(f"[LINE {i+1} TIMEOUT] {line[:100]}")
+                raise
+        return "\n".join(outputs)
+    else:
+        return _run_single_tcl(proc, command, effective_timeout)
 
 
 def restart_vivado_process() -> str:
@@ -1040,7 +1051,23 @@ def create_and_apply_pblock(
             
             result = run_tcl_command(add_cmd, timeout=timeout)
             result_lines.append(f"Applied pblock to: {apply_to}")
-            
+
+            # Count how many cells were actually added to the pblock
+            try:
+                count_cmd = f"llength [get_cells -hierarchical -filter {{pblock=={pblock_name}}}]"
+                cell_count = run_tcl_command(count_cmd, timeout=60.0).strip()
+                result_lines.append(f"Cells in pblock: {cell_count}")
+            except Exception:
+                result_lines.append("Cells in pblock: (count failed)")
+
+            # Count total cells in design for compliance comparison
+            try:
+                total_cmd = "llength [get_cells -hierarchical]"
+                total_count = run_tcl_command(total_cmd, timeout=60.0).strip()
+                result_lines.append(f"Total cells in design: {total_count}")
+            except Exception:
+                pass
+
             # Validate resources if requested
             if validate_resources:
                 validation = validate_pblock_resources(pblock_name)
@@ -1639,34 +1666,24 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
-            # First try using report_timing_summary to get WNS (more reliable on Linux)
-            timing_output = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
             wns_value = "PARSE_ERROR"
 
-            # Parse WNS from timing summary output
-            wns_match = re.search(r'^\s*(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+\d+\s+\d+\s*$',
-                                  timing_output, re.MULTILINE)
-            if wns_match:
-                wns_candidate = float(wns_match.group(1))
-                if wns_candidate == 0.0:
-                    wns_candidate = abs(wns_candidate)
-                wns_value = str(wns_candidate)
-                logger.info(f"get_wns: parsed WNS={wns_value} from timing_summary")
-            else:
-                # Fallback: try direct get_property
-                run_tcl_command("puts {wns_flush}", timeout=5)
-                output = run_tcl_command("set wns_val [get_property WNS [current_design]]; puts [format {%s} $wns_val]", timeout=timeout)
-                raw = output.strip()
-                lines = [l.strip() for l in raw.split('\n') if l.strip() and l.strip() != 'wns_flush']
-                if lines:
-                    try:
-                        parsed = float(lines[-1])
-                        if parsed == 0.0:
-                            parsed = abs(parsed)
-                        wns_value = str(parsed)
-                        logger.info(f"get_wns: parsed WNS={wns_value} from get_property")
-                    except ValueError:
-                        logger.warning(f"get_wns: cannot parse WNS from get_property output: {raw}")
+            # Direct get_property call avoids large timing report output that
+            # can cause pexpect buffer issues and output cross-contamination
+            output = run_tcl_command(
+                "puts [get_property WNS [current_design]]",
+                timeout=timeout
+            )
+            raw = output.strip()
+            if raw:
+                try:
+                    parsed = float(raw)
+                    if parsed == 0.0:
+                        parsed = abs(parsed)
+                    wns_value = str(parsed)
+                    logger.info(f"get_wns: parsed WNS={wns_value}")
+                except ValueError:
+                    logger.warning(f"get_wns: cannot parse WNS from output: {raw}")
 
             return [TextContent(type="text", text=wns_value)]
         

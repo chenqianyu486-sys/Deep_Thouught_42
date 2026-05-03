@@ -21,6 +21,7 @@ import re
 import shutil
 import sys
 import threading
+import hashlib
 import time
 import yaml
 from collections import OrderedDict
@@ -242,6 +243,24 @@ def parse_timing_summary_static(timing_report: str) -> dict:
             except (ValueError, IndexError):
                 continue
     return result
+
+
+@dataclass
+class WnsMilestone:
+    """已验证的 WNS 里程碑，包含达成上下文（策略、DCP、一致性哈希）。
+
+    用于黄金路径记忆：当 get_wns 解析失败时，系统信任最近一次
+    校验成功的 timing_summary 而非回滚状态。
+    """
+    achieved_wns: float
+    iteration: int
+    strategy_label: str = ""
+    dcp_path: Optional[str] = None
+    tns: Optional[float] = None
+    failing_endpoints: Optional[int] = None
+    timing_raw_hash: str = ""         # SHA256[:16] 用于一致性校验
+    timestamp: float = field(default_factory=time.time)
+    verified: bool = True             # 是否已通过 get_wns 交叉验证
 
 
 def load_system_prompt() -> str:
@@ -777,6 +796,13 @@ class DCPOptimizer(DCPOptimizerBase):
         self._iteration_narratives: list[dict] = []     # Progressive iteration summary for handoff
         self._strategy_sequence: list[str] = []          # Ordered strategy labels for state summary
 
+        # === Golden path memory: WNS milestones with full context ===
+        self._wns_milestones: list[WnsMilestone] = []    # Rich snapshot history
+        self._last_verified_timing_info: Optional[dict] = None  # Last parse_timing_summary_static() OK result
+        self._last_verified_timing_raw: Optional[str] = None    # Raw text of last verified timing_summary
+        self._paused_for_diagnostics: bool = False       # Diagnostic pause flag
+        self._last_verified_timing_iteration: Optional[int] = None  # Iteration when _last_verified_timing_info was updated
+
         # === Skill observability tracking ===
         self.skill_invocation_log: list[dict] = []       # Per-invocation skill call tracking
         self.skill_recommendation_log: list[dict] = []    # Recommendation-to-execution funnel tracking
@@ -835,6 +861,12 @@ class DCPOptimizer(DCPOptimizerBase):
         # Stores complete Vivado logs for on-demand retrieval via vivado_get_raw_tool_output
         self._raw_tool_outputs: dict[tuple[int, int], tuple[str, str]] = {}  # (iteration, round) -> (tool_name, raw_text)
         self._raw_tool_output_max = 50  # FIFO limit
+
+        # Repetition detection: sliding window of (tool_name, wns) for diminishing-returns detection
+        self._recent_tools: list[tuple[str, float]] = []
+
+        # Format compliance: track consecutive failures to escalate REMINDER -> BLOCKADE
+        self._consecutive_format_failures: int = 0
 
         # Step state tracking from LLM YAML responses
         self._step_state: Optional[StepState] = None   # Most recent parsed step state
@@ -910,6 +942,116 @@ class DCPOptimizer(DCPOptimizerBase):
         if wns == 0.0 and best is not None and best < -0.1:
             logger.warning(f"WNS suspicious: 0.000 ns from {best:.3f} ns without visible optimization")
         return True
+
+    # === Golden Path Memory: WNS Milestone Methods ===
+
+    @staticmethod
+    def _compute_timing_hash(raw_text: str) -> str:
+        """Compute SHA256[:16] consistency hash from timing summary raw text."""
+        if not raw_text:
+            return ""
+        return hashlib.sha256(raw_text.encode()).hexdigest()[:16]
+
+    def _infer_strategy_for_current_iteration(self) -> str:
+        """Infer the strategy label used in the current iteration from narratives."""
+        for entry in reversed(self._iteration_narratives):
+            if entry["iteration"] == self.iteration:
+                strat = entry.get("strategy_label", "")
+                if strat and strat not in ("Information", "Unknown"):
+                    return strat
+                break
+        return ""
+
+    def _record_wns_milestone(
+        self,
+        wns: float,
+        iteration: int,
+        strategy_label: str = "",
+        dcp_path: Optional[str] = None,
+        tns: Optional[float] = None,
+        failing_endpoints: Optional[int] = None,
+        timing_raw_hash: str = "",
+        verified: bool = True,
+    ) -> WnsMilestone:
+        """Record a WNS milestone with full context for rollback and traceability."""
+        milestone = WnsMilestone(
+            achieved_wns=wns,
+            iteration=iteration,
+            strategy_label=strategy_label or self._infer_strategy_for_current_iteration(),
+            dcp_path=dcp_path or str(self._get_intermediate_checkpoint_path(iteration)),
+            tns=tns,
+            failing_endpoints=failing_endpoints,
+            timing_raw_hash=timing_raw_hash,
+            verified=verified,
+        )
+        self._wns_milestones.append(milestone)
+        # Keep milestones sorted: best first
+        self._wns_milestones.sort(key=lambda m: m.achieved_wns, reverse=True)
+        logger.info(
+            f"WnsMilestone #{len(self._wns_milestones)}: {milestone.achieved_wns:.3f}ns "
+            f"@ iter {milestone.iteration}"
+            f"{' [' + milestone.strategy_label + ']' if milestone.strategy_label else ''}"
+            f"{' ✓' if milestone.verified else ' ?'}"
+        )
+        return milestone
+
+    def _restore_wns_from_snapshot(self) -> None:
+        """Restore WNS state from snapshot taken before get_completion()."""
+        snap = getattr(self, '_wns_snapshot', None)
+        if not snap:
+            logger.warning("No WNS snapshot available to restore from")
+            return
+        self.best_wns = snap["best_wns"]
+        self._best_wns_iteration = snap["_best_wns_iteration"]
+        self.latest_wns = self.best_wns
+        self.latest_tns = snap["latest_tns"]
+        self.latest_failing_endpoints = snap["latest_failing_endpoints"]
+        self._best_wns_tns = snap["_best_wns_tns"]
+        self._best_wns_failing_endpoints = snap["_best_wns_failing_endpoints"]
+        logger.info(f"Restored WNS state from snapshot: best={self.best_wns}, latest={self.latest_wns}")
+
+    def _get_latest_verified_wns(self) -> Optional[float]:
+        """Return the most recently verified WNS from milestones, or best_wns as fallback."""
+        for m in reversed(self._wns_milestones):
+            if m.verified:
+                return m.achieved_wns
+        if self.best_wns > float('-inf'):
+            return self.best_wns
+        return None
+
+    async def _pause_for_diagnostics(self, reason: str, details: dict) -> None:
+        """Pause the optimization flow for diagnostic intervention on consistency failure."""
+        print("\n" + "=" * 60)
+        print(f"  DIAGNOSTIC PAUSE")
+        print(f"  Reason: {reason}")
+        print(f"  Iteration: {self.iteration}")
+        print(f"  best_wns: {self.best_wns:.3f}, latest_wns: {self.latest_wns}")
+        print("=" * 60)
+        logger.error(f"DIAGNOSTIC_PAUSE: {reason}", extra=details)
+
+        self._paused_for_diagnostics = True
+        # Inject diagnostic signal into user context for LLM awareness
+        diagnostic_msg = (
+            f"SYSTEM DIAGNOSTIC PAUSE:\n"
+            f"Reason: {reason}\n"
+            f"A critical consistency check failed at iteration {self.iteration}.\n"
+            f"best_wns={self.best_wns:.3f}, latest_wns={self.latest_wns}.\n"
+            f"Please review the system state and determine next steps."
+        )
+        self._compat.add_message("user", diagnostic_msg)
+
+        # In interactive mode, wait for user input
+        if sys.stdin.isatty() and not getattr(self, '_batch_mode', False):
+            print("\nEnter 'c' to continue, 'q' to quit: ", end="", flush=True)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, lambda: sys.stdin.readline().strip().lower())
+            if response == 'q':
+                self._is_done_reason = "diagnostic_pause_user_quit"
+                print("Quit requested. Optimization will stop.")
+            else:
+                print("Continuing optimization...")
+        else:
+            print("Non-interactive mode. Optimization will continue with diagnostic flag set.")
 
     @property
     def tool_call_details(self) -> list[dict]:
@@ -1083,13 +1225,24 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # Compute remaining_strategies
         tried = set(self._strategy_sequence)
-        tried.update(self._compat.failed_strategies)
+        tried.update(self._compat.failed_strategy_names)
         remaining = sorted(ALL_STRATEGIES - tried)
         remaining_str = ", ".join(remaining) if remaining else "none"
 
         best_dcp_str = str(self._get_intermediate_checkpoint_path(best_wns_iter)) if best_wns_iter is not None else "N/A"
         input_dcp_str = str(getattr(self, 'input_dcp', 'N/A'))
         next_model = self._next_iteration_model or self.last_used_model or "worker"
+
+        # Build WNS milestones history summary (last 5)
+        wns_history_parts = []
+        for m in self._wns_milestones[-5:]:
+            verified_mark = "✓" if m.verified else "?"
+            entry = f"{verified_mark}{m.achieved_wns:.3f}ns@iter{m.iteration}"
+            if m.strategy_label:
+                entry += f"[{m.strategy_label}]"
+            wns_history_parts.append(entry)
+        wns_history_str = ", ".join(wns_history_parts) if wns_history_parts else "none"
+
         state_section = f"""**Current Optimization State:**
   iteration: {iteration}
   best_wns: {best_wns_str} (achieved at iteration {best_wns_iter}{best_wns_strategy})
@@ -1104,6 +1257,8 @@ class DCPOptimizer(DCPOptimizerBase):
   clock_period: {clock_period_str}
   input_dcp: {input_dcp_str}
   next_model: {next_model}
+  wns_history: {wns_history_str}
+  diagnostic_paused: {str(self._paused_for_diagnostics).lower()}
 """
 
         # Check if "Current Optimization State" already exists
@@ -1135,6 +1290,228 @@ class DCPOptimizer(DCPOptimizerBase):
             system_content += f"\n\n{get_skill_guide()}"
 
         return system_content
+
+    # === Section 8.3.2: Context Snapshot Injection ===
+
+    def _build_context_snapshot(self) -> str:
+        """Build YAML context snapshot of current optimization state.
+
+        Injected as the first user message before every LLM call.
+        All fields are derived from existing instance variables — no new state.
+        """
+        current_wns = self._get_current_wns()
+        best_wns = self.best_wns if self.best_wns > float('-inf') else None
+        iteration = self.iteration
+
+        # --- current_wns ---
+        current_wns_str = f"{current_wns:.3f} ns" if current_wns is not None else "N/A"
+
+        # --- best_wns ---
+        if best_wns is not None:
+            best_wns_iter = self._best_wns_iteration
+            best_wns_label = ""
+            if best_wns_iter is not None:
+                for entry in self._iteration_narratives:
+                    if entry.get("iteration") == best_wns_iter:
+                        strat = entry.get("strategy_label", "")
+                        if strat and strat not in ("Information", "Unknown"):
+                            best_wns_label = f", {strat}"
+                        break
+            best_wns_str = f"{best_wns:.3f} ns (iter {best_wns_iter}{best_wns_label})" if best_wns_iter else f"{best_wns:.3f} ns"
+        else:
+            best_wns_str = "N/A"
+
+        # --- remaining_violation ---
+        if current_wns is not None and current_wns < 0:
+            remaining = -current_wns
+            remaining_str = f"{remaining:.3f} ns"
+        else:
+            remaining_str = "N/A"
+
+        # --- active_strategy & strategy_state ---
+        active_strategy = self._strategy_sequence[-1] if self._strategy_sequence else "None"
+        failed_names = self._compat.failed_strategy_names
+        if active_strategy in failed_names:
+            strategy_state = "FAILED"
+        elif self.global_no_improvement >= 2:
+            # Check that the last N narratives show the same strategy
+            same_strategy = True
+            if len(self._strategy_sequence) >= 3:
+                last_three = self._strategy_sequence[-3:]
+                same_strategy = len(set(last_three)) == 1
+            strategy_state = "PLATEAUED" if same_strategy else "STALLED"
+        else:
+            strategy_state = "ACTIVE"
+
+        # --- strategy_sequence (last 8) ---
+        seq = self._strategy_sequence[-8:]
+        seq_yaml = ", ".join(f'"{s}"' for s in seq) if seq else ""
+
+        # --- failed_strategies ---
+        failed_yaml_lines = []
+        for fs in self._compat.failed_strategies:
+            name = fs.get("strategy", "?")
+            reason = fs.get("reason", "unknown")
+            failed_yaml_lines.append(f'  - "{name}: {reason}"')
+
+        # --- do_not_repeat (aggregated from tool_call_details) ---
+        dnr_entries = []
+        tool_stats: dict[str, list[float]] = {}
+        for td in self._compat.tool_call_details:
+            name = td.get("tool_name", "")
+            wns_val = td.get("wns")
+            if name and wns_val is not None and not td.get("error", False):
+                tool_stats.setdefault(name, []).append(wns_val)
+        for tool_name, wns_values in tool_stats.items():
+            if len(wns_values) > 3:
+                delta = max(wns_values) - min(wns_values)
+                if delta < 0.01:
+                    dnr_entries.append(f'  - "{tool_name} ({len(wns_values)} calls, delta {delta:.4f} ns)"')
+        # --- wns_milestones (last 5) ---
+        milestone_lines = []
+        for m in self._wns_milestones[-5:]:
+            label = f" ({m.strategy_label})" if m.strategy_label else ""
+            milestone_lines.append(f'  - "{m.achieved_wns:.3f} ns @ iter {m.iteration}{label}"')
+
+        lines = []
+        lines.append("# === FPGA Timing Optimization Agent Context Snapshot ===")
+        lines.append(f'primary_goal: "Achieve WNS >= 0.000 ns"')
+        lines.append(f'current_wns: "{current_wns_str}"')
+        lines.append(f'best_wns: "{best_wns_str}"')
+        lines.append(f'remaining_violation: "{remaining_str}"')
+        lines.append(f"iteration: {iteration}")
+        lines.append(f'active_strategy: "{active_strategy}"')
+        lines.append(f'strategy_state: "{strategy_state}"')
+        lines.append(f"stagnation: {self.global_no_improvement}")
+        if seq_yaml:
+            lines.append(f"strategy_sequence: [{seq_yaml}]")
+        else:
+            lines.append("strategy_sequence: []")
+        if failed_yaml_lines:
+            lines.append("failed_strategies:")
+            lines.extend(failed_yaml_lines)
+        else:
+            lines.append("failed_strategies: []")
+        if dnr_entries:
+            lines.append("do_not_repeat:")
+            lines.extend(dnr_entries[:5])
+        else:
+            lines.append("do_not_repeat: []")
+        if milestone_lines:
+            lines.append("wns_milestones:")
+            lines.extend(milestone_lines)
+        else:
+            lines.append("wns_milestones: []")
+        lines.append("# === Snapshot End ===")
+
+        return "\n".join(lines)
+
+    def _inject_context_snapshot(self, api_messages: list[dict]) -> None:
+        """Inject or update the context snapshot as the first user message.
+
+        Scans for an existing snapshot (by header marker), removes it to
+        prevent accumulation, then inserts a fresh snapshot after all
+        system messages.
+        """
+        SNAPSHOT_HEADER = "# === FPGA Timing Optimization Agent Context Snapshot ==="
+
+        # Find and remove existing snapshot message
+        for i, msg in enumerate(api_messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                if msg["content"].startswith(SNAPSHOT_HEADER):
+                    del api_messages[i]
+                    break
+
+        # Build fresh snapshot
+        snapshot_yaml = self._build_context_snapshot()
+
+        # Find the first non-system message index to insert before it
+        insert_idx = 0
+        for i, msg in enumerate(api_messages):
+            if msg.get("role") != "system":
+                insert_idx = i
+                break
+        else:
+            insert_idx = len(api_messages)  # All system messages, append at end
+
+        api_messages.insert(insert_idx, {"role": "user", "content": snapshot_yaml})
+
+    def _prepare_api_messages(self) -> list[dict]:
+        """Assemble and prepare messages for LLM API call.
+
+        Combines: message assembly, WNS state injection into system prompt,
+        iteration handoff injection, format blockade injection,
+        and context snapshot injection.
+        """
+        # Step 1: Get base messages from MemoryManager
+        api_messages = self._compat.get_formatted_for_api()
+
+        # Step 2: Inject current WNS state into system message to prevent context loss after compression
+        if api_messages and api_messages[0].get("role") == "system":
+            system_content = api_messages[0].get("content", "")
+            updated_content = self._inject_wns_state_to_system_prompt(system_content)
+            # Stamp format constraint at the front of system prompt for highest attention weight
+            updated_content = (
+                "[FORMAT: EVERY response MUST include step: YAML block with "
+                "step_id/result_status/flow_control. No XML tags, no markdown fences.]\n\n"
+                + updated_content
+            )
+            api_messages[0]["content"] = updated_content
+            # Sync latest WNS to SkillTelemetry for correlating skill executions with timing state
+            from skills.telemetry import SkillTelemetry
+            SkillTelemetry.set_current_wns(self.latest_wns)
+
+        # Step 3: Inject iteration handoff prompt or first-iteration starting context
+        # Insert as standalone system message after primary system prompt for better attention weight
+        if not self._iteration_handoff_injected:
+            if self._iteration_handoff_prompt:
+                handoff_msg = {"role": "system", "content": self._iteration_handoff_prompt}
+                api_messages.insert(1, handoff_msg)
+                logger.info(f"Injected iteration handoff prompt as system message (length: {len(self._iteration_handoff_prompt)} chars)")
+            elif self.iteration == 1:
+                # First iteration: no handoff from previous iteration, inject starting context
+                first_msg = {
+                    "role": "system",
+                    "content": (
+                        "**FIRST ITERATION** - Begin with initial design analysis "
+                        "(report_timing_summary, extract_critical_path_cells, etc.) "
+                        "to understand the current timing state before applying "
+                        "optimization strategies."
+                    )
+                }
+                api_messages.insert(1, first_msg)
+                logger.info("Injected first iteration starting context")
+            self._iteration_handoff_injected = True
+
+        # Step 4: Inject format reminder as last system message before API call
+        # Escalates to BLOCKADE when LLM repeatedly omits the YAML block
+        if self._consecutive_format_failures >= 2:
+            api_messages.append({
+                "role": "system",
+                "content": (
+                    "FORMAT BLOCKADE: Your last 2 responses lacked a valid step: YAML block. "
+                    "You CANNOT proceed without including this block. Format:\n"
+                    "step:\n"
+                    "  step_id: <N>\n"
+                    "  result_status: SUCCESS|PARTIAL|FAIL\n"
+                    "  flow_control: CONTINUE|SWITCH_STRATEGY|DONE\n"
+                    "  analysis:\n"
+                    "    observed_signals: {...}\n"
+                    "    scenario_match: <id>\n"
+                    "    hypothesis: \"...\"\n"
+                    "    strategy_rationale: \"...\""
+                )
+            })
+        else:
+            api_messages.append({
+                "role": "system",
+                "content": "REMINDER: Your response MUST contain a 'step:' YAML block (chain-of-thought natural language is OK before it). See format instructions at conversation start."
+            })
+
+        # Step 5: [NEW] Inject context snapshot as first user message
+        self._inject_context_snapshot(api_messages)
+
+        return api_messages
 
     def _build_compression_context(
         self,
@@ -1702,6 +2079,31 @@ class DCPOptimizer(DCPOptimizerBase):
                 elif "Maximum expansion attempts reached" in line:
                     summary_parts.append(line.strip()[:300])
                     has_validation_failure = True
+            # Parse cells count for compliance assessment
+            cells_in_pblock = None
+            cells_in_design = None
+            for line in lines:
+                if "Cells in pblock:" in line:
+                    try:
+                        cells_in_pblock = int(line.split(":")[-1].strip())
+                    except ValueError:
+                        pass
+                elif "Total cells in design:" in line:
+                    try:
+                        cells_in_design = int(line.split(":")[-1].strip())
+                    except ValueError:
+                        pass
+            if cells_in_pblock is not None:
+                key_details["cells_in_pblock"] = cells_in_pblock
+            if cells_in_design is not None:
+                key_details["cells_in_design"] = cells_in_design
+            if cells_in_pblock is not None and cells_in_design is not None:
+                if cells_in_pblock < cells_in_design:
+                    key_details["compliance"] = f"added {cells_in_pblock}/{cells_in_design} cells (PARTIAL)"
+                    if status == "success":
+                        status = "partial"
+                else:
+                    key_details["compliance"] = f"added {cells_in_pblock}/{cells_in_design} cells"
             if not summary_parts:
                 # Fallback: key status lines
                 for line in lines[:50]:
@@ -2109,19 +2511,20 @@ class DCPOptimizer(DCPOptimizerBase):
 
         lines = []
         for s in strategies:
-            related_calls = [
-                t for t in self._compat.tool_call_details
-                if s.lower() in t.get('tool_name', '').lower()
-                or s.lower() in t.get('result', '').lower()
-            ]
-            if related_calls:
-                last = related_calls[-1]
-                iter_num = last.get('iteration', '?')
-                wns = last.get('wns')
-                wns_str = f", WNS={wns:.3f}ns" if wns is not None else ""
-                lines.append(f"- {s} (iter{iter_num}{wns_str})")
-            else:
-                lines.append(f"- {s}")
+            name = s["strategy"] if isinstance(s, dict) else s
+            reason = s.get("reason", "unknown") if isinstance(s, dict) else ""
+            tool = s.get("tool", "") if isinstance(s, dict) else ""
+            iter_num = s.get("iteration", "?") if isinstance(s, dict) else "?"
+
+            parts = [f"- {name}"]
+            if reason:
+                parts.append(f" ({reason}")
+                if tool:
+                    parts.append(f", {tool}")
+                parts.append(")")
+            if isinstance(s, dict) and iter_num != "?":
+                parts.append(f" [iter{iter_num}]")
+            lines.append("".join(parts))
         return "\n".join(lines)
 
     def _build_skill_invocation_summary(self, iteration: int) -> str:
@@ -2228,11 +2631,14 @@ class DCPOptimizer(DCPOptimizerBase):
         if _pblock_failed:
             result["was_interrupted"] = True
             result["reason"] = "pblock_validation_failed"
-            self._compat.record_failure("PBLOCK")
+            self._compat.record_failure("PBLOCK", reason="execution_failure",
+                                        tool="vivado_create_and_apply_pblock",
+                                        detail="Pblock resource validation failed")
         elif _fanout_post_eval_missing:
             result["was_interrupted"] = True
             result["reason"] = "fanout_post_eval_missing"
-            self._compat.record_failure("Fanout")
+            self._compat.record_failure("Fanout", reason="execution_failure",
+                                        detail="Fanout post-evaluation missing")
 
         return result
 
@@ -2389,17 +2795,39 @@ class DCPOptimizer(DCPOptimizerBase):
 
         Returns a string like 'Recommended skill: rapidwright_analyze_pblock_region'
         or empty string if no clear recommendation.
+
+        Uses tiered failure filtering:
+        - reason="strategy_ineffective" → permanently excluded
+        - reason ∈ {tool_error, execution_failure} → retry allowed after 2 iterations cooldown
         """
-        failed = set(self._compat.failed_strategies)
+        # Tiered filtering: separate truly failed from tool-failed
+        truly_failed = set(
+            f["strategy"] for f in self._compat.failed_strategies
+            if f.get("reason") == "strategy_ineffective"
+        )
+        tool_failed = {
+            f["strategy"]: f for f in self._compat.failed_strategies
+            if f.get("reason") in ("tool_error", "execution_failure")
+        }
+
+        def _strategy_blocked(name: str) -> bool:
+            """Check if a strategy is blocked: truly failed OR tool-failed within cooldown."""
+            if name in truly_failed:
+                return True
+            if name in tool_failed:
+                tf = tool_failed[name]
+                if self.iteration - tf.get("iteration", 0) < 2:
+                    return True  # Still in cooldown
+            return False
 
         # [META-COGNITION] Stagnation: recommend diagnosis instead of optimization
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
         if self.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
-            if "PBLOCK" not in failed:
+            if not _strategy_blocked("PBLOCK"):
                 return ("Recommended skill: rapidwright_analyze_pblock_region "
                         "[DIAGNOSTIC - triggered by stagnation]. "
                         "Analyze FPGA fabric to understand timing obstacles before selecting strategy.")
-            if "Fanout" not in failed:
+            if not _strategy_blocked("Fanout"):
                 return ("Recommended skill: rapidwright_execute_fanout_strategy "
                         "[DIAGNOSTIC - triggered by stagnation]. "
                         "Check high-fanout nets as potential hidden obstacle.")
@@ -2408,7 +2836,7 @@ class DCPOptimizer(DCPOptimizerBase):
                     "Analyze placement detour issues on critical paths.")
 
         # Check spread data for distributed scenario
-        if "PBLOCK" not in failed and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
+        if not _strategy_blocked("PBLOCK") and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
             if avg_dist and avg_dist > 70:
                 return (f"Recommended skill: rapidwright_analyze_pblock_region (matches distributed scenario, avg_distance={avg_dist:.1f} > 70). "
@@ -2418,7 +2846,7 @@ class DCPOptimizer(DCPOptimizerBase):
                         f"vivado_place_design, vivado_route_design, and vivado_report_timing_summary yourself.")
 
         # Check high fanout nets
-        if "Fanout" not in failed and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
+        if not _strategy_blocked("Fanout") and hasattr(self, 'high_fanout_nets') and self.high_fanout_nets:
             max_fanout = max(n[1] for n in self.high_fanout_nets[:5]) if self.high_fanout_nets else 0
             if max_fanout > 100:
                 return (
@@ -2439,7 +2867,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 return "Recommended skill: rapidwright_analyze_net_detour (multiple phys_opt iterations without improvement, check for placement detour issues on critical paths)"
 
         # Default: moderate WNS suggests physopt
-        if "PhysOpt" not in failed:
+        if not _strategy_blocked("PhysOpt"):
             current_wns = self._get_current_wns()
             if current_wns is not None and current_wns > -2.0:
                 skill_name = STRATEGY_SKILL_MAP.get("PhysOpt", "physopt_strategy")
@@ -3110,12 +3538,24 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                     self.latest_tns = timing_info["tns"]
                                 if timing_info["failing_endpoints"] is not None:
                                     self.latest_failing_endpoints = timing_info["failing_endpoints"]
+                                # Update last verified timing_summary for golden path memory
+                                self._last_verified_timing_info = timing_info
+                                self._last_verified_timing_iteration = self.iteration
+                                self._last_verified_timing_raw = timing_text
+                                timing_hash = self._compute_timing_hash(timing_text)
                                 if current_wns > self.best_wns:
                                     logger.info(f"New best WNS (Auto-Eval): {current_wns:.3f} ns (improved from {self.best_wns:.3f} ns)")
                                     self.best_wns = current_wns
                                     self._best_wns_iteration = self.iteration
                                     self._best_wns_tns = timing_info.get("tns")
                                     self._best_wns_failing_endpoints = timing_info.get("failing_endpoints")
+                                    self._record_wns_milestone(
+                                        wns=current_wns,
+                                        iteration=self.iteration,
+                                        tns=timing_info.get("tns"),
+                                        failing_endpoints=timing_info.get("failing_endpoints"),
+                                        timing_raw_hash=timing_hash,
+                                    )
                                     wns_measured = current_wns  # Sync to MemoryManager via add_tool_result
                                 else:
                                     logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -3133,6 +3573,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                             self._best_wns_iteration = self.iteration
                                             self._best_wns_tns = self.latest_tns
                                             self._best_wns_failing_endpoints = self.latest_failing_endpoints
+                                            self._record_wns_milestone(
+                                                wns=current_wns,
+                                                iteration=self.iteration,
+                                                tns=self.latest_tns,
+                                                failing_endpoints=self.latest_failing_endpoints,
+                                                timing_raw_hash=self._compute_timing_hash(timing_text),
+                                            )
                                             wns_measured = current_wns
                                         else:
                                             logger.info(f"Current WNS (Auto-Eval): {current_wns:.3f} ns (best is still {self.best_wns:.3f} ns)")
@@ -3155,6 +3602,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             self.latest_tns = timing_info["tns"]
                         if timing_info["failing_endpoints"] is not None:
                             self.latest_failing_endpoints = timing_info["failing_endpoints"]
+                        # Update last verified timing_summary for golden path memory
+                        self._last_verified_timing_info = timing_info
+                        self._last_verified_timing_iteration = self.iteration
+                        self._last_verified_timing_raw = result_text
+                        timing_hash = self._compute_timing_hash(result_text)
                         current_fmax = self.calculate_fmax(current_wns, self.clock_period)
 
                         # Format fmax string if available
@@ -3166,6 +3618,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             self._best_wns_iteration = self.iteration
                             self._best_wns_tns = timing_info.get("tns")
                             self._best_wns_failing_endpoints = timing_info.get("failing_endpoints")
+                            self._record_wns_milestone(
+                                wns=current_wns,
+                                iteration=self.iteration,
+                                tns=timing_info.get("tns"),
+                                failing_endpoints=timing_info.get("failing_endpoints"),
+                                timing_raw_hash=timing_hash,
+                            )
                         else:
                             logger.info(f"Current WNS: {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                     else:
@@ -3201,6 +3660,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 self._best_wns_iteration = self.iteration
                                 self._best_wns_tns = self.latest_tns
                                 self._best_wns_failing_endpoints = self.latest_failing_endpoints
+                                self._record_wns_milestone(
+                                    wns=current_wns,
+                                    iteration=self.iteration,
+                                    tns=self.latest_tns,
+                                    failing_endpoints=self.latest_failing_endpoints,
+                                    verified=True,
+                                )
                             else:
                                 logger.info(f"Current WNS (from get_wns): {current_wns:.3f} ns{fmax_str} (best is still {self.best_wns:.3f} ns)")
                         else:
@@ -3304,7 +3770,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # Record as failed strategy
             tool_strategy = self._infer_strategy_from_tools([tool_name])
             if tool_strategy not in ("Information", "Unknown"):
-                self._compat.record_failure(tool_strategy)
+                self._compat.record_failure(tool_strategy, reason="tool_error",
+                                            tool=tool_name, detail=f"Timeout after {elapsed_time:.1f}s")
 
             # Skill invocation tracking (timeout path)
             if tool_name in SKILL_TOOL_MAP:
@@ -3362,7 +3829,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # Record as failed strategy (dedup inside record_failure)
             tool_strategy = self._infer_strategy_from_tools([tool_name])
             if tool_strategy not in ("Information", "Unknown"):
-                self._compat.record_failure(tool_strategy)
+                self._compat.record_failure(tool_strategy, reason="tool_error",
+                                            tool=tool_name, detail=str(e)[:200])
 
             # ── Skill invocation tracking (error path) ────────────
             if tool_name in SKILL_TOOL_MAP:
@@ -3445,6 +3913,10 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         self._best_wns_iteration = 0  # Track initial state as iteration 0
         self._best_wns_tns = timing_info["tns"]
         self._best_wns_failing_endpoints = timing_info["failing_endpoints"]
+        # Initialize golden path memory with initial timing data
+        self._last_verified_timing_info = timing_info
+        self._last_verified_timing_iteration = 0
+        self._last_verified_timing_raw = timing_report
 
         # NOTE (Issue 7): _sync_state_to_memory_manager() is NOT called here.
         # MemoryManager._initial_wns/_best_wns remain at default values (None/-inf).
@@ -3962,46 +4434,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             retry_delay = 2  # Initial delay in seconds
             last_exception = None
             # Get messages for logging and API call
-            api_messages = self._compat.get_formatted_for_api()
+            api_messages = self._prepare_api_messages()
 
-            # Inject current WNS state into system message to prevent context loss after compression
-            if api_messages and api_messages[0].get("role") == "system":
-                system_content = api_messages[0].get("content", "")
-                updated_content = self._inject_wns_state_to_system_prompt(system_content)
-                api_messages[0]["content"] = updated_content
-                # Sync latest WNS to SkillTelemetry for correlating skill executions with timing state
-                from skills.telemetry import SkillTelemetry
-                SkillTelemetry.set_current_wns(self.latest_wns)
-
-            # Inject iteration handoff prompt or first-iteration starting context
-            # Insert as standalone system message after primary system prompt for better attention weight
-            if not self._iteration_handoff_injected:
-                if self._iteration_handoff_prompt:
-                    handoff_msg = {"role": "system", "content": self._iteration_handoff_prompt}
-                    api_messages.insert(1, handoff_msg)
-                    logger.info(f"Injected iteration handoff prompt as system message (length: {len(self._iteration_handoff_prompt)} chars)")
-                elif self.iteration == 1:
-                    # First iteration: no handoff from previous iteration, inject starting context
-                    first_msg = {
-                        "role": "system",
-                        "content": (
-                            "**FIRST ITERATION** - Begin with initial design analysis "
-                            "(report_timing_summary, extract_critical_path_cells, etc.) "
-                            "to understand the current timing state before applying "
-                            "optimization strategies."
-                        )
-                    }
-                    api_messages.insert(1, first_msg)
-                    logger.info("Injected first iteration starting context")
-                self._iteration_handoff_injected = True
-
-            # Inject short format reminder as last system message before API call
-            # Ensures the YAML format instruction is always near the generation point,
-            # regardless of how long the context has grown.
-            api_messages.append({
-                "role": "system",
-                "content": "REMINDER: Your response MUST contain a 'step:' YAML block (chain-of-thought natural language is OK before it). See format instructions at conversation start."
-            })
 
             # Log prompt for observability
             self._prompt_logger.log_prompt(
@@ -4183,6 +4617,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             if step_state.parse_error:
                 logger.warning(f"[STEP_PARSE] YAML parse error: {step_state.parse_error}")
                 self._inject_yaml_format_error_feedback(step_state.parse_error)
+                self._consecutive_format_failures += 1
+                logger.warning(f"[FORMAT_FAIL] Consecutive format failures: {self._consecutive_format_failures}")
+            elif step_state.step_id is not None or step_state.flow_control is not None:
+                # Successfully parsed a valid step: YAML block — reset failure counter
+                if self._consecutive_format_failures > 0:
+                    logger.info(f"[FORMAT_FAIL] Format recovered, resetting counter (was {self._consecutive_format_failures})")
+                self._consecutive_format_failures = 0
 
             # Check flow_control BEFORE executing tools.
             # If termination signal (DONE/SWITCH_STRATEGY), skip tool execution
@@ -4285,17 +4726,73 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             # Record strategy failure when tool result indicates error
                             tool_strategy = self._infer_strategy_from_tools([tool_name])
                             if tool_strategy not in ("Information", "Unknown"):
-                                self._compat.record_failure(tool_strategy)
+                                self._compat.record_failure(tool_strategy, reason="tool_error",
+                                                            tool=tool_name, detail=result[:200])
 
                         # Special case: PBLOCK validation failure (status: validation_failed)
                         if tool_name == "vivado_create_and_apply_pblock" and "validation_failed" in result_lower:
-                            self._compat.record_failure("PBLOCK")
+                            self._compat.record_failure("PBLOCK", reason="execution_failure",
+                                                        tool=tool_name,
+                                                        detail="Pblock resource validation failed")
 
                         # [Phase 2] Add tool result via compat (each tool result is a separate message)
                         self._compat.add_message("tool", result, {
                             "tool_call_id": tc.id,
                             "name": tool_name
                         })
+
+                        # [REPETITION_DETECT] Track recent tools for diminshing-returns detection
+                        current_wns_snapshot = self._get_current_wns()
+                        if current_wns_snapshot is not None:
+                            self._recent_tools.append((tool_name, current_wns_snapshot))
+                            if len(self._recent_tools) > 5:
+                                self._recent_tools.pop(0)
+                            # Detect: >=3 consecutive same tool with marginal WNS change
+                            if len(self._recent_tools) >= 3:
+                                last_3 = self._recent_tools[-3:]
+                                same_tool = all(t == last_3[0][0] for t, _ in last_3)
+                                if same_tool:
+                                    wns_start = last_3[0][1]
+                                    wns_end = last_3[-1][1]
+                                    total_change = abs(wns_end - wns_start)
+                                    if total_change < 0.05:
+                                        warning = (
+                                            f"REPETITION DETECTED: '{last_3[0][0]}' called 3+ consecutive times "
+                                            f"with marginal WNS change ({wns_end - wns_start:+.3f}ns total). "
+                                            f"Consider: (1) call report_timing_summary to re-assess; "
+                                            f"(2) if plateaued, diagnose root cause before continuing."
+                                        )
+                                        self._compat.add_message("user", warning)
+                                        logger.warning(f"Repetition detected for tool '{last_3[0][0]}', "
+                                                       f"WNS delta={wns_end - wns_start:+.3f}ns")
+                                        self._recent_tools.clear()
+
+                        # [REFLECTION] Periodic checkpoint every 8 tool rounds
+                        if tool_round > 1 and tool_round % 8 == 0:
+                            current_wns_val = self._get_current_wns()
+                            best_wns_val = self.best_wns if self.best_wns > float('-inf') else None
+                            tools_this_iter = sum(
+                                1 for t in self._compat.tool_call_details
+                                if t.get('iteration') == self.iteration
+                            )
+                            wns_str = f"{current_wns_val:.3f}ns" if current_wns_val is not None else "(unknown)"
+                            reflection = (
+                                f"REFLECTION CHECKPOINT (tool round {tool_round}):\n"
+                                f"- Current WNS: {wns_str}"
+                            )
+                            if best_wns_val is not None:
+                                reflection += f" (best: {best_wns_val:.3f}ns)"
+                            reflection += (
+                                f"\n- Tools called this iteration: {tools_this_iter}\n"
+                                f"- Step back and evaluate:\n"
+                                f"  1. Is your current strategy producing significant WNS improvement?\n"
+                                f"  2. If yes, continue. If no, is it time to SWITCH_STRATEGY?\n"
+                                f"  3. If unsure, call report_timing_summary to re-assess.\n"
+                                f"- Your next response MUST explicitly justify CONTINUE vs SWITCH_STRATEGY "
+                                f"in the analysis.strategy_rationale field."
+                            )
+                            self._compat.add_message("user", reflection)
+                            logger.info(f"Reflection checkpoint injected at tool_round={tool_round}")
                     continue  # Loop continues to process tool results
 
             # 4. No tool call, update improvement tracking
@@ -4387,7 +4884,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 ]
                 prev_strategy = self._infer_strategy_from_tools(tools_this_iter)
                 if prev_strategy not in ("Information", "Unknown"):
-                    self._compat.record_failure(prev_strategy)
+                    self._compat.record_failure(prev_strategy, reason="strategy_ineffective",
+                                                detail="LLM signaled SWITCH_STRATEGY")
                 # System-enforced: end current iteration, force re-analysis next iteration
                 if self._is_done_reason is None:
                     self._is_done_reason = "switch_strategy"
@@ -4671,7 +5169,8 @@ CRITICAL OPTIMIZATION RULES:
                             elif self._is_routing_failure(error_msg):
                                 logger.warning(f"route_design clear routing failure (Iter {tool_detail['iteration']}): {error_msg[:100]}")
                                 recent_routing_failure = 'routing_failed'
-                                self._compat.record_failure("PlaceRoute")
+                                self._compat.record_failure("PlaceRoute", reason="execution_failure",
+                                                            detail="Route design clear routing failure")
                             else:
                                 # Other errors, handle conservatively but don't fully mark as failure
                                 recent_routing_failure = 'unknown_error'
@@ -4754,21 +5253,46 @@ CRITICAL OPTIMIZATION RULES:
                         if retry_count < max_retries:
                             await asyncio.sleep(2)
 
-                # If check failed after all retries, do not count this iteration - skip to next round without updating counters
+                # If check failed after all retries, apply golden path memory decision:
+                # - Level 1: checkpoint OK + timing_summary verified → trust timing_summary, keep WNS
+                # - Level 2: checkpoint OK but no timing_summary → restore from snapshot (degrade)
+                # - Level 3: both failed → pause for diagnostics
                 if not (checkpoint_success and get_wns_success):
-                    logger.warning(f"Iteration {self.iteration}: Checkpoint + get_wns check FAILED after {max_retries} retries, skipping iteration (no counter update)")
-                    # [Bug 4] Restore WNS state from snapshot taken before get_completion()
-                    snap = getattr(self, '_wns_snapshot', None)
-                    if snap:
-                        self.best_wns = snap["best_wns"]
-                        self._best_wns_iteration = snap["_best_wns_iteration"]
-                        self.latest_wns = self.best_wns  # best_wns reflects the rolled-back design state
-                        self.latest_tns = snap["latest_tns"]
-                        self.latest_failing_endpoints = snap["latest_failing_endpoints"]
-                        self._best_wns_tns = snap["_best_wns_tns"]
-                        self._best_wns_failing_endpoints = snap["_best_wns_failing_endpoints"]
-                        logger.info(f"Restored WNS state from snapshot: best={self.best_wns}, latest={self.latest_wns}")
-                    continue
+                    if (checkpoint_success
+                        and self._last_verified_timing_info
+                        and self._last_verified_timing_info.get("wns") is not None
+                        and self._last_verified_timing_iteration == self.iteration):
+                        # [Level 1] get_wns failed but we have verified timing_summary data
+                        # Trust the timing_summary WNS instead of rolling back state
+                        trusted_wns = self._last_verified_timing_info["wns"]
+                        logger.info(
+                            f"Iteration {self.iteration}: get_wns failed but timing_summary verified "
+                            f"(WNS={trusted_wns:.3f}), keeping WNS from timing_summary. "
+                            f"Checkpoint saved OK, no rollback needed."
+                        )
+                        # Keep current WNS state as-is (already updated by timing_summary parsing).
+                        # Milestone was already recorded at parse time — no duplicate needed here.
+                        self.latest_wns = trusted_wns
+                        self._best_wns_iteration = self.iteration
+                    elif checkpoint_success:
+                        # [Level 2] No timing_summary fallback, restore from snapshot
+                        logger.warning("No verified timing_summary available, restoring WNS from snapshot")
+                        self._restore_wns_from_snapshot()
+                        continue
+                    else:
+                        # [Level 3] Both checkpoint and get_wns failed — pause for diagnostics
+                        await self._pause_for_diagnostics(
+                            reason="checkpoint_and_get_wns_failed",
+                            details={
+                                "iteration": self.iteration,
+                                "checkpoint_success": checkpoint_success,
+                                "get_wns_success": get_wns_success,
+                                "best_wns": self.best_wns,
+                                "latest_wns": self.latest_wns,
+                            }
+                        )
+                        self._restore_wns_from_snapshot()
+                        continue
 
                 # [FIX] Determine WNS improvement AFTER checkpoint/get_wns confirms the actual WNS.
                 # Previously this ran before the checkpoint phase, so global_no_improvement and

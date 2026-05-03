@@ -119,6 +119,44 @@ API调用前 → _inject_wns_state_to_system_prompt()
     → 模型始终看到当前状态，不依赖working memory
 ```
 
+### 2.3.1 Agent 上下文快照注入（新增）
+
+```
+API调用前 → _prepare_api_messages() 中末尾调用 _inject_context_snapshot()
+    ↓
+_build_context_snapshot() 从现有实例变量构建 YAML：
+    primary_goal: "Achieve WNS >= 0.000 ns"
+    current_wns: "-0.352 ns"
+    best_wns: "-0.120 ns (iter 5, PhysOpt)"
+    remaining_violation: "0.352 ns"
+    iteration: 7
+    active_strategy: "PhysOpt"
+    strategy_state: "PLATEAUED"
+    stagnation: 3
+    strategy_sequence: ["PBLOCK", "Fanout", "PhysOpt"]
+    failed_strategies:
+      - "PBLOCK: execution_failure"
+      - "Fanout: tns_degraded"
+    do_not_repeat:
+      - "phys_opt_design (12 calls, delta 0.0023 ns)"
+    wns_milestones:
+      - "-0.120 ns @ iter 5 (PhysOpt)"
+    ↓
+_inject_context_snapshot(api_messages):
+    1. 扫描 api_messages 查找以 "# === FPGA Timing Optimization Agent Context Snapshot ==="
+       开头的 user 消息 → 找到则移除（防止累积）
+    2. 调用 _build_context_snapshot() 构建新 YAML
+    3. 在第一个非 system 消息位置插入新的 user 消息
+    → 每次 API 调用最多一条快照消息，零残留
+```
+
+**设计要点**：
+- **User 角色**：不同于 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
+- **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
+- **轻量级**：20-30 行 YAML，~300-500 tokens
+- **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
+- **`strategy_state` 推导**：`failed_strategy_names` 中有 → `"FAILED"`；`global_no_improvement >= 2` 且策略未变 → `"PLATEAUED"`；否则 `"ACTIVE"`
+
 ### 2.4 关键信息保护
 
 | 类型 | 存储位置 | 保护机制 |
@@ -129,7 +167,12 @@ API调用前 → _inject_wns_state_to_system_prompt()
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败）|
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
-| step: YAML 格式要求 | ① User message（会话起始）② System reminder（每API调用前） | 双重注入：User role 高注意力权重 + 末尾 System 贴近生成点 |
+| step: YAML 格式要求 | ① User message（会话起始）② System prompt 头部压印（每API调用前）③ System reminder/blockade（每API调用前） | 三重防御：User role 高注意力 + System prompt 前导压印 + 末尾贴近生成点；连续2次失败升级为 FORMAT BLOCKADE |
+| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_wns/best_wns/active_strategy/failed_strategies/do_not_repeat/wns_milestones |
+| 工具重复检测 | DCPOptimizer._recent_tools（滑动窗口） | 连续>=3次相同工具且WNS总变化<0.05ns时，注入 REPETITION DETECTED 警告 |
+| 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT，要求LLM评估策略有效性并显式 justify CONTINUE vs SWITCH_STRATEGY |
+| Pblock合规性 | Vivado MCP 返回 + Summarizer 解析 | `create_and_apply_pblock` 追加 cells 计数；`_summarize_tool_result()` 解析 `cells_in_pblock`/`cells_in_design`，部分成功时设置 `status=partial`、添加 `compliance` 字段 |
+| Tcl多行 | Vivado MCP `run_tcl_command()` | 按 `\n` 分割多行脚本，在同一 Vivado 会话中顺序执行（变量跨行持久化） |
 
 ### 2.5 模型选择
 
@@ -407,29 +450,46 @@ class StepState:
 
 **边界情况**: content=None + tool_calls → 空 StepState；DONE + tool_calls → flow_control 优先；旧模型不输出 YAML → 回退 `_parse_action_from_yaml`。
 
-### 5.6 失败策略追踪
+### 5.6 失败策略追踪（分级格式）
 
 `record_failure()` 的 8 个触发点：
 
-| 触发点 | 记录的策略 | 条件 |
-|--------|-----------|------|
-| SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
-| 工具调用超时 | 工具所属策略 | 工具超时 |
-| 工具调用异常 | 工具所属策略 | 工具执行抛出异常 |
-| 工具结果含错误 | 工具所属策略 | 工具结果含 error/failed 关键字 |
-| PBLOCK validation_failed | PBLOCK | `create_and_apply_pblock` 结果含 validation_failed |
-| Fanout后评估缺失 | Fanout | Fanout优化后缺少post-eval |
-| 路由失败 | PlaceRoute | `route_design`/`place_design` 失败 |
-| 策略中断检测 | PBLOCK/Fanout | `_detect_unfinished_strategy()` 检测到验证缺失 |
+| 触发点 | 记录的策略 | reason | 条件 |
+|--------|-----------|--------|------|
+| SWITCH_STRATEGY 处理 | 当前迭代推断的策略 | `strategy_ineffective` | `_infer_strategy_from_tools()` 返回非 Information/Unknown |
+| 工具调用超时 | 工具所属策略 | `tool_error` | 工具超时 |
+| 工具调用异常 | 工具所属策略 | `tool_error` | 工具执行抛出异常 |
+| 工具结果含错误 | 工具所属策略 | `tool_error` | 工具结果含 error/failed 关键字 |
+| PBLOCK validation_failed | PBLOCK | `execution_failure` | `create_and_apply_pblock` 结果含 validation_failed |
+| Fanout后评估缺失 | Fanout | `execution_failure` | Fanout优化后缺少post-eval |
+| 路由失败 | PlaceRoute | `execution_failure` | `route_design`/`place_design` 失败 |
+| 策略中断检测 | PBLOCK/Fanout | `execution_failure` | `_detect_unfinished_strategy()` 检测到验证缺失 |
+
+**分级格式** (`list[dict]`，原为 `list[str]`)：
+```python
+{"strategy": "PBLOCK", "reason": "execution_failure",  # tool_error | execution_failure | strategy_ineffective
+ "tool": "vivado_create_and_apply_pblock", "iteration": 3, "detail": "..."}
+```
+
+**`_build_skill_recommendation()` 分级过滤**：
+- `reason="strategy_ineffective"` → 永久排除（LLM 自主判定策略无效）
+- `reason ∈ {tool_error, execution_failure}` → 冷却 2 个迭代后可重试（工具/执行问题，非策略本身无效）
+- `_strategy_blocked(name)` 辅助函数统一判断逻辑
 
 **`failed_strategies` 的使用**：
-- `_build_skill_recommendation()`: 跳过已失败策略的推荐（PBLOCK/Fanout/PhysOpt 分别检查）
-- `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩，不受迭代年龄限制
-- `_is_failed_strategy_tool_result()`: 按工具名模式匹配（PBLOCK→pblock, PhysOpt→phys_opt, Fanout→fanout/optimize_fanout, PlaceRoute→place_design/route_design）
+- `_build_skill_recommendation()`: 分级过滤（truly_failed vs tool_failed），而非简单的 `set` 排除
+- `_build_failed_strategy_summary()`: 展示策略名 + reason + tool + iteration
+- `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩（兼容新旧格式）
+- `_is_failed_strategy_tool_result()`: 兼容 `str`（旧格式）和 `dict`（新格式）
+- `failed_strategy_names` 属性（compat.py/manage.py）: 向后兼容返回纯策略名列表
 
-### 5.7 step: YAML 格式要求双重注入
+**向后兼容**：
+- `failed_strategies` 属性仍返回列表（元素从 `str` 变为 `dict`）
+- 新增 `failed_strategy_names` 属性返回 `list[str]`，供仅需策略名的代码使用（如 `_inject_wns_state_to_system_prompt()` 的 `tried` 集合计算）
 
-双重注入策略，兼顾注意力权重与位置近端性：
+### 5.7 step: YAML 格式要求三重防御
+
+三重注入策略，逐级升级：
 
 **注入 1 — User Message（一次性，会话起始）**
 ```
@@ -440,15 +500,97 @@ optimize() 中:
 ```
 User role 消息注意力权重大于 System role，只需注入一次。
 
-**注入 2 — System Reminder（每 LLM API 调用前）**
+**注入 2 — System Prompt 头部压印（每 LLM API 调用前）**
+```
+get_completion() 中 _inject_wns_state_to_system_prompt() 返回后:
+system_content = "[FORMAT: EVERY response MUST include step: YAML block with "
+                 "step_id/result_status/flow_control. No XML tags, no markdown fences.]\n\n"
+                 + updated_content
+```
+确保格式约束始终处于 system prompt 最前沿，注意力权重最高。
+
+**注入 3 — System Reminder/BLOCKADE（每 LLM API 调用前，末尾位置）**
 ```
 get_completion() 中:
-messages 末尾追加:
-  {"role": "system", "content": "REMINDER: Your response MUST contain a 'step:' YAML block ..."}
+if _consecutive_format_failures >= 2:
+    → FORMAT BLOCKADE（含完整 YAML 模板，~200 tokens）
+else:
+    → 简短 REMINDER（<10 tokens）
 ```
-极简内容（<10 tokens），始终在 messages 最后一条，贴近模型生成点。
+贴近模型生成点。`_consecutive_format_failures` 计数器：
+- `_parse_step_yaml()` 有 `parse_error` 时 +1
+- 成功解析 valid step_id 或 flow_control 时重置为 0
+- 达到 2 时升级为 BLOCKADE，恢复后自动降级
 
 **格式约束**: response 中必须包含一个 `step:` YAML 控制块（允许在 `step:` 块之前输出自然语言思维链推理）。解析代码已支持从文本中任意位置提取最后一个 `step:` 块。
+
+### 5.8 工具重复检测器
+
+`get_completion()` 工具循环内的实时检测：
+
+```python
+_recent_tools: list[tuple[str, float]]  # 滑动窗口 (tool_name, wns)，最多5条
+```
+
+**检测条件**：连续 >=3 次相同工具 + WNS 总变化 < 0.05ns
+
+**触发时行为**：
+```
+REPETITION DETECTED: 'phys_opt_design' called 3+ consecutive times
+with marginal WNS change (+0.020ns total).
+Consider: (1) report_timing_summary to re-assess;
+(2) if plateaued, diagnose root cause before continuing.
+```
+- 注入 user 消息到对话上下文
+- 清空 `_recent_tools` 窗口防止重复报警
+- 关联触发周期反思（不等下一周期）
+
+**关键行为**：
+- 中间穿插其他工具时正确重置窗口
+- WNS 显著改善时（>=0.05ns）不触发
+- 仅当 `_get_current_wns()` 返回有效值（非 None）时记录
+
+### 5.9 周期反思触发器
+
+`get_completion()` 工具循环内，每 8 个 `tool_round` 注入：
+
+```
+REFLECTION CHECKPOINT (tool round 8):
+- Current WNS: -0.352ns (best: -0.300ns)
+- Tools called this iteration: 8
+- Step back and evaluate:
+  1. Is your current strategy producing significant WNS improvement?
+  2. If yes, continue. If no, is it time to SWITCH_STRATEGY?
+  3. If unsure, call report_timing_summary to re-assess.
+- Your next response MUST explicitly justify CONTINUE vs SWITCH_STRATEGY
+  in the analysis.strategy_rationale field.
+```
+
+**触发规则**：
+- `tool_round > 1` 且 `tool_round % 8 == 0`
+- 重复检测器触发时：跳过周期等待，**立即**注入反思
+- 与 `flow_control` 的 SWITCH_STRATEGY 语义一致
+
+**联动**: 重复检测触发 → 清空窗口 + 注入重复警告 → 立即触发周期反思。两者形成"检测—警告—反思"的完整干预链条。
+
+### 5.10 工具状态合规性
+
+**Pblock Cells 计数** (Vivado MCP `create_and_apply_pblock()`)：
+- `add_cells_to_pblock` 执行后，追加 `llength [get_cells -hierarchical -filter {pblock==<name>}]`
+- 输出 `Cells in pblock: N` 和 `Total cells in design: M`
+
+**Summarizer 合规性解析** (`_summarize_tool_result()` pblock 分支)：
+- 解析 `Cells in pblock:` / `Total cells in design:` 行
+- `cells_in_pblock < cells_in_design` 时：
+  - `key_details["compliance"] = "added N/M cells (PARTIAL)"`
+  - `status = "partial"`（非 `"success"`）
+- LLM 可在 tool_result YAML 中直接识别部分成功状态
+
+**Tcl 多行命令支持** (`run_tcl_command()`):
+- 按 `\n` 分割多行脚本
+- 在同一 Vivado 会话中逐行执行（`_run_single_tcl()`）
+- 变量跨行持久化，解决之前的"无状态子shell"问题
+- 单行命令行为不变（向后兼容）
 
 ## 6. 429降级机制
 
