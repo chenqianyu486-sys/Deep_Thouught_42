@@ -141,18 +141,17 @@ class TaskCategory:
 
 @dataclass
 class StepState:
-    """Parsed step YAML state from an LLM response.
+    """Process control state reported via the report_step_state tool call.
 
-    Carries the step control data (step_id, result_status, flow_control,
-    analysis) that the LLM includes in its response's step: YAML block.
+    Carries pure control signals (step_id, result_status, flow_control)
+    from the LLM's structured tool call response. Analysis data lives
+    in the LLM's text output (chain-of-thought).
     """
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
     flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
-    analysis: dict = field(default_factory=dict)  # observed_signals, scenario_match, hypothesis, strategy_rationale
     has_tool_calls: bool = False               # Whether native tool_calls were also present
     raw_content: str = ""                      # Raw content for logging/debugging
-    parse_error: Optional[str] = None          # Set if YAML parsing failed
 
 # Task classification patterns
 INFORMATION_PATTERNS = ["get_", "read", "query", "check", "list", "show", "status", "report"]
@@ -866,12 +865,8 @@ class DCPOptimizer(DCPOptimizerBase):
         # Repetition detection: sliding window of (tool_name, wns) for diminishing-returns detection
         self._recent_tools: list[tuple[str, float]] = []
 
-        # Format compliance: track consecutive failures to escalate REMINDER -> BLOCKADE
-        self._consecutive_format_failures: int = 0
-
-        # Step state tracking from LLM YAML responses
+        # Step state tracking from report_step_state tool call
         self._step_state: Optional[StepState] = None   # Most recent parsed step state
-        self._last_analysis: dict = field(default_factory=dict)  # Last analysis from SWITCH_STRATEGY/DONE
 
         # === Section 8.2: Context Manager Integration ===
         # Initialize EventBus for context change notifications
@@ -1304,19 +1299,7 @@ class DCPOptimizer(DCPOptimizerBase):
 
         remove_indices: set[int] = set()
 
-        # --- 1. Deduplicate FORMAT BLOCKADE / REMINDER (system messages) ---
-        format_indices = [
-            i for i, msg in enumerate(api_messages)
-            if msg.get("role") == "system"
-            and isinstance(msg.get("content"), str)
-            and (msg["content"].startswith("FORMAT BLOCKADE:")
-                 or msg["content"].startswith("REMINDER:"))
-        ]
-        # Keep only the last one
-        for i in format_indices[:-1]:
-            remove_indices.add(i)
-
-        # --- 2. Deduplicate REFLECTION CHECKPOINT (user messages) ---
+        # --- 1. Deduplicate REFLECTION CHECKPOINT (user messages) ---
         reflection_indices = [
             i for i, msg in enumerate(api_messages)
             if msg.get("role") == "user"
@@ -1399,14 +1382,14 @@ class DCPOptimizer(DCPOptimizerBase):
         api_messages = self._auto_compact_messages(api_messages)
 
         # Step 2: Augment system prompt with scenario hint and skill catalog (static context)
-        # Dynamic WNS state is injected via _inject_context_snapshot (Step 5) as a user message
+        # Dynamic WNS state is injected via _inject_context_snapshot (Step 4) as a user message
         if api_messages and api_messages[0].get("role") == "system":
             system_content = api_messages[0].get("content", "")
             updated_content = self._inject_wns_state_to_system_prompt(system_content)
             # Stamp format constraint at the front of system prompt for highest attention weight
             updated_content = (
                 "[FORMAT: EVERY response MUST call the report_step_state tool with "
-                "step_id/result_status/flow_control/analysis. Chain-of-thought text OK.]\n\n"
+                "step_id/result_status/flow_control. Chain-of-thought text OK.]\n\n"
                 + updated_content
             )
             api_messages[0]["content"] = updated_content
@@ -1436,32 +1419,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 logger.info("Injected first iteration starting context")
             self._iteration_handoff_injected = True
 
-        # Step 4: Inject format reminder as last system message before API call
-        # Escalates to BLOCKADE when LLM repeatedly omits the step state
-        if self._consecutive_format_failures >= 2:
-            api_messages.append({
-                "role": "system",
-                "content": (
-                    "FORMAT BLOCKADE: Your last 2 responses lacked a valid step state. "
-                    "You CANNOT proceed without calling the report_step_state tool. "
-                    "Every response MUST include:\n"
-                    "  report_step_state(\n"
-                    "    step_id=<N>,\n"
-                    "    result_status=SUCCESS|PARTIAL|FAIL,\n"
-                    "    flow_control=CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK,\n"
-                    "    analysis={observed_signals:{...}, scenario_match:<id>, "
-                    "hypothesis:\"...\", strategy_rationale:\"...\"}\n"
-                    "  )\n"
-                    "Call this tool ALONGSIDE any other tool calls in your structured tool calls."
-                )
-            })
-        else:
-            api_messages.append({
-                "role": "system",
-                "content": "REMINDER: Call the report_step_state tool (alongside other tools) with step_id, result_status, flow_control, and analysis."
-            })
-
-        # Step 5: [NEW] Inject context snapshot as first user message
+        # Step 4: Inject context snapshot as first user message
         self._inject_context_snapshot(api_messages)
 
         return api_messages
@@ -2476,9 +2434,7 @@ class DCPOptimizer(DCPOptimizerBase):
             "strategy_label": self._infer_strategy_from_tools(tools_this_iter),
             "outcome": outcome,
             "result_status": (self._step_state.result_status
-                              if self._step_state else None),
-            "scenario_match": (self._step_state.analysis.get('scenario_match')
-                               if self._step_state and self._step_state.analysis else None)
+                              if self._step_state else None)
         }
         self._iteration_narratives.append(entry)
         if len(self._iteration_narratives) > 20:
@@ -3072,31 +3028,9 @@ class DCPOptimizer(DCPOptimizerBase):
 {skill_rec_section}
 {stagnation_section}=== SKILL INVOCATIONS ===
 {self._build_skill_invocation_summary(self.iteration) or "(none)"}
-{self._format_analysis_section()}=== INCOMING MODEL ===
+=== INCOMING MODEL ===
 You are the Planner for this iteration. Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
         return handoff
-
-    def _format_analysis_section(self) -> str:
-        """Format the LLM's own analysis from the last step YAML for handoff context."""
-        if not self._last_analysis:
-            return ""
-        obs = self._last_analysis.get('observed_signals', {})
-        scenario = self._last_analysis.get('scenario_match', 'N/A')
-        hypothesis = self._last_analysis.get('hypothesis', '')
-        rationale = self._last_analysis.get('strategy_rationale', '')
-        parts = ["\n=== LLM'S OWN ANALYSIS ===\n"]
-        if scenario and scenario != 'N/A':
-            parts.append(f"- Scenario Match: {scenario}\n")
-        if hypothesis:
-            parts.append(f"- Hypothesis: {hypothesis[:200]}\n")
-        if rationale:
-            parts.append(f"- Strategy Rationale: {rationale[:200]}\n")
-        if obs:
-            obs_str = ", ".join(f"{k}={v}" for k, v in obs.items() if v is not None)
-            if obs_str:
-                parts.append(f"- Observed Signals: {obs_str}\n")
-        parts.append("\n")
-        return "".join(parts)
 
     def _generate_worker_handoff(self) -> str:
         """Generate lean handoff for worker models (250K context)."""
@@ -3472,9 +3406,10 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         # Register internal tool: report_step_state replaces the YAML step: block.
         # LLM calls this tool ALONGSIDE other tool calls to communicate process
-        # control (step_id, result_status, flow_control, analysis). The system
-        # extracts control flow from structured tool call arguments instead of
-        # parsing YAML from message.content text.
+        # control (step_id, result_status, flow_control). The system extracts
+        # control flow from structured tool call arguments instead of parsing
+        # YAML from message.content text. Analysis data is communicated via
+        # the LLM's text chain-of-thought, keeping control separate from analysis.
         self.tools.append({
             "type": "function",
             "function": {
@@ -3506,36 +3441,9 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 "RETRY: modify params and retry (max 3); "
                                 "ROLLBACK: revert to best checkpoint"
                             )
-                        },
-                        "analysis": {
-                            "type": "object",
-                            "properties": {
-                                "observed_signals": {
-                                    "type": "object",
-                                    "properties": {
-                                        "avg_distance": {"type": ["number", "null"]},
-                                        "max_fanout": {"type": ["integer", "null"]},
-                                        "failing_endpoints": {"type": ["integer", "null"]}
-                                    },
-                                    "description": "Observed design signals from recent timing/utilization analysis"
-                                },
-                                "scenario_match": {
-                                    "type": ["string", "null"],
-                                    "description": "Matched scenario ID (wide_lut, high_fanout, distributed, control_imbalance, congestion)"
-                                },
-                                "hypothesis": {
-                                    "type": "string",
-                                    "description": "Current hypothesis about the dominant timing obstacle"
-                                },
-                                "strategy_rationale": {
-                                    "type": "string",
-                                    "description": "Justification for continuing current strategy or switching"
-                                }
-                            },
-                            "required": ["hypothesis", "strategy_rationale"]
                         }
                     },
-                    "required": ["step_id", "result_status", "flow_control", "analysis"]
+                    "required": ["step_id", "result_status", "flow_control"]
                 },
                 "strict": False
             }
@@ -4408,132 +4316,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
 
         return results
 
-    @staticmethod
-    def _parse_action_from_yaml(content: str) -> tuple:
-        """Parse action and flow_control from YAML response.
-
-        Returns:
-            (action, flow_control) tuple - either may be None if not found
-        """
-        # Strip Markdown formatting that can break YAML parsing
-        content = re.sub(r'\*\*(.+?)\*\*', r'\1', content)
-        content = re.sub(r'`(.+?)`', r'\1', content)
-        blocks = re.split(r'\n(?=step:)', content)
-        for block in blocks:
-            block = block.strip()
-            if not block:
-                continue
-            if not block.startswith('step:'):
-                block = 'step:\n' + block
-            try:
-                data = yaml.safe_load(block)
-            except yaml.YAMLError:
-                continue
-            if not isinstance(data, dict):
-                continue
-            step_data = data.get('step')
-            if not isinstance(step_data, dict):
-                step_data = data
-            action = step_data.get('action')
-            flow_control = step_data.get('flow_control')
-            # Log analysis section if present (optional observability)
-            analysis_data = step_data.get('analysis')
-            if analysis_data and isinstance(analysis_data, dict):
-                scenario = analysis_data.get('scenario_match', 'unknown')
-                hypothesis = analysis_data.get('hypothesis', '')
-                logger.info(f"LLM analysis: scenario={scenario}, hypothesis={hypothesis[:100] if hypothesis else 'none'}")
-            if action or flow_control:
-                return (action, flow_control)
-        return (None, None)
-
-    @staticmethod
-    def _parse_step_yaml(content: str) -> StepState:
-        """Unified parser: extract full step YAML block from LLM response text.
-
-        Returns a StepState with whatever fields could be parsed. Never raises.
-        This is format-agnostic: works whether or not native tool_calls are present.
-        """
-        state = StepState(raw_content=content)
-        if not content or not content.strip():
-            return state
-
-        try:
-            # Strip XML tags, Markdown formatting, and repair fused step: boundaries
-            cleaned = re.sub(r'</?[^>]+>', '', content)
-            cleaned = re.sub(r'\*\*(.+?)\*\*', r'\1', cleaned)  # **bold** -> text
-            cleaned = re.sub(r'`(.+?)`', r'\1', cleaned)         # `code` -> text
-            # Only insert newline before step: when fused to a non-word char (e.g. >step:)
-            # Avoids splitting natural language like "next step:" or "first step:"
-            cleaned = re.sub(r'([^a-zA-Z0-9_\s])(step:)', r'\1\n\2', cleaned)
-
-            blocks = re.split(r'\n(?=step:)', cleaned)
-            if not blocks:
-                return state
-
-            # Use the LAST step: block if multiple exist (LLM may emit intermediate
-            # reasoning blocks; the last one represents the final state)
-            block = blocks[-1].strip()
-            if not block.startswith('step:'):
-                block = 'step:\n' + block
-
-            data = yaml.safe_load(block)
-            if not isinstance(data, dict):
-                return state
-
-            step_data = data.get('step')
-            if not isinstance(step_data, dict):
-                step_data = data
-
-            # Extract each field independently (partial data is fine)
-            raw_sid = step_data.get('step_id')
-            if raw_sid is not None:
-                try:
-                    state.step_id = int(raw_sid)
-                except (ValueError, TypeError):
-                    pass
-
-            state.result_status = step_data.get('result_status')
-            state.flow_control = step_data.get('flow_control')
-
-            # Backward compat: top-level 'action' is aliased to flow_control
-            if not state.flow_control:
-                state.flow_control = step_data.get('action')
-
-            # Extract full analysis dict
-            analysis = step_data.get('analysis')
-            if isinstance(analysis, dict):
-                state.analysis = analysis
-
-        except yaml.YAMLError as e:
-            state.parse_error = str(e)[:200]
-        except Exception as e:
-            state.parse_error = f"{type(e).__name__}: {str(e)[:200]}"
-
-        return state
-
-    def _inject_yaml_format_error_feedback(self, parse_error: str) -> None:
-        """Inject corrective format feedback when YAML fallback parsing fails.
-
-        Only called in the YAML fallback path. The primary path uses the
-        report_step_state tool call. Guides the LLM toward the tool-based
-        approach first, with YAML as fallback.
-        """
-        feedback = (
-            "FORMAT ERROR: Your YAML step: block was invalid. "
-            "PLEASE use the report_step_state tool call instead (in your structured "
-            "function/tool calls, not in text). It takes: step_id (int), result_status "
-            "(SUCCESS|PARTIAL|FAIL), flow_control (CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK), "
-            "and analysis (observed_signals, scenario_match, hypothesis, strategy_rationale). "
-            "Call it ALONGSIDE other tool calls.\n"
-            "Fallback YAML format (only if tool calling is unavailable):\n"
-            f"Parse error: {parse_error}"
-        )
-        self._compat.add_message("user", feedback)
-        logger.info(
-            "[FORMAT_FEEDBACK] Injected format error feedback for LLM "
-            f"(parse_error={parse_error[:80]})"
-        )
-
     WNS_TARGET_THRESHOLD = 0.0    # WNS target threshold (0.0 ns means timing convergence)
     async def get_completion(self) -> tuple[str, bool]:
         """Iteratively execute LLM calls and tool calls to avoid recursion stack overflow."""
@@ -4755,8 +4537,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # 增强可观测性：打印 assistant 的回答
             logger.info(f"[ASSISTANT] {assistant_content}")
 
-            # === Extract step state: report_step_state tool (primary) or YAML text (fallback) ===
-            # report_step_state is extracted and REMOVED from message.tool_calls BEFORE
+            # === Extract step state from report_step_state tool call ===
+            # Report_step_state is extracted and REMOVED from message.tool_calls BEFORE
             # the tool execution loop so flow_control (DONE/SWITCH_STRATEGY) can skip
             # expensive FPGA tool calls.
             step_state = None
@@ -4774,7 +4556,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             step_id=args.get("step_id"),
                             result_status=args.get("result_status"),
                             flow_control=args.get("flow_control"),
-                            analysis=args.get("analysis", {}),
                             # has_tool_calls if original list contains anything beyond report_step_state itself
                             has_tool_calls=bool(len(message.tool_calls) > 1),
                             raw_content=tc.function.arguments or ""
@@ -4786,35 +4567,15 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 if _report_step_call:
                     message.tool_calls = remaining_calls if remaining_calls else None
 
-            # Fallback: parse YAML from text if report_step_state tool call absent
-            if step_state is None or (step_state.step_id is None and step_state.flow_control is None):
-                step_state = self._parse_step_yaml(assistant_content)
-                step_state.has_tool_calls = bool(message.tool_calls)
-                # Reset tool-call source flag since we are using YAML content,
-                # not the (possibly empty/invalid) tool call arguments
-                _report_step_call = None
-
             self._step_state = step_state
 
-            if step_state.step_id is not None or step_state.flow_control is not None:
-                source = "report_step_state" if _report_step_call else "YAML"
+            if step_state and (step_state.step_id is not None or step_state.flow_control is not None):
                 logger.info(
-                    f"[STEP_STATE] (via {source}) step_id={step_state.step_id}, "
+                    f"[STEP_STATE] step_id={step_state.step_id}, "
                     f"result_status={step_state.result_status}, "
                     f"flow_control={step_state.flow_control}, "
-                    f"scenario={step_state.analysis.get('scenario_match', 'N/A')}, "
-                    f"hypothesis={str(step_state.analysis.get('hypothesis', ''))[:80]}, "
                     f"tool_calls={step_state.has_tool_calls}"
                 )
-            if step_state.parse_error:
-                logger.warning(f"[STEP_PARSE] YAML parse error: {step_state.parse_error}")
-                self._inject_yaml_format_error_feedback(step_state.parse_error)
-                self._consecutive_format_failures += 1
-                logger.warning(f"[FORMAT_FAIL] Consecutive format failures: {self._consecutive_format_failures}")
-            elif step_state.step_id is not None or step_state.flow_control is not None:
-                if self._consecutive_format_failures > 0:
-                    logger.info(f"[FORMAT_FAIL] Format recovered, resetting counter (was {self._consecutive_format_failures})")
-                self._consecutive_format_failures = 0
 
             # Check flow_control BEFORE executing tools.
             # If termination signal (DONE/SWITCH_STRATEGY), skip tool execution
@@ -5057,18 +4818,12 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # [FIX] When LLM signals flow_control=DONE, it means "I've finished my analysis for
             # this iteration" - NOT "exit the optimization". The system should properly end
             # this iteration and move to the next one with updated context.
-            # Use pre-parsed StepState if available (avoids re-parsing YAML),
-            # fall back to legacy _parse_action_from_yaml for backward compat.
             if self._step_state and self._step_state.flow_control:
                 action = self._step_state.result_status
                 flow_control = self._step_state.flow_control
             else:
-                action, flow_control = self._parse_action_from_yaml(content)
-
-            # Store analysis data when DONE/SWITCH_STRATEGY is signaled
-            if flow_control in ("DONE", "SWITCH_STRATEGY") and self._step_state:
-                self._last_analysis = self._step_state.analysis
-                logger.info(f"[ANALYSIS] Stored last analysis: scenario={self._last_analysis.get('scenario_match', 'N/A')}")
+                action = None
+                flow_control = None
 
             if flow_control == "DONE" or action == "DONE":
                 logger.info(f"LLM signaled DONE (action={action}, flow_control={flow_control})")
@@ -5249,13 +5004,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         # Initialize conversation with analysis results via compat (Phase 2)
         self._compat.add_message("system", system_prompt)
 
-        # Inject YAML format requirement as the FIRST user message (not system prompt prefix)
+        # Inject format requirement as the FIRST user message (not system prompt prefix)
         # User role messages get higher attention weight and are less likely to be forgotten
         # in long contexts compared to content buried in the system prompt.
         FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
 Every response MUST call the `report_step_state` tool (in your structured function/tool
-calls, NOT in the text body). This tool carries ALL process control directives:
-step_id, result_status, flow_control, and analysis.
+calls, NOT in the text body). This tool carries process control directives:
+step_id, result_status, flow_control.
 
 Call report_step_state ALONGSIDE any other tool calls you make. If you are making no
 other tool calls, call report_step_state alone.
@@ -5264,17 +5019,12 @@ The report_step_state tool takes these parameters:
   - step_id (integer): incrementing per message in current strategy
   - result_status (string): SUCCESS | PARTIAL | FAIL
   - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
-  - analysis (object):
-      - observed_signals: {avg_distance, max_fanout, failing_endpoints}
-      - scenario_match: matched scenario ID or null
-      - hypothesis: current hypothesis about the dominant timing obstacle
-      - strategy_rationale: justification for your strategy choice
 
-Your text response should contain free-form chain-of-thought reasoning.
-Process control goes in the report_step_state tool call, NOT in text.
+Your text response MUST contain your analysis (hypothesis, strategy_rationale,
+observed signals) as free-form chain-of-thought reasoning.
+Process control goes in the report_step_state tool call, analysis goes in text.
 
 STRICTLY FORBIDDEN:
-  - Using YAML `step:` blocks in text (use the report_step_state TOOL CALL instead)
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
 
