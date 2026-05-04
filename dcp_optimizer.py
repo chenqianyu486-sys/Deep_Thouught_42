@@ -1309,6 +1309,16 @@ class DCPOptimizer(DCPOptimizerBase):
         for i in reflection_indices[:-1]:
             remove_indices.add(i)
 
+        # --- 2. Deduplicate FORMAT GUARD (user messages) ---
+        format_indices = [
+            i for i, msg in enumerate(api_messages)
+            if msg.get("role") == "user"
+            and isinstance(msg.get("content"), str)
+            and msg["content"].startswith("CRITICAL OUTPUT FORMAT - MUST FOLLOW:")
+        ]
+        for i in format_indices[:-1]:
+            remove_indices.add(i)
+
         # --- 3. Deduplicate REPETITION DETECTED (user messages) ---
         repetition_indices = [
             i for i, msg in enumerate(api_messages)
