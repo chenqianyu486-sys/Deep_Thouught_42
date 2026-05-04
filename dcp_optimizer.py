@@ -119,6 +119,7 @@ CONTEXT_HARD_LIMIT = _worker_data.hard_limit  # deprecated
 
 RECENT_TURNS_TO_KEEP = 20              # number of recent messages to keep during compression (maintains conversation continuity)
 TOOL_RESULT_TRUNCATE = 30000           # tool result truncation threshold (retains key info after type-based filtering)
+SMALL_OUTPUT_THRESHOLD = 3000          # tool results smaller than this bypass summarization and are embedded raw
 
 # === Section 3.2: Token Estimation ===
 # Note: All context/prompts must be in English for consistent token estimation.
@@ -1404,8 +1405,8 @@ class DCPOptimizer(DCPOptimizerBase):
             updated_content = self._inject_wns_state_to_system_prompt(system_content)
             # Stamp format constraint at the front of system prompt for highest attention weight
             updated_content = (
-                "[FORMAT: EVERY response MUST include step: YAML block with "
-                "step_id/result_status/flow_control. No XML tags, no markdown fences.]\n\n"
+                "[FORMAT: EVERY response MUST call the report_step_state tool with "
+                "step_id/result_status/flow_control/analysis. Chain-of-thought text OK.]\n\n"
                 + updated_content
             )
             api_messages[0]["content"] = updated_content
@@ -1436,28 +1437,28 @@ class DCPOptimizer(DCPOptimizerBase):
             self._iteration_handoff_injected = True
 
         # Step 4: Inject format reminder as last system message before API call
-        # Escalates to BLOCKADE when LLM repeatedly omits the YAML block
+        # Escalates to BLOCKADE when LLM repeatedly omits the step state
         if self._consecutive_format_failures >= 2:
             api_messages.append({
                 "role": "system",
                 "content": (
-                    "FORMAT BLOCKADE: Your last 2 responses lacked a valid step: YAML block. "
-                    "You CANNOT proceed without including this block. Format:\n"
-                    "step:\n"
-                    "  step_id: <N>\n"
-                    "  result_status: SUCCESS|PARTIAL|FAIL\n"
-                    "  flow_control: CONTINUE|SWITCH_STRATEGY|DONE\n"
-                    "  analysis:\n"
-                    "    observed_signals: {...}\n"
-                    "    scenario_match: <id>\n"
-                    "    hypothesis: \"...\"\n"
-                    "    strategy_rationale: \"...\""
+                    "FORMAT BLOCKADE: Your last 2 responses lacked a valid step state. "
+                    "You CANNOT proceed without calling the report_step_state tool. "
+                    "Every response MUST include:\n"
+                    "  report_step_state(\n"
+                    "    step_id=<N>,\n"
+                    "    result_status=SUCCESS|PARTIAL|FAIL,\n"
+                    "    flow_control=CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK,\n"
+                    "    analysis={observed_signals:{...}, scenario_match:<id>, "
+                    "hypothesis:\"...\", strategy_rationale:\"...\"}\n"
+                    "  )\n"
+                    "Call this tool ALONGSIDE any other tool calls in your structured tool calls."
                 )
             })
         else:
             api_messages.append({
                 "role": "system",
-                "content": "REMINDER: Your response MUST contain a 'step:' YAML block (chain-of-thought natural language is OK before it). See format instructions at conversation start."
+                "content": "REMINDER: Call the report_step_state tool (alongside other tools) with step_id, result_status, flow_control, and analysis."
             })
 
         # Step 5: [NEW] Inject context snapshot as first user message
@@ -1915,6 +1916,21 @@ class DCPOptimizer(DCPOptimizerBase):
         line_count = len(lines)
         char_count = len(raw_result)
 
+        # [SMALL_OUTPUT] Bypass summarization for compact outputs (<3KB, non-timing)
+        # These are fully readable as raw text, no data loss needed.
+        if char_count < SMALL_OUTPUT_THRESHOLD and 'timing' not in tool_name:
+            indent = '\n'.join('    ' + line for line in lines)
+            return (f"tool_result:\n"
+                    f"  tool: {tool_name}\n"
+                    f"  summary: \"{lines[0][:200] if lines else ''}\"\n"
+                    f"  status: completed\n"
+                    f"  raw_output_truncated: false\n"
+                    f"  raw_output_chars: {char_count}\n"
+                    f"  raw_output: |\n{indent}")
+
+        # Track whether the YAML summary discards data from the raw output
+        was_truncated = True
+
         # Build summary components
         summary_parts = []
         key_details = {}
@@ -2006,11 +2022,15 @@ class DCPOptimizer(DCPOptimizerBase):
                     summary_parts.append(f"Extracted {path_count} critical pin paths")
                     key_details["path_count"] = path_count
                     if pin_paths:
-                        for i, pp in enumerate(pin_paths[:2]):
-                            preview = " -> ".join(pp[:4])
-                            if len(pp) > 4:
+                        # Show up to 10 paths (was 2) — the LLM needs topology context
+                        preview_count = min(10, len(pin_paths))
+                        for i, pp in enumerate(pin_paths[:preview_count]):
+                            preview = " -> ".join(pp[:6])  # Also expanded from 4 to 6 pins
+                            if len(pp) > 6:
                                 preview += " -> ..."
                             summary_parts.append(f"  Path {i+1}: {preview}")
+                        # Preserve all pin_paths in key_details for complete access
+                        key_details["pin_paths"] = pin_paths
             except Exception:
                 pass
 
@@ -2215,8 +2235,65 @@ class DCPOptimizer(DCPOptimizerBase):
             except Exception:
                 pass
 
+        elif tool_name == "rapidwright_analyze_net_detour":
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data['error'][:200]}")
+                    status = "error"
+                else:
+                    cells = data.get("cells_analyzed", 0)
+                    threshold = data.get("detour_threshold", 2.0)
+                    results = data.get("results", {})
+                    if cells == 0 or not results:
+                        summary_parts.append(
+                            f"Analysis: No cells exceeded detour threshold {threshold}. "
+                            f"No placement detour issues found."
+                        )
+                        key_details["cells_analyzed"] = 0
+                        key_details["detour_threshold"] = threshold
+                        key_details["has_detour_issues"] = False
+                    else:
+                        sorted_cells = sorted(
+                            results.items(), key=lambda x: x[1]["max_detour_ratio"], reverse=True
+                        )[:5]
+                        summary_parts.append(
+                            f"Analysis: {cells} cells exceed threshold {threshold}:"
+                        )
+                        for cell_name, cell_data in sorted_cells:
+                            ratio = cell_data["max_detour_ratio"]
+                            src = cell_data.get("source_pin", "")
+                            sink = cell_data.get("worst_sink_pin", "")
+                            detail = f"  {cell_name}: ratio={ratio:.2f}"
+                            if src and sink:
+                                detail += f" (src={src}, sink={sink})"
+                            summary_parts.append(detail)
+                        key_details["cells_analyzed"] = cells
+                        key_details["detour_threshold"] = threshold
+                        key_details["has_detour_issues"] = True
+            except Exception:
+                pass
+
+        # Determine whether the YAML summary actually discards data from the raw output.
+        # Branches that parse structured JSON and store everything in key_details
+        # are considered "not truncated" — the LLM has full access via YAML.
+        # Branches that extract only summary metrics (WNS/TNS only, fallback) are "truncated".
+        if tool_name in ("vivado_get_wns",):
+            was_truncated = False  # single float, fully captured
+        elif tool_name in ("vivado_phys_opt_design", "vivado_report_timing_summary",
+                           "vivado_route_design", "vivado_place_design"):
+            was_truncated = True   # only summary metrics extracted from large output
+        elif tool_name.startswith("rapidwright_"):
+            was_truncated = False  # JSON tools preserve full data in key_details
+        elif tool_name in ("vivado_extract_critical_path_pins",
+                           "vivado_create_and_apply_pblock"):
+            was_truncated = False  # key_details contains complete data
+        # else: fallback → was_truncated stays True
+
         # Fallback: generic truncation
         if not summary_parts:
+            was_truncated = True  # fallback is always lossy
             # Pick first few meaningful lines
             meaningful = [l.strip() for l in lines[:30] if l.strip() and not l.strip().startswith(("INFO:", "WARNING:", "//", "#"))]
             if meaningful:
@@ -2236,7 +2313,7 @@ class DCPOptimizer(DCPOptimizerBase):
                 if v is not None:
                     yaml_lines.append(f"    {k}: {v}")
         yaml_lines.append(f"  status: {status}")
-        yaml_lines.append(f"  raw_output_truncated: true")
+        yaml_lines.append(f"  raw_output_truncated: {str(was_truncated).lower()}")
         yaml_lines.append(f"  raw_output_chars: {char_count}")
 
         return '\n'.join(yaml_lines)
@@ -3393,6 +3470,77 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             }
         })
 
+        # Register internal tool: report_step_state replaces the YAML step: block.
+        # LLM calls this tool ALONGSIDE other tool calls to communicate process
+        # control (step_id, result_status, flow_control, analysis). The system
+        # extracts control flow from structured tool call arguments instead of
+        # parsing YAML from message.content text.
+        self.tools.append({
+            "type": "function",
+            "function": {
+                "name": "report_step_state",
+                "description": (
+                    "REQUIRED in every response. Reports process control state "
+                    "(replaces old step: YAML block). Call ALONGSIDE other tool "
+                    "calls, or alone if making no other calls."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "step_id": {
+                            "type": "integer",
+                            "description": "Incrementing per message in current strategy"
+                        },
+                        "result_status": {
+                            "type": "string",
+                            "enum": ["SUCCESS", "PARTIAL", "FAIL"],
+                            "description": "SUCCESS: WNS improved; PARTIAL: executed but insufficient; FAIL: regression or tool error"
+                        },
+                        "flow_control": {
+                            "type": "string",
+                            "enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"],
+                            "description": (
+                                "CONTINUE: next step in current strategy; "
+                                "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
+                                "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
+                                "RETRY: modify params and retry (max 3); "
+                                "ROLLBACK: revert to best checkpoint"
+                            )
+                        },
+                        "analysis": {
+                            "type": "object",
+                            "properties": {
+                                "observed_signals": {
+                                    "type": "object",
+                                    "properties": {
+                                        "avg_distance": {"type": ["number", "null"]},
+                                        "max_fanout": {"type": ["integer", "null"]},
+                                        "failing_endpoints": {"type": ["integer", "null"]}
+                                    },
+                                    "description": "Observed design signals from recent timing/utilization analysis"
+                                },
+                                "scenario_match": {
+                                    "type": ["string", "null"],
+                                    "description": "Matched scenario ID (wide_lut, high_fanout, distributed, control_imbalance, congestion)"
+                                },
+                                "hypothesis": {
+                                    "type": "string",
+                                    "description": "Current hypothesis about the dominant timing obstacle"
+                                },
+                                "strategy_rationale": {
+                                    "type": "string",
+                                    "description": "Justification for continuing current strategy or switching"
+                                }
+                            },
+                            "required": ["hypothesis", "strategy_rationale"]
+                        }
+                    },
+                    "required": ["step_id", "result_status", "flow_control", "analysis"]
+                },
+                "strict": False
+            }
+        })
+
     async def call_tool(self, tool_name: str, arguments: dict) -> str:
         """Execute a tool call on the appropriate MCP server."""
         # Internal tool: retrieve raw tool output from side buffer
@@ -3460,6 +3608,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 output_lines.append(f"{i:<4}  {path_count:<5}  {fanout:<6}  {net_name}")
 
             return "\n".join(output_lines)
+
+        # Internal tool: report_step_state (normally extracted BEFORE tool
+        # execution in get_completion(), this route is a safety net)
+        if tool_name == "report_step_state":
+            return json.dumps({"status": "acknowledged"})
 
         # Parse server prefix from tool name
         if tool_name.startswith("rapidwright_"):
@@ -4359,34 +4512,25 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         return state
 
     def _inject_yaml_format_error_feedback(self, parse_error: str) -> None:
-        """Inject corrective YAML format feedback into conversation for the LLM.
+        """Inject corrective format feedback when YAML fallback parsing fails.
 
-        Called when _parse_step_yaml detects invalid YAML. The LLM sees the
-        specific error and a format reminder at the next API call.
+        Only called in the YAML fallback path. The primary path uses the
+        report_step_state tool call. Guides the LLM toward the tool-based
+        approach first, with YAML as fallback.
         """
         feedback = (
-            "YAML FORMAT ERROR DETECTED.Please correct the format in your next response.\n"
-            "Reminder of the correct yaml format (must appear in every response):\n"
-            "  step:\n"
-            "    step_id: <N>\n"
-            "    result_status: SUCCESS|PARTIAL|FAIL\n"
-            "    flow_control: CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK\n"
-            "    analysis:\n"
-            "      observed_signals:\n"
-            "        avg_distance: <float|null>\n"
-            "        max_fanout: <int|null>\n"
-            "        failing_endpoints: <int|null>\n"
-            "      scenario_match: <scenario_id|null>\n"
-            "      hypothesis: \"<string>\"\n"
-            "      strategy_rationale: \"<string>\"\n"
-            "    tool_calls:\n"
-            "      - function: <tool_name>\n"
-            "        parameters:\n"
-            "          key: value"
+            "FORMAT ERROR: Your YAML step: block was invalid. "
+            "PLEASE use the report_step_state tool call instead (in your structured "
+            "function/tool calls, not in text). It takes: step_id (int), result_status "
+            "(SUCCESS|PARTIAL|FAIL), flow_control (CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK), "
+            "and analysis (observed_signals, scenario_match, hypothesis, strategy_rationale). "
+            "Call it ALONGSIDE other tool calls.\n"
+            "Fallback YAML format (only if tool calling is unavailable):\n"
+            f"Parse error: {parse_error}"
         )
         self._compat.add_message("user", feedback)
         logger.info(
-            "[FORMAT_FEEDBACK] Injected YAML format error feedback for LLM "
+            "[FORMAT_FEEDBACK] Injected format error feedback for LLM "
             f"(parse_error={parse_error[:80]})"
         )
 
@@ -4611,14 +4755,51 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # 增强可观测性：打印 assistant 的回答
             logger.info(f"[ASSISTANT] {assistant_content}")
 
-            # === NEW: Always parse step YAML from every response ===
-            step_state = self._parse_step_yaml(assistant_content)
-            step_state.has_tool_calls = bool(message.tool_calls)
+            # === Extract step state: report_step_state tool (primary) or YAML text (fallback) ===
+            # report_step_state is extracted and REMOVED from message.tool_calls BEFORE
+            # the tool execution loop so flow_control (DONE/SWITCH_STRATEGY) can skip
+            # expensive FPGA tool calls.
+            step_state = None
+            _report_step_call = None
+
+            if message.tool_calls:
+                remaining_calls = []
+                for tc in message.tool_calls:
+                    if tc.function and tc.function.name == "report_step_state":
+                        try:
+                            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                        except json.JSONDecodeError:
+                            args = {}
+                        step_state = StepState(
+                            step_id=args.get("step_id"),
+                            result_status=args.get("result_status"),
+                            flow_control=args.get("flow_control"),
+                            analysis=args.get("analysis", {}),
+                            # has_tool_calls if original list contains anything beyond report_step_state itself
+                            has_tool_calls=bool(len(message.tool_calls) > 1),
+                            raw_content=tc.function.arguments or ""
+                        )
+                        _report_step_call = tc
+                    else:
+                        remaining_calls.append(tc)
+
+                if _report_step_call:
+                    message.tool_calls = remaining_calls if remaining_calls else None
+
+            # Fallback: parse YAML from text if report_step_state tool call absent
+            if step_state is None or (step_state.step_id is None and step_state.flow_control is None):
+                step_state = self._parse_step_yaml(assistant_content)
+                step_state.has_tool_calls = bool(message.tool_calls)
+                # Reset tool-call source flag since we are using YAML content,
+                # not the (possibly empty/invalid) tool call arguments
+                _report_step_call = None
+
             self._step_state = step_state
 
             if step_state.step_id is not None or step_state.flow_control is not None:
+                source = "report_step_state" if _report_step_call else "YAML"
                 logger.info(
-                    f"[STEP_STATE] step_id={step_state.step_id}, "
+                    f"[STEP_STATE] (via {source}) step_id={step_state.step_id}, "
                     f"result_status={step_state.result_status}, "
                     f"flow_control={step_state.flow_control}, "
                     f"scenario={step_state.analysis.get('scenario_match', 'N/A')}, "
@@ -4631,7 +4812,6 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 self._consecutive_format_failures += 1
                 logger.warning(f"[FORMAT_FAIL] Consecutive format failures: {self._consecutive_format_failures}")
             elif step_state.step_id is not None or step_state.flow_control is not None:
-                # Successfully parsed a valid step: YAML block — reset failure counter
                 if self._consecutive_format_failures > 0:
                     logger.info(f"[FORMAT_FAIL] Format recovered, resetting counter (was {self._consecutive_format_failures})")
                 self._consecutive_format_failures = 0
@@ -4751,6 +4931,29 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             "tool_call_id": tc.id,
                             "name": tool_name
                         })
+
+                        # [EMPTY_ANALYSIS] Detect empty analysis results to prevent invalid follow-up
+                        if tool_name == "rapidwright_analyze_net_detour" and raw_result:
+                            try:
+                                import json as _json
+                                analysis_data = _json.loads(raw_result)
+                                if analysis_data.get("cells_analyzed", 0) == 0 and "error" not in analysis_data:
+                                    guidance = (
+                                        f"NOTICE: rapidwright_analyze_net_detour found no cells exceeding "
+                                        f"the detour threshold — no placement detour issues to fix. "
+                                        f"If your step sequence was based on the expectation of specific findings, "
+                                        f"re-evaluate whether remaining steps are still valid. "
+                                        f"Consider: (1) ending this iteration with flow_control: DONE "
+                                        f"if diagnostics are complete; "
+                                        f"(2) switching to a different analysis approach."
+                                    )
+                                    self._compat.add_message("user", guidance)
+                                    logger.info(
+                                        "Empty net_detour analysis result, injected guidance for tool_round=%d",
+                                        tool_round
+                                    )
+                            except Exception:
+                                pass
 
                         # [REPETITION_DETECT] Track recent tools for diminshing-returns detection
                         current_wns_snapshot = self._get_current_wns()
@@ -5050,35 +5253,30 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         # User role messages get higher attention weight and are less likely to be forgotten
         # in long contexts compared to content buried in the system prompt.
         FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
-Every response MUST contain a valid `step:` YAML block that carries ALL process
-control directives. Flow control (step_id, result_status, flow_control, analysis,
-tool_calls) goes INSIDE the `step:` block, NOT in the natural-language reasoning text.
-Natural-language chain-of-thought reasoning before the `step:` block is acceptable.
-INCLUDING when using native function/tool calls — the `step:` YAML block must still
-appear in the response text alongside any native tool calls.
+Every response MUST call the `report_step_state` tool (in your structured function/tool
+calls, NOT in the text body). This tool carries ALL process control directives:
+step_id, result_status, flow_control, and analysis.
 
-Format:
-  step:
-    step_id: <N>
-    result_status: SUCCESS|PARTIAL|FAIL
-    flow_control: CONTINUE|RETRY|ROLLBACK|SWITCH_STRATEGY|DONE
-    analysis:
-      observed_signals:
-        avg_distance: <float|null>
-        max_fanout: <int|null>
-        failing_endpoints: <int|null>
-      scenario_match: <scenario_id|null>
-      hypothesis: "<string>"
-      strategy_rationale: "<string>"
-    tool_calls:
-      - function: tool_name
-        parameters:
-          key: value
+Call report_step_state ALONGSIDE any other tool calls you make. If you are making no
+other tool calls, call report_step_state alone.
+
+The report_step_state tool takes these parameters:
+  - step_id (integer): incrementing per message in current strategy
+  - result_status (string): SUCCESS | PARTIAL | FAIL
+  - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
+  - analysis (object):
+      - observed_signals: {avg_distance, max_fanout, failing_endpoints}
+      - scenario_match: matched scenario ID or null
+      - hypothesis: current hypothesis about the dominant timing obstacle
+      - strategy_rationale: justification for your strategy choice
+
+Your text response should contain free-form chain-of-thought reasoning.
+Process control goes in the report_step_state tool call, NOT in text.
 
 STRICTLY FORBIDDEN:
-  - XML/HTML tags - NOT valid YAML
-  - Markdown code fences ``` around the YAML block
-  - Omitting the step: YAML block entirely
+  - Using YAML `step:` blocks in text (use the report_step_state TOOL CALL instead)
+  - XML/HTML tags in text
+  - Omitting the report_step_state tool call entirely
 
 Maintain this output format throughout the entire conversation.
 """

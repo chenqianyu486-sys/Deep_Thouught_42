@@ -16,32 +16,19 @@ rules:
     split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
 
 # ── Response Format ──
-# Placed early: every response MUST contain a step: YAML block for process control.
+# Every response MUST call the `report_step_state` tool (structured function/tool
+# calls, NOT in text) to communicate process control. Call it ALONGSIDE other tool
+# calls, or alone if making no other calls. Chain-of-thought reasoning in the text
+# body is acceptable and encouraged.
 response_format:
-  rule: "Every response MUST contain a `step:` YAML block (valid YAML) that carries all process control directives. The `step:` block is the structured process control section — place flow control (step_id, result_status, flow_control, analysis, tool_calls) INSIDE it, NOT in the natural-language reasoning text. Preceding natural-language chain-of-thought reasoning is acceptable and will not interfere with parsing."
-  note: "When using native function/tool calls, the `step:` YAML block MUST still appear in the response text alongside the native tool calls."
+  rule: "Every response MUST call the `report_step_state` tool (in your structured function/tool calls, NOT in text). Call it ALONGSIDE any other tool calls. Chain-of-thought reasoning in the text body is acceptable and encouraged."
+  note: "The report_step_state tool replaces the old `step:` YAML block. Process control is now communicated through structured tool calls, not text."
+  tool_name: "report_step_state"
   forbidden:
-    - "XML/HTML tags (DO NOT USE angle brackets)"
-    - "Markdown code fences ``` around the YAML block"
-    - "Omitting the step: YAML block entirely"
-  template: |
-    step:
-      step_id: <N>
-      result_status: SUCCESS|PARTIAL|FAIL
-      flow_control: CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK
-      analysis:
-        observed_signals:
-          avg_distance: <float|null>
-          max_fanout: <int|null>
-          failing_endpoints: <int|null>
-        scenario_match: <scenario_id|null>
-        hypothesis: "<string>"
-        strategy_rationale: "<string>"
-      tool_calls:
-        - function: <tool_name>
-          parameters:
-            key: value
-  fields:
+    - "Using YAML `step:` blocks in text (use the report_step_state TOOL CALL instead)"
+    - "XML/HTML tags in text"
+    - "Omitting the report_step_state tool call entirely"
+  parameters:
     step_id: "Incrementing integer per message in current strategy"
     result_status:
       SUCCESS: "WNS improved or maintained"
@@ -53,6 +40,14 @@ response_format:
       DONE: "WNS >= 0 achieved (ONLY valid when WNS >= 0)"
       RETRY: "Modify params and retry (max 3)"
       ROLLBACK: "Revert to best checkpoint"
+    analysis:
+      observed_signals:
+        avg_distance: "<float|null>"
+        max_fanout: "<int|null>"
+        failing_endpoints: "<int|null>"
+      scenario_match: "<scenario_id|null>"
+      hypothesis: "<string>"
+      strategy_rationale: "<string>"
   iteration_handoff: "When present, follow CONTINUATION DIRECTIVE over generic strategy guidance"
 
 # ── Scenario Detection ──
@@ -162,6 +157,7 @@ tool_reference:
     - write_verilog_simulation
     - vivado_get_raw_tool_output
     - vivado_get_cached_high_fanout_nets
+    - report_step_state
   rapidwright:
     - initialize_rapidwright
     - get_supported_devices

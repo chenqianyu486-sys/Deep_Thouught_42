@@ -439,22 +439,29 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `latest_tns: Optional[float]` — 最新 TNS
 - `latest_failing_endpoints: Optional[int]` — 最新失败端点计数
 
-### 5.5 Step YAML 状态追踪
+### 5.5 Step 状态追踪（`report_step_state` Tool）
 
-每轮 LLM 响应到达后，先解析 content 中的 step YAML，flow_control 优先于工具执行。
+每轮 LLM 响应到达后，**先**从 `message.tool_calls` 中提取 `report_step_state` 参数，flow_control 优先于工具执行（DONE/SWITCH_STRATEGY 跳过昂贵的 FPGA 工具调用）。
 
 **流程**：
 ```
 LLM response arrives
   ↓
-1. _parse_step_yaml(message.content) → StepState
-2. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
+1. 扫描 message.tool_calls 寻找 report_step_state（主路径）
+   ↓ 找到
+   解析 JSON arguments → StepState
+   将 report_step_state 从 tool_calls 中移除（不进入工具执行）
+   message.tool_calls = remaining_calls（仅余真正需执行的工具）
+   ↓ 未找到或参数无效
+2. _parse_step_yaml(message.content) → StepState（YAML fallback）
+   ↓
+3. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
    → 跳过工具执行（即使同时有 tool_calls），跳转到 flow_control 处理
    else if tool_calls
    → 正常执行工具
    else （纯文本）
    → 现有纯文本处理逻辑
-3. DONE/SWITCH_STRATEGY 时将 analysis 存入 _last_analysis
+4. DONE/SWITCH_STRATEGY 时将 analysis 存入 _last_analysis
 ```
 
 **StepState 数据结构**：
@@ -470,9 +477,15 @@ class StepState:
     parse_error: Optional[str] = None
 ```
 
-**增强内容**: 迭代叙事新增 `result_status` 和 `scenario_match`；Planner handoff 新增 `=== LLM'S OWN ANALYSIS ===` 段。
+**双路径对比**：
+| 维度 | `report_step_state` Tool（主路径） | YAML fallback |
+|------|-----------------------------------|---------------|
+| 提取方式 | `json.loads(tc.function.arguments)` | `yaml.safe_load()` 从 content 文本解析 |
+| 设置 `parse_error` | 从不 | JSONDecodeError/异常时设置 |
+| `_consecutive_format_failures` | 不直接影响 | 受 `parse_error` 驱动递增 |
+| `has_tool_calls` | `len(原始 tool_calls) > 1`（含自身） | `bool(message.tool_calls)`（report_step_state 已被移除） |
 
-**边界情况**: content=None + tool_calls → 空 StepState；DONE + tool_calls → flow_control 优先；旧模型不输出 YAML → 回退 `_parse_action_from_yaml`。
+**边界情况**: content=None + tool_calls → 空 StepState；DONE + tool_calls → flow_control 优先；report_step_state 参数无效 → 降级 YAML fallback；仅 report_step_state 无其他工具 → message.tool_calls 变为 None。
 
 ### 5.6 失败策略追踪（分级格式）
 
@@ -511,15 +524,15 @@ class StepState:
 - `failed_strategies` 属性仍返回列表（元素从 `str` 变为 `dict`）
 - 新增 `failed_strategy_names` 属性返回 `list[str]`，供仅需策略名的代码使用（如 `_inject_wns_state_to_system_prompt()` 的 `tried` 集合计算）
 
-### 5.7 step: YAML 格式要求三重防御
+### 5.7 `report_step_state` Tool 格式要求三重防御
 
-三重注入策略，逐级升级：
+三重注入策略，逐级升级（从 YAML step: 块迁移至结构化 tool call）：
 
 **注入 1 — User Message（一次性，会话起始）**
 ```
 optimize() 中:
 1. system_prompt → system prompt
-2. user(FORMAT_GUARD)  ← 完整的 YAML 格式定义
+2. user(FORMAT_GUARD)  ← report_step_state tool 完整定义（参数、枚举值、禁止项）
 3. user(initial_optimization_instructions)
 ```
 User role 消息注意力权重大于 System role，只需注入一次。
@@ -527,8 +540,8 @@ User role 消息注意力权重大于 System role，只需注入一次。
 **注入 2 — System Prompt 头部压印（每 LLM API 调用前）**
 ```
 get_completion() 中 _inject_wns_state_to_system_prompt() 返回后:
-system_content = "[FORMAT: EVERY response MUST include step: YAML block with "
-                 "step_id/result_status/flow_control. No XML tags, no markdown fences.]\n\n"
+system_content = "[FORMAT: EVERY response MUST call the report_step_state tool with "
+                 "step_id/result_status/flow_control/analysis. Chain-of-thought text OK.]\n\n"
                  + updated_content
 ```
 确保格式约束始终处于 system prompt 最前沿，注意力权重最高。
@@ -537,16 +550,35 @@ system_content = "[FORMAT: EVERY response MUST include step: YAML block with "
 ```
 get_completion() 中:
 if _consecutive_format_failures >= 2:
-    → FORMAT BLOCKADE（含完整 YAML 模板，~200 tokens）
+    → FORMAT BLOCKADE（包含 report_step_state 完整调用签名 ~200 tokens）
 else:
-    → 简短 REMINDER（<10 tokens）
+    → 简短 REMINDER（<20 tokens）
 ```
 贴近模型生成点。`_consecutive_format_failures` 计数器：
-- `_parse_step_yaml()` 有 `parse_error` 时 +1
-- 成功解析 valid step_id 或 flow_control 时重置为 0
+- YAML fallback 路径中 `_parse_step_yaml()` 有 `parse_error` 时 +1
+- 成功解析 valid step_id 或 flow_control（任一路径）时重置为 0
 - 达到 2 时升级为 BLOCKADE，恢复后自动降级
 
-**格式约束**: response 中必须包含一个 `step:` YAML 控制块（允许在 `step:` 块之前输出自然语言思维链推理）。解析代码已支持从文本中任意位置提取最后一个 `step:` 块。
+**格式约束**: response 中必须调用 `report_step_state` tool（在结构化 function/tool calls 中，不在文本中）。允许在 tool call 之外输出自然语言思维链推理。YAML `step:` 块仅作为降级 fallback。
+
+**`report_step_state` Tool 定义**：
+```python
+{
+    "name": "report_step_state",
+    "parameters": {
+        "step_id": {"type": "integer"},
+        "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
+        "flow_control": {"enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"]},
+        "analysis": {
+            "observed_signals": {"avg_distance": "float|null", "max_fanout": "int|null", "failing_endpoints": "int|null"},
+            "scenario_match": "string|null",
+            "hypothesis": "string",
+            "strategy_rationale": "string"
+        }
+    },
+    "required": ["step_id", "result_status", "flow_control", "analysis"]
+}
+```
 
 ### 5.8 工具重复检测器
 
@@ -694,8 +726,9 @@ phys_opt_design / route_design 等工具的原始 Vivado 日志单次可达 25k+
 
 **1. `_summarize_tool_result()`** (dcp_optimizer.py，位于 `_filter_tool_result()` 之后)
 
-每个工具调用返回时自动提取结构化 YAML 摘要替代原始日志：
+每个工具调用返回时自动提取结构化 YAML 摘要替代原始日志，分两种模式：
 ```yaml
+# 大输出（timing report）→ 仅提取 WNS/TNS，raw_output_truncated: true
 tool_result:
   tool: vivado_phys_opt_design
   summary: "WNS: -0.939, TNS: -834.718, Failing endpoints: 1529"
@@ -707,10 +740,24 @@ tool_result:
   status: completed
   raw_output_truncated: true
   raw_output_chars: 45231
+
+# 小型输出（<3KB，非 timing）→ 直通嵌入 raw_output，raw_output_truncated: false
+tool_result:
+  tool: vivado_get_wns
+  summary: "WNS: -0.352"
+  status: completed
+  raw_output_truncated: false
+  raw_output_chars: 84
+  raw_output: |
+    -0.352
 ```
 
 - 利用已有 `parse_timing_summary_static()` 提取 WNS/TNS/failing_endpoints
 - 与 `_prev_best_wns` 对比计算 delta
+- **`raw_output_truncated` 真实性**：不再硬编码 `true`。JSON 工具（`rapidwright_*`、`vivado_extract_critical_path_pins`、`vivado_create_and_apply_pblock`）→ `false`；仅提取摘要指标的大输出（timing/route/place）→ `true`；fallback → `true`
+- **小型输出直通**（`_summarize_tool_result()`）：`char_count < SMALL_OUTPUT_THRESHOLD(3000)` 且非 timing 工具时，不提取字段，直接将完整 `raw_output` 嵌入 YAML 的 `raw_output: |` 块，`raw_output_truncated: false`
+- `vivado_extract_critical_path_pins`: 路径预览从 2 条扩展到 10 条，引脚预览从 4 个扩展到 6 个；全部 `pin_paths` 列表保存在 `key_details.pin_paths` 中供 LLM 完整读取
+- `rapidwright_analyze_net_detour`: 解析 JSON 输出（cells_analyzed/detour_threshold/results）；空结果时 summary 明确标注 `"No cells exceeded threshold"` + `key_details.has_detour_issues=false`；有结果时列出 top-5 cell 及其绕路比率；同时在 `get_completion()` 中检测到空结果时额外注入 NOTICE guidance 引导 LLM 重新评估后续步骤
 - 摘要替换原始文本进入对话历史（message pipeline 中 `call_tool()` → `_summarize_tool_result()` → `add_message()`）
 
 **2. `_raw_tool_outputs`** (dcp_optimizer.py)
