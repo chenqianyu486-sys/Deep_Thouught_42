@@ -217,7 +217,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="optimize_lut_input_cone",
-            description="Optimize LUT input cones by combining chained small LUTs into a single larger LUT to reduce logic depth. This is useful for optimizing critical paths.",
+            description="Optimize LUT input cones by combining chained small LUTs into a single larger LUT (max 6 inputs) to reduce logic depth on critical paths.\n\n"
+                        "LIMITATIONS:\n"
+                        "- NOT suitable for neural network accelerators or wide-datapath designs where logic cones have 75+ inputs (exceeds 6-input LUT physical limit).\n"
+                        "- The tool returns status 'success' even when no cones were optimizable — ALWAYS check optimized_count in the result.\n\n"
+                        "RESULT INTERPRETATION:\n"
+                        "- optimized_count > 0: cones were combined; re-route and verify timing.\n"
+                        "- optimized_count == 0 but status='success': check per-pin 'status' field. 'no_optimization' means pin already has minimal depth. Java ERRORs about '6 maximum inputs supported' mean the design's logic cones are too wide — skip this tool entirely.\n"
+                        "- If ALL pins produce Java ERRORs: this design is NOT suitable for LUT cone optimization. Switch to a different strategy.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -403,6 +410,14 @@ async def list_tools() -> list[Tool]:
             ["src_ff/Q", "lut1/I2", "lut1/O", "lut2/I0", "lut2/O", "dst_ff/D"]
 
             Requires design to be loaded via read_checkpoint first.
+
+            RESULT INTERPRETATION:
+            - Empty result (no cells exceeding threshold): routing is already compact for the
+              analyzed paths. This is a VALID diagnostic result, NOT a failure. It confirms
+              the current placement's routing is near-optimal for these paths.
+            - Non-empty result: cells with detour_ratio > threshold were found. Consider calling
+              optimize_cell_placement for the worst offenders.
+
             Priority: Call this when WNS is stuck and critical paths have >3 LUT levels, or after multiple phys_opt/route cycles without improvement.""",
             inputSchema={
                 "type": "object",
@@ -506,7 +521,13 @@ async def list_tools() -> list[Tool]:
             Output: region coordinates, pblock_ranges string, estimated resources,
                     and next_steps (Vivado tools you must call yourself).
             Priority: Use when avg_distance > 70 (distributed scenario) or
-                      recommendation == 'PBLOCK'.""",
+                      recommendation == 'PBLOCK'.
+
+            NOTE on resource_multiplier:
+            - Default 1.5x provides 50%% headroom. For already-congested designs, this may
+              over-allocate and produce an unnecessarily large pblock, reducing timing benefit.
+            - Reduce to 1.0x-1.2x if the design has high utilization or if you want a tighter region.
+            - The returned pblock_ranges are ready for direct use in vivado_create_and_apply_pblock.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -577,6 +598,17 @@ async def list_tools() -> list[Tool]:
             Trigger: High fanout nets present (fanout > 100), no path spread.
             Input: list of nets with fanout counts.
             Output: optimization results (nets_processed, successful_count, failed_count, checkpoint_path).
+
+            STRATEGY INTERACTION WARNING:
+            - Running fanout splitting AFTER PBLOCK placement can WORSEN WNS by disrupting the dense PBLOCK layout.
+            - If WNS regresses after fanout+reroute, set flow_control=ROLLBACK to revert to pre-fanout checkpoint.
+            - Prefer running fanout optimization BEFORE applying PBLOCK constraints, or as a standalone strategy.
+
+            RESULT INTERPRETATION:
+            - successful_count > 0: nets were split. Always verify WNS delta after Vivado route_design.
+            - If WNS worsens after this optimization: the fanout splitting broke existing placement density.
+              Roll back and do NOT retry with different nets — try a different strategy instead.
+
             Priority: Prefer this over manual optimize_fanout_batch when high_fanout nets (fo>100) dominate timing.""",
             inputSchema={
                 "type": "object",

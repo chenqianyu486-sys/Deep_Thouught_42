@@ -720,14 +720,36 @@ def optimize_lut_input_cone(hierarchical_input_pins: list[str]) -> Dict[str, Any
         
         # Count successful optimizations
         success_count = sum(1 for r in results if r["status"] == "optimized")
-        
-        return {
+
+        result = {
             "status": "success",
             "total_pins": len(hierarchical_input_pins),
             "optimized_count": success_count,
             "results": results
         }
-        
+
+        # Inject llm_hint when no optimization was possible
+        if success_count == 0:
+            has_input_limit_error = any(
+                "6 maximum inputs" in r.get("message", "")
+                for r in results if r.get("status") == "error"
+            )
+            if has_input_limit_error:
+                result["llm_hint"] = (
+                    "All LUT input cones exceed the 6-input physical limit "
+                    "(neural-network-style wide logic detected). "
+                    "This design is NOT suitable for LUT cone optimization. "
+                    "Skip this tool and switch to a different strategy."
+                )
+            else:
+                result["llm_hint"] = (
+                    "No LUT input cones were optimizable (optimized_count=0). "
+                    "The existing logic depth may already be minimal. "
+                    "Try a different strategy instead of retrying this tool."
+                )
+
+        return result
+
     except Exception as e:
         logger.error(f"Error in LUT input cone optimization: {e}")
         return {"error": str(e)}

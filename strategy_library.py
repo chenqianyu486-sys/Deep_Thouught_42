@@ -102,6 +102,7 @@ SKILL_GUIDANCE = {
         "output": "cells with detour_ratio > threshold, sorted descending",
         "threshold": "2.0 (higher = worse placement)",
         "condition": "Critical path has >3 LUT levels OR high detour cells detected",
+        "interpretation": "Empty result (no cells > threshold) = routing already compact for analyzed paths. Valid diagnosis, not a failure.",
     },
     "optimize_cell_placement": {
         "category": "PLACEMENT",
@@ -125,6 +126,8 @@ SKILL_GUIDANCE = {
         "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "note": "split_factor is calculated internally as max(3, min(8, fanout // 100)) — do NOT provide it",
+        "risk": "HIGH when used after PBLOCK placement. Fanout splitting disrupts PBLOCK dense layout — WNS often regresses.",
+        "contraindications": "Do NOT use after PBLOCK placement. Prefer running BEFORE PBLOCK or as standalone strategy.",
     },
     "analyze_pblock_region": {
         "category": "ANALYSIS",

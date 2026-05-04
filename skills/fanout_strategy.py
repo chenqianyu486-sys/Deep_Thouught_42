@@ -96,7 +96,8 @@ def execute_fanout_optimization(
     display_name="High Fanout Net Optimization",
     description="Split high fanout nets using RapidWright and write checkpoint. "
                 "MUTATING. Side effects: net topology changes, checkpoint file written. "
-                "Trigger: High fanout nets present (fanout > 100), no path spread.",
+                "Trigger: High fanout nets present (fanout > 100), no path spread. "
+                "WARNING: Running after PBLOCK placement may worsen WNS by disrupting dense layout.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="non-idempotent",
     side_effects=["net_topology", "checkpoint_file"],

@@ -40,14 +40,6 @@ response_format:
       DONE: "WNS >= 0 achieved (ONLY valid when WNS >= 0)"
       RETRY: "Modify params and retry (max 3)"
       ROLLBACK: "Revert to best checkpoint"
-    analysis:
-      observed_signals:
-        avg_distance: "<float|null>"
-        max_fanout: "<int|null>"
-        failing_endpoints: "<int|null>"
-      scenario_match: "<scenario_id|null>"
-      hypothesis: "<string>"
-      strategy_rationale: "<string>"
   iteration_handoff: "When present, follow CONTINUATION DIRECTIVE over generic strategy guidance"
 
 # ── Scenario Detection ──
@@ -92,6 +84,15 @@ strategy_selection:
     <<: *profile-pblock
   - default:
     <<: *profile-physopt
+
+  ordering_constraints:
+    - "PBLOCK should be attempted BEFORE fanout optimization. Fanout after PBLOCK disrupts dense layout."
+    - "If execute_fanout_strategy is run after PBLOCK and WNS regresses: set flow_control=ROLLBACK immediately."
+    - "optimize_lut_input_cone: Skip entirely for neural network / wide-datapath designs. Check optimized_count in result — 0 means no cones were optimizable."
+    - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
+  strategy_risk:
+    fanout_after_pblock: "HIGH RISK — fanout splitting removes the dense clustering that PBLOCK creates, likely worsening WNS."
+    lut_cone_on_wide_logic: "INEFFECTIVE — neural network designs have 75+ input cones, far exceeding 6-input LUT limit."
 
 strategies:
   available:

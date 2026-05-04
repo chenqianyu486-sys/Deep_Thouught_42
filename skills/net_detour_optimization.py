@@ -634,7 +634,8 @@ def optimize_cell_placement(
     display_name="Analyze Net Detour",
     description="Analyze detour ratios for cells on critical paths. READ-ONLY. "
                 "detour_ratio = routed_path_length / manhattan_distance. "
-                "Ratio > 2.0 suggests cell may benefit from re-placement.",
+                "Ratio > 2.0 suggests cell may benefit from re-placement. "
+                "Empty result = routing is compact for analyzed paths (valid diagnosis).",
     category=SkillCategory.ANALYSIS,
     idempotency="safe",
     side_effects=[],

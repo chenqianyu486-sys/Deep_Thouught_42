@@ -371,7 +371,9 @@ def generate_pblock_plan(
                 "READ-ONLY analysis. Returns region coordinates, pblock_ranges string, "
                 "estimated resources, capacity validation (capacity_ok), deficit, advice, "
                 "and next_steps (ONLY when capacity is sufficient). "
-                "Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
+                "Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles. "
+                "NOTE: If resource_multiplier is too high (default 1.5x), the returned region "
+                "may be larger than necessary. Reduce to 1.0x-1.2x for congested designs.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",
     side_effects=[],
