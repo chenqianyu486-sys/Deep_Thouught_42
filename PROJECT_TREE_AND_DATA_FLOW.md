@@ -12,6 +12,10 @@ fpl26_optimization_contest/
 ├── requirements.txt
 ├── CLAUDE.md                     # 项目指令文件
 ├── strategy_library.py           # 策略库
+├── Makefile                      # 构建自动化
+├── LICENSE-APACHE-2.0.txt        # Apache 2.0 许可证
+├── RapidWright/                  # RapidWright Java 子模块（src/、jars/、python/、data/）
+├── docs/                         # GitHub Pages 文档站点（benchmarks、FAQ、submission 指南等）
 ├── context_manager/              # 内存管理模块
 │   ├── __init__.py
 │   ├── manager.py                # MemoryManager - 中心编排，单次_compress()触发
@@ -22,6 +26,7 @@ fpl26_optimization_contest/
 │   ├── agent_context.py          # AgentContextManager - 多Agent分支
 │   ├── compat.py                  # 兼容性包装
 │   ├── logging_config.py          # 日志配置
+│   ├── test_lightyaml.py          # YAML 解析器测试
 │   ├── stores/                    # 存储层
 │   │   ├── __init__.py
 │   │   └── memory_store.py
@@ -33,12 +38,14 @@ fpl26_optimization_contest/
 │       ├── __init__.py
 │       ├── base.py                # 压缩策略基类
 │       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断 + 过时时序报告替换
-│       ├── planner_compress.py         # PlannerCompressor: 100K token_budget, preserve_turns=60, preserve_role_turns=6
-│       └── worker_compress.py          # WorkerCompressor: 35K token_budget, preserve_turns=40, preserve_role_turns=6
+│       ├── planner_compress.py         # PlannerCompressor（继承 YAMLStructuredCompressor，参数来自 model_config.yaml：preserve_turns=60/min_importance=0.1/时序10K字符）
+│       └── worker_compress.py          # WorkerCompressor（继承 YAMLStructuredCompressor，参数来自 model_config.yaml：preserve_turns=40/min_importance=0.15/时序3K字符）
 ├── RapidWrightMCP/               # RapidWright MCP服务器
 │   ├── rapidwright_tools.py      # 工具函数实现
 │   ├── server.py                 # MCP服务器入口
 │   ├── test_server.py            # 服务器测试
+│   ├── setup.sh                  # 设置脚本
+│   ├── README.md                 # 自述文件
 │   └── requirements.txt
 ├── VivadoMCP/                    # Vivado MCP服务器
 │   ├── vivado_mcp_server.py      # Vivado MCP服务器实现
@@ -93,6 +100,7 @@ DCPOptimizer._prepare_api_messages()
    - 重复 REFLECTION CHECKPOINT → 仅保留最新 1 条
    - 重复 REPETITION DETECTED → 仅保留最新 1 条
    - 重复 SYSTEM NOTICE → 仅保留最新 1 条
+   - 重复 FORMAT GUARD → 仅保留最新 1 条（"CRITICAL OUTPUT FORMAT" 开头）
    - 连续同名工具结果 → 仅保留最后一条
          ↓
 3. 增强系统提示词（scenario hint + skill catalog）
@@ -106,8 +114,8 @@ DCPOptimizer._prepare_api_messages()
          ↓
 LLM API Call
 ```
-    - 正常模式: preserve_turns=40/min_importance=0.15/preserve_role_turns=6 (worker), preserve_turns=60/min_importance=0.1/preserve_role_turns=6 (planner)
-    - 激进模式(hard_limit触发): preserve_turns=25(worker)/40(planner), min_importance=0.35(worker)/0.25(planner)
+    - 正常模式: preserve_turns=40/min_importance=0.15/preserve_role_turns=6 (worker), preserve_turns=60/min_importance=0.1/preserve_role_turns=6 (planner)（来自 model_config.yaml，详见第4节）
+    - 激进模式(hard_limit触发): preserve_turns=25(worker)/40(planner), min_importance=0.35(worker)/0.25(planner)（来自 model_config.yaml，详见第4节）
     - system消息始终保护
     - preserve_role_turns=6: 最近6条消息保留原始API role（user/assistant/tool），不塞进YAML
     - 两轮预算分配: 60%高重要性 + 40%中等重要性
@@ -117,7 +125,10 @@ LLM API Call
     - 过时时序报告替换：迭代 < current_iteration-1 的长时序报告 → `[Outdated timing report from iteration N]`（节省 token）
     - **失败策略工具消息提前压缩**：已知失败策略的工具结果不受迭代年龄限制，直接压缩为 `[SYSTEM COMPRESSED TOOL: name (iteration N)]` 标记（节省 token）
     - **反"鬼打墙"机制**（2026-05 新增）：
-      - 受保护工具列表 `PROTECTED_ANALYSIS_TOOLS`：分析型工具（rapidwright_analyze_pblock_region 等）不被压缩为标记，保留完整 YAML 摘要
+      - 受保护工具列表 `PROTECTED_ANALYSIS_TOOLS`（frozenset，定义于 yaml_structured_compress.py:193）：分析型工具不被压缩为标记，保留完整 YAML 摘要
+        - `rapidwright_analyze_pblock_region`、`rapidwright_analyze_fabric_for_pblock`、`rapidwright_analyze_net_detour`
+        - `rapidwright_smart_region_search`、`rapidwright_read_checkpoint`
+        - `vivado_get_cached_high_fanout_nets`、`vivado_get_raw_tool_output`
       - 标记格式改为 `[SYSTEM COMPRESSED TOOL: ...]`，明确标注系统主动压缩而非截断
       - 压缩发生后注入 `SYSTEM NOTICE: ...` 通知消息，告知模型标记含义，阻止重复调用
     - `_is_failed_strategy_tool_result()`: 按工具名模式匹配 failed_strategies 列表（PBLOCK→含pblock, PhysOpt→含phys_opt, Fanout→含fanout/optimize_fanout, PlaceRoute→含place_design/route_design）
@@ -132,6 +143,7 @@ LLM API Call
 3. WorkingMemory.clear()                        ← 再清空
 4. 添加system + YAML摘要（旧消息）              ← YAML压缩
 5. 添加最近 preserve_role_turns=6 条消息        ← 保留原始 role（user/assistant/tool）
+    注：`getattr(self, 'preserve_role_turns', 3)`，回退值硬编码为 3
 ```
 
 ### 2.3 WNS/TNS状态注入（已迁移至上下文快照）
@@ -160,9 +172,9 @@ _build_context_snapshot() 从现有实例变量构建 YAML：
     do_not_repeat:
       - "phys_opt_design (already called 12 times with no improvement)"
     iteration_history:
-      - "iter1: IMP WNS -0.500 -> -0.352 (+0.148) PBLOCK"
-      - "iter2: UNC WNS -0.352 -> -0.352 (+0.000) PhysOpt"
-      - "iter3: REG WNS -0.352 -> -0.380 (-0.028) Fanout"
+      - "iter1(IMP): -0.500->-0.352ns(+0.1480) 7toks PBLOCK"
+      - "iter2(UNC): -0.352->-0.352ns(+0.0000) 5toks PhysOpt"
+      - "iter3(REG): -0.352->-0.380ns(-0.0280) 9toks Fanout"
     ↓
 _inject_context_snapshot(api_messages):
     1. 扫描 api_messages 查找以 "# === FPGA Context Snapshot ==="
@@ -177,7 +189,7 @@ _inject_context_snapshot(api_messages):
 - **紧凑格式**：仅 7 个字段，~180 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）；`iteration_history` 展示最近 5 次迭代 WNS 轨迹
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}: {IMP|UNC|REG} WNS {before} -> {after} ({delta}) {strategy_label}`
+- **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`（注意：无 "WNS" 字样，包含工具计数）
 
 ### 2.4 关键信息保护
 
@@ -185,7 +197,7 @@ _inject_context_snapshot(api_messages):
 |------|----------|----------|
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
 | WNS/TNS/策略状态 | 上下文快照（user message，独立于压缩系统） | 通过 `_build_context_snapshot()` → `_inject_context_snapshot()` 每 API 调用前注入为第一条 user 消息 |
-| 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在6个检测点被调用（工具异常/工具错误/SWITCH_STRATEGY/未完成策略检测/PBLOCK验证失败/路由失败） |
+| 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在8个检测点被调用（工具超时/工具异常/工具错误/SWITCH_STRATEGY/PBLOCK验证失败/Fanout后评估缺失/路由失败/策略中断） |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 | report_step_state tool call 格式 | ① User message（会话起始）+ ② System prompt 头部压印（每API调用前） | 双重提醒：User role 高注意力 + System prompt 前导压印 |
@@ -207,7 +219,7 @@ WORKER: deepseek/deepseek-v4-flash (250K context, 快速执行)
 
 ### 2.5.1 模型选择维度（`_select_model()`）
 
-评分系统（8维度变量，前2个已注释，当前6个生效，加权得分高的模型胜出，margin=2防止震荡）：
+评分系统（8维度变量，前2个已注释，当前6个生效，加权得分高的模型胜出，margin=1防止震荡（代码实现 planner_score > worker_score + 1））：
 
 | 维度 | 条件 | Planner得分 | Worker得分 |
 |------|------|-----------|-----------|
@@ -291,8 +303,8 @@ Skill 超时映射（三层）:
 │   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
 │   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+write_checkpoint, 返回优化结果(LLM自行调Vivado工具串)
 
-Skill 推荐机制 (`_build_skill_recommendation()`, 6 条件按优先级排列):
-├── stagnation (no_improvement>=1) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
+Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列, 注意 stagnation 条件含隐含的 best_wns < 0 检查):
+├── stagnation (global_no_improvement>=1 AND best_wns<0) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
 ├── stagnation + Fanout not failed                    → rapidwright_execute_fanout_strategy [诊断]
 ├── stagnation + 都失败                                → rapidwright_analyze_net_detour [诊断]
 ├── avg_distance > 70 + PBLOCK not failed             → rapidwright_analyze_pblock_region
@@ -407,7 +419,7 @@ planner:
 ```python
 MAX_TOOL_ROUNDS_PER_ITERATION = 80
 GLOBAL_NO_IMPROVEMENT_LIMIT = 3
-WNS_TARGET_THRESHOLD = 0.0  # 0.0ns = 时序收敛
+WNS_TARGET_THRESHOLD = 0.0  # 0.0ns = 时序收敛（get_completion() 方法内局部变量）
 
 迭代流程:
 1. get_completion() → LLM tool-calling 循环
@@ -431,8 +443,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - 交接提示词迭代结束时生成，模型分层专属
 
 **交接提示词**:
-- **Planner** (~500-800 tokens): `EXIT REASON` → `CONTINUATION DIRECTIVE` → `ITERATION TRAJECTORY` → `NEXT OPTIMIZATION GOAL` → `RECOMMENDED SKILL`
-- **Worker** (~200-300 tokens): `CONTINUATION` → `RECENT TRAJECTORY (last 3)`
+- **Planner** (~600-1000 tokens): `EXIT REASON` → `CONTINUATION DIRECTIVE` → `ITERATION TRAJECTORY` → `CURRENT STATE` → `NEXT OPTIMIZATION GOAL` → `LAST ITERATION TOOLS` → `FAILED STRATEGIES` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS` → `INCOMING MODEL`
+- **Worker** (~300-500 tokens): `CONTINUATION` → `EXIT LABEL` → `RECENT TRAJECTORY (last 3)` → `STATE` → `GOAL` → `LAST ITERATION TOOLS` → `AVOID` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS`
 - 策略中断检测: `_detect_unfinished_strategy()` 检查最后 2 步是否有 report_timing_summary
 - 首次迭代: 注入 `**FIRST ITERATION** - Begin with initial design analysis...`
 - Handoff 注入: 独立 system message（index=1）
@@ -466,7 +478,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 
 关键修复：
 - **WNS 改善判定时序**: `_on_iteration_end()` 和 `_prev_best_wns` 移到 checkpoint/get_wns 成功之后执行，确保 counter、model selection、handoff prompt 都使用确认后的 WNS
-- **退出原因传递**: 所有 `break` 改为 `return content, is_done`，确保 `cost_limit` 等退出原因正确传递
+- **退出原因传递**: DONE 处理器设 flags 后走迭代结束处理（设 `_end_iteration_on_return = True` → 迭代循环检测 → _on_iteration_end()），确保 `cost_limit` 等退出原因正确传递
 - **LLM 过早 DONE 抑制**: SYSTEM_PROMPT 中 DONE 语义收紧为 `WNS >= 0 achieved`；注入 `current_tns` 和 `failing_endpoints` 让 LLM 感知问题规模
 
 **新增状态变量**:
@@ -523,7 +535,7 @@ class StepState:
 | PBLOCK validation_failed | PBLOCK | `execution_failure` | `create_and_apply_pblock` 结果含 validation_failed |
 | Fanout后评估缺失 | Fanout | `execution_failure` | Fanout优化后缺少post-eval |
 | 路由失败 | PlaceRoute | `execution_failure` | `route_design`/`place_design` 失败 |
-| 策略中断检测 | PBLOCK/Fanout | `execution_failure` | `_detect_unfinished_strategy()` 检测到验证缺失 |
+| 策略中断检测 | PBLOCK/Fanout | `execution_failure` | `_detect_unfinished_strategy()`: 退出原因 ∈ {tool_round_limit/flow_control_done_next_iteration/switch_strategy} + 策略可执行 + 最后2个工具无 report_timing_summary；额外检测 PBLOCK validation_failed 和 Fanout 后评估缺失 |
 
 **分级格式** (`list[dict]`，原为 `list[str]`)：
 ```python
@@ -542,6 +554,13 @@ class StepState:
 - `YAMLStructuredCompressor._compress_outdated_tool_results()`: 失败策略的工具结果优先压缩（兼容新旧格式）
 - `_is_failed_strategy_tool_result()`: 兼容 `str`（旧格式）和 `dict`（新格式）
 - `failed_strategy_names` 属性（compat.py/manage.py）: 向后兼容返回纯策略名列表
+
+**`_infer_strategy_from_tools()` 策略推断映射**（用于 record_failure、handoff 生成等）：
+- PBLOCK → 工具名含 `pblock`
+- PhysOpt → 工具名含 `phys_opt`
+- Fanout → 工具名含 `fanout` 或 `optimize_fanout`
+- PlaceRoute → 工具名含 `place_design` 或 `route_design`
+- 以上均不匹配 → Information/Unknown（不记录失败）
 
 **向后兼容**：
 - `failed_strategies` 属性仍返回列表（元素从 `str` 变为 `dict`）
@@ -716,7 +735,7 @@ tool call 入口:
 ```python
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
-COST_HARD_LIMIT = $1.00 (planner+worker合计)
+cost_hard_limit（从 model_config.yaml 加载的实例属性，默认 $1.00，planner+worker 合计）
 ```
 
 ## 13. 工具输出摘要化 + 历史自动裁剪
