@@ -4591,7 +4591,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             # If termination signal (DONE/SWITCH_STRATEGY), skip tool execution
             # even when native tool_calls are present (contradictory but safe:
             # the LLM should not request tools AND signal termination simultaneously).
-            flow_signal = step_state.flow_control
+            flow_signal = step_state.flow_control if step_state else None
             if flow_signal in ("DONE", "SWITCH_STRATEGY"):
                 content = assistant_content
                 if message.tool_calls:

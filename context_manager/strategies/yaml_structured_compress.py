@@ -541,6 +541,45 @@ class YAMLStructuredCompressor(CompressionStrategy):
             role_preserved = []
             yaml_selected = selected
 
+        # === Repair: ensure tool_calls / tool response pairs stay together ===
+        # DeepSeek API requires every assistant message with tool_calls to be
+        # immediately followed by tool messages matching each tool_call_id.
+        # The role_preserved/yaml_selected split is count-based and can break
+        # these pairs. Move orphaned tool responses into role_preserved.
+        if role_preserved:
+            # Collect tool_call_ids from assistant messages in role_preserved
+            assistant_tc_ids = set()
+            for msg, _, _ in role_preserved:
+                if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
+                        if tc_id:
+                            assistant_tc_ids.add(tc_id)
+
+            if assistant_tc_ids:
+                # Collect tool_call_ids already in role_preserved
+                present_tc_ids = set()
+                for msg, _, _ in role_preserved:
+                    if msg.role == MessageRole.TOOL and msg.tool_call_id:
+                        present_tc_ids.add(msg.tool_call_id)
+
+                # Find tool_call_ids referenced by assistant but missing responses
+                missing_ids = assistant_tc_ids - present_tc_ids
+                if missing_ids:
+                    moved = []
+                    still_yaml = []
+                    for item in yaml_selected:
+                        msg = item[0]
+                        if msg.role == MessageRole.TOOL and msg.tool_call_id in missing_ids:
+                            moved.append(item)
+                            missing_ids.discard(msg.tool_call_id)
+                        else:
+                            still_yaml.append(item)
+                    if moved:
+                        yaml_selected = still_yaml
+                        role_preserved = moved + role_preserved
+                        role_preserved.sort(key=lambda x: x[0].metadata.get('index', 0))
+
         # Build YAML structure from yaml_selected (older messages) only
         yaml_data = self._build_yaml_structure(
             system_msgs,
