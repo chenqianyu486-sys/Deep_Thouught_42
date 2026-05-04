@@ -4365,10 +4365,8 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         specific error and a format reminder at the next API call.
         """
         feedback = (
-            "**YAML FORMAT ERROR DETECTED**\n\n"
-            "Your previous response contained an invalid `step:` YAML block:\n"
-            f"  {parse_error}\n\n"
-            "Reminder of the correct format (must appear in every response):\n"
+            "YAML FORMAT ERROR DETECTED.Please correct the format in your next response.\n"
+            "Reminder of the correct yaml format (must appear in every response):\n"
             "  step:\n"
             "    step_id: <N>\n"
             "    result_status: SUCCESS|PARTIAL|FAIL\n"
@@ -4384,14 +4382,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             "    tool_calls:\n"
             "      - function: <tool_name>\n"
             "        parameters:\n"
-            "          key: value\n"
-            "\n"
-            "STRICTLY FORBIDDEN:\n"
-            "- XML/HTML tags\n"
-            "- Markdown code fences ``` around the YAML block\n"
-            "- Omitting the step: YAML block entirely\n"
-            "\n"
-            "Please correct the format in your next response."
+            "          key: value"
         )
         self._compat.add_message("user", feedback)
         logger.info(
