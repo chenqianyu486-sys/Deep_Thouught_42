@@ -186,6 +186,20 @@ TOOL_RESULT_KEYWORDS = [
     'place_design', 'route_design', 'report_timing'
 ]
 
+# Analysis tool results whose YAML summaries should NOT be compressed to markers.
+# These are diagnostic/structural analysis outputs the model needs to reference for
+# decision-making. Compressing them triggers re-call loops ("ghosting") because the
+# marker looks like truncated output, causing the model to re-invoke the tool.
+PROTECTED_ANALYSIS_TOOLS = frozenset({
+    'rapidwright_analyze_pblock_region',
+    'rapidwright_analyze_fabric_for_pblock',
+    'rapidwright_analyze_net_detour',
+    'rapidwright_smart_region_search',
+    'rapidwright_read_checkpoint',
+    'vivado_get_cached_high_fanout_nets',
+    'vivado_get_raw_tool_output',
+})
+
 
 class YAMLStructuredCompressor(CompressionStrategy):
     """Compress messages using YAML format with FPGA-aware structure."""
@@ -298,7 +312,8 @@ class YAMLStructuredCompressor(CompressionStrategy):
                 is_tool_result = msg_iter > 0 and len(msg.content) > 100
                 is_outdated = is_tool_result and msg_iter < boundary
                 is_failed = is_tool_result and self._is_failed_strategy_tool_result(msg, failed_strategies)
-                if is_outdated or is_failed:
+                is_protected = msg.name in PROTECTED_ANALYSIS_TOOLS if msg.name else False
+                if (is_outdated or is_failed) and not is_protected:
                     # Try to extract key metrics from YAML summary format
                     stripped = msg.content.strip()
                     lines = stripped.split('\n')
@@ -318,14 +333,14 @@ class YAMLStructuredCompressor(CompressionStrategy):
                     if tool_name:
                         # Structured YAML summary format — keep only metadata
                         detail_str = f", wns={key_details['wns']}" if 'wns' in key_details else ""
-                        marker = f"[Tool: {tool_name} (iteration {msg_iter}){detail_str}]"
+                        marker = f"[SYSTEM COMPRESSED TOOL: {tool_name} (iteration {msg_iter}){detail_str}]"
                     else:
                         # Raw text format — try regex extraction for WNS
                         wns_match = re.search(r'WNS[=:]\s*([-\d.]+)', stripped, re.IGNORECASE)
                         wns_str = f", wns={wns_match.group(1)}" if wns_match else ""
                         # Truncate tool name from first line
                         first_line = lines[0][:80] if lines else ""
-                        marker = f"[Tool result (iteration {msg_iter}){wns_str}: {first_line}]"
+                        marker = f"[SYSTEM COMPRESSED: tool result (iteration {msg_iter}){wns_str}: {first_line}]"
 
                     saved_chars += len(msg.content)
                     replaced_count += 1
@@ -342,6 +357,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
             result.append((msg, importance, topic))
 
         if replaced_count > 0:
+            self._tools_compressed_count = replaced_count
             logger.info(
                 "[OUTDATED_TOOL_RESULT] Compressed %d old tool results (saved ~%d chars)",
                 replaced_count, saved_chars,
@@ -373,6 +389,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
         self.min_importance_threshold = min_importance_threshold
         self.max_chars_multiplier = max_chars_multiplier
         self.preserve_role_turns = preserve_role_turns
+        self._tools_compressed_count = 0  # Tracks tool results compressed to markers in current pass
 
     def compress(self, messages: List[Message], context: CompressionContext) -> List[Message]:
         """Compress messages into YAML format with FPGA design state.
@@ -444,6 +461,9 @@ class YAMLStructuredCompressor(CompressionStrategy):
             extra={"preserve_turns": preserve_turns,
                   "threshold": min_importance_threshold, "trace_id": get_trace_id()}
         )
+
+        # Reset compression tracking for this pass
+        self._tools_compressed_count = 0
 
         # Score and classify all messages
         scored = ImportanceScorer.classify_and_score(messages, context)
@@ -583,6 +603,26 @@ class YAMLStructuredCompressor(CompressionStrategy):
         # Keep system messages + YAML summary + role-preserved messages
         result = [msg for msg, _, _ in system_msgs]
         result.append(summary_msg)
+
+        # Inject compression notification when tool results were compressed to markers
+        # This prevents the model from misinterpreting [SYSTEM COMPRESSED TOOL:] markers
+        # as truncated output and re-calling tools ("ghosting" behavior).
+        if self._tools_compressed_count > 0:
+            notification_msg = Message(
+                role=MessageRole.USER,
+                content=(
+                    "SYSTEM NOTICE: Context compression was applied to conserve tokens. "
+                    "Tool results marked with [SYSTEM COMPRESSED TOOL: ...] were intentionally "
+                    "compressed by the system; their key metrics are preserved in the YAML "
+                    "summary above. Do NOT re-call tools whose results show as compressed."
+                ),
+                metadata={
+                    'protected': True,
+                    'compression_notification': True,
+                }
+            )
+            result.append(notification_msg)
+
         for msg, _, _ in role_preserved:
             result.append(msg)
 

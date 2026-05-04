@@ -118,7 +118,11 @@ LLM API Call
     - 工具调用保留参数（最多5个）
     - 时序报告智能截断（5项改进：动态预算/阈值过滤/起终点成对/时钟域分组/回退保护）
     - 过时时序报告替换：迭代 < current_iteration-1 的长时序报告 → `[Outdated timing report from iteration N]`（节省 token）
-    - **失败策略工具消息提前压缩**：已知失败策略的工具结果不受迭代年龄限制，直接压缩为 `[Tool: name (iteration N)]` 标记（节省 token）
+    - **失败策略工具消息提前压缩**：已知失败策略的工具结果不受迭代年龄限制，直接压缩为 `[SYSTEM COMPRESSED TOOL: name (iteration N)]` 标记（节省 token）
+    - **反"鬼打墙"机制**（2026-05 新增）：
+      - 受保护工具列表 `PROTECTED_ANALYSIS_TOOLS`：分析型工具（rapidwright_analyze_pblock_region 等）不被压缩为标记，保留完整 YAML 摘要
+      - 标记格式改为 `[SYSTEM COMPRESSED TOOL: ...]`，明确标注系统主动压缩而非截断
+      - 压缩发生后注入 `SYSTEM NOTICE: ...` 通知消息，告知模型标记含义，阻止重复调用
     - `_is_failed_strategy_tool_result()`: 按工具名模式匹配 failed_strategies 列表（PBLOCK→含pblock, PhysOpt→含phys_opt, Fanout→含fanout/optimize_fanout, PlaceRoute→含place_design/route_design）
     - WNS状态注入时机: API调用时（不在working memory）
 ```
@@ -720,9 +724,11 @@ FIFO 淘汰（最多 50 条）。仅当 LLM 调 `vivado_get_raw_tool_output` 时
 
 **4. 压缩阶段旧消息裁剪** (yaml_structured_compress.py)
 
-`_compress_outdated_tool_results()`: 迭代差 > 2 的工具消息替换为：
-- YAML 格式: `[Tool: vivado_phys_opt_design (iteration 3), wns=-0.939]`
-- 旧格式: 正则提取 WNS + 首行截断
+`_compress_outdated_tool_results()`: 迭代差 > 2 的工具消息替换为（反"鬼打墙"机制）：
+- YAML 格式: `[SYSTEM COMPRESSED TOOL: vivado_phys_opt_design (iteration 3), wns=-0.939]`
+- 原始格式: `[SYSTEM COMPRESSED: tool result (iteration N), wns=...: ...]`
+- 受保护工具（PROTECTED_ANALYSIS_TOOLS）跳过压缩，保留完整 YAML 摘要
+- 压缩后在 YAML summary 末尾注入 `SYSTEM NOTICE: Context compression was applied...` 通知消息
 - 放在 timing report 压缩之后，系统消息分离之前
 
 **5. 压缩后角色保留** (yaml_structured_compress.py)
