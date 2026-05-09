@@ -41,6 +41,15 @@ RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
 export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
+# Auto-discover Vivado if not on PATH (AWS AMI: /tools/Xilinx/Vivado/2025.1/)
+ifeq ($(shell command -v $(VIVADO_EXEC) 2>/dev/null),)
+  VIVADO_CANDIDATE := $(shell ls -d /tools/Xilinx/Vivado/2025.*/bin/vivado 2>/dev/null | head -n 1)
+  ifneq ($(VIVADO_CANDIDATE),)
+    VIVADO_EXEC := $(VIVADO_CANDIDATE)
+    export VIVADO_EXEC
+  endif
+endif
+
 # Example DCPs to download
 EXAMPLE_DCP_1 := demo_corundum_25g_misses_timing.dcp
 EXAMPLE_DCP_2 := logicnets_jscl.dcp
@@ -53,11 +62,17 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup build-rapidwright run_optimizer run_test run_skill_test validate validate_demo run-submission clean veryclean help
+.PHONY: setup build-rapidwright run_optimizer run_test run_skill_test validate validate_demo validate-submission run-submission clean veryclean help
 
 # Default target
 help:
 	@echo "FPGA Design Optimization Agent - Makefile"
+	@echo ""
+	@echo "Competition workflow (FPL'26):"
+	@echo "  make setup SKIP_EXAMPLES=1                        # One-time setup on AWS instance"
+	@echo "  make run_optimizer DCP=fpl26_contest_benchmarks/benchmark1.dcp"
+	@echo "  make run_optimizer DCP=fpl26_contest_benchmarks/benchmark2.dcp"
+	@echo "  make validate-submission DCP=fpl26_contest_benchmarks/benchmark1.dcp"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup              - Install dependencies, build RapidWright, download example DCPs"
@@ -67,12 +82,14 @@ help:
 	@echo "  run_skill_test     - Run only skill invocation tests (quick, no place/route)"
 	@echo "  validate           - Validate functional equivalence between two DCPs"
 	@echo "  validate_demo      - Run validation demo (self-check)"
+	@echo "  validate-submission - Find and validate optimized DCP against original"
 	@echo "  clean              - Remove generated files (run directories, logs, Vivado outputs)"
 	@echo "  veryclean          - Remove all generated files including example DCPs"
 	@echo ""
 	@echo "Usage examples:"
 	@echo "  make setup"
-	@echo "  make setup VIVADO_EXEC=/tools/Xilinx/Vivado/2025.2/bin/vivado"
+	@echo "  make setup SKIP_EXAMPLES=1"
+	@echo "  make setup VIVADO_EXEC=/tools/Xilinx/Vivado/2025.1/bin/vivado"
 	@echo "  make run_optimizer DCP=logicnets_jscl.dcp"
 	@echo "  make run_test DCP=logicnets_jscl.dcp"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3"
@@ -81,17 +98,20 @@ help:
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp VECTORS=50000"
 	@echo "  make validate_demo"
+	@echo "  make validate-submission DCP=logicnets_jscl.dcp"
 	@echo "  make clean"
 	@echo ""
 	@echo "Environment variables:"
-	@echo "  VIVADO_EXEC     - Path to Vivado executable (default: vivado)"
-	@echo "  JAVA_HOME       - Java installation directory (auto-detected from PATH if not set)"
-	@echo "  DCP             - Input DCP file for run_optimizer / run_test targets"
-	@echo "  MAX_NETS        - Max high fanout nets to optimize in test mode (default: 5)"
-	@echo "  SKIP_SKILLS     - Set to 1 to skip skill invocation tests in test mode"
-	@echo "  GOLDEN          - Golden (reference) DCP for validation"
-	@echo "  REVISED         - Revised (optimized) DCP for validation"
-	@echo "  VECTORS         - Number of test vectors for validation (default: 10000)"
+	@echo "  VIVADO_EXEC          - Path to Vivado executable (default: vivado, auto-discovered)"
+	@echo "  JAVA_HOME            - Java installation directory (auto-detected from PATH if not set)"
+	@echo "  OPENROUTER_API_KEY   - OpenRouter API key (required for run_optimizer, set by organizers)"
+	@echo "  DCP                  - Input DCP file for run_optimizer / run_test targets"
+	@echo "  MAX_NETS             - Max high fanout nets to optimize in test mode (default: 5)"
+	@echo "  SKIP_SKILLS          - Set to 1 to skip skill invocation tests in test mode"
+	@echo "  SKIP_EXAMPLES        - Set to 1 to skip example DCP downloads in setup"
+	@echo "  GOLDEN               - Golden (reference) DCP for validation"
+	@echo "  REVISED              - Revised (optimized) DCP for validation"
+	@echo "  VECTORS              - Number of test vectors for validation (default: 10000)"
 	@echo ""
 	@echo "Output structure:"
 	@echo "  - Optimized DCP: <input_name>_optimized-<timestamp>.dcp (next to input)"
@@ -104,7 +124,12 @@ setup:
 	@echo ""
 	
 	@printf "$(COLOR_YELLOW)[1/6] Installing Python dependencies...$(COLOR_RESET)\n"
-	$(PIP) install -r requirements.txt
+	@if [ -f "/usr/lib/python3/dist-packages/EXTERNALLY-MANAGED" ]; then \
+		printf "$(COLOR_YELLOW)PEP 668 detected (Ubuntu 22.02+), using --break-system-packages$(COLOR_RESET)\n"; \
+		$(PYTHON) -m pip install --break-system-packages -r requirements.txt; \
+	else \
+		$(PIP) install -r requirements.txt; \
+	fi
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
 	@echo ""
 	
@@ -160,7 +185,9 @@ setup:
 	@echo ""
 	
 	@printf "$(COLOR_YELLOW)[5/6] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
-	@if [ -f "$(EXAMPLE_DCP_1)" ]; then \
+	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
+		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
+	elif [ -f "$(EXAMPLE_DCP_1)" ]; then \
 		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_1) already exists$(COLOR_RESET)\n"; \
 	else \
 		if command -v wget >/dev/null 2>&1; then \
@@ -177,9 +204,11 @@ setup:
 		fi; \
 	fi
 	@echo ""
-	
+
 	@printf "$(COLOR_YELLOW)[6/6] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
-	@if [ -f "$(EXAMPLE_DCP_2)" ]; then \
+	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
+		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
+	elif [ -f "$(EXAMPLE_DCP_2)" ]; then \
 		printf "$(COLOR_GREEN)✓ $(EXAMPLE_DCP_2) already exists$(COLOR_RESET)\n"; \
 	else \
 		if command -v wget >/dev/null 2>&1; then \
@@ -225,7 +254,7 @@ build-rapidwright:
 	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"
 
 # Run optimizer target: Run dcp_optimizer.py (output DCP name generated automatically)
-run_optimizer: 
+run_optimizer:
 	@if [ -z "$(DCP)" ]; then \
 		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
 		echo "Usage: make run_optimizer DCP=input.dcp"; \
@@ -233,6 +262,12 @@ run_optimizer:
 	fi
 	@if [ ! -f "$(DCP)" ]; then \
 		printf "$(COLOR_RED)Error: DCP file not found: $(DCP)$(COLOR_RESET)\n"; \
+		exit 1; \
+	fi
+	@if [ -z "$(OPENROUTER_API_KEY)" ]; then \
+		printf "$(COLOR_RED)Error: OPENROUTER_API_KEY environment variable not set$(COLOR_RESET)\n"; \
+		echo "The contest organizers set this automatically."; \
+		echo "For local testing: export OPENROUTER_API_KEY=your_key"; \
 		exit 1; \
 	fi
 	@printf "$(COLOR_GREEN)Running optimizer on $(DCP)...$(COLOR_RESET)\n"
@@ -389,6 +424,27 @@ validate_demo:
 	@printf "$(COLOR_GREEN)Running demo validation (self-check)...$(COLOR_RESET)\n"
 	@echo ""
 	$(PYTHON) validate_dcps.py "$(EXAMPLE_DCP_2)" "$(EXAMPLE_DCP_2)" --vectors 1000
+
+# Validate optimized DCP against original (competition helper)
+validate-submission:
+	@if [ -z "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
+		echo "Usage: make validate-submission DCP=input.dcp"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP file not found: $(DCP)$(COLOR_RESET)\n"; \
+		exit 1; \
+	fi
+	@INPUT_DIR=$$(dirname "$(DCP)"); \
+	INPUT_STEM=$$(basename "$(DCP)" .dcp); \
+	OPTIMIZED=$$(ls -t "$$INPUT_DIR"/$$INPUT_STEM"_optimized"*.dcp 2>/dev/null | head -n 1); \
+	if [ -z "$$OPTIMIZED" ]; then \
+		printf "$(COLOR_RED)Error: No optimized DCP found matching $$INPUT_STEM*_optimized*.dcp$(COLOR_RESET)\n"; \
+		exit 1; \
+	fi; \
+	printf "$(COLOR_GREEN)Validating: $(DCP) vs $$OPTIMIZED$(COLOR_RESET)\n"; \
+	$(PYTHON) validate_dcps.py "$(DCP)" "$$OPTIMIZED"
 
 run-submission:
 	@echo "Running submission...[Will be implemented later]"

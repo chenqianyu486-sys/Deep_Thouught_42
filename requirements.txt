@@ -6,12 +6,12 @@ mcp>=1.0.0
 # OpenAI client (only needed for full agent mode using OpenRouter, not test mode)
 openai>=1.0.0
 
-# RapidWright MCP dependencies
-rapidwright>=2025.2.1
-
 # Vivado MCP dependencies (pexpect for process control)
 pexpect>=4.8.0
 
 # Context Manager dependencies
 pyyaml>=6.0
 tiktoken>=0.5.0
+
+# NOTE: RapidWright is built from source via git submodule (make build-rapidwright),
+# NOT installed via pip. The pip 'rapidwright' package conflicts with the local build.
