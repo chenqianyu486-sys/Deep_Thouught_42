@@ -45,6 +45,7 @@ from skills import smart_region_search
 from skills import pblock_strategy
 from skills import physopt_strategy
 from skills import fanout_strategy
+from skills import congestion_analysis
 
 __all__ = [
     "Skill",

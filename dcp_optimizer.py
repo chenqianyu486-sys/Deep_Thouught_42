@@ -747,13 +747,15 @@ class DCPOptimizer(DCPOptimizerBase):
         model_planner: str = DEFAULT_MODEL_PLANNER,
         model_worker: str = DEFAULT_MODEL_WORKER,
         debug: bool = False,
-        run_dir: Optional[Path] = None
+        run_dir: Optional[Path] = None,
+        wall_clock_timeout: float = 3600.0  # 1 hour default (seconds)
     ):
         super().__init__(debug=debug, run_dir=run_dir)
         
         self.api_key = api_key
         self.model_planner = model_planner
         self.model_worker = model_worker
+        self.wall_clock_timeout = wall_clock_timeout  # Wall-clock timeout in seconds
 
         # Track failed strategies via compat (MemoryManager.failed_strategies)
         self.tools: list[dict] = []
@@ -1252,6 +1254,14 @@ class DCPOptimizer(DCPOptimizerBase):
         else:
             lines.append("iteration_history: []")
 
+        # --- budget_status: remaining OpenRouter budget and elapsed time ---
+        remaining_budget = max(0.0, self.cost_hard_limit - self.total_cost)
+        budget_pct = (self.total_cost / self.cost_hard_limit * 100) if self.cost_hard_limit > 0 else 0
+        elapsed = self._get_elapsed_time()
+        remaining_time = self._get_remaining_time()
+        lines.append(f'remaining_budget: "${remaining_budget:.2f}" ({budget_pct:.0f}% used)')
+        lines.append(f'elapsed_time: "{elapsed:.0f}s" (remaining: {remaining_time:.0f}s)')
+
         return "\n".join(lines)
 
     def _inject_context_snapshot(self, api_messages: list[dict]) -> None:
@@ -1731,6 +1741,26 @@ class DCPOptimizer(DCPOptimizerBase):
     def _check_async_exit_requested(self) -> bool:
         """Check if user requested exit (async version). Returns True if exit requested."""
         return self._async_exit_requested.is_set()
+
+    def _check_wall_clock_timeout(self) -> bool:
+        """Check if wall-clock timeout has been reached. Returns True if timeout exceeded."""
+        if self.start_time is None or self.wall_clock_timeout is None:
+            return False
+        elapsed = time.time() - self.start_time
+        return elapsed >= self.wall_clock_timeout
+
+    def _get_remaining_time(self) -> float:
+        """Get remaining wall-clock time in seconds. Returns 0 if expired."""
+        if self.start_time is None or self.wall_clock_timeout is None:
+            return float('inf')
+        elapsed = time.time() - self.start_time
+        return max(0.0, self.wall_clock_timeout - elapsed)
+
+    def _get_elapsed_time(self) -> float:
+        """Get elapsed wall-clock time in seconds."""
+        if self.start_time is None:
+            return 0.0
+        return time.time() - self.start_time
 
     async def _call_llm_with_exit_check(self, model: str, messages: list, tools: list, timeout: float = 600.0) -> Optional[object]:
         """Make an LLM call with exit checking after completion.
@@ -3213,6 +3243,16 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 planner_score += 1
             # If wns_improvement >= 0 (improving or stable): no bias adjustment
 
+        # ── Dimension 9: Budget awareness (cost control) ────────────────────
+        # When budget is running low, favor cheaper worker model to preserve
+        # remaining budget for more optimization iterations
+        budget_used_pct = (self.total_cost / self.cost_hard_limit * 100) if self.cost_hard_limit > 0 else 0
+        if budget_used_pct > 80:
+            worker_score += 3  # Strong preference for cheaper model
+            logger.info(f"Budget critical ({budget_used_pct:.0f}% used), favoring worker model")
+        elif budget_used_pct > 60:
+            worker_score += 1  # Mild preference for cheaper model
+
         # ── Decision threshold ────────────────────────────────────────────────
         # Filter out exhausted models
         worker_exhausted = self.model_worker in self._exhausted_worker_fallbacks or self.model_worker in self._exhausted_planner_fallbacks
@@ -4364,6 +4404,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                 self._is_done_reason = "user_requested"
                 is_done = False
                 return content, is_done
+            # Check wall-clock timeout between tool rounds
+            if self._check_wall_clock_timeout():
+                remaining = self._get_remaining_time()
+                logger.warning(f"Wall-clock timeout reached ({self._get_elapsed_time():.0f}s elapsed, limit={self.wall_clock_timeout:.0f}s), breaking inner loop")
+                content = f"[Wall-clock timeout reached at tool round {tool_round}, iteration {self.iteration}. Saving best checkpoint.]"
+                self._is_done_reason = "wall_clock_timeout"
+                is_done = False
+                return content, is_done
             if tool_round > self.MAX_TOOL_ROUNDS_PER_ITERATION:
                 logger.warning(f"Tool round limit reached ({tool_round} > {self.MAX_TOOL_ROUNDS_PER_ITERATION}), breaking inner loop")
                 content = f"[Tool round limit reached ({tool_round} rounds), continuing to next iteration]"
@@ -5081,6 +5129,15 @@ CRITICAL OPTIMIZATION RULES:
                 self._print_optimization_summary()
                 return False
 
+            # Check wall-clock timeout at iteration boundary
+            if self._check_wall_clock_timeout():
+                logger.warning(f"Wall-clock timeout reached at iteration {self.iteration} ({self._get_elapsed_time():.0f}s elapsed, limit={self.wall_clock_timeout:.0f}s)")
+                self.end_time = time.time()
+                # Save best checkpoint before exiting
+                await self._save_best_checkpoint_on_timeout(output_dcp)
+                self._print_optimization_summary()
+                return False
+
             # [Bug 4] Snapshot WNS state before get_completion(), for rollback on verification failure
             self._wns_snapshot = {
                 "best_wns": self.best_wns,
@@ -5101,10 +5158,10 @@ CRITICAL OPTIMIZATION RULES:
                 else:
                     response_text, is_done = result
                 print(f"\n{response_text}\n")
-
                 # [FIX] Inject corrective feedback when LLM prematurely declared DONE
                 # This ensures the next iteration's model knows optimization is NOT complete
                 if getattr(self, '_is_done_reason', None) == "flow_control_done_next_iteration":
+
                     current_wns = self._get_current_wns()
                     wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
                     tns_str = f"{self.latest_tns:.3f}ns" if self.latest_tns is not None else "unknown"
@@ -5119,6 +5176,14 @@ CRITICAL OPTIMIZATION RULES:
                     )
                     self._compat.add_message("user", corrective_msg)
                     logger.info("Injected corrective feedback for premature DONE signal")
+
+                # Handle wall-clock timeout: save best checkpoint and exit immediately
+                if getattr(self, '_is_done_reason', None) == "wall_clock_timeout":
+                    logger.warning(f"Wall-clock timeout detected after get_completion(), saving best checkpoint...")
+                    self.end_time = time.time()
+                    await self._save_best_checkpoint_on_timeout(output_dcp)
+                    self._print_optimization_summary()
+                    return False
 
                 # [NEW] Routing failure fault tolerance handling
                 # Avoid adding route_design to failed_strategies due to routing timeout
@@ -5751,6 +5816,41 @@ CRITICAL OPTIMIZATION RULES:
         except Exception as e:
             logger.warning(f"Failed to save intermediate checkpoint: {e}")
             return None
+
+    async def _save_best_checkpoint_on_timeout(self, output_dcp: Path) -> bool:
+        """Save the best checkpoint to the output DCP path on wall-clock timeout.
+        
+        This ensures the evaluation harness finds a valid output DCP even when
+        the optimizer runs out of time. Uses Vivado write_checkpoint with force=True
+        to overwrite any existing file.
+        """
+        try:
+            # First try to rollback to best checkpoint if we have one
+            best_iter = getattr(self, '_best_wns_iteration', None)
+            if self.best_wns > float('-inf') and best_iter is not None:
+                ckpt_path = self._get_intermediate_checkpoint_path(best_iter)
+                if ckpt_path.exists():
+                    logger.info(f"Rolling back to best checkpoint (iter {best_iter}, WNS={self.best_wns:.3f}) before saving...")
+                    try:
+                        await self.call_tool("vivado_open_checkpoint", {
+                            "dcp_path": str(ckpt_path.resolve())
+                        })
+                        await self._verify_wns_after_rollback()
+                    except Exception as rollback_err:
+                        logger.warning(f"Rollback to best checkpoint failed: {rollback_err}. Saving current state.")
+
+            # Save to the output DCP path
+            result = await self.call_tool("vivado_write_checkpoint", {
+                "dcp_path": str(output_dcp.resolve()),
+                "force": True
+            })
+            logger.info(f"Saved best checkpoint to output: {output_dcp}")
+            print(f"\n✓ Saved best checkpoint (WNS={self.best_wns:.3f}) to: {output_dcp}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save best checkpoint on timeout: {e}")
+            print(f"\n✗ Failed to save checkpoint on timeout: {e}")
+            return False
 
     async def _run_full_validation(self, dcp: Path, label: str = "final", num_vectors: int = 10000) -> bool:
         """Run full Phase 1 + Phase 2 validation. Used for final DCP only."""
@@ -7584,6 +7684,12 @@ Examples:
         action="store_true",
         help="Run only skill invocation tests (no place/route). Implies --test."
     )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=3600.0,
+        help="Wall-clock timeout in seconds (default: 3600 = 1 hour). The optimizer will save the best checkpoint and exit when this limit is reached."
+    )
 
     args = parser.parse_args()
     
@@ -7680,7 +7786,8 @@ Examples:
         model_planner=args.model,        # Strategy planning model
         model_worker=args.model_worker,  # Routine execution model
         debug=args.debug,
-        run_dir=run_dir
+        run_dir=run_dir,
+        wall_clock_timeout=args.timeout  # Wall-clock timeout
     )
     
     try:

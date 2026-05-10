@@ -62,6 +62,7 @@ COMPLEX_TOOLS = {
     "analyze_critical_path_spread",
     "analyze_fabric_for_pblock",
     "optimize_lut_input_cone",
+    "analyze_congestion",
 }
 
 
@@ -638,6 +639,38 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["nets"]
             }
+        ),
+        Tool(
+            name="analyze_congestion",
+            description="""Analyze FPGA fabric tile utilization to detect routing congestion hotspots.
+
+            READ-ONLY analysis. Examines cell placement density per column to identify
+            regions with high resource utilization that may cause routing congestion.
+
+            Returns:
+            - severity: LOW/MODERATE/HIGH congestion level
+            - congested_columns: top N columns with highest cell density
+            - congestion_clusters: groups of adjacent congested columns
+            - recommendation: strategy suggestion based on congestion level
+
+            Trigger: Use when timing analysis shows routing-related delays or when
+            utilization report indicates high resource density.
+            Priority: Diagnostic tool — call before choosing PBLOCK vs other strategies.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "utilization_threshold": {
+                        "type": "number",
+                        "description": "Threshold (0-1) for flagging high-utilization columns. Default: 0.8 (80% of max).",
+                        "default": 0.8
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Number of top congested columns to return. Default: 10.",
+                        "default": 10
+                    }
+                }
+            }
         )
     ]
 
@@ -803,6 +836,14 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 nets=arguments["nets"],
                 temp_dir=arguments.get("temp_dir", "temp"),
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
+            )
+
+        elif name == "analyze_congestion":
+            from skills.congestion_analysis import analyze_congestion
+            result = analyze_congestion(
+                design=rw._current_design,
+                utilization_threshold=arguments.get("utilization_threshold", 0.8),
+                top_n=arguments.get("top_n", 10),
             )
 
         else:

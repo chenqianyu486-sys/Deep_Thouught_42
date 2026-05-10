@@ -1,0 +1,50 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "analysis.analyze_congestion@1.0.0",
+  "displayName": "Routing Congestion Analysis",
+  "description": "Analyze FPGA fabric tile utilization to detect routing congestion hotspots (READ-ONLY)",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 30000,
+    "maxMs": 60000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "utilization_threshold": {
+        "type": "number",
+        "description": "Threshold (0-1) for flagging high-utilization columns. Default: 0.8 (80% of max).",
+        "default": 0.8
+      },
+      "top_n": {
+        "type": "integer",
+        "description": "Number of top congested columns to return. Default: 10.",
+        "default": 10
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

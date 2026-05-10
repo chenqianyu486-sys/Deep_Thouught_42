@@ -179,6 +179,7 @@ tool_reference:
     - analyze_net_detour
     - optimize_cell_placement
     - smart_region_search
+    - analyze_congestion
 
 measurement:
   baseline:

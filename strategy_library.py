@@ -18,7 +18,7 @@ SCENARIO_DETECTION_MATRIX = [
     {"id": "control_imbalance", "scenario": "Control Logic Imbalance",
      "detection": "report_timing_summary: max_delay variation > 2x"},
     {"id": "congestion", "scenario": "Routing Congestion",
-     "detection": "get_tile_info: utilization > 80%"},
+     "detection": "analyze_congestion: severity=HIGH or congested_ratio > 0.3"},
 ]
 
 SCENARIO_WORKFLOW = [

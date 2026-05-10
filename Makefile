@@ -41,11 +41,24 @@ RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
 export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
-# Auto-discover Vivado if not on PATH (AWS AMI: /tools/Xilinx/Vivado/2025.1/)
+# Auto-discover Vivado if not on PATH (AWS AMI, local installs)
+# This is critical for the contest evaluation environment where Vivado is
+# pre-installed but not on PATH by default.
 ifeq ($(shell command -v $(VIVADO_EXEC) 2>/dev/null),)
-  VIVADO_CANDIDATE := $(shell ls -d /tools/Xilinx/Vivado/2025.*/bin/vivado 2>/dev/null | head -n 1)
-  ifneq ($(VIVADO_CANDIDATE),)
-    VIVADO_EXEC := $(VIVADO_CANDIDATE)
+  _VIVADO_DISCOVERY := $(shell \
+    for d in \
+      /tools/Xilinx/Vivado/2025.1/bin/vivado \
+      /opt/Xilinx/Vivado/2025.1/bin/vivado \
+      /home/ubuntu/2025.1/Vivado/bin/vivado \
+      /home/*/2025.1/Vivado/bin/vivado \
+      /tools/Xilinx/Vivado/*/bin/vivado \
+      /opt/Xilinx/Vivado/*/bin/vivado \
+    ; do \
+      if [ -x "$$d" ]; then echo "$$d"; break; fi; \
+    done \
+  )
+  ifneq ($(_VIVADO_DISCOVERY),)
+    VIVADO_EXEC := $(_VIVADO_DISCOVERY)
     export VIVADO_EXEC
   endif
 endif
@@ -149,8 +162,9 @@ setup:
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
 	else \
-		printf "$(COLOR_RED)✗ Vivado not found on PATH$(COLOR_RESET)\n"; \
+		printf "$(COLOR_RED)✗ Vivado not found$(COLOR_RESET)\n"; \
 		echo ""; \
+		echo "Auto-discovery checked: /tools/Xilinx, /opt/Xilinx, /home/*/2025.1"; \
 		echo "Please either:"; \
 		echo "  1. Source Vivado settings: source /path/to/Vivado/*/settings64.sh"; \
 		echo "  2. Specify Vivado path: make setup VIVADO_EXEC=/path/to/vivado"; \
@@ -249,6 +263,8 @@ build-rapidwright:
 		printf "$(COLOR_YELLOW)Initializing RapidWright git submodule...$(COLOR_RESET)\n"; \
 		git submodule update --init RapidWright; \
 	fi
+	@# Ensure gradlew has execute permission (WSL git may strip it)
+	@chmod +x "$(RAPIDWRIGHT_PATH)/gradlew" 2>/dev/null || true
 	@cd "$(RAPIDWRIGHT_PATH)" && JAVA_HOME=$$JAVA_HOME ./gradlew compileJava -p "$(RAPIDWRIGHT_PATH)"
 	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
@@ -448,7 +464,25 @@ validate-submission:
 	$(PYTHON) validate_dcps.py "$(DCP)" "$$OPTIMIZED"
 
 run-submission:
-	@echo "Running submission...[Will be implemented later]"
+	@echo "Running FPL26 submission..."
+	@# Set up Java from Vivado if Java is not available
+	@if ! command -v java >/dev/null 2>&1; then \
+		printf "$(COLOR_YELLOW)Java not found on PATH, attempting to use Java from Vivado...$(COLOR_RESET)\n"; \
+		VIVADO_PATH=$$(command -v $(VIVADO_EXEC) 2>/dev/null); \
+		if [ -n "$$VIVADO_PATH" ]; then \
+			VIVADO_BIN_DIR=$$(dirname $$VIVADO_PATH); \
+			VIVADO_ROOT=$$(dirname $$VIVADO_BIN_DIR); \
+			VIVADO_JAVA="$$VIVADO_ROOT/tps/lnx64/jre11*/bin/java"; \
+			if ls $$VIVADO_JAVA >/dev/null 2>&1; then \
+				JAVA_FOUND=$$(ls $$VIVADO_JAVA | head -n 1); \
+				export JAVA_HOME=$$(dirname $$(dirname $$JAVA_FOUND)); \
+				export PATH="$$JAVA_HOME/bin:$$PATH"; \
+				printf "$(COLOR_GREEN)Using Java from Vivado: %s$(COLOR_RESET)\n" "$$JAVA_HOME"; \
+			fi; \
+		fi; \
+	fi; \
+	echo ""; \
+	$(PYTHON) dcp_optimizer.py "$(DCP)" --timeout 3500
 	
 # Clean target: Remove run directories and Vivado-generated .Xil directories
 clean:
