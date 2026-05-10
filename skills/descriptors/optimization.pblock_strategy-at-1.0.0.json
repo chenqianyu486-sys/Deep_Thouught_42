@@ -3,7 +3,7 @@
   "specVersion": "3.0",
   "id": "optimization.pblock_strategy@1.0.0",
   "displayName": "PBLOCK Region Analysis",
-  "description": "Analyze FPGA fabric to find optimal PBLOCK region for re-placement. READ-ONLY analysis. Returns region coordinates, pblock_ranges string, estimated resources, capacity validation (capacity_ok), deficit, advice, and next_steps (ONLY when capacity is sufficient). Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles.",
+  "description": "Analyze FPGA fabric to find optimal PBLOCK region for re-placement. READ-ONLY analysis. Returns region coordinates, pblock_ranges string, estimated resources, capacity validation (capacity_ok), deficit, advice, and next_steps (ONLY when capacity is sufficient). Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles. NOTE: If resource_multiplier is too high (default 1.5x), the returned region may be larger than necessary. Reduce to 1.0x-1.2x for congested designs.",
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {

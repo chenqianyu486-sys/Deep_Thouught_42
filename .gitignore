@@ -3,3 +3,8 @@ __pycache__
 *.dcp
 *.log
 *.jou
+.Xil/
+venv/
+dcp_optimizer_run-*/
+.hermes/
+fpl26_contest_benchmarks_v1.0.0/
