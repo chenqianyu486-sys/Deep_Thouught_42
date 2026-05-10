@@ -122,18 +122,29 @@ help:
 setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
-	
-	@printf "$(COLOR_YELLOW)[1/6] Installing Python dependencies...$(COLOR_RESET)\n"
-	@if [ -f "/usr/lib/python3/dist-packages/EXTERNALLY-MANAGED" ]; then \
-		printf "$(COLOR_YELLOW)PEP 668 detected (Ubuntu 22.02+), using --break-system-packages$(COLOR_RESET)\n"; \
+
+	@printf "$(COLOR_YELLOW)[1/7] Checking for wget/curl (required for downloads)...$(COLOR_RESET)\n"
+	@if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then \
+		printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
+		echo "Please install wget or curl:"; \
+		echo "  sudo apt-get install -y wget curl"; \
+		exit 1; \
+	fi
+	@printf "$(COLOR_GREEN)✓ wget/curl available$(COLOR_RESET)\n"
+	@echo ""
+
+	@printf "$(COLOR_YELLOW)[2/7] Installing Python dependencies...$(COLOR_RESET)\n"
+	@EXTERNALLY_MANAGED=$$($(PYTHON) -c "import sysconfig; print(sysconfig.get_path('stdlib') + '/EXTERNALLY-MANAGED')") && \
+	if [ -f "$$EXTERNALLY_MANAGED" ]; then \
+		printf "$(COLOR_YELLOW)PEP 668 detected (Ubuntu 22.04+), using --break-system-packages$(COLOR_RESET)\n"; \
 		$(PYTHON) -m pip install --break-system-packages -r requirements.txt; \
 	else \
 		$(PIP) install -r requirements.txt; \
 	fi
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
 	@echo ""
-	
-	@printf "$(COLOR_YELLOW)[2/6] Checking Vivado...$(COLOR_RESET)\n"
+
+	@printf "$(COLOR_YELLOW)[3/7] Checking Vivado...$(COLOR_RESET)\n"
 	@if command -v $(VIVADO_EXEC) >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
@@ -147,7 +158,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[3/6] Checking Java...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[4/7] Checking Java...$(COLOR_RESET)\n"
 	@if command -v java >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Java found: %s$(COLOR_RESET)\n" "$$(command -v java)"; \
 		java -version 2>&1 | head -n 1; \
@@ -180,11 +191,11 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[4/6] Building RapidWright from source...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[5/7] Building RapidWright from source...$(COLOR_RESET)\n"
 	@$(MAKE) build-rapidwright
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[5/6] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[6/7] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_1)" ]; then \
@@ -193,19 +204,14 @@ setup:
 		if command -v wget >/dev/null 2>&1; then \
 			wget -q --show-progress $(DCP_URL_BASE)/$(EXAMPLE_DCP_1); \
 			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_1)$(COLOR_RESET)\n"; \
-		elif command -v curl >/dev/null 2>&1; then \
+		else \
 			curl -# -O $(DCP_URL_BASE)/$(EXAMPLE_DCP_1); \
 			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_1)$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
-			echo "Please install wget or curl, or manually download:"; \
-			echo "  $(DCP_URL_BASE)/$(EXAMPLE_DCP_1)"; \
-			exit 1; \
 		fi; \
 	fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[6/6] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[7/7] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_2)" ]; then \
@@ -214,14 +220,9 @@ setup:
 		if command -v wget >/dev/null 2>&1; then \
 			wget -q --show-progress $(DCP_URL_BASE)/$(EXAMPLE_DCP_2); \
 			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_2)$(COLOR_RESET)\n"; \
-		elif command -v curl >/dev/null 2>&1; then \
+		else \
 			curl -# -O $(DCP_URL_BASE)/$(EXAMPLE_DCP_2); \
 			printf "$(COLOR_GREEN)✓ Downloaded $(EXAMPLE_DCP_2)$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
-			echo "Please install wget or curl, or manually download:"; \
-			echo "  $(DCP_URL_BASE)/$(EXAMPLE_DCP_2)"; \
-			exit 1; \
 		fi; \
 	fi
 	@echo ""
@@ -248,7 +249,7 @@ build-rapidwright:
 		printf "$(COLOR_YELLOW)Initializing RapidWright git submodule...$(COLOR_RESET)\n"; \
 		git submodule update --init RapidWright; \
 	fi
-	@cd "$(RAPIDWRIGHT_PATH)" && ./gradlew compileJava -p "$(RAPIDWRIGHT_PATH)"
+	@cd "$(RAPIDWRIGHT_PATH)" && JAVA_HOME=$$JAVA_HOME ./gradlew compileJava -p "$(RAPIDWRIGHT_PATH)"
 	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"
