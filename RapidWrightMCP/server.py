@@ -62,6 +62,7 @@ COMPLEX_TOOLS = {
     "analyze_critical_path_spread",
     "analyze_fabric_for_pblock",
     "optimize_lut_input_cone",
+    "route_design_rwroute",
 }
 
 
@@ -638,6 +639,32 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["nets"]
             }
+        ),
+        Tool(
+            name="route_design_rwroute",
+            description="""使用 RapidWright 内置路由器 RWRoute 进行 FPGA 布线。
+
+绕过 Vivado Implementation 许可证限制。RWRoute 支持 UltraScale/UltraScale+ 系列、
+全时序驱动布线，可与 Vivado 的 route_design 互换使用。
+
+布线完成后必须调用 write_checkpoint 保存结果，再用 Vivado 的 open_checkpoint + report_timing_summary 验证时序。
+
+布线策略: "TimingDriven"(默认,时序驱动) / "NonTimingDriven"(非时序驱动,速度更快但时序可能较差)""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directive": {
+                        "type": "string",
+                        "description": "布线策略: TimingDriven(时序驱动,默认) / NonTimingDriven(非时序驱动)",
+                        "default": "TimingDriven"
+                    },
+                    "timeout_minutes": {
+                        "type": "integer",
+                        "description": "预留超时参数(分钟,默认360), 实际由 JVM 控制",
+                        "default": 360
+                    }
+                }
+            }
         )
     ]
 
@@ -803,6 +830,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 nets=arguments["nets"],
                 temp_dir=arguments.get("temp_dir", "temp"),
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
+            )
+
+        elif name == "route_design_rwroute":
+            result = rw.route_design_rwroute(
+                directive=arguments.get("directive", "TimingDriven"),
+                timeout_minutes=arguments.get("timeout_minutes", 360),
             )
 
         else:

@@ -2123,3 +2123,54 @@ def execute_fanout_strategy(
         logger.error(f"Error executing fanout strategy: {e}")
         return {"error": str(e)}
 
+
+def route_design_rwroute(
+    directive: str = "TimingDriven",
+    timeout_minutes: int = 360,
+) -> dict:
+    """使用 RapidWright 原生路由器 RWRoute 进行布线。
+    
+    绕过 Vivado Implementation 许可证限制。RWRoute 是 RapidWright 内置的
+    全功能时序驱动 FPGA 路由器，支持 UltraScale/UltraScale+ 系列。
+    
+    Args:
+        directive: 布线策略 - "TimingDriven"(时序驱动,默认) 或 "NonTimingDriven"(非时序驱动)
+        timeout_minutes: 预留超时参数(分钟)，实际由 JVM 控制
+    
+    Returns:
+        dict with status, message, elapsed_seconds
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    import time
+
+    try:
+        from com.xilinx.rapidwright.rwroute import RWRoute
+
+        start = time.time()
+        logger.info(f"Starting RWRoute routing (directive={directive})...")
+
+        if directive == "NonTimingDriven":
+            _current_design = RWRoute.routeDesignFullNonTimingDriven(_current_design)
+        else:
+            _current_design = RWRoute.routeDesignFullTimingDriven(_current_design)
+
+        elapsed = time.time() - start
+        logger.info(f"RWRoute routing completed in {elapsed:.1f}s")
+
+        return {
+            "status": "success",
+            "message": f"Design routed successfully using RapidWright RWRoute ({directive})",
+            "elapsed_seconds": round(elapsed, 1),
+        }
+
+    except Exception as e:
+        logger.error(f"RapidWright routing failed: {e}")
+        return {"error": f"RapidWright routing failed: {str(e)}"}
+

@@ -41,6 +41,10 @@ RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
 export RAPIDWRIGHT_PATH
 export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
 
+# Vivado license file (set to empty to skip)
+XILINXD_LICENSE_FILE ?= $(HOME)/.Xilinx/Xilinx.lic
+export XILINXD_LICENSE_FILE
+
 # Auto-discover Vivado if not on PATH (AWS AMI: /tools/Xilinx/Vivado/2025.1/)
 ifeq ($(shell command -v $(VIVADO_EXEC) 2>/dev/null),)
   VIVADO_CANDIDATE := $(shell ls -d /tools/Xilinx/Vivado/2025.*/bin/vivado 2>/dev/null | head -n 1)
@@ -94,6 +98,7 @@ help:
 	@echo "  make run_test DCP=logicnets_jscl.dcp"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp SKIP_SKILLS=1"
+	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp USE_RW_ROUTE=1"
 	@echo "  make run_skill_test DCP=logicnets_jscl.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp VECTORS=50000"
@@ -142,6 +147,13 @@ setup:
 		$(PIP) install -r requirements.txt; \
 	fi
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)  Patching rapidwright for JPype classpath fix...$(COLOR_RESET)\n"
+	@$(PYTHON) scripts/patch_rapidwright.py 2>/dev/null; \
+		if [ $$? -eq 0 ]; then \
+			printf "$(COLOR_GREEN)  ✓ rapidwright patched$(COLOR_RESET)\n"; \
+		else \
+			printf "$(COLOR_YELLOW)  ⚠ rapidwright patch skipped (non-critical)$(COLOR_RESET)\n"; \
+		fi
 	@echo ""
 
 	@printf "$(COLOR_YELLOW)[3/7] Checking Vivado...$(COLOR_RESET)\n"
@@ -295,11 +307,14 @@ run_optimizer:
 run_test:
 	@if [ -z "$(DCP)" ]; then \
 		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
-		echo "Usage: make run_test DCP=input.dcp [MAX_NETS=5]"; \
+		echo "Usage: make run_test DCP=input.dcp [MAX_NETS=5] [USE_RW_ROUTE=1]"; \
 		echo ""; \
 		echo "Supported example DCPs:"; \
 		echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp   # High fanout optimization"; \
 		echo "  make run_test DCP=logicnets_jscl.dcp                    # Pblock optimization"; \
+		echo ""; \
+		echo "Options:"; \
+		echo "  USE_RW_ROUTE=1  - 使用 RapidWright RWRoute 布线, 绕过 Vivado 许可证"; \
 		exit 1; \
 	fi
 	@if [ ! -f "$(DCP)" ]; then \
@@ -324,7 +339,7 @@ run_test:
 		fi; \
 	fi; \
 	echo ""; \
-	$(PYTHON) dcp_optimizer.py "$(DCP)" --test $(if $(MAX_NETS),--max-nets $(MAX_NETS)) $(if $(SKIP_SKILLS),--skip-skills)
+	$(PYTHON) dcp_optimizer.py "$(DCP)" --test $(if $(MAX_NETS),--max-nets $(MAX_NETS)) $(if $(SKIP_SKILLS),--skip-skills) $(if $(USE_RW_ROUTE),--use-rw-route)
 
 # Run skill-only test: invoke all skills without place/route (quick validation)
 run_skill_test:
