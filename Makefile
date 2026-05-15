@@ -98,7 +98,6 @@ help:
 	@echo "  make run_test DCP=logicnets_jscl.dcp"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp SKIP_SKILLS=1"
-	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp USE_RW_ROUTE=1"
 	@echo "  make run_skill_test DCP=logicnets_jscl.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp VECTORS=50000"
@@ -307,14 +306,11 @@ run_optimizer:
 run_test:
 	@if [ -z "$(DCP)" ]; then \
 		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
-		echo "Usage: make run_test DCP=input.dcp [MAX_NETS=5] [USE_RW_ROUTE=1]"; \
+		echo "Usage: make run_test DCP=input.dcp [MAX_NETS=5]"; \
 		echo ""; \
 		echo "Supported example DCPs:"; \
 		echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp   # High fanout optimization"; \
 		echo "  make run_test DCP=logicnets_jscl.dcp                    # Pblock optimization"; \
-		echo ""; \
-		echo "Options:"; \
-		echo "  USE_RW_ROUTE=1  - 使用 RapidWright RWRoute 布线, 绕过 Vivado 许可证"; \
 		exit 1; \
 	fi
 	@if [ ! -f "$(DCP)" ]; then \
@@ -339,7 +335,7 @@ run_test:
 		fi; \
 	fi; \
 	echo ""; \
-	$(PYTHON) dcp_optimizer.py "$(DCP)" --test $(if $(MAX_NETS),--max-nets $(MAX_NETS)) $(if $(SKIP_SKILLS),--skip-skills) $(if $(USE_RW_ROUTE),--use-rw-route)
+	$(PYTHON) dcp_optimizer.py "$(DCP)" --test $(if $(MAX_NETS),--max-nets $(MAX_NETS)) $(if $(SKIP_SKILLS),--skip-skills)
 
 # Run skill-only test: invoke all skills without place/route (quick validation)
 run_skill_test:

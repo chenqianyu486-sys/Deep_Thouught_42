@@ -5838,11 +5838,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
     making it easier to identify where MCP servers or Vivado might hang.
     """
     
-    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None, skip_skills: bool = False, use_rw_route: bool = False):
+    def __init__(self, debug: bool = False, run_dir: Optional[Path] = None, skip_skills: bool = False):
         super().__init__(debug=debug, run_dir=run_dir)
         self.final_wns = None
         self.skip_skills = skip_skills
-        self.use_rw_route = use_rw_route  # 使用 RapidWright RWRoute 替代 Vivado route_design
         self.skill_test_results: list[dict] = []
         # Console exit monitoring (mirrors DCPOptimizer setup)
         self._user_exit_requested = threading.Event()
@@ -6530,71 +6529,35 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 else:
                     print(f"phys_opt_design did not significantly improve timing, continuing with routing")
 
-            # 布线: 根据 --use-rw-route 选择 RapidWright RWRoute 或 Vivado route_design
-            if self.use_rw_route:
-                # 使用 RapidWright 原生路由器 RWRoute, 绕过 Vivado Implementation 许可证
-                print(f"\n[TEST] Using RapidWright RWRoute for routing (bypasses Vivado license)...")
-                logger.info("Routing via RapidWright RWRoute (use_rw_route=True)")
-                
-                rw_route_result = await self.call_rapidwright_tool("route_design_rwroute", {
-                    "directive": "TimingDriven",
-                }, timeout=21600.0)
-                print(f"RWRoute result: {rw_route_result}")
-                logger.info(f"RWRoute result: {rw_route_result}")
-                
-                # 布线完成, 保存 DCP
-                rw_dcp_path = str(self.run_dir / "rwroute_routed.dcp")
-                await self.call_rapidwright_tool("write_checkpoint", {
-                    "dcp_path": rw_dcp_path,
-                    "overwrite": True
-                }, timeout=300.0)
-                print(f"RWRoute DCP written: {rw_dcp_path}")
-                logger.info(f"RWRoute DCP written: {rw_dcp_path}")
-                
-                # 在 Vivado 中重新打开以获取时序报告
-                await self.call_vivado_tool("open_checkpoint", {
-                    "dcp_path": rw_dcp_path,
-                }, timeout=300.0)
-                print(f"Re-opened routed DCP in Vivado")
-                
-                # 检查布线状态
-                result = await self.call_vivado_tool("report_route_status", {
-                    "show_unrouted": True,
-                    "show_errors": True,
-                    "max_nets": 20
-                }, timeout=300.0)
-                print(f"Route status after RWRoute:\n{result[:1500]}...")
-                logger.info(f"Route status after RWRoute: {result}")
-            else:
-                # 原有 Vivado 布线流程
-                ROUTE_TIMEOUT = 21600.0  # 6 hours = 6 * 60 * 60 = 21600 seconds
-                print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
+            # Route the design with extended timeout (6 hours)
+            ROUTE_TIMEOUT = 21600.0  # 6 hours = 6 * 60 * 60 = 21600 seconds
+            print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
 
-                done_event = __import__('threading').Event()
-                heartbeat = HeartbeatLogger(
-                    interval_seconds=60.0,
-                    message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
-                    done_event=done_event
-                )
-                heartbeat.start()
+            done_event = __import__('threading').Event()
+            heartbeat = HeartbeatLogger(
+                interval_seconds=60.0,
+                message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
+                done_event=done_event
+            )
+            heartbeat.start()
 
-                try:
-                    result = await self.call_vivado_tool("route_design", {
-                        "directive": "Default",
-                    }, timeout=ROUTE_TIMEOUT)
-                    print(f"Route design result:\n{result}")
-                    logger.info(f"Route design: {result}")
-                finally:
-                    done_event.set()
-                    heartbeat.stop()
+            try:
+                result = await self.call_vivado_tool("route_design", {
+                    "directive": "Default",
+                }, timeout=ROUTE_TIMEOUT)
+                print(f"Route design result:\n{result}")
+                logger.info(f"Route design: {result}")
+            finally:
+                done_event.set()
+                heartbeat.stop()
 
-                result = await self.call_vivado_tool("report_route_status", {
-                    "show_unrouted": True,
-                    "show_errors": True,
-                    "max_nets": 20
-                }, timeout=300.0)
-                print(f"Route status after routing:\n{result[:1500]}...")
-                logger.info(f"Route status after routing: {result}")
+            result = await self.call_vivado_tool("report_route_status", {
+                "show_unrouted": True,
+                "show_errors": True,
+                "max_nets": 20
+            }, timeout=300.0)
+            print(f"Route status after routing:\n{result[:1500]}...")
+            logger.info(f"Route status after routing: {result}")
 
             if self._check_test_exit("Step 9: Report final timing"):
                 return False
@@ -7137,67 +7100,31 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     else:
                         print(f"\nNo phys_opt_design improved, continuing with routing")
 
-            # 布线: 根据 --use-rw-route 选择 RapidWright RWRoute 或 Vivado route_design
-            if self.use_rw_route:
-                # 使用 RapidWright 原生路由器 RWRoute, 绕过 Vivado Implementation 许可证
-                print(f"\n[TEST] Using RapidWright RWRoute for routing (bypasses Vivado license)...")
-                logger.info("Routing via RapidWright RWRoute (use_rw_route=True)")
-                
-                rw_route_result = await self.call_rapidwright_tool("route_design_rwroute", {
-                    "directive": "TimingDriven",
-                }, timeout=21600.0)
-                print(f"RWRoute result: {rw_route_result}")
-                logger.info(f"RWRoute result: {rw_route_result}")
-                
-                # 布线完成, 保存 DCP
-                rw_dcp_path = str(self.run_dir / "rwroute_routed.dcp")
-                await self.call_rapidwright_tool("write_checkpoint", {
-                    "dcp_path": rw_dcp_path,
-                    "overwrite": True
-                }, timeout=300.0)
-                print(f"RWRoute DCP written: {rw_dcp_path}")
-                logger.info(f"RWRoute DCP written: {rw_dcp_path}")
-                
-                # 在 Vivado 中重新打开以获取时序报告
-                await self.call_vivado_tool("open_checkpoint", {
-                    "dcp_path": rw_dcp_path,
-                }, timeout=300.0)
-                print(f"Re-opened routed DCP in Vivado")
-                
-                # 检查布线状态
-                result = await self.call_vivado_tool("report_route_status", {
-                    "show_unrouted": True,
-                    "show_errors": True,
-                    "max_nets": 20
-                }, timeout=300.0)
-                print(f"Route status after RWRoute:\n{result[:1500]}...")
-                logger.info(f"Route status after RWRoute: {result}")
-            else:
-                # 原有 Vivado 布线流程
-                ROUTE_TIMEOUT = 21600.0  # 6 hours
-                print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
+            # Route the design with extended timeout (6 hours)
+            ROUTE_TIMEOUT = 21600.0  # 6 hours
+            print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
 
-                done_event = __import__('threading').Event()
-                heartbeat = HeartbeatLogger(
-                    interval_seconds=60.0,
-                    message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
-                    done_event=done_event
-                )
-                heartbeat.start()
+            done_event = __import__('threading').Event()
+            heartbeat = HeartbeatLogger(
+                interval_seconds=60.0,
+                message=f"route_design in progress (timeout: {ROUTE_TIMEOUT:.0f}s)",
+                done_event=done_event
+            )
+            heartbeat.start()
 
-                try:
-                    result = await self.call_vivado_tool("route_design", {
-                        "directive": "Default"
-                    }, timeout=ROUTE_TIMEOUT)
-                    print(f"Route design result:\n{result}")
-                    logger.info(f"Route design: {result}")
-                finally:
-                    done_event.set()
-                    heartbeat.stop()
+            try:
+                result = await self.call_vivado_tool("route_design", {
+                    "directive": "Default"
+                }, timeout=ROUTE_TIMEOUT)
+                print(f"Route design result:\n{result}")
+                logger.info(f"Route design: {result}")
+            finally:
+                done_event.set()
+                heartbeat.stop()
 
-                result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
-                print(f"Route status after routing:\n{result[:1500]}...")
-                logger.info(f"Route status after routing: {result}")
+            result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
+            print(f"Route status after routing:\n{result[:1500]}...")
+            logger.info(f"Route status after routing: {result}")
 
             if self._check_test_exit("Step 10: Report final timing"):
                 return False
@@ -7560,14 +7487,12 @@ class FPGAOptimizerTest(DCPOptimizerBase):
         print(f"[TEST] Run directory preserved at: {self.run_dir}")
 
 
-async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, max_nets: int = 5, run_dir: Optional[Path] = None, skip_skills: bool = False, use_rw_route: bool = False):
+async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, max_nets: int = 5, run_dir: Optional[Path] = None, skip_skills: bool = False):
     """Run the test mode optimization.
 
     Detects which example DCP is being used and applies the appropriate optimization flow:
     - demo_corundum_25g_misses_timing.dcp: High fanout net optimization flow
     - logicnets_jscl.dcp: Pblock-based placement optimization flow
-    
-    use_rw_route: 若为 True, 使用 RapidWright RWRoute 替代 Vivado route_design(绕过许可证限制)
     """
     # Detect which DCP is being used based on filename
     dcp_name = input_dcp.name.lower()
@@ -7592,7 +7517,7 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
     if skip_skills:
         print("[TEST] --skip-skills set, will test only raw tool flow (no skill invocations)")
 
-    tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir, skip_skills=skip_skills, use_rw_route=use_rw_route)
+    tester = FPGAOptimizerTest(debug=debug, run_dir=run_dir, skip_skills=skip_skills)
     
     try:
         await tester.start_servers()
@@ -7697,11 +7622,6 @@ Examples:
         action="store_true",
         help="Run only skill invocation tests (no place/route). Implies --test."
     )
-    parser.add_argument(
-        "--use-rw-route",
-        action="store_true",
-        help="使用 RapidWright RWRoute 进行布线, 绕过 Vivado Implementation 许可证限制"
-    )
 
     args = parser.parse_args()
     
@@ -7769,8 +7689,7 @@ Examples:
             debug=args.debug,
             max_nets=args.max_nets,
             run_dir=run_dir,
-            skip_skills=args.skip_skills,
-            use_rw_route=args.use_rw_route
+            skip_skills=args.skip_skills
         )
         sys.exit(exit_code)
     
