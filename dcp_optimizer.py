@@ -566,44 +566,71 @@ class DCPOptimizerBase:
     
     async def get_clock_period(self, call_tool_fn) -> Optional[float]:
         """
-        Query the clock period of the critical (worst-slack) clock from Vivado in nanoseconds.
+        查询 clk_fpl26contest 时钟域周期 (比赛评分标准时钟).
         
-        Uses a Tcl script that finds the endpoint clock of the worst setup timing path
-        and returns its period. This should improve handling of multi-clock designs.
+        比赛要求: 所有 benchmark 都有名为 clk_fpl26contest 的时钟约束,
+        Fmax 必须基于此时钟计算: fmax = 1000 / (period - WNS).
+        
+        先尝试查询 clk_fpl26contest, 若不存在则回退到最差时序路径的时钟.
         
         Args:
-            call_tool_fn: Function to call Vivado tools, should accept (tool_name, arguments)
+            call_tool_fn: Vivado 工具调用函数
         
-        Returns the period of the critical clock, or None if no clocks.
+        Returns:
+            时钟周期 (ns), 或 None
         """
-        # Get the period of the endpoint clock on the worst setup timing path
+        # 比赛标准: 查询 clk_fpl26contest 时钟周期
         tcl_cmd = (
-            "set tp [get_timing_paths -max_paths 1 -setup]; "
-            "if {$tp ne {}} { "
-            "  set clk [get_property ENDPOINT_CLOCK $tp]; "
-            "  if {$clk ne {}} { "
-            "    puts [get_property PERIOD [get_clocks $clk]]; "
-            "  } "
+            "set clk [get_clocks -quiet clk_fpl26contest]; "
+            "if {$clk ne {}} { "
+            "  puts [get_property PERIOD $clk]; "
+            "} else { "
+            "  puts {NO_CONTEST_CLOCK}; "
             "}"
         )
         try:
             result = await call_tool_fn("run_tcl", {"command": tcl_cmd})
+            result_str = result.strip()
             
+            for token in result_str.split():
+                if token.startswith('ERROR') or token.startswith('WARNING'):
+                    continue
+                try:
+                    period = float(token)
+                    if period > 0:
+                        logger.info(f"Contest clock period (clk_fpl26contest): {period:.3f} ns")
+                        return period
+                except ValueError:
+                    continue
+            
+            # 回退: clk_fpl26contest 不存在, 用最差时序路径的时钟
+            logger.info("clk_fpl26contest not found, falling back to worst-path clock")
+            fallback_cmd = (
+                "set tp [get_timing_paths -max_paths 1 -setup]; "
+                "if {$tp ne {}} { "
+                "  set clk [get_property ENDPOINT_CLOCK $tp]; "
+                "  if {$clk ne {}} { "
+                "    puts [get_property PERIOD [get_clocks $clk]]; "
+                "  } "
+                "}"
+            )
+            result = await call_tool_fn("run_tcl", {"command": fallback_cmd})
             for token in result.strip().split():
                 if token.startswith('ERROR') or token.startswith('WARNING'):
                     continue
                 try:
                     period = float(token)
                     if period > 0:
-                        logger.info(f"Critical clock period: {period:.3f} ns")
+                        logger.info(f"Fallback clock period: {period:.3f} ns")
                         return period
                 except ValueError:
                     continue
+            
+            logger.warning("Could not determine clock period from Vivado")
+            return None
         except Exception as e:
-            logger.warning(f"Failed to get critical clock period: {e}")
-        
-        logger.warning("Could not determine critical clock period from Vivado")
-        return None
+            logger.warning(f"Failed to get clock period: {e}")
+            return None
     
     def parse_high_fanout_nets(self, report: str) -> list[tuple[str, int, int]]:
         """
@@ -813,6 +840,7 @@ class DCPOptimizer(DCPOptimizerBase):
         # === Section 8.X: DCP Validation ===
         self.validation_enabled = False          # Disable validation during optimization
         self.checkpoint_saving_enabled = True     # Enable checkpoint saving for iteration rollback
+        self._needs_save = False                  # 比赛要求: WNS 改善时标记需要持久化
         self.validation_interval = 5            # Run Phase 1 every N iterations
         self.validation_report_dir = self.temp_dir / "validation_reports"
 
@@ -3740,6 +3768,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                             self._best_wns_iteration = self.iteration
                             self._best_wns_tns = timing_info.get("tns")
                             self._best_wns_failing_endpoints = timing_info.get("failing_endpoints")
+                            self._needs_save = True  # 比赛要求: WNS 改善时立即持久化
                             self._record_wns_milestone(
                                 wns=current_wns,
                                 iteration=self.iteration,
@@ -3782,6 +3811,7 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                                 self._best_wns_iteration = self.iteration
                                 self._best_wns_tns = self.latest_tns
                                 self._best_wns_failing_endpoints = self.latest_failing_endpoints
+                                self._needs_save = True  # 比赛要求: WNS 改善时立即持久化
                                 self._record_wns_milestone(
                                     wns=current_wns,
                                     iteration=self.iteration,
@@ -5342,6 +5372,18 @@ CRITICAL OPTIMIZATION RULES:
                 self._on_iteration_end(wns_improved, self.last_used_model)
                 self._prev_best_wns = self.best_wns
 
+                # 比赛要求: WNS 改善时, 立即持久化输出 DCP (防止超时丢失最佳结果)
+                if wns_improved and self._needs_save and hasattr(self, 'output_dcp') and self.output_dcp:
+                    try:
+                        await self.call_tool("vivado_write_checkpoint", {
+                            "dcp_path": str(self.output_dcp.resolve()),
+                            "force": True
+                        })
+                        logger.info(f"Saved best result to {self.output_dcp} (WNS: {self.best_wns:.3f} ns)")
+                        self._needs_save = False
+                    except Exception as save_err:
+                        logger.warning(f"Failed to save best result: {save_err}")
+
                 # [NEW] Per-iteration validation using intermediate checkpoint (every N iterations)
                 # Use validation_interval to avoid running validation too frequently
                 if (self.validation_enabled and
@@ -6178,10 +6220,10 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("STEP 0: Initialize RapidWright")
             print("-"*60)
             
-            # Initialize RapidWright (Vivado will auto-start when first used)
+            # 初始化 RapidWright (Vivado 会在首次使用时自动启动)
             result = await self.call_rapidwright_tool("initialize_rapidwright", {
                 "jvm_max_memory": "8G"
-            }, timeout=120.0)
+            }, timeout=300.0)
             print(f"RapidWright init result:\n{result[:500]}...")
             logger.info(f"RapidWright init result: {result}")
 
@@ -6307,7 +6349,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
                                 "pin_paths": pin_paths,
                                 "detour_threshold": 2.0
-                            }, timeout=120.0)
+                            }, timeout=300.0)
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
@@ -6591,7 +6633,6 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             ROUTE_TIMEOUT = 21600.0  # 6 hours = 6 * 60 * 60 = 21600 seconds
             print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
 
-            # Start heartbeat logger for long-running route_design
             done_event = __import__('threading').Event()
             heartbeat = HeartbeatLogger(
                 interval_seconds=60.0,
@@ -6610,7 +6651,6 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 done_event.set()
                 heartbeat.stop()
 
-            # Check route status again
             result = await self.call_vivado_tool("report_route_status", {
                 "show_unrouted": True,
                 "show_errors": True,
@@ -6761,7 +6801,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             
             result = await self.call_rapidwright_tool("initialize_rapidwright", {
                 "jvm_max_memory": "8G"
-            }, timeout=120.0)
+            }, timeout=300.0)
             print(f"RapidWright init result:\n{result[:500]}...")
             logger.info(f"RapidWright init result: {result}")
 
@@ -6886,7 +6926,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                             skill_result = await self.call_rapidwright_tool("analyze_net_detour", {
                                 "pin_paths": pin_paths,
                                 "detour_threshold": 2.0
-                            }, timeout=120.0)
+                            }, timeout=300.0)
                             self._verify_skill_result("analyze_net_detour", skill_result)
                         else:
                             print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
@@ -6957,7 +6997,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                         "nets": test_nets,
                         "temp_dir": str(self.temp_dir),
                         "checkpoint_prefix": "lnets_fanout_test",
-                    }, timeout=120.0)
+                    }, timeout=300.0)
                     self._verify_skill_result("execute_fanout_strategy", skill_result)
                 except Exception as e:
                     print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
@@ -7164,7 +7204,6 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             ROUTE_TIMEOUT = 21600.0  # 6 hours
             print(f"\nRouting design (timeout: {ROUTE_TIMEOUT:.0f} seconds / {ROUTE_TIMEOUT/3600:.1f} hours)...")
 
-            # Start heartbeat logger for long-running route_design
             done_event = __import__('threading').Event()
             heartbeat = HeartbeatLogger(
                 interval_seconds=60.0,
@@ -7183,7 +7222,6 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                 done_event.set()
                 heartbeat.stop()
 
-            # Check route status
             result = await self.call_vivado_tool("report_route_status", {}, timeout=300.0)
             print(f"Route status after routing:\n{result[:1500]}...")
             logger.info(f"Route status after routing: {result}")
@@ -7319,7 +7357,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             print("-"*60)
             result = await self.call_rapidwright_tool("initialize_rapidwright", {
                 "jvm_max_memory": "8G"
-            }, timeout=120.0)
+            }, timeout=300.0)
             print(f"RapidWright init result:\n{result[:500]}...")
 
             if self._check_test_exit("Skill test - Step 2: Open DCP"):
@@ -7393,7 +7431,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
                     try:
                         sr = await self.call_rapidwright_tool("analyze_net_detour", {
                             "pin_paths": pin_paths, "detour_threshold": 2.0
-                        }, timeout=120.0)
+                        }, timeout=300.0)
                         self._verify_skill_result("analyze_net_detour", sr)
                     except Exception as e:
                         print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
