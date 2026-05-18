@@ -3614,6 +3614,33 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
         start_time = time.time()
         wns_measured = None
         error_occurred = False
+        
+        # === SAFETY GUARD: Block retiming directives/flags for phys_opt_design ===
+        if tool_name == "vivado_phys_opt_design":
+            BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
+            BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
+            SAFE_DIRECTIVES = [
+                "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
+                "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
+                "AlternateReplication", "AggressiveFanoutOpt", "RQS",
+            ]
+            
+            d = arguments.get("directive", "")
+            if d in BLOCKED_DIRECTIVES:
+                logger.warning(f"[SAFETY] Blocked retiming directive: {d}")
+                return json.dumps({
+                    "error": f"Directive '{d}' is BLOCKED — causes functional errors (retiming). "
+                             f"Use a safe directive: {', '.join(SAFE_DIRECTIVES)}"
+                })
+            
+            blocked_opts = [opt for opt in BLOCKED_BOOL_OPTIONS if arguments.get(opt)]
+            if blocked_opts:
+                logger.warning(f"[SAFETY] Blocked retiming options: {blocked_opts}")
+                return json.dumps({
+                    "error": f"Options {blocked_opts} are BLOCKED — cause functional errors (retiming). "
+                             f"Remove them and use a safe directive: {', '.join(SAFE_DIRECTIVES)}"
+                })
+        # === END SAFETY GUARD ===
 
         # Diagnostic log: capture analyze_net_detour pin_paths detail
         if tool_name == "rapidwright_analyze_net_detour":
@@ -7146,7 +7173,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
             
             # ================================================================
             # [NEW] Intermediate checkpoint: Pre-routing optimization
-            # Perform phys_opt_design before routing to reduce congestion
+            # Skipped: phys_opt_design removed to preserve functional correctness
             # ================================================================
             pre_route_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
             pre_route_info = parse_timing_summary_static(pre_route_timing)
@@ -7154,51 +7181,7 @@ class FPGAOptimizerTest(DCPOptimizerBase):
 
             if pre_route_wns is not None:
                 print(f"Pre-routing WNS: {pre_route_wns:.3f} ns")
-
-                # If timing is poor, try phys_opt_design for load reduction
-                if pre_route_wns < -0.3:
-                    print(f"Pre-routing timing is poor, trying phys_opt_design optimization...")
-
-                    # Try multiple directives
-                    directives_to_try = [
-                        "aggressive_preroute_optimization",
-                        "directive",  # Default
-                        "add_physical_constraints"
-                    ]
-
-                    best_wns_after_physopt = pre_route_wns
-                    best_physopt_result = None
-                    best_directive = None
-
-                    for directive in directives_to_try:
-                        print(f"\nTrying phys_opt_design -directive {directive}...")
-                        try:
-                            phys_opt_result = await self.call_vivado_tool("phys_opt_design", {
-                                "directive": directive
-                            }, timeout=3600.0)
-
-                            # Check results
-                            check_timing = await self.call_vivado_tool("report_timing_summary", {}, timeout=300.0)
-                            check_info = parse_timing_summary_static(check_timing)
-                            check_wns = check_info.get("wns")
-
-                            if check_wns is not None and check_wns > best_wns_after_physopt:
-                                best_wns_after_physopt = check_wns
-                                best_physopt_result = phys_opt_result
-                                best_directive = directive
-                                print(f"Improved: {pre_route_wns:.3f} -> {check_wns:.3f} ns")
-                            else:
-                                print(f"No improvement, keeping {check_wns:.3f} ns")
-
-                        except Exception as e:
-                            print(f"Failed: {e}")
-                            continue
-                    
-                    if best_physopt_result is not None:
-                        print(f"\nUsing {best_directive} achieved best phys_opt effect")
-                        print(f"   phys_opt post WNS: {best_wns_after_physopt:.3f} ns")
-                    else:
-                        print(f"\nNo phys_opt_design improved, continuing with routing")
+                print("[TEST] Skipping phys_opt_design to preserve functional correctness")
 
             # Route the design with extended timeout (6 hours)
             ROUTE_TIMEOUT = 21600.0  # 6 hours
