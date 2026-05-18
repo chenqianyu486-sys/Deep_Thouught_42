@@ -381,6 +381,51 @@ ordering_constraints:
 - `analyze_net_detour`: 新增 `interpretation` 字段（解释空结果含义）
 - `execute_fanout_strategy`: 新增 `risk` 和 `contraindications` 字段（标注 PBLOCK 后运行风险）
 
+### 2.8 phys_opt_design 安全守卫（2026-05-18 新增）
+
+**背景**：经功能验证发现，`phys_opt_design` 的 retiming 指令（`AlternateFlowWithRetiming`、`AddRetime`）会导致 LUT 链密集的神经网络设计出现功能错误（200 测试向量中 9 个不匹配）。
+
+**修复方案**：在两层添加安全守卫，阻止危险指令：
+
+**1. VivadoMCP 服务端守卫**（`VivadoMCP/vivado_mcp_server.py`）
+```python
+# 在 phys_opt_design 处理逻辑中添加
+BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
+BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
+SAFE_DIRECTIVES = {
+    "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
+    "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
+    "AlternateReplication", "AggressiveFanoutOpt", "RQS",
+}
+```
+
+**2. dcp_optimizer.py call_tool 入口守卫**
+```python
+# 在 call_tool() 方法中添加
+if tool_name == "vivado_phys_opt_design":
+    # 检查 directive 参数
+    # 检查 retime/interconnect_retime 布尔选项
+    # 返回清晰的错误信息
+```
+
+**验证结果**：
+- 修复前：200 测试向量中 9 个不匹配 ❌
+- 修复后：200 测试向量中 0 个不匹配 ✅
+- WNS 改善：-0.978 ns → -0.446 ns（+0.532 ns）
+
+**禁止的指令/选项**：
+- `AlternateFlowWithRetiming` ❌（retiming 改变流水线结构）
+- `AddRetime` ❌（retiming 改变流水线结构）
+- `retime=true` ❌（布尔选项）
+- `interconnect_retime=true` ❌（布尔选项）
+
+**允许的指令**：
+- `Default` ✅
+- `Explore` ✅
+- `AggressiveExplore` ✅
+- `RuntimeOptimized` ✅
+- 其他安全指令 ✅
+
 ## 3. 事件系统
 
 ```python
