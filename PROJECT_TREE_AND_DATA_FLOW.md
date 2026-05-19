@@ -34,7 +34,8 @@ fpl26_optimization_contest/
 │   │   ├── handoff.py            # build_handoff_prompt/build_data_driven_goal/build_stagnation_signal
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
-│   │   └── compress.py           # compress_context（CompressionContext构建+阈值检查+同步调用_compress）
+│   │   ├── compress.py           # compress_context（CompressionContext构建+阈值检查+同步调用_compress）
+│   │   └── critical_path.py      # parse_critical_path_cells/update_critical_paths/format_critical_paths（动态critical path管理）
 │   ├── test_graph.py             # 21项单元测试（状态/边/图/追踪/集成）
 │   └── test_mode.py              # V2测试模式：无LLM验证MCP工具调用和Skill调用（V2TestMode类）
 ├── config_loader.py              # 模型配置加载器（单例）
@@ -133,7 +134,7 @@ fpl26_optimization_contest/
 ### 状态模型
 ```
 OptimizerState (可变dataclass)
-├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones
+├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones/critical_paths(动态列表)/critical_paths_stale
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives
 ├── ModelState     — 模型选择/fallback/交接提示词
 ├── CostState      — token用量/成本追踪
@@ -155,9 +156,14 @@ init_analysis → [条件: timing met?]
 ### 子图: llm_tool_loop
 ```
 llm_call → evaluate_flow → [条件: flow_control?]
-  ├─ CONTINUE → execute_tools → update_wns → llm_call (循环)
+  ├─ CONTINUE → execute_tools → update_wns → update_critical_paths → llm_call (循环)
   ├─ DONE/SWITCH_STRATEGY → 退出子图
   └─ RETRY/ROLLBACK → 重试/回滚
+
+关键路径追踪:
+  - execute_tools 后: 若 tool=vivado_extract_critical_path_cells → 解析JSON缓存到 state.timing.critical_paths
+  - execute_tools 后: 若 tool=vivado_phys_opt_design/vivado_route_design → 标记 critical_paths_stale=True
+  - 循环末尾: 若 critical_paths_stale → 自动调用 vivado_extract_critical_path_cells(num_paths=10) 刷新
 ```
 
 ### 关键设计
@@ -189,6 +195,7 @@ V2 状态机架构从 V1 的 `DCPOptimizer` 单体类（~8000行）拆分为 `op
 | `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析（无XML/YAML回退） |
 | `_compress_context()` | `pure/compress.py` | CompressionContext构建 + 阈值检查 + 同步调用 |
 | 散布的常量/枚举 | `pure/constants.py` | TaskCategory/ModelTier/阈值常量 |
+| `vivado_extract_critical_path_cells` 结果解析 | `pure/critical_path.py` | Critical path 解析/更新/格式化（V2新增，V1无对应） |
 
 **状态迁移**：
 
@@ -314,6 +321,9 @@ _build_context_snapshot() 从现有实例变量构建 YAML：
     failed_strategies: []
     do_not_repeat:
       - "phys_opt_design (already called 12 times with no improvement)"
+    critical_paths:
+      - "path1: cellA -> cellB -> cellC -> cellD (4 cells, iter 5)"
+      - "path2: cellE -> cellF -> cellG (3 cells, iter 5)"
     iteration_history:
       - "iter1(IMP): -0.500->-0.352ns(+0.1480) 7toks PBLOCK"
       - "iter2(UNC): -0.352->-0.352ns(+0.0000) 5toks PhysOpt"
@@ -329,10 +339,60 @@ _inject_context_snapshot(api_messages):
 
 **设计要点**：
 - **User 角色**：不同于旧的 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
-- **紧凑格式**：仅 7 个字段，~180 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）；`iteration_history` 展示最近 5 次迭代 WNS 轨迹
+- **紧凑格式**：仅 8 个字段，~200 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）；`critical_paths` 展示 top 5 关键路径（每条路径前 6 个 cell 名 + 总 cell 数 + 提取迭代号）；`iteration_history` 展示最近 5 次迭代 WNS 轨迹
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`（注意：无 "WNS" 字样，包含工具计数）
+
+### 2.3.2 动态 Critical Path 管理
+
+**数据结构**（`optimizer/state.py`）：
+```python
+@dataclass
+class CriticalPathEntry:
+    """Single critical path with cell list."""
+    cells: list[str]           # Ordered cell names on this path
+    path_length: int = 0       # Number of cells
+    iteration: int = 0         # When this path was extracted
+```
+
+`TimingState` 新增字段：
+```python
+critical_paths: list[CriticalPathEntry]  # Top 10 paths sorted by length (longest first)
+critical_paths_iteration: int = 0        # Last iteration when paths were extracted
+critical_paths_stale: bool = False       # Set True after phys_opt/route_design
+```
+
+**双重更新触发**：
+
+```
+触发1（被动）: LLM 调用 vivado_extract_critical_path_cells
+  → tool_router 返回 JSON [[cell_name, ...], ...]
+  → llm_tool_loop._update_critical_paths_from_tool() 解析结果
+  → pure/critical_path.update_critical_paths() 存入 state.timing.critical_paths
+
+触发2（主动）: phys_opt_design / route_design 执行后
+  → state.timing.critical_paths_stale = True
+  → 工具循环末尾 auto-refresh:
+    → _auto_refresh_critical_paths() 调用 vivado_extract_critical_path_cells(num_paths=10)
+    → 解析结果存入 state.timing.critical_paths
+    → critical_paths_stale = False
+```
+
+**展示位置**：
+| 位置 | 来源 | 限制 |
+|------|------|------|
+| Context Snapshot (2.3.1) | `build_context_snapshot(critical_paths=...)` | top 5, 6 cells/path |
+| Planner Handoff (5.1) | `_generate_planner_handoff()` | top 5, 6 cells/path |
+| Worker Handoff (5.1) | `_generate_worker_handoff()` | top 3, 6 cells/path |
+
+**纯函数**（`optimizer/pure/critical_path.py`）：
+- `parse_critical_path_cells(result: str) -> list[list[str]]` — 解析 JSON 工具结果
+- `update_critical_paths(state, cell_paths, iteration)` — 更新 state，保留 top 10
+- `format_critical_paths_snapshot(critical_paths, limit)` — YAML 格式化（快照用）
+- `format_critical_paths_handoff(critical_paths, limit)` — 纯文本格式化（handoff 用）
+
+**节流**：仅在 `critical_paths_stale == True` 时触发 auto-refresh，避免冗余 MCP 调用。
 
 ### 2.4 关键信息保护
 
@@ -344,7 +404,8 @@ _inject_context_snapshot(api_messages):
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 | report_step_state tool call 格式 | ① User message（会话起始）+ ② System prompt 头部压印（每API调用前） | 双重提醒：User role 高注意力 + System prompt 前导压印 |
-| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_best_wns/active_strategy(含状态)/failed_strategies/do_not_repeat |
+| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_best_wns/active_strategy(含状态)/failed_strategies/do_not_repeat/critical_paths |
+| 动态 Critical Path | `state.timing.critical_paths` | 被动更新：LLM 调 `vivado_extract_critical_path_cells` 时解析缓存；主动更新：phys_opt/route_design 后标记 stale 并 auto-refresh；top 10 路径按长度排序 |
 | 工具重复检测 | DCPOptimizer._recent_tools（滑动窗口） | 连续>=3次相同工具且WNS总变化<0.05ns时，注入 REPETITION DETECTED 警告 |
 | 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT，要求LLM评估策略有效性并显式 justify CONTINUE vs SWITCH_STRATEGY |
 | Pblock合规性 | Vivado MCP 返回 + Summarizer 解析 | `create_and_apply_pblock` 追加 cells 计数；`_summarize_tool_result()` 解析 `cells_in_pblock`/`cells_in_design`，部分成功时设置 `status=partial`、添加 `compliance` 字段 |
@@ -687,8 +748,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - 交接提示词迭代结束时生成，模型分层专属
 
 **交接提示词**:
-- **Planner** (~600-1000 tokens): `EXIT REASON` → `CONTINUATION DIRECTIVE` → `ITERATION TRAJECTORY` → `CURRENT STATE` → `NEXT OPTIMIZATION GOAL` → `LAST ITERATION TOOLS` → `FAILED STRATEGIES` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS` → `INCOMING MODEL`
-- **Worker** (~300-500 tokens): `CONTINUATION` → `EXIT LABEL` → `RECENT TRAJECTORY (last 3)` → `STATE` → `GOAL` → `LAST ITERATION TOOLS` → `AVOID` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS`
+- **Planner** (~600-1000 tokens): `EXIT REASON` → `CONTINUATION DIRECTIVE` → `ITERATION TRAJECTORY` → `CURRENT STATE` → `CRITICAL PATHS (top 5)` → `NEXT OPTIMIZATION GOAL` → `LAST ITERATION TOOLS` → `FAILED STRATEGIES` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS` → `INCOMING MODEL`
+- **Worker** (~300-500 tokens): `CONTINUATION` → `EXIT LABEL` → `RECENT TRAJECTORY (last 3)` → `STATE` → `CRITICAL PATHS (top 3)` → `GOAL` → `LAST ITERATION TOOLS` → `AVOID` → `RECOMMENDED SKILL` → `STAGNATION SIGNAL` → `SKILL INVOCATIONS`
 - 策略中断检测: `_detect_unfinished_strategy()` 检查最后 2 步是否有 report_timing_summary
 - 首次迭代: 注入 `**FIRST ITERATION** - Begin with initial design analysis...`
 - Handoff 注入: 独立 system message（index=1）

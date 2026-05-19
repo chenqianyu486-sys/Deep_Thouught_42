@@ -8249,6 +8249,31 @@ Examples:
         )
         sys.exit(exit_code)
     
+    # V2 test mode — validate tools/skills without LLM (no API key needed)
+    if args.test_v2 or args.test_v2_only_skills:
+        from optimizer.test_mode import run_v2_test_mode
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+
+        print(f"FPGA Design Optimization - V2 TEST MODE")
+        print(f"=========================================")
+        print(f"Input:       {args.input_dcp.resolve()}")
+        print(f"Output:      {args.output_dcp.resolve()}")
+        print(f"Run dir:     {run_dir}")
+        print(f"Skills only: {args.test_v2_only_skills}")
+        print()
+
+        success = await run_v2_test_mode(
+            input_dcp=args.input_dcp,
+            output_dcp=args.output_dcp,
+            debug=args.debug,
+            max_nets=args.max_nets,
+            skip_skills=args.skip_skills or args.test_v2_only_skills,
+            skills_only=args.test_v2_only_skills,
+        )
+        sys.exit(0 if success else 1)
+
     # Normal mode - requires API key and LLM
     if not args.api_key:
         print("Error: OpenRouter API key required. Set OPENROUTER_API_KEY or use --api-key", file=sys.stderr)
@@ -8273,31 +8298,6 @@ Examples:
             model_worker=args.model_worker,
             wall_clock_timeout=args.timeout,
             debug=args.debug,
-        )
-        sys.exit(0 if success else 1)
-
-    # V2 test mode — validate tools/skills without LLM
-    if args.test_v2 or args.test_v2_only_skills:
-        from optimizer.test_mode import run_v2_test_mode
-
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
-
-        print(f"FPGA Design Optimization - V2 TEST MODE")
-        print(f"=========================================")
-        print(f"Input:       {args.input_dcp.resolve()}")
-        print(f"Output:      {args.output_dcp.resolve()}")
-        print(f"Run dir:     {run_dir}")
-        print(f"Skills only: {args.test_v2_only_skills}")
-        print()
-
-        success = await run_v2_test_mode(
-            input_dcp=args.input_dcp,
-            output_dcp=args.output_dcp,
-            debug=args.debug,
-            max_nets=args.max_nets,
-            skip_skills=args.skip_skills or args.test_v2_only_skills,
-            skills_only=args.test_v2_only_skills,
         )
         sys.exit(0 if success else 1)
 

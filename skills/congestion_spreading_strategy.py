@@ -195,6 +195,25 @@ def analyze_congestion_spreading(
     }
 
 
+def _find_nearest_compatible_site(device, site_type_enum, target_col, target_row):
+    """Find nearest compatible unoccupied site near target coordinates."""
+    for radius in range(0, 50):
+        for dc in range(-radius, radius + 1):
+            for dr in range(-radius, radius + 1):
+                if abs(dc) != radius and abs(dr) != radius:
+                    continue
+                try:
+                    tile = device.getTile(target_row + dr, target_col + dc)
+                    if tile is None:
+                        continue
+                    for site in tile.getSites():
+                        if site.getSiteTypeEnum() == site_type_enum and not site.isOccupied():
+                            return site
+                except Exception:
+                    continue
+    return None
+
+
 def execute_congestion_spreading(
     design,
     max_cells_to_spread: int = 20,
@@ -335,7 +354,7 @@ def execute_congestion_spreading(
             for net in nets:
                 nets_unrouted.append(str(net.getName()))
                 net.unroute()
-            DesignTools.fullyUnplaceCell(cell)
+            DesignTools.fullyUnplaceCell(cell, None)
         except Exception as e:
             results.append({
                 "cell_name": cell_name,
@@ -349,22 +368,17 @@ def execute_congestion_spreading(
         # Spiral search for empty compatible site near target
         new_site = None
         try:
-            new_site = ECOPlacementHelper.spiralOutFrom(
+            ref_site = _find_nearest_compatible_site(
                 device, cell.getSiteTypeEnum(), target_col, target_row
             )
-            if new_site and new_site.isOccupied():
-                max_spiral_steps = 20
-                for _ in range(max_spiral_steps):
-                    new_site = ECOPlacementHelper.spiralOutFrom(
-                        device,
-                        cell.getSiteTypeEnum(),
-                        new_site.getInstanceX(),
-                        new_site.getInstanceY(),
-                    )
-                    if new_site and not new_site.isOccupied():
+            if ref_site:
+                site_iter = ECOPlacementHelper.spiralOutFrom(ref_site).iterator()
+                while site_iter.hasNext():
+                    candidate = site_iter.next()
+                    if (not candidate.isOccupied()
+                            and candidate.getSiteTypeEnum() == cell.getSiteTypeEnum()):
+                        new_site = candidate
                         break
-                else:
-                    new_site = None
         except Exception:
             new_site = None
 
@@ -381,7 +395,7 @@ def execute_congestion_spreading(
         # Place cell and route intra-site wiring
         try:
             design.placeCell(cell, new_site)
-            site_inst = new_site.getSiteInstance()
+            site_inst = design.getSiteInstFromSite(new_site)
             if site_inst:
                 site_inst.routeSite()
 

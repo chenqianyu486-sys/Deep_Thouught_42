@@ -10,7 +10,9 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..state import OptimizerState
+    from ..state import OptimizerState, CriticalPathEntry
+
+from .critical_path import format_critical_paths_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ def build_context_snapshot(
     remaining_time: float,
     iteration_narratives: list[dict],
     tool_call_details: list[dict],
+    critical_paths: list | None = None,
 ) -> str:
     """Build compact YAML context snapshot of current optimization state.
 
@@ -106,6 +109,16 @@ def build_context_snapshot(
             lines.append(f'  - "{nl}"')
     else:
         lines.append("iteration_history: []")
+
+    # --- critical_paths ---
+    if critical_paths:
+        cp_lines = format_critical_paths_snapshot(critical_paths)
+        if cp_lines:
+            lines.append("critical_paths:")
+            for cp in cp_lines:
+                lines.append(f'  - "{cp}"')
+    else:
+        lines.append("critical_paths: []")
 
     # --- budget_status ---
     remaining_budget = max(0.0, cost_hard_limit - total_cost)

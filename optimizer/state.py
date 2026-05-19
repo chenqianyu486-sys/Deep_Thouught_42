@@ -25,6 +25,14 @@ class StepState:
 
 
 @dataclass
+class CriticalPathEntry:
+    """Single critical path with cell list."""
+    cells: list[str] = field(default_factory=list)
+    path_length: int = 0
+    iteration: int = 0
+
+
+@dataclass
 class WnsMilestone:
     """Verified WNS milestone with context."""
     achieved_wns: float = 0.0
@@ -61,6 +69,9 @@ class TimingState:
     clock_period: Optional[float] = None
     high_fanout_nets: list = field(default_factory=list)
     critical_path_spread: Optional[dict] = None
+    critical_paths: list[CriticalPathEntry] = field(default_factory=list)
+    critical_paths_iteration: int = 0
+    critical_paths_stale: bool = False
     resource_utilization: Optional[dict] = None
 
 

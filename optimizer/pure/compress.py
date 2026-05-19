@@ -72,15 +72,19 @@ def _get_model_config(tier: str) -> ModelContextConfig:
         return _worker_config
 
 
-def _estimate_tokens_from_messages(messages: list[dict]) -> int:
-    """Rough token estimate from message dicts (char-based, ~4 chars/token)."""
+def _estimate_tokens_from_messages(messages) -> int:
+    """Rough token estimate from messages (char-based, ~4 chars/token).
+
+    Accepts both Message objects and plain dicts.
+    """
     total_chars = 0
     for m in messages:
-        content = m.get("content", "")
+        # Support both Message objects and dicts
+        content = m.content if hasattr(m, 'content') else m.get("content", "")
         if isinstance(content, str):
             total_chars += len(content)
         # tool_calls contribute tokens too
-        tc = m.get("tool_calls")
+        tc = getattr(m, 'tool_calls', None) or (m.get("tool_calls") if isinstance(m, dict) else None)
         if tc:
             total_chars += len(str(tc)) // 2  # JSON is compact
     return total_chars // 4
@@ -109,7 +113,9 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
 
     try:
         # 1. Get messages and estimate tokens
-        messages = deps.compat.messages
+        #    Use MemoryManager.get_context() (Message objects) instead of
+        #    compat.messages (dict copies) to avoid creating temporary dicts.
+        messages = deps.memory_manager.get_context()
         current_tokens = _estimate_tokens_from_messages(messages)
 
         # 2. Determine model tier and config

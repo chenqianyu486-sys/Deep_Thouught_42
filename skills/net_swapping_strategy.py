@@ -204,12 +204,12 @@ def analyze_net_swapping(
             return {"error": "Device not available"}
 
         # Iterate over all sites, filter for SLICE types
-        for site in device.getSites():
+        for site in device.getAllSites():
             site_type = str(site.getSiteTypeEnum()) if hasattr(site, "getSiteTypeEnum") else ""
             if "SLICE" not in site_type.upper():
                 continue
 
-            site_inst = site.getSiteInstance()
+            site_inst = design.getSiteInstFromSite(site)
             if site_inst is None:
                 continue
 
@@ -389,7 +389,7 @@ def execute_net_swapping(
                 swaps_failed += 1
                 continue
 
-            site_inst = site.getSiteInstance()
+            site_inst = design.getSiteInstFromSite(site)
             if site_inst is None:
                 results.append({
                     "candidate_idx": idx,
@@ -465,7 +465,7 @@ def execute_net_swapping(
         try:
             site = design.getDevice().getSite(site_name)
             if site is not None:
-                site_inst = site.getSiteInstance()
+                site_inst = design.getSiteInstFromSite(site)
                 if site_inst is not None:
                     site_inst.routeSite()
         except Exception as e:

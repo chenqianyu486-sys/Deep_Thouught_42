@@ -79,6 +79,7 @@ async def prepare_context_node(
         remaining_time=remaining,
         iteration_narratives=state.iteration.narratives,
         tool_call_details=tool_call_details,
+        critical_paths=state.timing.critical_paths,
     )
 
     # Inject snapshot into messages

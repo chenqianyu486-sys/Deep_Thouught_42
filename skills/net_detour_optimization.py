@@ -605,7 +605,7 @@ def optimize_cell_placement(
             design.placeCell(cell, new_site)
 
             # Route intra-site wiring
-            site_inst = new_site.getSiteInstance()
+            site_inst = design.getSiteInstFromSite(new_site)
             if site_inst:
                 site_inst.routeSite()
 

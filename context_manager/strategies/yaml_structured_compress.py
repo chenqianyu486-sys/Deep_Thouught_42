@@ -32,13 +32,12 @@ logger = logging.getLogger(__name__)
 # Optional YAML roundtrip validation (off by default, controlled by env var)
 _YAML_ROUNDTRIP_VALIDATE = os.environ.get('YAML_ROUNDTRIP_VALIDATE', '0') == '1'
 
-# Tag-based importance weights
+# Tag-based importance weights (keys must match MessageRole enum values)
 TAG_WEIGHTS = {
-    'tool_result': 3.0,
-    'tool_call': 2.5,
-    'error': 2.5,
-    'assistant_message': 1.5,
-    'user_message': 1.0,
+    'tool': 3.0,       # MessageRole.TOOL
+    'assistant': 1.5,   # MessageRole.ASSISTANT
+    'user': 1.0,        # MessageRole.USER
+    'system': 0.5,      # MessageRole.SYSTEM
 }
 
 # Keyword-based importance boost

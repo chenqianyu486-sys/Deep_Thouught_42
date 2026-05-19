@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from .iteration_logic import infer_strategy_from_tools
 from .context_snapshot import _format_narrative_summary
+from .critical_path import format_critical_paths_handoff, DISPLAY_LIMIT_HANDOFF_PLANNER, DISPLAY_LIMIT_HANDOFF_WORKER
 
 if TYPE_CHECKING:
     from ..state import OptimizerState
@@ -151,6 +152,10 @@ def _generate_planner_handoff(
     best_iter_str = f"iter {best_wns_iter}" if best_wns_iter is not None else "N/A"
     clock_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
 
+    critical_paths_str = format_critical_paths_handoff(
+        state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_PLANNER
+    )
+
     return f"""**ITERATION HANDOFF - Planner**
 
 === ITERATION TRAJECTORY ===
@@ -161,6 +166,9 @@ def _generate_planner_handoff(
 - Current WNS: {wns_str}
 - Best WNS: {best_str} ({best_iter_str})
 - Clock Period: {clock_str}
+
+=== CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_PLANNER}) ===
+{critical_paths_str}
 
 === NEXT OPTIMIZATION GOAL ===
 {goal}
@@ -198,6 +206,10 @@ def _generate_worker_handoff(
     best_iter_str = f"iter{best_wns_iter}" if best_wns_iter is not None else "N/A"
     clock_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
 
+    critical_paths_str = format_critical_paths_handoff(
+        state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_WORKER
+    )
+
     return f"""**ITERATION HANDOFF - Worker**
 
 === RECENT TRAJECTORY (last 3) ===
@@ -205,6 +217,9 @@ def _generate_worker_handoff(
 
 === STATE ===
 - Iter: {state.iteration.current} -> {state.iteration.current + 1} | WNS: {wns_str} | Best: {best_str} ({best_iter_str}) | Clock: {clock_str}
+
+=== CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_WORKER}) ===
+{critical_paths_str}
 
 === GOAL ===
 {goal}

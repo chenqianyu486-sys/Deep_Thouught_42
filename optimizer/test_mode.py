@@ -202,8 +202,10 @@ class V2TestMode:
             # Extract text content
             if result.content:
                 text_parts = [c.text for c in result.content if hasattr(c, 'text')]
-                return "\n".join(text_parts)
-            return "(no output)"
+                raw = "\n".join(text_parts)
+                if raw.strip():
+                    return raw
+            return json.dumps({"error": f"Empty MCP response for {tool_name}"})
 
         except asyncio.TimeoutError:
             heartbeat_done.set()
@@ -553,15 +555,15 @@ class V2TestMode:
         {"name": "optimize_pin_swapping", "tool": "rapidwright_optimize_pin_swapping",
          "skill_name": "pin_swapping_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_pin_swap"}, "needs": "critical_paths"},
         {"name": "replicate_critical_cells", "tool": "rapidwright_replicate_critical_cells",
-         "skill_name": "critical_path_cell_replication_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_cell_repl"}, "needs": "critical_paths"},
+         "skill_name": "critical_path_cell_replication_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_cell_repl"}, "needs": "critical_paths", "source_key": "critical_paths_cells"},
         {"name": "execute_register_retiming", "tool": "rapidwright_execute_register_retiming",
          "skill_name": "execute_register_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_retime"},
-         "dep": "analyze_register_retiming", "dep_key": "retiming_candidates"},
+         "dep": "analyze_register_retiming", "dep_key": "retiming_candidates", "dep_result_key": "candidates"},
         {"name": "execute_net_swapping", "tool": "rapidwright_execute_net_swapping",
          "skill_name": "execute_net_swapping", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_net_swap"},
          "dep": "analyze_net_swapping", "dep_key": "candidates"},
         {"name": "flatten_lut_cascade", "tool": "rapidwright_flatten_lut_cascade",
-         "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths"},
+         "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
     ]
 
     async def _prepare_skill_test_data(self, init_data: dict) -> dict:
@@ -589,7 +591,23 @@ class V2TestMode:
 
         # critical_paths: wrap pin_paths as list[dict] for tools that need it
         if "pin_paths" in shared:
+            # Format 1: pin_paths dict (analyze_register_retiming, optimize_pin_swapping)
             shared["critical_paths"] = [{"pin_paths": shared["pin_paths"]}]
+
+            # Format 2: cells dict (replicate_critical_cells)
+            cells_from_pins = []
+            seen_cells = set()
+            for p in shared["pin_paths"]:
+                cell = p.split("/")[0] if "/" in p else p
+                if cell not in seen_cells:
+                    seen_cells.add(cell)
+                    cells_from_pins.append({"name": cell, "delay": 0.5, "type": "LUT", "fanout": 10})
+            shared["critical_paths_cells"] = [{"cells": cells_from_pins}]
+
+            # Format 3: list[list[str]] (flatten_lut_cascade)
+            shared["critical_paths_cell_names"] = [
+                [p.split("/")[0] for p in shared["pin_paths"] if "/" in p]
+            ]
 
         # cell_names: extract from pin_paths (first 5 unique cells)
         if "pin_paths" in shared:
@@ -656,16 +674,27 @@ class V2TestMode:
 
             # Inject data from shared test data (needs)
             needs = entry.get("needs")
-            if needs and needs in shared:
-                args[needs] = shared[needs]
+            source_key = entry.get("source_key", needs)
+            if needs and source_key in shared:
+                args[needs] = shared[source_key]
 
             # Inject data from dependency (dep)
             dep = entry.get("dep")
             dep_key = entry.get("dep_key")
+            dep_result_key = entry.get("dep_result_key", dep_key)
             if dep and dep_key:
                 dep_data = dep_results.get(dep)
-                if dep_data and dep_key in dep_data:
-                    args[dep_key] = dep_data[dep_key]
+                if dep_data and dep_result_key in dep_data:
+                    args[dep_key] = dep_data[dep_result_key]
+                else:
+                    print(f"\n{'─' * 60}")
+                    print(f"SKILL {idx}: [SKIP] {name} — dependency '{dep}' key '{dep_result_key}' not available")
+                    print(f"{'─' * 60}")
+                    self.skill_test_results.append({
+                        "skill": name, "success": False,
+                        "error": f"dependency '{dep}' key '{dep_result_key}' not available"
+                    })
+                    continue
 
             # Skip if required data is missing
             if needs and needs not in args:
@@ -692,9 +721,23 @@ class V2TestMode:
             if self._check_test_exit(f"Skill {idx}"):
                 return False
 
+        # ── Summary ──
         passed = sum(1 for r in self.skill_test_results if r.get("success"))
+        failed = sum(1 for r in self.skill_test_results if not r.get("success"))
         total = len(self.skill_test_results)
-        return passed == total
+        all_ok = (failed == 0)
+
+        print(f"\n{'=' * 60}")
+        print(f"SKILL TEST SUMMARY: {passed}/{total} passed, {failed} failed")
+        print(f"{'=' * 60}")
+        for r in self.skill_test_results:
+            mark = "✓" if r.get("success") else "✗"
+            print(f"  [{mark}] {r['skill']}")
+            if not r.get("success") and r.get("error"):
+                print(f"       {r['error']}")
+        print()
+
+        return all_ok
 
     # ── Corundum Full Test ─────────────────────────────────────────
 

@@ -24,11 +24,15 @@ from ...pure.tool_router import call_tool as call_tool_fn
 from ...pure.step_state import extract_step_state
 from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT
 from ...pure.compress import compress_context
+from ...pure.critical_path import parse_critical_path_cells, update_critical_paths
 
 logger = logging.getLogger(__name__)
 
 # Max tool rounds per iteration (safety limit)
 MAX_TOOL_ROUNDS = 80
+
+# Compression check interval: only check every N rounds to reduce CPU overhead
+COMPRESS_CHECK_INTERVAL = 5
 
 
 async def llm_tool_loop_node(
@@ -57,8 +61,8 @@ async def llm_tool_loop_node(
         if _check_exit_conditions(state, tool_round):
             return NodeName.ITERATION_END
 
-        # ── Compress context (per-round) ──────────────────────────
-        if deps.memory_manager is not None:
+        # ── Compress context (throttled) ───────────────────────────
+        if deps.memory_manager is not None and tool_round % COMPRESS_CHECK_INTERVAL == 0:
             try:
                 compress_context(state, deps)
             except Exception as e:
@@ -204,6 +208,13 @@ async def llm_tool_loop_node(
                 # Track WNS from timing results
                 _track_wns_from_result(state, tool_name, raw_result)
 
+                # Track critical path data from extract tool
+                _update_critical_paths_from_tool(state, tool_name, raw_result)
+
+                # Mark critical paths stale after layout/routing changes
+                if tool_name in ("vivado_phys_opt_design", "vivado_route_design"):
+                    state.timing.critical_paths_stale = True
+
                 # Track tool errors
                 result_lower = summary.lower() if summary else ""
                 if "error" in result_lower and "success" not in result_lower:
@@ -211,6 +222,13 @@ async def llm_tool_loop_node(
                         "tool": tool_name,
                         "result": summary[:2000],
                     })
+
+            # Auto-refresh critical paths if stale after layout/routing changes
+            if state.timing.critical_paths_stale:
+                try:
+                    await _auto_refresh_critical_paths(state, deps)
+                except Exception as e:
+                    logger.warning(f"[llm_tool_loop] Critical path auto-refresh failed: {e}")
 
             continue  # Loop continues to process tool results
 
@@ -366,6 +384,30 @@ def _track_cost(state: OptimizerState, response) -> None:
             )
     except Exception as e:
         logger.warning(f"[llm_tool_loop] Failed to parse usage: {e}")
+
+
+def _update_critical_paths_from_tool(state: OptimizerState, tool_name: str, raw_result: str) -> None:
+    """Parse and cache critical path cells from tool result."""
+    if tool_name != "vivado_extract_critical_path_cells":
+        return
+    cell_paths = parse_critical_path_cells(raw_result)
+    if cell_paths:
+        update_critical_paths(state, cell_paths, iteration=state.iteration.current)
+
+
+async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) -> None:
+    """Re-extract critical paths after layout/routing changes."""
+    result = await call_tool_fn(
+        "vivado_extract_critical_path_cells",
+        {"num_paths": 10},
+        deps.rapidwright_session, deps.vivado_session,
+    )
+    cell_paths = parse_critical_path_cells(result)
+    if cell_paths:
+        update_critical_paths(state, cell_paths, iteration=state.iteration.current)
+        logger.info(f"[llm_tool_loop] Auto-refreshed {len(cell_paths)} critical paths")
+    else:
+        state.timing.critical_paths_stale = False
 
 
 def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: str) -> None:
