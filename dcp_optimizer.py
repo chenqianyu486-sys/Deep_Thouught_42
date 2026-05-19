@@ -309,6 +309,8 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_execute_fanout_strategy": "fanout_strategy",
     "rapidwright_analyze_congestion_spreading": "analyze_congestion_spreading",
     "rapidwright_execute_congestion_spreading": "execute_congestion_spreading",
+    "rapidwright_analyze_net_swapping": "analyze_net_swapping",
+    "rapidwright_execute_net_swapping": "execute_net_swapping",
 }
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
@@ -2474,6 +2476,8 @@ class DCPOptimizer(DCPOptimizerBase):
             return "RegisterRetiming"
         if "congestion_spread" in tool_str or "execute_congestion_spreading" in tool_str:
             return "CongestionSpreading"
+        if "net_swapping" in tool_str or "execute_net_swapping" in tool_str:
+            return "NetSwap"
         if "place_design" in tool_str or "route_design" in tool_str:
             return "PlaceRoute"
         if any(t in tool_str for t in ["report_", "get_", "extract_", "analyze_"]):

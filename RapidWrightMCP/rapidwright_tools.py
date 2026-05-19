@@ -2570,3 +2570,107 @@ def execute_congestion_spreading(
         logger.error(f"Error executing congestion spreading: {e}")
         return {"error": str(e)}
 
+
+def analyze_net_swapping(
+    max_candidates: int = 20,
+    wirelength_threshold: float = 50.0,
+) -> dict:
+    """Analyze design to find net swap candidates within SLICE sites.
+
+    READ-ONLY analysis. Identifies pairs of LUT cells with identical INIT strings
+    within the same SLICE where swapping input nets would reduce wirelength.
+
+    Args:
+        max_candidates: Maximum candidates to return (default: 20)
+        wirelength_threshold: Minimum wirelength reduction to be a candidate (default: 50)
+
+    Returns:
+        Dictionary with candidates list and summary
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("analyze_net_swapping")
+        if skill is None:
+            return {"error": "Skill 'analyze_net_swapping' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            max_candidates=max_candidates,
+            wirelength_threshold=wirelength_threshold,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in net swapping analysis: {e}")
+        return {"error": str(e)}
+
+
+def execute_net_swapping(
+    candidates: list,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "net_swap",
+) -> dict:
+    """Execute net swaps within SLICE sites and write checkpoint.
+
+    MUTATING: modifies net connections and intra-site routing.
+
+    Args:
+        candidates: List of swap candidates from analyze_net_swapping
+        temp_dir: Directory for checkpoint output (default: "temp")
+        checkpoint_prefix: Checkpoint filename prefix (default: "net_swap")
+
+    Returns:
+        Dictionary with swaps_performed, swaps_failed, checkpoint_path
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("execute_net_swapping")
+        if skill is None:
+            return {"error": "Skill 'execute_net_swapping' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            candidates=candidates,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing net swapping: {e}")
+        return {"error": str(e)}
+

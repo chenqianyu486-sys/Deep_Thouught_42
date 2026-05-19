@@ -157,6 +157,21 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "NetSwap": {
+        "name": "Net Swapping Optimization",
+        "trigger": "Routing congestion within SLICE sites, LUT pairs with swappable input nets",
+        "sequence": [
+            {"step": "analyze_net_swapping", "platform": "RapidWright",
+             "params": {"max_candidates": 20, "wirelength_threshold": 50},
+             "note": "READ-ONLY: identify net swap candidates within SLICEs"},
+            {"step": "execute_net_swapping", "platform": "RapidWright",
+             "params": {"candidates": "from analyze_net_swapping output"},
+             "note": "Perform net swaps, writes checkpoint"},
+            {"step": "open_checkpoint", "platform": "Vivado", "params": None},
+            {"step": "route_design", "platform": "Vivado", "params": None},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -169,6 +184,7 @@ STRATEGY_LABEL_MAP = {
     "CellReplication": "CellReplication",
     "CongestionSpreading": "CongestionSpreading",
     "RegisterRetiming": "RegisterRetiming",
+    "NetSwap": "NetSwap",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -180,6 +196,7 @@ STRATEGY_SKILL_MAP = {
     "CellReplication": "critical_path_cell_replication",
     "CongestionSpreading": "execute_congestion_spreading",
     "RegisterRetiming": "execute_register_retiming",
+    "NetSwap": "execute_net_swapping",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -290,6 +307,23 @@ SKILL_GUIDANCE = {
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM - inserting FFs changes logic depth and routing. Limit to 5 ops per call.",
         "contraindications": "Do NOT use when Vivado global retiming (phys_opt_design -retime) has already been tried and caused functional errors. This targeted approach is safer but still modifies netlist topology.",
+    },
+    "analyze_net_swapping": {
+        "category": "ANALYSIS",
+        "input": "max_candidates (default 20), wirelength_threshold (default 50)",
+        "output": "ranked list of net swap candidates within SLICE sites",
+        "condition": "Routing congestion within SLICEs, LUT pairs with identical INIT strings",
+        "prerequisite": "Design must be loaded via read_checkpoint",
+        "interpretation": "Empty candidates = no beneficial swaps found. Non-empty = swaps that reduce wirelength.",
+    },
+    "execute_net_swapping": {
+        "category": "OPTIMIZATION",
+        "input": "candidates from analyze_net_swapping, temp_dir, checkpoint_prefix",
+        "output": "swaps_performed, swaps_failed, checkpoint_path",
+        "condition": "analyze_net_swapping identified candidates",
+        "prerequisite": "Call analyze_net_swapping first to get candidate list",
+        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
+        "risk": "LOW - swaps are within a single SLICE, limited blast radius. If WNS regresses >0.05ns, roll back to pre_swap_checkpoint.",
     },
 }
 

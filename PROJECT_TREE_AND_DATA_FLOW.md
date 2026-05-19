@@ -71,6 +71,7 @@ fpl26_optimization_contest/
 │   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
 │   ├── congestion_spreading_strategy.py  # Skill类：Congestion-Aware Cell Spreading（分析+执行）
 │   ├── register_retiming_strategy.py  # Skill类：Register Retiming（分析+执行，pipeline FF插入）
+│   ├── net_swapping_strategy.py      # Skill类：Net Swapping（分析+执行，SLICE内BEL引脚网络交换）
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -281,6 +282,8 @@ skills/
 ├── optimization.execute_congestion_spreading@1.0.0  # 拥塞感知单元扩散（non-idempotent）
 ├── analysis.analyze_register_retiming@1.0.0  # Register Retiming 分析（READ-ONLY）
 ├── optimization.execute_register_retiming@1.0.0  # Register Retiming 执行（non-idempotent）
+├── analysis.analyze_net_swapping@1.0.0  # Net Swapping 分析（READ-ONLY）
+├── optimization.execute_net_swapping@1.0.0  # Net Swapping 执行（non-idempotent）
 └── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
 
 Skill 超时映射（三层）:
@@ -296,6 +299,8 @@ Skill 超时映射（三层）:
 | optimize_cell | 60000 (1min) | 60000 / 120000 | 360.0 |
 | analyze_register_retiming | **60000** (1min) | 60000 / 120000 | - |
 | execute_register_retiming | **300000** (5min) | 300000 / 600000 | - |
+| analyze_net_swapping | **60000** (1min) | 60000 / 120000 | - |
+| execute_net_swapping | **120000** (2min) | 120000 / 240000 | - |
 
 三层超时的作用域:
 1. **@skill decorator** — 技能框架内部心跳检测阈值（skills/*.py）
@@ -315,6 +320,8 @@ Skill 超时映射（三层）:
 │   └── execute_congestion_spreading: severity=HIGH → 评分拥塞cell+扩散+write_checkpoint (LLM自行调Vivado工具串)
 │   ├── analyze_register_retiming: deep combinational chains → 识别FF-to-FF深链段+插入点（READ-ONLY）
 │   └── execute_register_retiming: 插入pipeline FF到组合逻辑链中+write_checkpoint (LLM自行调Vivado工具串)
+│   ├── analyze_net_swapping: SLICE内LUT对 → 识别可交换网络候选（READ-ONLY）
+│   └── execute_net_swapping: 交换BEL引脚网络+write_checkpoint (LLM自行调Vivado工具串)
 
 Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列, 注意 stagnation 条件含隐含的 best_wns < 0 检查):
 ├── stagnation (global_no_improvement>=1 AND best_wns<0) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]

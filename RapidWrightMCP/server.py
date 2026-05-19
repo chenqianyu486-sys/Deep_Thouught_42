@@ -71,6 +71,8 @@ COMPLEX_TOOLS = {
     "replicate_critical_cells",
     "analyze_register_retiming",
     "execute_register_retiming",
+    "analyze_net_swapping",
+    "execute_net_swapping",
 }
 
 
@@ -1010,6 +1012,71 @@ If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint."""
                 "required": ["retiming_candidates"]
             }
         ),
+        Tool(
+            name="analyze_net_swapping",
+            description="""Identify net swap candidates within SLICE sites.
+
+READ-ONLY analysis. Finds pairs of LUT cells with identical INIT strings in the
+same SLICE where swapping input nets would reduce estimated wirelength (bounding
+box heuristic).
+
+Use this BEFORE execute_net_swapping to identify which swaps are beneficial.
+
+Trigger: routing congestion within SLICEs, critical paths have LUT pairs that
+could benefit from net rerouting.
+Empty result = no beneficial swaps found (valid diagnosis, not a failure).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_candidates": {
+                        "type": "integer",
+                        "description": "Maximum candidates to return. Default: 20.",
+                        "default": 20
+                    },
+                    "wirelength_threshold": {
+                        "type": "number",
+                        "description": "Minimum wirelength reduction to be a candidate. Default: 50.",
+                        "default": 50.0
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_net_swapping",
+            description="""Swap equivalent nets between BEL pins within SLICE sites.
+
+MUTATING: modifies net connections, intra-site routing, writes checkpoint file.
+Swaps input nets between LUT cell pairs identified by analyze_net_swapping.
+Only swaps between cells with identical INIT strings (logic-safe).
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+LIMITATIONS: Only works within a single SLICE. Only swaps between cells with
+matching INIT strings. If WNS regresses > 0.05ns after reroute, rollback to
+pre_swap_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "candidates": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of swap candidates from analyze_net_swapping"
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "net_swap"
+                    }
+                },
+                "required": ["candidates"]
+            }
+        ),
     ]
 
 
@@ -1256,6 +1323,22 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     max_retiming_ops=arguments.get("max_retiming_ops", 5),
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "register_retime"),
+                )
+
+        elif name == "analyze_net_swapping":
+            result = rw.analyze_net_swapping(
+                max_candidates=arguments.get("max_candidates", 20),
+                wirelength_threshold=arguments.get("wirelength_threshold", 50.0),
+            )
+
+        elif name == "execute_net_swapping":
+            if "candidates" not in arguments:
+                result = {"error": "Missing required parameter: candidates. Provide candidates from analyze_net_swapping."}
+            else:
+                result = rw.execute_net_swapping(
+                    candidates=arguments["candidates"],
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "net_swap"),
                 )
 
         else:
