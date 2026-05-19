@@ -1,10 +1,11 @@
 # LLM Model Configuration for Context Management
 # Worker models: optimized for speed, smaller context window (250K tokens)
 # Planner models: optimized for reasoning, larger context window (1M tokens)
+# Use flash models due to limited budget
 
 worker:
   model_tier: "worker"
-  model_name: "deepseek/deepseek-v4-flash"  # Default Flash model name
+  model_name: "deepseek/deepseek-v4-flash"  # Default worker model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -23,7 +24,7 @@ worker:
   cost_hard_limit: 2.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name
+  model_name: "deepseek/deepseek-v4-flash"    # Default planner model name
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)

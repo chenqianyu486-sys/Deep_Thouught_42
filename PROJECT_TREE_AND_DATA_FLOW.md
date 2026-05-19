@@ -165,6 +165,53 @@ llm_call → evaluate_flow → [条件: flow_control?]
 - **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
 
+### 1.2 V1→V2 迁移映射
+
+V2 状态机架构从 V1 的 `DCPOptimizer` 单体类（~8000行）拆分为 `optimizer/` 包（~3000行，20+文件），核心变更如下：
+
+**纯函数提取 (`optimizer/pure/`)**：
+
+| V1 方法 (DCPOptimizer) | V2 纯函数模块 | 说明 |
+|------------------------|--------------|------|
+| `_parse_timing_summary()` | `pure/timing.py` | 时序摘要解析、高扇出网线解析、资源利用率解析 |
+| `_select_model()` | `pure/model_select.py` | 任务分类、9维评分、模型选择 |
+| `_summarize_tool_result()` | `pure/tool_summary.py` | 工具结果YAML摘要化 |
+| `_on_iteration_end()` | `pure/iteration_logic.py` | 迭代计数器更新、策略推断、迭代叙事 |
+| `_build_context_snapshot()` | `pure/context_snapshot.py` | 上下文快照构建与注入 |
+| `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、数据驱动目标、停滞信号 |
+| `call_tool()` | `pure/tool_router.py` | MCP工具路由（含 phys_opt 安全守卫） |
+| `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析（无XML/YAML回退） |
+| `_compress_context()` | `pure/compress.py` | CompressionContext构建 + 阈值检查 + 同步调用 |
+| 散布的常量/枚举 | `pure/constants.py` | TaskCategory/ModelTier/阈值常量 |
+
+**状态迁移**：
+
+```
+DCPOptimizer 实例属性 → OptimizerState (6个dataclass子切片)
+├── self.latest_wns/best_wns/failing_endpoints → state.timing: TimingState
+├── self._iteration_count/no_improvement_count → state.iteration: IterationState
+├── self.model_worker/model_planner/fallback  → state.model: ModelState
+├── self.total_cost/total_tokens              → state.cost: CostState
+├── self._compression_count/raw_tool_outputs  → state.context: ContextState
+└── self._user_exit_requested/is_done         → state.control: ControlState
+```
+
+**流程迁移**：
+
+| V1 | V2 |
+|----|-----|
+| `optimize()` 主循环 (line 5174) | `NodeGraph.run()` + 条件边 `after_check_exit` |
+| `get_completion()` LLM循环 (line 4535) | `llm_tool_loop` 子图 (`nodes/subgraphs/llm_tool_loop.py`) |
+| `_perform_initial_analysis()` | `init_analysis_node` (`nodes/init_analysis.py`) |
+| `_on_iteration_end()` | `iteration_end_node` (`nodes/iteration_end.py`) |
+| 模型选择散布在 `get_completion()` 中 | `select_model_node` (`nodes/select_model.py`) |
+| 上下文压缩散布在多处 | `prepare_context_node` (`nodes/prepare_context.py`) |
+
+**共享组件（不迁移）**：
+- `DCPOptimizerBase` (line 320): `start_servers`, `cleanup`, `calculate_fmax`, `_parse_resource_utilization`, `_parse_hold_timing`, `check_hold_timing`, `_is_routing_failure`, `_start_tool_heartbeat`
+- `MemoryManager`, `EventBus`, MCP 服务器 (`RapidWrightMCP/`, `VivadoMCP/`)
+- Skills 框架 (`skills/`), `strategy_library.py`
+
 ## 2. 核心数据流
 
 ### 2.1 消息流程
@@ -300,9 +347,12 @@ _inject_context_snapshot(api_messages):
 ### 2.5 模型选择
 
 ```
-PLANNER: deepseek/deepseek-v4-pro (1M context, 复杂推理)
+PLANNER: deepseek/deepseek-v4-flash (1M context, 复杂推理)
 WORKER: deepseek/deepseek-v4-flash (250K context, 快速执行)
+- 两者使用相同基础模型，通过不同上下文窗口和压缩参数区分层级
 - 429降级: 按层级fallback列表，轮询+耗尽追踪
+  - Worker fallback: stepfun/step-3.5-flash → xiaomi/mimo-v2-flash
+  - Planner fallback: xiaomi/mimo-v2.5
 - 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
 - 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
 ```
@@ -452,6 +502,26 @@ JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）�
 └── errors: [{ code, recoverable }, ...]
 ```
 
+### 2.6.1 策略库完整清单（strategy_library.py）
+
+`strategy_library.py` 定义了 9 个优化策略，按场景匹配推荐给 LLM：
+
+| 策略键 | 名称 | 触发条件 | 关联 Skill |
+|--------|------|---------|-----------|
+| `PBLOCK` | Pblock-Based Re-placement | distributed 场景（avg_distance>70） | `rapidwright_analyze_pblock_region` |
+| `PhysOpt` | Physical Optimization | 1-2 paths with spread, WNS>-2.0 | `rapidwright_execute_physopt_strategy` |
+| `Fanout` | High Fanout Net Optimization | fanout>100, 无 spread | `rapidwright_execute_fanout_strategy` |
+| `PinSwap` | Pin Swapping | WNS 卡在 ~-0.3ns, LUT 输入引脚延迟差异 | `rapidwright_analyze_net_swapping` |
+| `LUTCascade` | LUT Cascade Flattening | >3 级 LUT 串联 | `rapidwright_optimize_lut_input_cone` |
+| `CellReplication` | Critical Path Cell Replication | fanout>10 或 delay>0.3ns | Vivado `phys_opt_design` |
+| `CongestionSpreading` | Congestion-Aware Cell Spreading | congestion=HIGH, PBLOCK/PhysOpt 无效 | `rapidwright_analyze_congestion_spreading` |
+| `RegisterRetiming` | Register Retiming | 深组合逻辑链（>2 LUTs） | `rapidwright_analyze_register_retiming` |
+| `NetSwap` | Net Swapping | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
+
+**场景检测矩阵** (`SCENARIO_DETECTION_MATRIX`): 7 个场景 — `wide_lut`, `high_fanout`, `distributed`, `control_imbalance`, `congestion`, `congestion_spread`, `deep_chain`
+
+**已知问题**: `get_strategy_catalog()` (line 376) 仅遍历 `["PBLOCK", "PhysOpt", "Fanout"]` 3 个策略，遗漏了其余 6 个。系统提示词注入时仅展示部分策略目录。
+
 ### 2.7 Tool 描述增强（2026-05 新增）
 
 为提升 LLM 决策准确率，对 Tool 和 Skill 描述进行了增强，增加三类信息：
@@ -550,21 +620,29 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 ```yaml
 # Worker: 速度优化, 250K max
 worker:
+  model_name: "deepseek/deepseek-v4-flash"
   soft_threshold: 175K, hard_limit: 200K
   token_budget: 80K
   preserve_turns: 40, preserve_turns_aggressive: 10
   min_importance: 0.15, min_importance_aggressive: 0.7
+  preserve_turns_hard_limit: 25, min_importance_threshold_hard_limit: 0.35
   preserve_role_turns: 6
+  history_retrieval_limit: 8, history_retrieval_min_importance: 0.5
   fallback_models: ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
+  cost_hard_limit: 2.00  # USD
 
-# Planner: 推理优化, 1M max
+# Planner: 推理优化, 1M max（与 Worker 使用相同基础模型，通过上下文窗口和压缩参数区分）
 planner:
+  model_name: "deepseek/deepseek-v4-flash"
   soft_threshold: 200K, hard_limit: 300K
   token_budget: 80K
   preserve_turns: 60, preserve_turns_aggressive: 10
   min_importance: 0.1, min_importance_aggressive: 0.7
+  preserve_turns_hard_limit: 40, min_importance_threshold_hard_limit: 0.25
   preserve_role_turns: 6
-  fallback_models: ["qwen/qwen3.6-plus", "xiaomi/mimo-v2.5-pro"]
+  history_retrieval_limit: 10, history_retrieval_min_importance: 0.3
+  fallback_models: ["xiaomi/mimo-v2.5"]
+  cost_hard_limit: 1.00  # USD
 ```
 
 ## 5. 迭代控制
@@ -852,7 +930,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 
 | 原因 | 描述 |
 |------|------|
-| `cost_limit` | 达到$1.00硬限制 |
+| `cost_limit` | 达到成本硬限制（worker: $2.00, planner: $1.00, v1代码使用worker的$2.00作为全局限制） |
 | `wns_target_met` | WNS>=0.0（时序收敛） |
 | `max_iterations_reached` | 3次迭代无改进 |
 | `tool_round_limit` | MAX_TOOL_ROUNDS_PER_ITERATION 轮工具调用达限 |
@@ -890,7 +968,7 @@ tool call 入口:
 ```python
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
-cost_hard_limit（从 model_config.yaml 加载的实例属性，默认 $1.00，planner+worker 合计）
+cost_hard_limit（从 model_config.yaml 加载：worker $2.00, planner $1.00；v1代码使用worker的$2.00作为全局限制）
 ```
 
 ## 13. 工具输出摘要化 + 历史自动裁剪
