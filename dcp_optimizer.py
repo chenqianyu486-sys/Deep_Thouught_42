@@ -399,6 +399,64 @@ class DCPOptimizerBase:
                 return None  # Missing key means parse failure
         return resources
 
+    @staticmethod
+    def _parse_hold_timing(timing_text: str) -> dict:
+        """Parse hold timing section from report_timing_summary output.
+
+        Vivado's report_timing_summary includes both setup and hold sections.
+        This extracts the hold WNS/WHS from the min delay path report.
+        Competition requires hold WNS >= 0.
+        """
+        result = {"hold_wns": None, "hold_tns": None, "hold_failing": None}
+        lines = timing_text.split('\n')
+
+        in_hold = False
+        for line in lines:
+            s = line.strip()
+            if 'Hold' in s and ('WNS' in s or 'WHS' in s):
+                in_hold = True
+                continue
+            if in_hold and s and not s.startswith('-'):
+                parts = s.split()
+                try:
+                    if len(parts) >= 4:
+                        result["hold_wns"] = float(parts[0])
+                        result["hold_tns"] = float(parts[1])
+                        result["hold_failing"] = int(parts[2])
+                    elif len(parts) >= 2:
+                        result["hold_wns"] = float(parts[0])
+                        result["hold_tns"] = float(parts[1])
+                    break
+                except (ValueError, IndexError):
+                    continue
+            if in_hold and 'Setup' in s:
+                break
+
+        return result
+
+    async def check_hold_timing(self, call_tool_fn) -> Optional[dict]:
+        """Check hold timing via Vivado report_timing_summary -delay_type min.
+
+        Competition requires hold and pulse width requirements fully met.
+        Returns dict with hold_wns/hold_tns/hold_failing, or None on error.
+        """
+        try:
+            result = await call_tool_fn("run_tcl",
+                {"command": "report_timing_summary -delay_type min -max_paths 100"})
+            hold = self._parse_hold_timing(result)
+            if hold.get("hold_wns") is not None:
+                if hold["hold_wns"] < 0:
+                    logger.warning(
+                        f"HOLD VIOLATION: WNS={hold['hold_wns']:.3f}ns, "
+                        f"TNS={hold['hold_tns']}, failing={hold['hold_failing']}"
+                    )
+                else:
+                    logger.info(f"Hold timing OK: WNS={hold['hold_wns']:.3f}ns")
+            return hold
+        except Exception as e:
+            logger.warning(f"Hold timing check failed: {e}")
+            return None
+
     def _start_tool_heartbeat(self, tool_name: str, start_time: float, interval: float = 60.0) -> tuple[asyncio.Task, int]:
         """
         Start a background heartbeat logger for a long-running tool call.
@@ -4172,6 +4230,13 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
             print(f"  - TNS: {self.initial_tns:.3f} ns")
         if self.initial_failing_endpoints is not None:
             print(f"  - Failing endpoints: {self.initial_failing_endpoints}")
+        # Check hold timing (competition requirement)
+        hold = await self.check_hold_timing(self._call_vivado_tool)
+        if hold and hold.get("hold_wns") is not None:
+            if hold["hold_wns"] < 0:
+                print(f"  - Hold: VIOLATED (WNS={hold['hold_wns']:.3f}ns, {hold.get('hold_failing','?')} failing)")
+            else:
+                print(f"  - Hold: MET (WNS={hold['hold_wns']:.3f}ns)")
         print()
         
         # Step 4: Get critical high fanout nets
@@ -5499,6 +5564,19 @@ CRITICAL OPTIMIZATION RULES:
                 if is_done:
                     logger.info("Optimization workflow completed")
                     self.end_time = time.time()
+
+                    # Check hold timing before final save (competition requirement)
+                    print("\n=== Hold Timing Check ===")
+                    hold = await self.check_hold_timing(self._call_vivado_tool)
+                    if hold:
+                        hwns = hold.get("hold_wns")
+                        if hwns is not None:
+                            if hwns < 0:
+                                print(f"  [WARN] Hold VIOLATED: WNS={hwns:.3f}ns, {hold.get('hold_failing','?')} failing")
+                            else:
+                                print(f"  [OK] Hold MET: WNS={hwns:.3f}ns")
+                    else:
+                        print("  [WARN] Hold check failed")
 
                     # Write output DCP before validation
                     if hasattr(self, 'output_dcp') and self.output_dcp:

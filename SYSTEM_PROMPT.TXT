@@ -186,6 +186,7 @@ tool_reference:
     - optimize_cell_placement
     - smart_region_search
     - analyze_congestion
+    - report_timing
 
 measurement:
   baseline:
@@ -197,6 +198,20 @@ measurement:
     - report_timing_summary
     - report_route_status
   format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
+
+# ── Rapid Pre-Validation ──
+# rapidwright_report_timing 使用 RapidWright 内置近似时序模型 (~2% 误差),
+# 无需 Vivado, ~2.5 秒出 WNS。用于快速试多种策略再选最优。
+prevalidation:
+  tool: rapidwright_report_timing
+  cost: "~2.5s, no Vivado needed"
+  error: "~2% vs Vivado sign-off timing"
+  usage:
+    - "After making changes in RapidWright (fanout, detour, placement), call this FIRST to estimate WNS"
+    - "If estimate shows improvement, THEN commit to Vivado place/route for final verification"
+    - "If estimate shows no improvement, skip Vivado and try a different approach"
+    - "Especially useful when comparing multiple PBLOCK region candidates"
+  warning: "Always verify final result with Vivado report_timing_summary"
 
 timing_ops:
   affecting:
