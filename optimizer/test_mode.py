@@ -583,7 +583,7 @@ class V2TestMode:
                     print(f"[TEST] Prepared pin_paths: {len(shared['pin_paths'])} pins")
                 else:
                     print(f"[TEST] ⚠ extract_critical_path_pins returned empty pin_paths")
-                    _dbg = {k: pins_data.get(k) for k in ("debug_has_slack", "debug_report_length", "debug_num_slack_sections", "debug_per_path") if k in pins_data}
+                    _dbg = {k: pins_data.get(k) for k in ("debug_has_slack", "debug_report_length", "debug_num_slack_sections", "debug_per_path", "error") if k in pins_data}
                     if _dbg:
                         print(f"[TEST] debug: {_dbg}")
         except Exception as e:
