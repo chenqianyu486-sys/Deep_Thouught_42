@@ -470,6 +470,42 @@ def test_skill_trace_attributes():
     print("  PASSED: trace attributes")
 
 
+def test_all_expected_skills_registered():
+    """Verify all expected skills are registered in SkillRegistry."""
+    EXPECTED_SKILLS = {
+        "net_detour", "optimize_cell", "smart_region",
+        "pblock_strategy", "physopt_strategy", "fanout_strategy",
+        "analyze_congestion", "analyze_congestion_spreading",
+        "execute_congestion_spreading",
+        "pin_swapping_strategy", "critical_path_cell_replication_strategy",
+        "analyze_register_retiming", "execute_register_retiming",
+        "analyze_net_swapping", "execute_net_swapping",
+        "lut_cascade_flattening",
+    }
+    registered = {m.name for m in SkillRegistry.list_all()}
+    missing = EXPECTED_SKILLS - registered
+    assert not missing, f"Skills not registered: {missing}"
+    extra = registered - EXPECTED_SKILLS - {"test_mock_skill"}
+    if extra:
+        print(f"  WARNING: Unexpected skills: {extra}")
+    print(f"  PASSED: all {len(EXPECTED_SKILLS)} expected skills registered")
+
+
+def test_all_descriptors_generated():
+    """Verify JSON descriptor files exist for all registered skills."""
+    from pathlib import Path
+    descriptors_dir = Path(__file__).parent / "descriptors"
+    assert descriptors_dir.is_dir(), f"Descriptors dir not found: {descriptors_dir}"
+    missing = []
+    for meta in SkillRegistry.list_all():
+        safe_name = meta.id.replace("@", "-at-").replace("/", "_")
+        desc_file = descriptors_dir / f"{safe_name}.json"
+        if not desc_file.exists():
+            missing.append(meta.id)
+    assert not missing, f"Missing descriptor files for: {missing}"
+    print(f"  PASSED: all {len(list(SkillRegistry.list_all()))} descriptors exist")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -505,6 +541,8 @@ def main():
         test_skill_idempotency_store,
         test_skill_inflight_guard,
         test_skill_trace_attributes,
+        test_all_expected_skills_registered,
+        test_all_descriptors_generated,
     ]
 
     passed = 0

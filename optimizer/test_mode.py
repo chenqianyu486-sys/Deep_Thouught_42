@@ -521,6 +521,29 @@ class V2TestMode:
         print("SKILL INVOCATION TESTS")
         print("=" * 60)
 
+        # Verify all expected skills are registered
+        from skills import SkillRegistry
+        EXPECTED_SKILLS = {
+            "net_detour", "optimize_cell", "smart_region",
+            "pblock_strategy", "physopt_strategy", "fanout_strategy",
+            "analyze_congestion", "analyze_congestion_spreading",
+            "execute_congestion_spreading",
+            "pin_swapping_strategy", "critical_path_cell_replication_strategy",
+            "analyze_register_retiming", "execute_register_retiming",
+            "analyze_net_swapping", "execute_net_swapping",
+            "lut_cascade_flattening",
+        }
+        registered = {m.name for m in SkillRegistry.list_all()}
+        missing = EXPECTED_SKILLS - registered
+        if missing:
+            print(f"[TEST] WARNING: {len(missing)} skills not registered: {missing}")
+            self.skill_test_results.extend([
+                {"skill": name, "success": False, "error": "not registered"}
+                for name in sorted(missing)
+            ])
+        else:
+            print(f"[TEST] All {len(EXPECTED_SKILLS)} expected skills registered")
+
         pins_result = ""
 
         # Skill 1: analyze_net_detour
