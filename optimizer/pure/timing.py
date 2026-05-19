@@ -171,3 +171,41 @@ def compute_timing_hash(raw_text: str) -> str:
     if not raw_text:
         return ""
     return hashlib.sha256(raw_text.encode()).hexdigest()[:16]
+
+
+def parse_hold_timing(timing_text: str) -> dict:
+    """Parse hold timing section from report_timing_summary output.
+
+    Vivado's report_timing_summary includes both setup and hold sections.
+    This extracts the hold WNS/WHS from the min delay path report.
+    Competition requires hold WNS >= 0.
+
+    Returns:
+        dict with keys: hold_wns, hold_tns, hold_failing (None if parse fails).
+    """
+    result = {"hold_wns": None, "hold_tns": None, "hold_failing": None}
+    lines = timing_text.split('\n')
+
+    in_hold = False
+    for line in lines:
+        s = line.strip()
+        if 'Hold' in s and ('WNS' in s or 'WHS' in s):
+            in_hold = True
+            continue
+        if in_hold and s and not s.startswith('-'):
+            parts = s.split()
+            try:
+                if len(parts) >= 4:
+                    result["hold_wns"] = float(parts[0])
+                    result["hold_tns"] = float(parts[1])
+                    result["hold_failing"] = int(parts[2])
+                elif len(parts) >= 2:
+                    result["hold_wns"] = float(parts[0])
+                    result["hold_tns"] = float(parts[1])
+                break
+            except (ValueError, IndexError):
+                continue
+        if in_hold and 'Setup' in s:
+            break
+
+    return result

@@ -15,6 +15,7 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
+from ..pure.timing import parse_hold_timing
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,27 @@ async def save_output_node(
     logger.info(f"  LLM calls:  {state.model.llm_call_count}")
     logger.info(f"  Elapsed:    {elapsed:.1f}s")
     logger.info("=" * 60)
+
+    # Check hold timing before final save (competition requirement)
+    if state.control.output_dcp and deps.vivado_session:
+        try:
+            logger.info("[save_output] Checking hold timing...")
+            hold_report = await call_tool_fn(
+                "vivado_run_tcl",
+                {"command": "report_timing_summary -delay_type min -max_paths 100"},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            hold = parse_hold_timing(hold_report)
+            if hold.get("hold_wns") is not None:
+                if hold["hold_wns"] < 0:
+                    logger.warning(
+                        f"[save_output] HOLD VIOLATED: WNS={hold['hold_wns']:.3f}ns, "
+                        f"failing={hold.get('hold_failing')}"
+                    )
+                else:
+                    logger.info(f"[save_output] Hold timing MET: WNS={hold['hold_wns']:.3f}ns")
+        except Exception as e:
+            logger.warning(f"[save_output] Hold timing check failed: {e}")
 
     # Write output DCP
     if state.control.output_dcp and deps.vivado_session:

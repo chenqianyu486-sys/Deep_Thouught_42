@@ -16,7 +16,7 @@ from pathlib import Path
 from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
-from ..pure.timing import parse_timing_summary, parse_high_fanout_nets, parse_resource_utilization
+from ..pure.timing import parse_timing_summary, parse_high_fanout_nets, parse_resource_utilization, parse_hold_timing
 from ..pure.tool_router import call_tool as call_tool_fn
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,25 @@ async def init_analysis_node(
                 logger.info(f"[init_analysis] Clock period: {state.timing.clock_period:.3f} ns")
         except Exception as e:
             logger.warning(f"[init_analysis] Could not get clock period: {e}")
+
+        # Check hold timing (competition requirement: hold WNS >= 0)
+        try:
+            hold_report = await call_tool_fn(
+                "vivado_run_tcl",
+                {"command": "report_timing_summary -delay_type min -max_paths 100"},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            hold = parse_hold_timing(hold_report)
+            if hold.get("hold_wns") is not None:
+                if hold["hold_wns"] < 0:
+                    logger.warning(
+                        f"[init_analysis] HOLD VIOLATED: WNS={hold['hold_wns']:.3f}ns, "
+                        f"failing={hold.get('hold_failing')}"
+                    )
+                else:
+                    logger.info(f"[init_analysis] Hold timing MET: WNS={hold['hold_wns']:.3f}ns")
+        except Exception as e:
+            logger.warning(f"[init_analysis] Hold timing check failed: {e}")
 
         # Step 5: Get critical high fanout nets
         logger.info("[init_analysis] Identifying high fanout nets...")
