@@ -11,7 +11,6 @@ BEL pin connections on LUT cells without changing LUT equation (INIT string).
 
 import logging
 import os
-import time
 from typing import Any
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec

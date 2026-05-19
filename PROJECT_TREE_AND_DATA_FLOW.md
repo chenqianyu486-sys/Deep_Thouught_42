@@ -106,6 +106,8 @@ fpl26_optimization_contest/
 │   ├── register_retiming_strategy.py  # Skill类：Register Retiming（分析+执行，pipeline FF插入）
 │   ├── pin_swapping_optimization_strategy.py  # Skill类：Pin Swapping Optimization（LUT引脚交换）
 │   ├── net_swapping_strategy.py      # Skill类：Net Swapping（分析+执行，SLICE内BEL引脚网络交换）
+│   ├── lut_cascade_flattening_strategy.py  # Skill类：LUT Cascade Flattening（non-idempotent，LUT串联展平）
+│   ├── critical_path_cell_replication_strategy.py  # Skill类：Critical Path Cell Replication（non-idempotent）
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -405,6 +407,8 @@ skills/
 ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
 ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
+├── lut_cascade_flattening_strategy.py  # Skill类：LUT Cascade Flattening
+├── critical_path_cell_replication_strategy.py  # Skill类：Critical Path Cell Replication
 ├── SKILL_SPECIFICATION.md        # Skill规范文档
 ├── descriptors/                 # 自动生成的JSON描述符文件（含test_mock_skill）
 ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -425,6 +429,8 @@ skills/
 ├── optimization.pin_swapping_strategy@1.0.0  # Pin Swapping Optimization（LUT引脚交换，getBELPins已修复）
 ├── analysis.analyze_net_swapping@1.0.0  # Net Swapping 分析（READ-ONLY）
 ├── optimization.execute_net_swapping@1.0.0  # Net Swapping 执行（non-idempotent）
+├── optimization.lut_cascade_flattening@1.0.0  # LUT Cascade Flattening（non-idempotent，LUT串联展平）
+├── optimization.critical_path_cell_replication_strategy@1.0.0  # Critical Path Cell Replication（non-idempotent）
 └── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
 
 Skill 超时映射（三层）:
@@ -444,6 +450,7 @@ Skill 超时映射（三层）:
 | pin_swapping_strategy | **120000** (2min) | 120000 / 240000 | - |
 | analyze_net_swapping | **60000** (1min) | 60000 / 120000 | - |
 | execute_net_swapping | **120000** (2min) | 120000 / 240000 | - |
+| lut_cascade_flattening | **300000** (5min) | 300000 / 600000 | - |
 
 三层超时的作用域:
 1. **@skill decorator** — 技能框架内部心跳检测阈值（skills/*.py）

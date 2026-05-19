@@ -177,6 +177,7 @@ def analyze_congestion(
             default=10,
         ),
     ],
+    required_context=["design"],
 )
 class CongestionAnalysisSkill(Skill):
     """Routing Congestion Analysis Skill."""

@@ -205,6 +205,9 @@ def execute_lut_cascade_flattening(
     except Exception as e:
         return {"error": f"LUT optimization failed: {e}"}
 
+    if not isinstance(opt_result, dict):
+        return {"error": f"LUT optimization returned invalid result: {type(opt_result).__name__}"}
+
     optimized_count = opt_result.get("optimized_count", 0)
 
     # Step 5: Write post-flatten checkpoint
