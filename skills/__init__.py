@@ -46,6 +46,8 @@ from skills import pblock_strategy
 from skills import physopt_strategy
 from skills import fanout_strategy
 from skills import congestion_analysis
+from skills import pin_swapping_optimization_strategy
+from skills import critical_path_cell_replication_strategy
 
 __all__ = [
     "Skill",

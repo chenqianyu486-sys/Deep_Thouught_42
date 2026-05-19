@@ -1702,8 +1702,9 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
         return {"error": "No design loaded. Use read_checkpoint first."}
 
     try:
-        logger.info("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f",
-                    len(pin_paths), _current_design is not None, detour_threshold)
+        logger.info("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f, pin_paths_sample=%s",
+                    len(pin_paths), _current_design is not None, detour_threshold,
+                    str(pin_paths[:3]) if pin_paths else "EMPTY")
 
         from skills import SkillRegistry, SkillContext
 
@@ -2121,6 +2122,181 @@ def execute_fanout_strategy(
         return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
         logger.error(f"Error executing fanout strategy: {e}")
+        return {"error": str(e)}
+
+
+def flatten_lut_cascade(
+    critical_paths: list[list[str]],
+    min_cascade_depth: int = 3,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "lut_cascade",
+) -> dict:
+    """Flatten LUT cascades on critical paths using LUTInputConeOpt.
+
+    Identifies LUT chains deeper than min_cascade_depth and merges them
+    to reduce logic depth on timing-critical paths.
+
+    Args:
+        critical_paths: List of paths, each path is a list of cell names
+        min_cascade_depth: Minimum LUT levels to consider a cascade (default 3)
+        temp_dir: Directory for checkpoint files
+        checkpoint_prefix: Checkpoint filename prefix
+
+    Returns:
+        dict with cascades_found, optimized_count, checkpoint_path, etc.
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("lut_cascade_flattening")
+        if skill is None:
+            return {"error": "Skill 'lut_cascade_flattening' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            min_cascade_depth=min_cascade_depth,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data  # Already a plain dict
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error flattening LUT cascades: {e}")
+        return {"error": str(e)}
+
+
+def optimize_pin_swapping(
+    critical_paths: list[dict],
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "pin_swap",
+) -> dict:
+    """Execute pin swapping optimization on critical path LUTs.
+
+    Remaps critical LUT input signals to faster physical pins (A5/A6)
+    to reduce critical path delay. Saves checkpoint before and after.
+
+    Args:
+        critical_paths: List of path descriptors with cells/pins info
+        temp_dir: Directory for checkpoint
+        checkpoint_prefix: Checkpoint filename prefix
+
+    Returns:
+        Dictionary with swap results and checkpoint path
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("pin_swapping_strategy")
+        if skill is None:
+            return {"error": "Skill 'pin_swapping_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in pin swapping: {e}")
+        return {"error": str(e)}
+
+
+def replicate_critical_cells(
+    critical_paths: list[dict],
+    delay_threshold: float = 0.3,
+    max_replications: int = 10,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "cell_replication",
+) -> dict:
+    """Replicate high-delay cells on critical paths to reduce timing.
+
+    Identifies cells with delay > threshold on critical paths, replicates them
+    using RapidWright FanOutOptimization (splits high-fanout nets driven by
+    those cells), and writes a checkpoint. The caller must re-route and verify
+    timing in Vivado.
+
+    Args:
+        critical_paths: List of path dicts, each with:
+            {"cells": [{"name": str, "delay": float, "type": str, "fanout": int}, ...]}
+        delay_threshold: Minimum delay (ns) to flag a cell for replication (default 0.3)
+        max_replications: Maximum number of cells to replicate (default 10)
+        temp_dir: Directory for checkpoint output (default "temp")
+        checkpoint_prefix: Checkpoint filename prefix (default "cell_replication")
+
+    Returns:
+        Dictionary with replications_performed, failed_count, checkpoint_path,
+        and per-cell replication results
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("critical_path_cell_replication_strategy")
+        if skill is None:
+            return {"error": "Skill 'critical_path_cell_replication_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            delay_threshold=delay_threshold,
+            max_replications=max_replications,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error replicating critical cells: {e}")
         return {"error": str(e)}
 
 

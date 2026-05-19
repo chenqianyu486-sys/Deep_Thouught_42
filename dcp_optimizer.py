@@ -2462,6 +2462,12 @@ class DCPOptimizer(DCPOptimizerBase):
             return "PhysOpt"
         if "fanout_strategy" in tool_str or "optimize_fanout" in tool_str:
             return "Fanout"
+        if "flatten_lut_cascade" in tool_str or "lut_cascade" in tool_str:
+            return "LUTCascade"
+        if "replicate_critical_cells" in tool_str or "cell_replication" in tool_str:
+            return "CellReplication"
+        if "optimize_pin_swapping" in tool_str or "pin_swap" in tool_str:
+            return "PinSwap"
         if "place_design" in tool_str or "route_design" in tool_str:
             return "PlaceRoute"
         if any(t in tool_str for t in ["report_", "get_", "extract_", "analyze_"]):

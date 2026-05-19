@@ -64,6 +64,9 @@ COMPLEX_TOOLS = {
     "optimize_lut_input_cone",
     "analyze_congestion",
     "route_design_rwroute",
+    "flatten_lut_cascade",
+    "optimize_pin_swapping",
+    "replicate_critical_cells",
 }
 
 
@@ -642,6 +645,58 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="flatten_lut_cascade",
+            description="""Flatten LUT cascades on critical paths to reduce logic depth.
+
+            Identifies chains of >3 LUTs in series on critical paths and merges them
+            using RapidWright LUTInputConeOpt. Saves checkpoint before mutation.
+
+            MUTATING: merges LUT cells and writes checkpoint files.
+            Trigger: Critical paths have >3 LUT levels in series (logic depth bottleneck).
+            After this, run vivado_open_checkpoint, vivado_route_design,
+            vivado_report_timing_summary to verify WNS improvement.
+
+            LIMITATIONS:
+            - NOT suitable for neural network / wide-datapath designs where logic cones
+              have 75+ inputs (exceeds 6-input LUT physical limit).
+
+            RESULT INTERPRETATION:
+            - optimized_count > 0: cones were combined; re-route and verify timing.
+            - optimized_count == 0: check cascades_found. If 0, no deep cascades exist.
+              If >0 but 0 optimized, the LUT cones may be too wide for this tool.
+
+            Priority: Call when WNS is stuck and critical paths have >3 LUT levels.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]"
+                    },
+                    "min_cascade_depth": {
+                        "type": "integer",
+                        "description": "Minimum LUT levels to consider a cascade (default: 3)",
+                        "default": 3
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "lut_cascade"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
             name="analyze_congestion",
             description="""Analyze FPGA fabric tile utilization to detect routing congestion hotspots.
 
@@ -698,7 +753,116 @@ async def list_tools() -> list[Tool]:
                     }
                 }
             }
-        )
+        ),
+        Tool(
+            name="optimize_pin_swapping",
+            description="""Swap LUT input pins to remap critical signals to faster physical pins (A5/A6).
+
+            Analyzes critical paths to find LUT cells whose input pins can be remapped
+            to faster physical BEL pins (A5/A6 are typically fastest on UltraScale).
+            Saves checkpoint before mutation; returns swap results + checkpoint path.
+
+            MUTATING: changes cell pin connections, writes checkpoint file.
+            Trigger: WNS stuck around -0.3ns, LUT input pins have delay variation.
+            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+
+            Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre_swap_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cells": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "List of cell names on the path"
+                                }
+                            }
+                        },
+                        "description": "List of critical path descriptors with cell names"
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "pin_swap"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="replicate_critical_cells",
+            description="""Replicate high-delay cells on critical paths to reduce fanout and load.
+
+            Identifies cells with delay > threshold on critical paths, replicates them
+            using RapidWright FanOutOptimization (splits high-fanout nets driven by
+            those cells), and writes a checkpoint.
+
+            MUTATING: changes net topology, writes checkpoint file.
+            Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout.
+            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+
+            Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre-replication checkpoint.
+            Max 10 cells replicated per call (safety cap).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cells": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string", "description": "Cell name"},
+                                            "delay": {"type": "number", "description": "Cell delay in ns"},
+                                            "type": {"type": "string", "description": "Cell type (LUT6, FDRE, etc.)"},
+                                            "fanout": {"type": "integer", "description": "Output fanout count"}
+                                        },
+                                        "required": ["name", "delay"]
+                                    },
+                                    "description": "List of cells on the critical path with timing info"
+                                }
+                            },
+                            "required": ["cells"]
+                        },
+                        "description": "List of critical path descriptors"
+                    },
+                    "delay_threshold": {
+                        "type": "number",
+                        "description": "Minimum delay (ns) to flag a cell for replication (default: 0.3)",
+                        "default": 0.3
+                    },
+                    "max_replications": {
+                        "type": "integer",
+                        "description": "Maximum number of cells to replicate (default: 10)",
+                        "default": 10
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "cell_replication"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
     ]
 
 
@@ -865,6 +1029,17 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
             )
 
+        elif name == "flatten_lut_cascade":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.flatten_lut_cascade(
+                    critical_paths=arguments["critical_paths"],
+                    min_cascade_depth=arguments.get("min_cascade_depth", 3),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "lut_cascade"),
+                )
+
         elif name == "analyze_congestion":
             from skills.congestion_analysis import analyze_congestion
             result = analyze_congestion(
@@ -878,6 +1053,28 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 directive=arguments.get("directive", "TimingDriven"),
                 timeout_minutes=arguments.get("timeout_minutes", 360),
             )
+
+        elif name == "optimize_pin_swapping":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
+            else:
+                result = rw.optimize_pin_swapping(
+                    critical_paths=arguments["critical_paths"],
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "pin_swap"),
+                )
+
+        elif name == "replicate_critical_cells":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.replicate_critical_cells(
+                    critical_paths=arguments["critical_paths"],
+                    delay_threshold=arguments.get("delay_threshold", 0.3),
+                    max_replications=arguments.get("max_replications", 10),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "cell_replication"),
+                )
 
         else:
             result = {"error": f"Unknown tool: {name}"}

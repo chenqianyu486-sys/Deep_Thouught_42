@@ -24,7 +24,7 @@ worker:
 
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name
+  model_name: "deepseek/deepseek-v4-flash"    # Same as worker to reduce cost
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
