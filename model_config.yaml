@@ -20,8 +20,7 @@ worker:
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
     - "stepfun/step-3.5-flash"
     - "xiaomi/mimo-v2-flash"
-  cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
-
+  cost_hard_limit: 2.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
   model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name

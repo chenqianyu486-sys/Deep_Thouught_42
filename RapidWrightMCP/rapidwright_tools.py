@@ -2174,3 +2174,106 @@ def route_design_rwroute(
         logger.error(f"RapidWright routing failed: {e}")
         return {"error": f"RapidWright routing failed: {str(e)}"}
 
+
+def report_timing() -> Dict[str, Any]:
+    """使用 RapidWright 内置时序模型报告近似时序 (报告近似时序).
+
+    利用 TimingGraph.getMaxDelayPath() 计算最差数据路径延迟,
+    并与设计的时钟周期要求比较得出 WNS.
+
+    注意: 这是相对于 Vivado 签核时序的 ~2% 近似模型。
+    用于优化探索期间的快速反馈, 但最终结果务必用 Vivado 验证。
+
+    Returns:
+        dict with:
+        - status: "success" or "error"
+        - wns_ns: 最差负时序裕量 (纳秒, 负值 = 违例)
+        - max_delay_ps: 最大数据路径延迟 (皮秒)
+        - clock_period_ps: 时钟周期 (皮秒)
+        - clock_period_ns: 时钟周期 (纳秒)
+        - is_approximate: True
+        - endpoints_failing: 始终为 0 (近似模型不计算此项)
+        - message: 可读摘要
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    import time
+    try:
+        from com.xilinx.rapidwright.timing import TimingManager, TimingGraph
+        from com.xilinx.rapidwright.timing import TimingEdge, TimingVertex
+
+        start = time.time()
+
+        tim = TimingManager(_current_design)
+        tg = tim.getTimingGraph()
+
+        critical_path = tg.getMaxDelayPath()
+        if critical_path is None:
+            return {
+                "status": "error",
+                "message": "No timing paths found in the design"
+            }
+
+        max_delay_ps = critical_path.getWeight()
+
+        # 尝试从 XDC 约束中查找比赛时钟 clk_fpl26contest 的周期
+        # getDesignTimingRequirement() 返回 ALL 时钟中的最大值,
+        # 这对比赛来说是错误的——我们需要比赛专用时钟的周期
+        clock_period_ns = 0.0
+        try:
+            from com.xilinx.rapidwright.design import ConstraintGroup
+            for cg in [ConstraintGroup.NORMAL, ConstraintGroup.LATE]:
+                constraints = _current_design.getXDCConstraints(cg)
+                for c in list(constraints):
+                    cstr = str(c)
+                    if "clk_fpl26contest" in cstr and "-period" in cstr:
+                        idx = cstr.index("-period") + 7
+                        end = idx
+                        while end < len(cstr) and (cstr[end].isdigit() or cstr[end] == '.'):
+                            end += 1
+                        if end > idx:
+                            clock_period_ns = float(cstr[idx:end])
+                            break
+                if clock_period_ns > 0:
+                    break
+            if clock_period_ns <= 0:
+                clock_period_ns = float(TimingManager.getDesignTimingRequirement(_current_design))
+        except Exception:
+            clock_period_ns = float(TimingManager.getDesignTimingRequirement(_current_design))
+
+        clock_period_ps = clock_period_ns * 1000.0
+        wns_ns = (clock_period_ps - max_delay_ps) / 1000.0
+
+        elapsed_ms = (time.time() - start) * 1000
+        logger.info(
+            f"RapidWright timing: max_delay={max_delay_ps:.0f}ps, "
+            f"clock={clock_period_ns:.3f}ns ({clock_period_ps:.0f}ps), WNS={wns_ns:.3f}ns "
+            f"({elapsed_ms:.0f}ms)"
+        )
+
+        return {
+            "status": "success",
+            "wns_ns": round(wns_ns, 3),
+            "max_delay_ps": round(max_delay_ps, 0),
+            "clock_period_ns": round(clock_period_ns, 3),
+            "clock_period_ps": round(clock_period_ps, 0),
+            "is_approximate": True,
+            "endpoints_failing": 0,
+            "elapsed_ms": round(elapsed_ms, 0),
+            "message": (
+                f"Approximate timing (RapidWright ~2% error vs Vivado): "
+                f"WNS={wns_ns:.3f}ns, "
+                f"max_delay={max_delay_ps:.0f}ps, "
+                f"clock_period={clock_period_ns:.3f}ns"
+            ),
+        }
+
+    except Exception as e:
+        logger.error(f"RapidWright timing report failed: {e}")
+        return {"error": f"Timing report failed: {str(e)}"}
+

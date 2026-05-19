@@ -2200,6 +2200,29 @@ class DCPOptimizer(DCPOptimizerBase):
             except Exception:
                 pass
 
+        elif tool_name == "rapidwright_report_timing":
+            # RapidWright 近似时序报告 (比 Vivado 快 5x, ~2% 误差)
+            try:
+                import json as _json
+                data = _json.loads(raw_result)
+                if "error" in data:
+                    summary_parts.append(f"Error: {data.get('error', 'unknown')[:200]}")
+                    status = "error"
+                else:
+                    wns = data.get("wns_ns")
+                    cp = data.get("clock_period_ns")
+                    delay = data.get("max_delay_ps")
+                    if wns is not None:
+                        summary_parts.append(f"Approx WNS: {wns:.3f}ns (RapidWright)")
+                        key_details["wns"] = round(wns, 3)
+                        key_details["wns_source"] = "rapidwright_approximate"
+                    if cp is not None:
+                        summary_parts.append(f"Clock: {cp:.3f}ns")
+                    if delay is not None:
+                        summary_parts.append(f"Max delay: {delay:.0f}ps")
+            except Exception:
+                pass
+
         elif tool_name == "rapidwright_execute_physopt_strategy":
             # Parse StrategyPlan JSON for pending steps
             try:

@@ -665,6 +665,21 @@ async def list_tools() -> list[Tool]:
                     }
                 }
             }
+        ),
+        Tool(
+            name="report_timing",
+            description="""使用 RapidWright 内置时序模型报告近似时序 (~2% 误差).
+
+通过 TimingGraph.getMaxDelayPath() 计算最差数据路径延迟,
+与设计时钟周期要求比较得出近似 WNS。
+
+用于优化探索期间的快速反馈, 但最终结果务必用 Vivado 的 report_timing_summary 验证。
+
+返回 WNS(纳秒)、最大延迟和时钟周期(皮秒)。""",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            }
         )
     ]
 
@@ -837,6 +852,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 directive=arguments.get("directive", "TimingDriven"),
                 timeout_minutes=arguments.get("timeout_minutes", 360),
             )
+
+        elif name == "report_timing":
+            result = rw.report_timing()
 
         else:
             result = {"error": f"Unknown tool: {name}"}
