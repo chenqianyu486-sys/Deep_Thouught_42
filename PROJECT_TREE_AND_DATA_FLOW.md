@@ -137,7 +137,7 @@ OptimizerState (可变dataclass)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives
 ├── ModelState     — 模型选择/fallback/交接提示词
 ├── CostState      — token用量/成本追踪
-├── ContextState   — 压缩指标/raw_tool_outputs/重复检测
+├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)
 └── ControlState   — 退出条件/路径/step_state
 ```
 
@@ -168,6 +168,8 @@ llm_call → evaluate_flow → [条件: flow_control?]
 - **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
 - **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`，并清除 `user_exit_requested` 标志防止死循环
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
+- **V2 上下文数据流**: `compress_context()` 从 `OptimizerState`（canonical）读取 `iteration`/`best_wns`/`current_wns`/`clock_period`/`initial_wns`，而非从 `MemoryManager`（shadow）。`failed_strategies` 仍从 `deps.compat` 读取（由 `iteration_end_node` 调用 `record_failure()` 填充）。上下文快照的 `failed_strategy_names` 和 `tool_call_details` 从 `deps.compat` 读取。
+- **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`。`_sync_state_to_memory_manager()` 已删除（原实现访问不存在的 `_state` 属性，始终为空操作）。
 
 ### 1.2 V1→V2 迁移映射
 

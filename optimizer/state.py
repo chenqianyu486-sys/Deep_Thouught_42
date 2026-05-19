@@ -118,15 +118,8 @@ class CostState:
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
-    compression_hard_count: int = 0
-    compression_soft_count: int = 0
-    compression_skipped: int = 0
-    compression_details: list[dict] = field(default_factory=list)
     raw_tool_outputs: dict[tuple[int, int], tuple[str, str]] = field(default_factory=dict)
     raw_tool_output_max: int = 50
-    recent_tools: list[tuple[str, float]] = field(default_factory=list)
-    skill_invocation_log: list[dict] = field(default_factory=list)
-    skill_recommendation_log: list[dict] = field(default_factory=list)
 
 
 @dataclass

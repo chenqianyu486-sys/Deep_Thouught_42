@@ -36,9 +36,6 @@ async def prepare_context_node(
     # 1. Compress context if memory_manager available
     if deps.memory_manager is not None:
         try:
-            # Sync state to memory manager
-            _sync_state_to_memory_manager(state, deps.memory_manager)
-
             # Trigger compression if over threshold
             if compress_context(state, deps):
                 state.context.compression_count += 1
@@ -65,19 +62,23 @@ async def prepare_context_node(
         elapsed = time.time() - state.control.start_time
         remaining = max(0, state.control.wall_clock_timeout - elapsed)
 
+    # Read from compat (MemoryManager) for data that lives there
+    failed_strategy_names = deps.compat.failed_strategy_names if deps.compat else []
+    tool_call_details = deps.compat.tool_call_details if deps.compat else []
+
     snapshot = build_context_snapshot(
         current_wns=current_wns,
         best_wns=best_wns,
         best_wns_iteration=state.timing.best_wns_iteration,
         strategy_sequence=state.iteration.strategy_sequence,
-        failed_strategy_names=[],  # Will be populated from compat
+        failed_strategy_names=failed_strategy_names,
         global_no_improvement=state.iteration.global_no_improvement,
         cost_hard_limit=state.cost.cost_hard_limit,
         total_cost=state.cost.total_cost,
         elapsed_time=elapsed,
         remaining_time=remaining,
         iteration_narratives=state.iteration.narratives,
-        tool_call_details=[],  # Will be populated from compat
+        tool_call_details=tool_call_details,
     )
 
     # Inject snapshot into messages
@@ -90,26 +91,3 @@ async def prepare_context_node(
             logger.warning(f"[prepare_context] Snapshot injection failed: {e}")
 
     return NodeName.LLM_TOOL_LOOP
-
-
-def _sync_state_to_memory_manager(state: OptimizerState, memory_manager) -> None:
-    """Sync optimizer state to memory manager for accurate compression."""
-    try:
-        if hasattr(memory_manager, '_state'):
-            mm_state = memory_manager._state
-            mm_state.best_wns = state.timing.best_wns
-            mm_state.latest_wns = state.timing.latest_wns
-            mm_state.iteration = state.iteration.current
-    except Exception:
-        pass
-
-
-def _estimate_tokens(deps: NodeDeps) -> int:
-    """Estimate current token count from messages."""
-    try:
-        if deps.compat is not None and hasattr(deps.compat, '_context_estimator'):
-            messages = deps.compat.messages
-            return deps.compat._context_estimator.estimate_from_messages(messages)
-    except Exception:
-        pass
-    return 0

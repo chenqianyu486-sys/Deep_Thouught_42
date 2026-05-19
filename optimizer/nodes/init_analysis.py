@@ -252,6 +252,16 @@ async def init_analysis_node(
         state.control.done_reason = f"init_analysis_failed: {e}"
         return NodeName.SAVE_OUTPUT
 
+    # Sync initial values to MemoryManager for compression context
+    if deps.compat is not None:
+        try:
+            if state.timing.initial_wns is not None:
+                deps.compat.set_initial_wns(state.timing.initial_wns)
+            if state.timing.clock_period is not None:
+                deps.compat.set_clock_period(state.timing.clock_period)
+        except Exception as e:
+            logger.warning(f"[init_analysis] Failed to sync initial values to MemoryManager: {e}")
+
     logger.info(
         f"[init_analysis] Complete: WNS={state.timing.initial_wns}, "
         f"best_wns={state.timing.best_wns:.3f}"

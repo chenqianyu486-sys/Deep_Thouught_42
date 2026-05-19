@@ -243,7 +243,10 @@ class V2TestMode:
             return {}
 
         has_error = isinstance(data, dict) and "error" in data
-        self.skill_test_results.append({"skill": skill_name, "success": not has_error, "data": data})
+        entry = {"skill": skill_name, "success": not has_error, "data": data}
+        if has_error:
+            entry["error"] = data["error"]
+        self.skill_test_results.append(entry)
 
         if has_error:
             print(f"[TEST] ⚠ Skill '{skill_name}' returned error: {data['error']}")
@@ -570,10 +573,25 @@ class V2TestMode:
                     self.verify_skill_result("analyze_net_detour", skill_result)
                 else:
                     print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
+                    try:
+                        _data = json.loads(pins_result)
+                        print(f"[TEST] debug_has_slack={_data.get('debug_has_slack', '?')}")
+                        print(f"[TEST] debug_report_length={_data.get('debug_report_length', '?')}")
+                        print(f"[TEST] debug_num_path_sections={_data.get('debug_num_slack_sections', '?')}")
+                        if "debug_per_path" in _data:
+                            print(f"[TEST] per-path debug: {_data['debug_per_path']}")
+                        report_snippet = _data.get("debug_timing_report", "")
+                        if report_snippet:
+                            print(f"[TEST] debug_timing_report:\n{report_snippet}")
+                    except Exception:
+                        print(f"[TEST] Raw pins_result: {str(pins_result)[:500]}")
+                    self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": "no pin paths in result"})
             else:
                 print("[TEST] ⚠ analyze_net_detour skipped: no output from extract_critical_path_pins")
+                self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": "no output from extract_critical_path_pins"})
         except Exception as e:
             print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
+            self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": str(e)})
 
         if self._check_test_exit("Skill 2"):
             return False
@@ -590,6 +608,7 @@ class V2TestMode:
             self.verify_skill_result("smart_region_search", skill_result)
         except Exception as e:
             print(f"[TEST] ⚠ smart_region_search skipped: {e}")
+            self.skill_test_results.append({"skill": "smart_region_search", "success": False, "error": str(e)})
 
         if self._check_test_exit("Skill 3"):
             return False
@@ -607,6 +626,7 @@ class V2TestMode:
             self.verify_skill_result("analyze_pblock_region", skill_result)
         except Exception as e:
             print(f"[TEST] ⚠ analyze_pblock_region skipped: {e}")
+            self.skill_test_results.append({"skill": "analyze_pblock_region", "success": False, "error": str(e)})
 
         if self._check_test_exit("Skill 4"):
             return False
@@ -623,6 +643,7 @@ class V2TestMode:
             self.verify_skill_result("execute_physopt_strategy", skill_result)
         except Exception as e:
             print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
+            self.skill_test_results.append({"skill": "execute_physopt_strategy", "success": False, "error": str(e)})
 
         if self._check_test_exit("Skill 5"):
             return False
@@ -649,6 +670,7 @@ class V2TestMode:
             self.verify_skill_result("execute_fanout_strategy", skill_result)
         except Exception as e:
             print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
+            self.skill_test_results.append({"skill": "execute_fanout_strategy", "success": False, "error": str(e)})
 
         if self._check_test_exit("Skill 6"):
             return False
@@ -695,12 +717,16 @@ class V2TestMode:
                             self.verify_skill_result("optimize_cell_placement", sr)
                         else:
                             print("[TEST] ⚠ optimize_cell_placement skipped: no cell names")
+                            self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": "no cell names"})
                     else:
                         print("[TEST] ⚠ optimize_cell_placement skipped: no cell names")
+                        self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": "no cell names"})
                 except Exception as e2:
                     print(f"[TEST] ⚠ optimize_cell_placement skipped (fallback): {e2}")
+                    self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": str(e2)})
         except Exception as e:
             print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
+            self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": str(e)})
 
         passed = sum(1 for r in self.skill_test_results if r.get("success"))
         total = len(self.skill_test_results)
@@ -1067,6 +1093,8 @@ class V2TestMode:
                 mark = "✓" if r.get("success") else "✗"
                 elapsed = r.get("elapsed", 0)
                 print(f"  [{mark}] {r['tool']}  ({elapsed:.1f}s)")
+                if not r.get("success") and r.get("error"):
+                    print(f"       error: {r['error']}")
             print()
 
         # Skill test results
@@ -1079,6 +1107,8 @@ class V2TestMode:
             for r in self.skill_test_results:
                 mark = "✓" if r.get("success") else "✗"
                 print(f"  [{mark}] {r['skill']}")
+                if not r.get("success") and r.get("error"):
+                    print(f"       error: {r['error']}")
             print()
 
 

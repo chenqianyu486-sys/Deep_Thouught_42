@@ -55,9 +55,10 @@ async def iteration_end_node(
     update_iteration_counters(state, wns_improved, state.model.current_model)
 
     # Build narrative
+    tool_call_details = deps.compat.tool_call_details if deps.compat else []
     tools_this_iter = [
         t.get('tool_name', '')
-        for t in (getattr(deps, '_tool_call_details', []) or [])
+        for t in tool_call_details
         if t.get('iteration') == state.iteration.current
     ]
     strategy_label = infer_strategy_from_tools(tools_this_iter)
@@ -78,11 +79,22 @@ async def iteration_end_node(
     if len(state.iteration.narratives) > 20:
         state.iteration.narratives.pop(0)
 
-    # Track strategy sequence
+    # Track strategy sequence and record failures
     if strategy_label and strategy_label not in ("Information", "Unknown"):
         state.iteration.strategy_sequence.append(strategy_label)
         if len(state.iteration.strategy_sequence) > 10:
             state.iteration.strategy_sequence.pop(0)
+
+        # Record failure if iteration didn't improve and we have a known strategy
+        if not wns_improved and deps.compat is not None:
+            reason = "strategy_ineffective" if state.control.done_reason == "switch_strategy" else "strategy_ineffective"
+            deps.compat.record_failure(
+                strategy=strategy_label,
+                reason=reason,
+                tool=", ".join(tools_this_iter[:3]),
+                detail=f"Iteration {state.iteration.current}: no WNS improvement",
+            )
+            logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
 
     # Pre-decide next iteration's model
     context_complexity = estimate_context_complexity(
@@ -100,15 +112,23 @@ async def iteration_end_node(
 
     # Generate handoff prompt
     current_wns = state.timing.latest_wns
+    failed_strategies = deps.compat.failed_strategies if deps.compat else []
     handoff = build_handoff_prompt(
         state=state,
         tier="planner" if next_model == state.model.planner_model else "worker",
-        tool_call_details=getattr(deps, '_tool_call_details', []) or [],
-        failed_strategies=getattr(deps, '_failed_strategies', []) or [],
+        tool_call_details=tool_call_details,
+        failed_strategies=failed_strategies,
         current_wns=current_wns,
     )
     state.model.iteration_handoff_prompt = handoff
     state.model.iteration_handoff_injected = False
+
+    # Advance MemoryManager's iteration counter (syncs with state.iteration.current)
+    if deps.compat is not None:
+        try:
+            deps.compat.advance_iteration()
+        except Exception as e:
+            logger.warning(f"[iteration_end] advance_iteration failed: {e}")
 
     logger.info(
         f"[iteration_end] Iteration {state.iteration.current} complete: "

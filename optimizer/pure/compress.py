@@ -134,17 +134,21 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
             )
 
         # 4. Build CompressionContext
+        #    Read from OptimizerState (canonical) instead of MemoryManager (shadow),
+        #    because V2 never populates MemoryManager's internal fields via compat layer.
+        #    Only failed_strategies still comes from compat (populated by record_failure()).
+        failed_strategies = deps.compat.failed_strategies if deps.compat else []
         context = CompressionContext(
             current_tokens=current_tokens,
             threshold_tokens=config.soft_threshold,
             hard_limit_tokens=config.hard_limit,
-            failed_strategies=deps.compat.failed_strategies,
-            tool_call_details=deps.compat.tool_call_details,
-            best_wns=deps.compat.best_wns,
-            initial_wns=deps.compat.initial_wns,
+            failed_strategies=failed_strategies,
+            tool_call_details=[],  # Compressor never reads this field
+            best_wns=state.timing.best_wns if state.timing.best_wns > float('-inf') else None,
+            initial_wns=state.timing.initial_wns,
             current_wns=state.timing.latest_wns,
-            iteration=deps.compat.iteration,
-            clock_period=deps.compat.clock_period if hasattr(deps.compat, 'clock_period') else None,
+            iteration=state.iteration.current,
+            clock_period=state.timing.clock_period,
             model_context_config=config,
             force_aggressive=force_aggressive,
         )

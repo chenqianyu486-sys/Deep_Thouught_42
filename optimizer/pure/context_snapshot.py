@@ -66,10 +66,6 @@ def build_context_snapshot(
             strategy_parts.append(f"{s} (ACTIVE)")
     active_strategy = " -> ".join(strategy_parts) if strategy_parts else "None"
 
-    # --- failed_strategies ---
-    # Note: failed_strategies list comes from compat, not passed here
-    # The caller should pass failed_strategy_names separately
-
     # --- do_not_repeat ---
     dnr_entries = []
     tool_stats: dict[str, list[float]] = {}
@@ -90,7 +86,12 @@ def build_context_snapshot(
     lines.append(f'current_best_wns: "{cb_wns}"')
     lines.append(f'remaining_violation: "{remaining_str}"')
     lines.append(f'active_strategy: "{active_strategy}"')
-    lines.append("failed_strategies: []")
+    if failed_strategy_names:
+        lines.append("failed_strategies:")
+        for fs in failed_strategy_names[-5:]:
+            lines.append(f'  - "{fs}"')
+    else:
+        lines.append("failed_strategies: []")
     if dnr_entries:
         lines.append("do_not_repeat:")
         lines.extend(dnr_entries[:5])
