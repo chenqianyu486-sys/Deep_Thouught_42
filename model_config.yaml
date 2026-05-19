@@ -38,6 +38,5 @@ planner:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "qwen/qwen3.6-plus"
-    - "xiaomi/mimo-v2.5-pro"
+    - "xiaomi/mimo-v2.5"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)
