@@ -1,0 +1,54 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "analysis.analyze_net_swapping@1.0.0",
+  "displayName": "Net Swapping Analysis",
+  "description": "Identify net swap candidates within SLICE sites. READ-ONLY. Finds pairs of LUT cells with identical INIT strings where swapping input nets would reduce wirelength. Use before execute_net_swapping.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 60000,
+    "maxMs": 120000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "max_candidates": {
+        "type": "integer",
+        "description": "Maximum candidates to return. Default: 20.",
+        "default": 20
+      },
+      "wirelength_threshold": {
+        "type": "number",
+        "description": "Minimum wirelength reduction to be a candidate. Default: 50.",
+        "default": 50.0
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

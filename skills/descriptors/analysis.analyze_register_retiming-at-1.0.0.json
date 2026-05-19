@@ -1,0 +1,61 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "analysis.analyze_register_retiming@1.0.0",
+  "displayName": "Register Retiming Analysis",
+  "description": "Identify FF-to-FF segments with deep combinational logic for register retiming insertion. READ-ONLY. Use before execute_register_retiming. Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs between FFs).",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 60000,
+    "maxMs": 120000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "critical_paths": {
+        "type": "array",
+        "description": "List of path dicts from Vivado extract_critical_path_pins. Each dict has 'pin_paths' key with pin path strings."
+      },
+      "delay_threshold": {
+        "type": "number",
+        "description": "Minimum combinational delay (ns) to flag a segment.",
+        "default": 0.5
+      },
+      "min_chain_depth": {
+        "type": "integer",
+        "description": "Minimum LUT chain depth to consider.",
+        "default": 2
+      }
+    },
+    "required": [
+      "critical_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

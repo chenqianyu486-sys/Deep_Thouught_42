@@ -1,0 +1,72 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.execute_register_retiming@1.0.0",
+  "displayName": "Register Retiming Execution",
+  "description": "Insert pipeline registers on deep combinational chains to reduce critical path delay. MUTATING. Side effects: new FF cells added, net topology changed, checkpoint file written. Trigger: analyze_register_retiming identified candidates with deep chains. Targeted approach: only inserts FFs on specific paths, safer than global retiming. After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "cell_creation",
+    "net_topology",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 300000,
+    "maxMs": 600000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "retiming_candidates": {
+        "type": "array",
+        "description": "List of retiming candidate dicts from analyze_register_retiming."
+      },
+      "max_retiming_ops": {
+        "type": "integer",
+        "description": "Maximum FF insertions per call (safety cap).",
+        "default": 5
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for checkpoint output.",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Checkpoint filename prefix.",
+        "default": "register_retime",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "retiming_candidates"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

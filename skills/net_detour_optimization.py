@@ -319,22 +319,30 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
 
         # Analyze incoming net (input pin)
         if in_pin:
-            # Find the net connected to this input pin
             try:
                 hier_port = design.getNetlist().getHierPortInstFromName(f"{cell_name}/{in_pin}")
                 if hier_port:
                     net = hier_port.getNet()
                     if net:
-                        # Get all source pins of this net
-                        source_pins = net.getSourcePins()
-                        if source_pins and source_pins.size() > 0:
-                            src_pin = source_pins[0]
-                            ratio, src_pin_name, sink_pin_name = _detour_ratio(net, src_pin)
+                        # Find the SitePinInst matching this cell's input pin
+                        # (the previous code incorrectly passed source pin to _detour_ratio)
+                        cell_site_pins = cell.getSitePinInsts()
+                        sink_pin_inst = None
+                        for sp in cell_site_pins:
+                            if sp.getNet() == net and sp.getName() == in_pin:
+                                sink_pin_inst = sp
+                                break
+
+                        if sink_pin_inst:
+                            ratio, src_pin_name, sink_pin_name = _detour_ratio(net, sink_pin_inst)
                             if ratio > max_ratio:
                                 max_ratio = ratio
                                 source_pin_result = src_pin_name
                                 worst_sink_result = sink_pin_name
                             in_net_detour = ratio
+                        else:
+                            logger.debug("[DIAG] No matching SitePinInst for %s/%s on net %s",
+                                         cell_name, in_pin, net.getName())
             except Exception:
                 pass
 

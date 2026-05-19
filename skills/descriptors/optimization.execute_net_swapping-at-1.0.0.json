@@ -1,0 +1,67 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.execute_net_swapping@1.0.0",
+  "displayName": "Net Swapping Execution",
+  "description": "Swap equivalent nets between BEL pins within SLICE sites. MUTATING. Side effects: pin connections, intra-site routing, checkpoint file. Trigger: analyze_net_swapping identified candidates with wirelength reduction. Requires candidates list from analyze_net_swapping.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "pin_connections",
+    "intra_site_routing",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 120000,
+    "maxMs": 240000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "candidates": {
+        "type": "array",
+        "description": "List of swap candidates from analyze_net_swapping."
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for checkpoint output.",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Checkpoint filename prefix.",
+        "default": "net_swap",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "candidates"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

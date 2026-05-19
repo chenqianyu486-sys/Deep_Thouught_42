@@ -1786,6 +1786,39 @@ async def call_tool(name: str, arguments: dict):
         elif name == "phys_opt_design":
             timeout = arguments.get("timeout", 3600)  # 1 hour default for physical optimization
             
+            # === SAFETY GUARD: Block retiming directives/flags that cause functional errors ===
+            BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
+            BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
+            SAFE_DIRECTIVES = {
+                "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
+                "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
+                "AlternateReplication", "AggressiveFanoutOpt", "RQS",
+            }
+            
+            _phys_directive = arguments.get("directive")
+            if _phys_directive and _phys_directive in BLOCKED_DIRECTIVES:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Directive '{_phys_directive}' is BLOCKED because it causes functional errors "
+                        f"(retiming breaks design correctness). "
+                        f"Use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                    )
+                )]
+            
+            # Block dangerous boolean options
+            _phys_blocked = [opt for opt in BLOCKED_BOOL_OPTIONS if arguments.get(opt)]
+            if _phys_blocked:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Boolean option(s) BLOCKED: {', '.join(_phys_blocked)}. "
+                        f"These retiming-related options cause functional errors. "
+                        f"Remove them and use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                    )
+                )]
+            # === END SAFETY GUARD ===
+            
             cmd = "phys_opt_design"
             
             # Directive option (incompatible with other options)

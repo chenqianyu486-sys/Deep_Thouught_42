@@ -25,8 +25,7 @@ _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(_script_dir)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-# ===========================================================================
-
+# ====================================================================
 import rapidwright_tools as rw
 
 # Import sanitization utilities
@@ -62,7 +61,17 @@ COMPLEX_TOOLS = {
     "analyze_critical_path_spread",
     "analyze_fabric_for_pblock",
     "optimize_lut_input_cone",
+    "analyze_congestion",
+    "analyze_congestion_spreading",
+    "execute_congestion_spreading",
     "route_design_rwroute",
+    "flatten_lut_cascade",
+    "optimize_pin_swapping",
+    "replicate_critical_cells",
+    "analyze_register_retiming",
+    "execute_register_retiming",
+    "analyze_net_swapping",
+    "execute_net_swapping",
 }
 
 
@@ -641,6 +650,157 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="flatten_lut_cascade",
+            description="""Flatten LUT cascades on critical paths to reduce logic depth.
+
+            Identifies chains of >3 LUTs in series on critical paths and merges them
+            using RapidWright LUTInputConeOpt. Saves checkpoint before mutation.
+
+            MUTATING: merges LUT cells and writes checkpoint files.
+            Trigger: Critical paths have >3 LUT levels in series (logic depth bottleneck).
+            After this, run vivado_open_checkpoint, vivado_route_design,
+            vivado_report_timing_summary to verify WNS improvement.
+
+            LIMITATIONS:
+            - NOT suitable for neural network / wide-datapath designs where logic cones
+              have 75+ inputs (exceeds 6-input LUT physical limit).
+
+            RESULT INTERPRETATION:
+            - optimized_count > 0: cones were combined; re-route and verify timing.
+            - optimized_count == 0: check cascades_found. If 0, no deep cascades exist.
+              If >0 but 0 optimized, the LUT cones may be too wide for this tool.
+
+            Priority: Call when WNS is stuck and critical paths have >3 LUT levels.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]"
+                    },
+                    "min_cascade_depth": {
+                        "type": "integer",
+                        "description": "Minimum LUT levels to consider a cascade (default: 3)",
+                        "default": 3
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "lut_cascade"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="analyze_congestion",
+            description="""Analyze FPGA fabric tile utilization to detect routing congestion hotspots.
+
+            READ-ONLY analysis. Examines cell placement density per column to identify
+            regions with high resource utilization that may cause routing congestion.
+
+            Returns:
+            - severity: LOW/MODERATE/HIGH congestion level
+            - congested_columns: top N columns with highest cell density
+            - congestion_clusters: groups of adjacent congested columns
+            - recommendation: strategy suggestion based on congestion level
+
+            Trigger: Use when timing analysis shows routing-related delays or when
+            utilization report indicates high resource density.
+            Priority: Diagnostic tool — call before choosing PBLOCK vs other strategies.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "utilization_threshold": {
+                        "type": "number",
+                        "description": "Threshold (0-1) for flagging high-utilization columns. Default: 0.8 (80% of max).",
+                        "default": 0.8
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Number of top congested columns to return. Default: 10.",
+                        "default": 10
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="analyze_congestion_spreading",
+            description="""Analyze routing congestion and identify cells to spread outward.
+
+READ-ONLY analysis. Identifies cells in congested regions, scores them by how many
+of their connected net pins are also in congested columns, and returns a ranked
+candidate list with suggested spread directions.
+
+Use this BEFORE execute_congestion_spreading to understand which cells would
+benefit most from being relocated.
+
+Trigger: analyze_congestion shows severity=HIGH or congested_ratio > 0.3.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "congestion_threshold": {
+                        "type": "number",
+                        "description": "Threshold (0-1) for column congestion. Default: 0.8.",
+                        "default": 0.8
+                    },
+                    "max_cells_to_spread": {
+                        "type": "integer",
+                        "description": "Maximum candidate cells to return. Default: 20.",
+                        "default": 20
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_congestion_spreading",
+            description="""Spread cells from congested regions to less congested areas.
+
+MUTATING: modifies cell placement and writes checkpoint file.
+Internally analyzes congestion, scores candidates, then moves the highest-scoring
+cells outward using spiral site search.
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+Trigger: analyze_congestion_spreading identified candidates AND
+analyze_congestion severity=HIGH.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_cells_to_spread": {
+                        "type": "integer",
+                        "description": "Maximum cells to move (default: 20)",
+                        "default": 20
+                    },
+                    "spread_distance": {
+                        "type": "integer",
+                        "description": "Column distance to spread outward (default: 10)",
+                        "default": 10
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "congestion_spread"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="route_design_rwroute",
             description="""使用 RapidWright 内置路由器 RWRoute 进行 FPGA 布线。
 
@@ -680,7 +840,257 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {},
             }
-        )
+        ),
+        Tool(
+            name="optimize_pin_swapping",
+            description="""Swap LUT input pins to remap critical signals to faster physical pins (A5/A6).
+
+            Analyzes critical paths to find LUT cells whose input pins can be remapped
+            to faster physical BEL pins (A5/A6 are typically fastest on UltraScale).
+            Saves checkpoint before mutation; returns swap results + checkpoint path.
+
+            MUTATING: changes cell pin connections, writes checkpoint file.
+            Trigger: WNS stuck around -0.3ns, LUT input pins have delay variation.
+            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+
+            Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre_swap_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cells": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "List of cell names on the path"
+                                }
+                            }
+                        },
+                        "description": "List of critical path descriptors with cell names"
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "pin_swap"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="replicate_critical_cells",
+            description="""Replicate high-delay cells on critical paths to reduce fanout and load.
+
+            Identifies cells with delay > threshold on critical paths, replicates them
+            using RapidWright FanOutOptimization (splits high-fanout nets driven by
+            those cells), and writes a checkpoint.
+
+            MUTATING: changes net topology, writes checkpoint file.
+            Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout.
+            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+
+            Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre-replication checkpoint.
+            Max 10 cells replicated per call (safety cap).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cells": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string", "description": "Cell name"},
+                                            "delay": {"type": "number", "description": "Cell delay in ns"},
+                                            "type": {"type": "string", "description": "Cell type (LUT6, FDRE, etc.)"},
+                                            "fanout": {"type": "integer", "description": "Output fanout count"}
+                                        },
+                                        "required": ["name", "delay"]
+                                    },
+                                    "description": "List of cells on the critical path with timing info"
+                                }
+                            },
+                            "required": ["cells"]
+                        },
+                        "description": "List of critical path descriptors"
+                    },
+                    "delay_threshold": {
+                        "type": "number",
+                        "description": "Minimum delay (ns) to flag a cell for replication (default: 0.3)",
+                        "default": 0.3
+                    },
+                    "max_replications": {
+                        "type": "integer",
+                        "description": "Maximum number of cells to replicate (default: 10)",
+                        "default": 10
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint files",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "cell_replication"
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="analyze_register_retiming",
+            description="""Identify FF-to-FF segments with deep combinational logic for register retiming.
+
+READ-ONLY analysis. Parses critical path pin data from Vivado to find segments
+where combinational delay exceeds threshold, and identifies optimal insertion
+points for pipeline registers.
+
+Use this BEFORE execute_register_retiming to identify which paths would benefit
+from register insertion.
+
+Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs).
+Empty result = no deep chains found (valid diagnosis, not a failure).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of path dicts from Vivado extract_critical_path_pins"
+                    },
+                    "delay_threshold": {
+                        "type": "number",
+                        "description": "Minimum combinational delay (ns) to flag a segment. Default: 0.5.",
+                        "default": 0.5
+                    },
+                    "min_chain_depth": {
+                        "type": "integer",
+                        "description": "Minimum LUT chain depth to consider. Default: 2.",
+                        "default": 2
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="execute_register_retiming",
+            description="""Insert pipeline registers on deep combinational chains to reduce critical path delay.
+
+MUTATING: creates new FF cells, modifies net topology, writes checkpoint file.
+Uses RapidWright ECOTools to insert FFs inline on specific critical paths.
+Targeted approach - only inserts on identified segments, safer than Vivado global retiming.
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+LIMITATIONS: Not suitable for paths crossing clock domain boundaries.
+Max 5 FF insertions per call (safety cap).
+If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "retiming_candidates": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of retiming candidates from analyze_register_retiming"
+                    },
+                    "max_retiming_ops": {
+                        "type": "integer",
+                        "description": "Maximum FF insertions per call (default: 5)",
+                        "default": 5
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "register_retime"
+                    }
+                },
+                "required": ["retiming_candidates"]
+            }
+        ),
+        Tool(
+            name="analyze_net_swapping",
+            description="""Identify net swap candidates within SLICE sites.
+
+READ-ONLY analysis. Finds pairs of LUT cells with identical INIT strings in the
+same SLICE where swapping input nets would reduce estimated wirelength (bounding
+box heuristic).
+
+Use this BEFORE execute_net_swapping to identify which swaps are beneficial.
+
+Trigger: routing congestion within SLICEs, critical paths have LUT pairs that
+could benefit from net rerouting.
+Empty result = no beneficial swaps found (valid diagnosis, not a failure).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_candidates": {
+                        "type": "integer",
+                        "description": "Maximum candidates to return. Default: 20.",
+                        "default": 20
+                    },
+                    "wirelength_threshold": {
+                        "type": "number",
+                        "description": "Minimum wirelength reduction to be a candidate. Default: 50.",
+                        "default": 50.0
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_net_swapping",
+            description="""Swap equivalent nets between BEL pins within SLICE sites.
+
+MUTATING: modifies net connections, intra-site routing, writes checkpoint file.
+Swaps input nets between LUT cell pairs identified by analyze_net_swapping.
+Only swaps between cells with identical INIT strings (logic-safe).
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+LIMITATIONS: Only works within a single SLICE. Only swaps between cells with
+matching INIT strings. If WNS regresses > 0.05ns after reroute, rollback to
+pre_swap_checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "candidates": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of swap candidates from analyze_net_swapping"
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "net_swap"
+                    }
+                },
+                "required": ["candidates"]
+            }
+        ),
     ]
 
 
@@ -847,6 +1257,39 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
             )
 
+        elif name == "flatten_lut_cascade":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.flatten_lut_cascade(
+                    critical_paths=arguments["critical_paths"],
+                    min_cascade_depth=arguments.get("min_cascade_depth", 3),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "lut_cascade"),
+                )
+
+        elif name == "analyze_congestion":
+            from skills.congestion_analysis import analyze_congestion
+            result = analyze_congestion(
+                design=rw._current_design,
+                utilization_threshold=arguments.get("utilization_threshold", 0.8),
+                top_n=arguments.get("top_n", 10),
+            )
+
+        elif name == "analyze_congestion_spreading":
+            result = rw.analyze_congestion_spreading(
+                congestion_threshold=arguments.get("congestion_threshold", 0.8),
+                max_cells_to_spread=arguments.get("max_cells_to_spread", 20),
+            )
+
+        elif name == "execute_congestion_spreading":
+            result = rw.execute_congestion_spreading(
+                max_cells_to_spread=arguments.get("max_cells_to_spread", 20),
+                spread_distance=arguments.get("spread_distance", 10),
+                temp_dir=arguments.get("temp_dir", "temp"),
+                checkpoint_prefix=arguments.get("checkpoint_prefix", "congestion_spread"),
+            )
+
         elif name == "route_design_rwroute":
             result = rw.route_design_rwroute(
                 directive=arguments.get("directive", "TimingDriven"),
@@ -855,6 +1298,64 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
 
         elif name == "report_timing":
             result = rw.report_timing()
+        elif name == "optimize_pin_swapping":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
+            else:
+                result = rw.optimize_pin_swapping(
+                    critical_paths=arguments["critical_paths"],
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "pin_swap"),
+                )
+
+        elif name == "replicate_critical_cells":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.replicate_critical_cells(
+                    critical_paths=arguments["critical_paths"],
+                    delay_threshold=arguments.get("delay_threshold", 0.3),
+                    max_replications=arguments.get("max_replications", 10),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "cell_replication"),
+                )
+
+        elif name == "analyze_register_retiming":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
+            else:
+                result = rw.analyze_register_retiming(
+                    critical_paths=arguments["critical_paths"],
+                    delay_threshold=arguments.get("delay_threshold", 0.5),
+                    min_chain_depth=arguments.get("min_chain_depth", 2),
+                )
+
+        elif name == "execute_register_retiming":
+            if "retiming_candidates" not in arguments:
+                result = {"error": "Missing required parameter: retiming_candidates. Provide candidates from analyze_register_retiming."}
+            else:
+                result = rw.execute_register_retiming(
+                    retiming_candidates=arguments["retiming_candidates"],
+                    max_retiming_ops=arguments.get("max_retiming_ops", 5),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "register_retime"),
+                )
+
+        elif name == "analyze_net_swapping":
+            result = rw.analyze_net_swapping(
+                max_candidates=arguments.get("max_candidates", 20),
+                wirelength_threshold=arguments.get("wirelength_threshold", 50.0),
+            )
+
+        elif name == "execute_net_swapping":
+            if "candidates" not in arguments:
+                result = {"error": "Missing required parameter: candidates. Provide candidates from analyze_net_swapping."}
+            else:
+                result = rw.execute_net_swapping(
+                    candidates=arguments["candidates"],
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "net_swap"),
+                )
 
         else:
             result = {"error": f"Unknown tool: {name}"}

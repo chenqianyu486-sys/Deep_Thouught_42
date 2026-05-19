@@ -1,0 +1,76 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.critical_path_cell_replication_strategy@1.0.0",
+  "displayName": "Critical Path Cell Replication",
+  "description": "Replicate high-delay cells on critical paths to reduce fanout/load. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout. After this, run vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "net_topology",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 300000,
+    "maxMs": 600000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "critical_paths": {
+        "type": "array",
+        "description": "List of path dicts: [{\"cells\": [{\"name\": str, \"delay\": float, \"type\": str, \"fanout\": int}, ...]}, ...]"
+      },
+      "delay_threshold": {
+        "type": "number",
+        "description": "Minimum delay (ns) to flag a cell for replication",
+        "default": 0.3
+      },
+      "max_replications": {
+        "type": "integer",
+        "description": "Maximum number of cells to replicate",
+        "default": 10
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for intermediate checkpoint",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Checkpoint filename prefix",
+        "default": "cell_replication",
+        "minLength": 1
+      }
+    },
+    "required": [
+      "critical_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}
