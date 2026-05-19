@@ -8,3 +8,9 @@ venv/
 dcp_optimizer_run-*/
 .hermes/
 fpl26_contest_benchmarks_v1.0.0/
+
+# DCP validation temporary directories
+dcp_validation_*/
+
+# DCP optimization output directories (*.dcp.edf with .edf and .md5 inside)
+*.dcp.edf/
