@@ -586,23 +586,18 @@ if tool_name == "vivado_phys_opt_design":
     # 返回清晰的错误信息
 ```
 
-**验证结果**：
-- 修复前：200 测试向量中 9 个不匹配 ❌
-- 修复后：200 测试向量中 0 个不匹配 ✅
-- WNS 改善：-0.978 ns → -0.446 ns（+0.532 ns）
-
 **禁止的指令/选项**：
-- `AlternateFlowWithRetiming` ❌（retiming 改变流水线结构）
-- `AddRetime` ❌（retiming 改变流水线结构）
-- `retime=true` ❌（布尔选项）
-- `interconnect_retime=true` ❌（布尔选项）
+- `AlternateFlowWithRetiming` （retiming 改变流水线结构）
+- `AddRetime` （retiming 改变流水线结构）
+- `retime=true` （布尔选项）
+- `interconnect_retime=true` （布尔选项）
 
 **允许的指令**：
-- `Default` ✅
-- `Explore` ✅
-- `AggressiveExplore` ✅
-- `RuntimeOptimized` ✅
-- 其他安全指令 ✅
+- `Default` 
+- `Explore` 
+- `AggressiveExplore` 
+- `RuntimeOptimized` 
+- 其他安全指令 
 
 ## 3. 事件系统
 
