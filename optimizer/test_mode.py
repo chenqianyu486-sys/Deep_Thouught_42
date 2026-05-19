@@ -515,8 +515,107 @@ class V2TestMode:
 
     # ── Skill Tests ────────────────────────────────────────────────
 
+    # Data-driven skill test table. Each entry defines one skill invocation test.
+    # Keys:
+    #   name   - display name for test results
+    #   tool   - MCP tool name (rapidwright_* or vivado_*)
+    #   args   - base arguments (static); "{run_dir}" is replaced at runtime
+    #   needs  - key in test_shared_data to inject as extra arg (name matches arg key)
+    #   dep    - name of a prior skill whose verify_skill_result output feeds this one
+    #   dep_key- key in dep's result data to inject as extra arg (name matches arg key)
+    # Each entry: name (display), tool (MCP), skill_name (SkillRegistry), args, needs, dep, dep_key
+    SKILL_TEST_TABLE = [
+        # ── READ-ONLY (analysis) ──────────────────────────────────
+        {"name": "analyze_congestion", "tool": "rapidwright_analyze_congestion",
+         "skill_name": "analyze_congestion", "args": {}},
+        {"name": "analyze_congestion_spreading", "tool": "rapidwright_analyze_congestion_spreading",
+         "skill_name": "analyze_congestion_spreading", "args": {}},
+        {"name": "analyze_net_detour", "tool": "rapidwright_analyze_net_detour",
+         "skill_name": "net_detour", "args": {"detour_threshold": 2.0}, "needs": "pin_paths"},
+        {"name": "smart_region_search", "tool": "rapidwright_smart_region_search",
+         "skill_name": "smart_region", "args": {"target_lut_count": 50000, "target_ff_count": 50000}},
+        {"name": "analyze_pblock_region", "tool": "rapidwright_analyze_pblock_region",
+         "skill_name": "pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": 1.5}},
+        {"name": "analyze_register_retiming", "tool": "rapidwright_analyze_register_retiming",
+         "skill_name": "analyze_register_retiming", "args": {}, "needs": "critical_paths"},
+        {"name": "analyze_net_swapping", "tool": "rapidwright_analyze_net_swapping",
+         "skill_name": "analyze_net_swapping", "args": {}},
+
+        # ── MUTATING (optimization) ───────────────────────────────
+        {"name": "execute_physopt_strategy", "tool": "rapidwright_execute_physopt_strategy",
+         "skill_name": "physopt_strategy", "args": {"directive": "Default", "design_is_routed": False}},
+        {"name": "execute_fanout_strategy", "tool": "rapidwright_execute_fanout_strategy",
+         "skill_name": "fanout_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_fanout"}, "needs": "nets"},
+        {"name": "optimize_cell_placement", "tool": "rapidwright_optimize_cell_placement",
+         "skill_name": "optimize_cell", "args": {}, "needs": "cell_names"},
+        {"name": "execute_congestion_spreading", "tool": "rapidwright_execute_congestion_spreading",
+         "skill_name": "execute_congestion_spreading", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_congestion_spread"}},
+        {"name": "optimize_pin_swapping", "tool": "rapidwright_optimize_pin_swapping",
+         "skill_name": "pin_swapping_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_pin_swap"}, "needs": "critical_paths"},
+        {"name": "replicate_critical_cells", "tool": "rapidwright_replicate_critical_cells",
+         "skill_name": "critical_path_cell_replication_strategy", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_cell_repl"}, "needs": "critical_paths"},
+        {"name": "execute_register_retiming", "tool": "rapidwright_execute_register_retiming",
+         "skill_name": "execute_register_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_retime"},
+         "dep": "analyze_register_retiming", "dep_key": "retiming_candidates"},
+        {"name": "execute_net_swapping", "tool": "rapidwright_execute_net_swapping",
+         "skill_name": "execute_net_swapping", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_net_swap"},
+         "dep": "analyze_net_swapping", "dep_key": "candidates"},
+        {"name": "flatten_lut_cascade", "tool": "rapidwright_flatten_lut_cascade",
+         "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths"},
+    ]
+
+    async def _prepare_skill_test_data(self, init_data: dict) -> dict:
+        """Prepare shared data for skill tests from init_analysis results."""
+        shared: dict = {}
+
+        # pin_paths: extract from Vivado (used by analyze_net_detour, analyze_register_retiming, etc.)
+        try:
+            pins_result = await self.call_tool("vivado_extract_critical_path_pins", {
+                "num_paths": 5,
+            }, timeout=300.0)
+            if pins_result.strip() and pins_result.strip() != "(no output)":
+                pins_data = json.loads(pins_result)
+                pin_paths_array = pins_data.get("pin_paths", [])
+                if pin_paths_array and len(pin_paths_array) > 0:
+                    shared["pin_paths"] = pin_paths_array[0]
+                    print(f"[TEST] Prepared pin_paths: {len(shared['pin_paths'])} pins")
+                else:
+                    print(f"[TEST] ⚠ extract_critical_path_pins returned empty pin_paths")
+                    _dbg = {k: pins_data.get(k) for k in ("debug_has_slack", "debug_report_length", "debug_num_slack_sections", "debug_per_path") if k in pins_data}
+                    if _dbg:
+                        print(f"[TEST] debug: {_dbg}")
+        except Exception as e:
+            print(f"[TEST] ⚠ extract_critical_path_pins failed: {e}")
+
+        # critical_paths: wrap pin_paths as list[dict] for tools that need it
+        if "pin_paths" in shared:
+            shared["critical_paths"] = [{"pin_paths": shared["pin_paths"]}]
+
+        # cell_names: extract from pin_paths (first 5 unique cells)
+        if "pin_paths" in shared:
+            seen = set()
+            cell_names = []
+            for p in shared["pin_paths"]:
+                cell = p.split("/")[0] if "/" in p else p
+                if cell not in seen:
+                    seen.add(cell)
+                    cell_names.append(cell)
+            shared["cell_names"] = cell_names[:5]
+
+        # nets: high fanout nets for execute_fanout_strategy
+        high_fanout = init_data.get("high_fanout_nets", [])
+        if high_fanout:
+            shared["nets"] = [
+                {"net_name": net_name, "fanout": fanout}
+                for net_name, fanout, _ in high_fanout[:3]
+            ]
+        else:
+            shared["nets"] = [{"net_name": "dummy_net", "fanout": 100}]
+
+        return shared
+
     async def run_skill_tests(self, init_data: dict) -> bool:
-        """Run all 6 skill validation tests.
+        """Run all skill validation tests (data-driven, covers all 16 skills).
 
         Returns True if all skills pass.
         """
@@ -526,16 +625,7 @@ class V2TestMode:
 
         # Verify all expected skills are registered
         from skills import SkillRegistry
-        EXPECTED_SKILLS = {
-            "net_detour", "optimize_cell", "smart_region",
-            "pblock_strategy", "physopt_strategy", "fanout_strategy",
-            "analyze_congestion", "analyze_congestion_spreading",
-            "execute_congestion_spreading",
-            "pin_swapping_strategy", "critical_path_cell_replication_strategy",
-            "analyze_register_retiming", "execute_register_retiming",
-            "analyze_net_swapping", "execute_net_swapping",
-            "lut_cascade_flattening",
-        }
+        EXPECTED_SKILLS = {t["skill_name"] for t in self.SKILL_TEST_TABLE}
         registered = {m.name for m in SkillRegistry.list_all()}
         missing = EXPECTED_SKILLS - registered
         if missing:
@@ -547,186 +637,60 @@ class V2TestMode:
         else:
             print(f"[TEST] All {len(EXPECTED_SKILLS)} expected skills registered")
 
-        pins_result = ""
+        # Prepare shared test data (pin_paths, critical_paths, cell_names, nets)
+        shared = await self._prepare_skill_test_data(init_data)
 
-        # Skill 1: analyze_net_detour
-        print("\n" + "-" * 60)
-        print("SKILL 1: [SKILL] Test analyze_net_detour")
-        print("-" * 60)
-        try:
-            pins_result = await self.call_tool("vivado_extract_critical_path_pins", {
-                "num_paths": 5,
-            }, timeout=300.0)
-            if pins_result.strip() and pins_result.strip() != "(no output)":
-                try:
-                    pins_data = json.loads(pins_result)
-                    pin_paths_array = pins_data.get("pin_paths", [])
-                except Exception:
-                    pin_paths_array = []
-                if pin_paths_array and len(pin_paths_array) > 0:
-                    pin_paths = pin_paths_array[0]
-                    print(f"[TEST] Using {len(pin_paths)} pins from critical path")
-                    skill_result = await self.call_tool("rapidwright_analyze_net_detour", {
-                        "pin_paths": pin_paths,
-                        "detour_threshold": 2.0,
-                    }, timeout=300.0)
-                    self.verify_skill_result("analyze_net_detour", skill_result)
-                else:
-                    print("[TEST] ⚠ analyze_net_detour skipped: no pin paths in result")
-                    try:
-                        _data = json.loads(pins_result)
-                        print(f"[TEST] debug_has_slack={_data.get('debug_has_slack', '?')}")
-                        print(f"[TEST] debug_report_length={_data.get('debug_report_length', '?')}")
-                        print(f"[TEST] debug_num_path_sections={_data.get('debug_num_slack_sections', '?')}")
-                        if "debug_per_path" in _data:
-                            print(f"[TEST] per-path debug: {_data['debug_per_path']}")
-                        report_snippet = _data.get("debug_timing_report", "")
-                        if report_snippet:
-                            print(f"[TEST] debug_timing_report:\n{report_snippet}")
-                    except Exception:
-                        print(f"[TEST] Raw pins_result: {str(pins_result)[:500]}")
-                    self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": "no pin paths in result"})
-            else:
-                print("[TEST] ⚠ analyze_net_detour skipped: no output from extract_critical_path_pins")
-                self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": "no output from extract_critical_path_pins"})
-        except Exception as e:
-            print(f"[TEST] ⚠ analyze_net_detour FAILED: {e}")
-            self.skill_test_results.append({"skill": "analyze_net_detour", "success": False, "error": str(e)})
+        # Track results from analyze steps for dependency resolution
+        dep_results: dict[str, dict] = {}
 
-        if self._check_test_exit("Skill 2"):
-            return False
+        # Run each skill test from the table
+        for idx, entry in enumerate(self.SKILL_TEST_TABLE, 1):
+            name = entry["name"]
+            tool = entry["tool"]
+            args = dict(entry.get("args", {}))
 
-        # Skill 2: smart_region_search
-        print("\n" + "-" * 60)
-        print("SKILL 2: [SKILL] Test smart_region_search")
-        print("-" * 60)
-        try:
-            skill_result = await self.call_tool("rapidwright_smart_region_search", {
-                "target_lut_count": 50000,
-                "target_ff_count": 50000,
-            }, timeout=360.0)
-            self.verify_skill_result("smart_region_search", skill_result)
-        except Exception as e:
-            print(f"[TEST] ⚠ smart_region_search skipped: {e}")
-            self.skill_test_results.append({"skill": "smart_region_search", "success": False, "error": str(e)})
+            # Replace {run_dir} placeholder
+            for k, v in args.items():
+                if isinstance(v, str) and v == "{run_dir}":
+                    args[k] = str(self.run_dir)
 
-        if self._check_test_exit("Skill 3"):
-            return False
+            # Inject data from shared test data (needs)
+            needs = entry.get("needs")
+            if needs and needs in shared:
+                args[needs] = shared[needs]
 
-        # Skill 3: analyze_pblock_region
-        print("\n" + "-" * 60)
-        print("SKILL 3: [SKILL] Test analyze_pblock_region")
-        print("-" * 60)
-        try:
-            skill_result = await self.call_tool("rapidwright_analyze_pblock_region", {
-                "target_lut_count": 50000,
-                "target_ff_count": 50000,
-                "resource_multiplier": 1.5,
-            }, timeout=600.0)
-            self.verify_skill_result("analyze_pblock_region", skill_result)
-        except Exception as e:
-            print(f"[TEST] ⚠ analyze_pblock_region skipped: {e}")
-            self.skill_test_results.append({"skill": "analyze_pblock_region", "success": False, "error": str(e)})
+            # Inject data from dependency (dep)
+            dep = entry.get("dep")
+            dep_key = entry.get("dep_key")
+            if dep and dep_key:
+                dep_data = dep_results.get(dep)
+                if dep_data and dep_key in dep_data:
+                    args[dep_key] = dep_data[dep_key]
 
-        if self._check_test_exit("Skill 4"):
-            return False
+            # Skip if required data is missing
+            if needs and needs not in args:
+                print(f"\n{'─' * 60}")
+                print(f"SKILL {idx}: [SKIP] {name} — missing '{needs}'")
+                print(f"{'─' * 60}")
+                self.skill_test_results.append({"skill": name, "success": False, "error": f"missing required data: {needs}"})
+                continue
 
-        # Skill 4: execute_physopt_strategy
-        print("\n" + "-" * 60)
-        print("SKILL 4: [SKILL] Test execute_physopt_strategy")
-        print("-" * 60)
-        try:
-            skill_result = await self.call_tool("rapidwright_execute_physopt_strategy", {
-                "directive": "Default",
-                "design_is_routed": False,
-            }, timeout=360.0)
-            self.verify_skill_result("execute_physopt_strategy", skill_result)
-        except Exception as e:
-            print(f"[TEST] ⚠ execute_physopt_strategy skipped: {e}")
-            self.skill_test_results.append({"skill": "execute_physopt_strategy", "success": False, "error": str(e)})
+            print(f"\n{'─' * 60}")
+            print(f"SKILL {idx}: [TEST] {name}")
+            print(f"{'─' * 60}")
 
-        if self._check_test_exit("Skill 5"):
-            return False
+            try:
+                result = await self.call_tool(tool, args, timeout=600.0)
+                data = self.verify_skill_result(name, result)
+                # Store result for dependency resolution
+                if data:
+                    dep_results[name] = data
+            except Exception as e:
+                print(f"[TEST] ⚠ {name} FAILED: {e}")
+                self.skill_test_results.append({"skill": name, "success": False, "error": str(e)})
 
-        # Skill 5: execute_fanout_strategy
-        print("\n" + "-" * 60)
-        print("SKILL 5: [SKILL] Test execute_fanout_strategy")
-        print("-" * 60)
-        try:
-            # Use real high fanout nets if available, else dummy
-            high_fanout = init_data.get("high_fanout_nets", [])
-            if high_fanout:
-                test_nets = [
-                    {"net_name": net_name, "fanout": fanout}
-                    for net_name, fanout, _ in high_fanout[:3]
-                ]
-            else:
-                test_nets = [{"net_name": "dummy_net", "fanout": 100}]
-            skill_result = await self.call_tool("rapidwright_execute_fanout_strategy", {
-                "nets": test_nets,
-                "temp_dir": str(self.run_dir),
-                "checkpoint_prefix": "v2_test_fanout",
-            }, timeout=300.0)
-            self.verify_skill_result("execute_fanout_strategy", skill_result)
-        except Exception as e:
-            print(f"[TEST] ⚠ execute_fanout_strategy skipped: {e}")
-            self.skill_test_results.append({"skill": "execute_fanout_strategy", "success": False, "error": str(e)})
-
-        if self._check_test_exit("Skill 6"):
-            return False
-
-        # Skill 6: optimize_cell_placement
-        print("\n" + "-" * 60)
-        print("SKILL 6: [SKILL] optimize_cell_placement")
-        print("-" * 60)
-        try:
-            cell_names = []
-            if pins_result.strip() and pins_result.strip() != "(no output)":
-                try:
-                    pins_data = json.loads(pins_result)
-                    pin_paths_list = pins_data.get("pin_paths", [])
-                except Exception:
-                    pin_paths_list = []
-                if pin_paths_list and len(pin_paths_list) > 0:
-                    pp = pin_paths_list[0]
-                    seen = set()
-                    for p in pp:
-                        cell = p.split("/")[0] if "/" in p else p
-                        if cell not in seen:
-                            seen.add(cell)
-                            cell_names.append(cell)
-                    cell_names = cell_names[:5]
-            if cell_names:
-                sr = await self.call_tool("rapidwright_optimize_cell_placement", {
-                    "cell_names": cell_names,
-                }, timeout=360.0)
-                self.verify_skill_result("optimize_cell_placement", sr)
-            else:
-                # Fallback: search_cells
-                print("[TEST] No critical path cells, trying search_cells fallback...")
-                try:
-                    sr = await self.call_tool("rapidwright_search_cells", {"limit": 5}, timeout=60.0)
-                    if sr.strip():
-                        cells_data = json.loads(sr)
-                        fallback_names = [c["name"] for c in cells_data.get("cells", []) if c.get("name")]
-                        if fallback_names:
-                            print(f"[TEST] Using fallback cell names: {fallback_names}")
-                            sr = await self.call_tool("rapidwright_optimize_cell_placement", {
-                                "cell_names": fallback_names,
-                            }, timeout=360.0)
-                            self.verify_skill_result("optimize_cell_placement", sr)
-                        else:
-                            print("[TEST] ⚠ optimize_cell_placement skipped: no cell names")
-                            self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": "no cell names"})
-                    else:
-                        print("[TEST] ⚠ optimize_cell_placement skipped: no cell names")
-                        self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": "no cell names"})
-                except Exception as e2:
-                    print(f"[TEST] ⚠ optimize_cell_placement skipped (fallback): {e2}")
-                    self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": str(e2)})
-        except Exception as e:
-            print(f"[TEST] ⚠ optimize_cell_placement skipped: {e}")
-            self.skill_test_results.append({"skill": "optimize_cell_placement", "success": False, "error": str(e)})
+            if self._check_test_exit(f"Skill {idx}"):
+                return False
 
         passed = sum(1 for r in self.skill_test_results if r.get("success"))
         total = len(self.skill_test_results)
