@@ -1,0 +1,54 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "analysis.analyze_congestion_spreading@1.0.0",
+  "displayName": "Congestion-Aware Spreading Analysis",
+  "description": "Identify cells in congested regions and rank them by congestion connectivity. READ-ONLY. Use before execute_congestion_spreading.",
+  "idempotency": "safe",
+  "sideEffects": [],
+  "timeout": {
+    "defaultMs": 60000,
+    "maxMs": 120000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "congestion_threshold": {
+        "type": "number",
+        "description": "Threshold (0-1) for column congestion. Default: 0.8.",
+        "default": 0.8
+      },
+      "max_cells_to_spread": {
+        "type": "integer",
+        "description": "Maximum candidate cells to return. Default: 20.",
+        "default": 20
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

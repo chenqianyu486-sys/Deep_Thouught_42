@@ -1,0 +1,69 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.execute_congestion_spreading@1.0.0",
+  "displayName": "Congestion-Aware Cell Spreading",
+  "description": "Spread cells from congested regions outward to improve routability. MUTATING. Side effects: cell placement changes, checkpoint file written. Trigger: analyze_congestion severity=HIGH, PBLOCK/PhysOpt ineffective.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "cell_placement",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 300000,
+    "maxMs": 600000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "max_cells_to_spread": {
+        "type": "integer",
+        "description": "Maximum cells to move. Default: 20.",
+        "default": 20
+      },
+      "spread_distance": {
+        "type": "integer",
+        "description": "Column distance to spread outward. Default: 10.",
+        "default": 10
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for checkpoint output.",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Checkpoint filename prefix.",
+        "default": "congestion_spread",
+        "minLength": 1
+      }
+    }
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

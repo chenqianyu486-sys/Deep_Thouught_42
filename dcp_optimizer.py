@@ -307,6 +307,8 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_analyze_pblock_region": "pblock_strategy",
     "rapidwright_execute_physopt_strategy": "physopt_strategy",
     "rapidwright_execute_fanout_strategy": "fanout_strategy",
+    "rapidwright_analyze_congestion_spreading": "analyze_congestion_spreading",
+    "rapidwright_execute_congestion_spreading": "execute_congestion_spreading",
 }
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
@@ -2468,6 +2470,8 @@ class DCPOptimizer(DCPOptimizerBase):
             return "CellReplication"
         if "optimize_pin_swapping" in tool_str or "pin_swap" in tool_str:
             return "PinSwap"
+        if "congestion_spread" in tool_str or "execute_congestion_spreading" in tool_str:
+            return "CongestionSpreading"
         if "place_design" in tool_str or "route_design" in tool_str:
             return "PlaceRoute"
         if any(t in tool_str for t in ["report_", "get_", "extract_", "analyze_"]):
@@ -2890,6 +2894,10 @@ class DCPOptimizer(DCPOptimizerBase):
                 return ("Recommended skill: rapidwright_execute_fanout_strategy "
                         "[DIAGNOSTIC - triggered by stagnation]. "
                         "Check high-fanout nets as potential hidden obstacle.")
+            if not _strategy_blocked("CongestionSpreading"):
+                return ("Recommended skill: rapidwright_analyze_congestion_spreading "
+                        "[DIAGNOSTIC - triggered by stagnation]. "
+                        "Check routing congestion as potential timing obstacle.")
             return ("Recommended skill: rapidwright_analyze_net_detour "
                     "[DIAGNOSTIC - triggered by stagnation]. "
                     "Analyze placement detour issues on critical paths.")

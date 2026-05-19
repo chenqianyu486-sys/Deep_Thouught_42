@@ -19,6 +19,8 @@ SCENARIO_DETECTION_MATRIX = [
      "detection": "report_timing_summary: max_delay variation > 2x"},
     {"id": "congestion", "scenario": "Routing Congestion",
      "detection": "analyze_congestion: severity=HIGH or congested_ratio > 0.3"},
+    {"id": "congestion_spread", "scenario": "Congestion-Aware Spreading",
+     "detection": "analyze_congestion: severity=HIGH AND PBLOCK ineffective"},
 ]
 
 SCENARIO_WORKFLOW = [
@@ -120,6 +122,21 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "CongestionSpreading": {
+        "name": "Congestion-Aware Cell Spreading",
+        "trigger": "analyze_congestion severity=HIGH, PBLOCK/PhysOpt ineffective",
+        "sequence": [
+            {"step": "analyze_congestion", "platform": "RapidWright",
+             "params": {"utilization_threshold": 0.8},
+             "note": "Identify congested columns and severity"},
+            {"step": "execute_congestion_spreading", "platform": "RapidWright",
+             "params": {"max_cells_to_spread": 20, "spread_distance": 10},
+             "note": "Spread high-score cells outward, writes checkpoint"},
+            {"step": "open_checkpoint", "platform": "Vivado", "params": None},
+            {"step": "route_design", "platform": "Vivado", "params": None},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -130,6 +147,7 @@ STRATEGY_LABEL_MAP = {
     "LUTCascade": "LUTCascade",
     "PinSwap": "PinSwap",
     "CellReplication": "CellReplication",
+    "CongestionSpreading": "CongestionSpreading",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -139,6 +157,7 @@ STRATEGY_SKILL_MAP = {
     "LUTCascade": "lut_cascade_flattening",
     "PinSwap": "pin_swapping_strategy",
     "CellReplication": "critical_path_cell_replication",
+    "CongestionSpreading": "execute_congestion_spreading",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -213,6 +232,24 @@ SKILL_GUIDANCE = {
         "prerequisite": "Load DCP via read_checkpoint first",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM — cell replication increases resource usage. Limit to 10 cells max.",
+    },
+    "analyze_congestion_spreading": {
+        "category": "ANALYSIS",
+        "input": "congestion_threshold (default 0.8), max_cells_to_spread (default 20)",
+        "output": "ranked candidate cells with congestion_connectivity_score and spread direction",
+        "condition": "analyze_congestion shows severity=HIGH or congested_ratio > 0.3",
+        "prerequisite": "Design must be loaded via read_checkpoint",
+        "interpretation": "Empty candidates = no congestion issues. Non-empty = cells with many connections in congested regions.",
+    },
+    "execute_congestion_spreading": {
+        "category": "OPTIMIZATION",
+        "input": "max_cells_to_spread (default 20), spread_distance (default 10 columns)",
+        "output": "cells_moved, density_reduction, checkpoint_path",
+        "condition": "analyze_congestion_spreading identified candidates AND congestion severity=HIGH",
+        "prerequisite": "Call analyze_congestion_spreading first to understand impact",
+        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
+        "risk": "MEDIUM — moving cells can disrupt existing good placement. Limit spread_distance to avoid excessive displacement.",
+        "contraindications": "Do NOT use when congestion is LOW or MODERATE. Prefer PBLOCK for geographic constraints first.",
     },
 }
 

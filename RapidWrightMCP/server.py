@@ -63,6 +63,8 @@ COMPLEX_TOOLS = {
     "analyze_fabric_for_pblock",
     "optimize_lut_input_cone",
     "analyze_congestion",
+    "analyze_congestion_spreading",
+    "execute_congestion_spreading",
     "route_design_rwroute",
     "flatten_lut_cascade",
     "optimize_pin_swapping",
@@ -729,6 +731,73 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="analyze_congestion_spreading",
+            description="""Analyze routing congestion and identify cells to spread outward.
+
+READ-ONLY analysis. Identifies cells in congested regions, scores them by how many
+of their connected net pins are also in congested columns, and returns a ranked
+candidate list with suggested spread directions.
+
+Use this BEFORE execute_congestion_spreading to understand which cells would
+benefit most from being relocated.
+
+Trigger: analyze_congestion shows severity=HIGH or congested_ratio > 0.3.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "congestion_threshold": {
+                        "type": "number",
+                        "description": "Threshold (0-1) for column congestion. Default: 0.8.",
+                        "default": 0.8
+                    },
+                    "max_cells_to_spread": {
+                        "type": "integer",
+                        "description": "Maximum candidate cells to return. Default: 20.",
+                        "default": 20
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_congestion_spreading",
+            description="""Spread cells from congested regions to less congested areas.
+
+MUTATING: modifies cell placement and writes checkpoint file.
+Internally analyzes congestion, scores candidates, then moves the highest-scoring
+cells outward using spiral site search.
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+Trigger: analyze_congestion_spreading identified candidates AND
+analyze_congestion severity=HIGH.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_cells_to_spread": {
+                        "type": "integer",
+                        "description": "Maximum cells to move (default: 20)",
+                        "default": 20
+                    },
+                    "spread_distance": {
+                        "type": "integer",
+                        "description": "Column distance to spread outward (default: 10)",
+                        "default": 10
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "congestion_spread"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="route_design_rwroute",
             description="""使用 RapidWright 内置路由器 RWRoute 进行 FPGA 布线。
 
@@ -1046,6 +1115,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 design=rw._current_design,
                 utilization_threshold=arguments.get("utilization_threshold", 0.8),
                 top_n=arguments.get("top_n", 10),
+            )
+
+        elif name == "analyze_congestion_spreading":
+            result = rw.analyze_congestion_spreading(
+                congestion_threshold=arguments.get("congestion_threshold", 0.8),
+                max_cells_to_spread=arguments.get("max_cells_to_spread", 20),
+            )
+
+        elif name == "execute_congestion_spreading":
+            result = rw.execute_congestion_spreading(
+                max_cells_to_spread=arguments.get("max_cells_to_spread", 20),
+                spread_distance=arguments.get("spread_distance", 10),
+                temp_dir=arguments.get("temp_dir", "temp"),
+                checkpoint_prefix=arguments.get("checkpoint_prefix", "congestion_spread"),
             )
 
         elif name == "route_design_rwroute":

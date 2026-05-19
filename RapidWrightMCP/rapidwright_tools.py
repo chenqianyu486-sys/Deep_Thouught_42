@@ -2350,3 +2350,111 @@ def route_design_rwroute(
         logger.error(f"RapidWright routing failed: {e}")
         return {"error": f"RapidWright routing failed: {str(e)}"}
 
+
+def analyze_congestion_spreading(
+    congestion_threshold: float = 0.8,
+    max_cells_to_spread: int = 20,
+) -> dict:
+    """Analyze routing congestion and identify cells to spread outward.
+
+    READ-ONLY analysis. Scores cells by how many of their connected net pins
+    are in congested columns, and returns a ranked candidate list.
+
+    Args:
+        congestion_threshold: Threshold (0-1) for column congestion detection
+        max_cells_to_spread: Maximum candidate cells to return
+
+    Returns:
+        Dictionary with congestion_analysis, candidates, and summary
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("analyze_congestion_spreading")
+        if skill is None:
+            return {"error": "Skill 'analyze_congestion_spreading' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            congestion_threshold=congestion_threshold,
+            max_cells_to_spread=max_cells_to_spread,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in congestion spreading analysis: {e}")
+        return {"error": str(e)}
+
+
+def execute_congestion_spreading(
+    max_cells_to_spread: int = 20,
+    spread_distance: int = 10,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "congestion_spread",
+) -> dict:
+    """Spread cells from congested regions outward and write checkpoint.
+
+    MUTATING: modifies cell placement and writes a DCP file.
+
+    Args:
+        max_cells_to_spread: Maximum cells to move
+        spread_distance: Column distance to spread outward
+        temp_dir: Directory for checkpoint output
+        checkpoint_prefix: Checkpoint filename prefix
+
+    Returns:
+        Dictionary with cells_moved, cells_failed, density_reduction,
+        checkpoint_path, results, post_actions
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("execute_congestion_spreading")
+        if skill is None:
+            return {"error": "Skill 'execute_congestion_spreading' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            max_cells_to_spread=max_cells_to_spread,
+            spread_distance=spread_distance,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing congestion spreading: {e}")
+        return {"error": str(e)}
+

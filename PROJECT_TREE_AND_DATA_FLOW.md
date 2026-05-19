@@ -69,6 +69,7 @@ fpl26_optimization_contest/
 │   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 │   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
 │   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
+│   ├── congestion_spreading_strategy.py  # Skill类：Congestion-Aware Cell Spreading（分析+执行）
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
@@ -275,6 +276,8 @@ skills/
 ├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
 ├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization
+├── analysis.analyze_congestion_spreading@1.0.0  # 拥塞感知扩散分析（READ-ONLY）
+├── optimization.execute_congestion_spreading@1.0.0  # 拥塞感知单元扩散（non-idempotent）
 └── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
 
 Skill 超时映射（三层）:
@@ -282,6 +285,8 @@ Skill 超时映射（三层）:
 |-------|-------------------------------|-----------------------------------|-------------------|
 | smart_region | **60000** (1min) | 60000 / 120000 | 60.0 |
 | pblock_strategy | **60000** (1min) | 60000 / 120000 | 60.0 |
+| analyze_congestion_spreading | **60000** (1min) | 60000 / 120000 | - |
+| execute_congestion_spreading | **300000** (5min) | 300000 / 600000 | - |
 | net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
 | physopt_strategy | 360000 (6min) | 360000 / 720000 | 360.0 |
 | fanout_strategy | 300000 (5min) | 300000 / 600000 | 300.0 * nets |
@@ -301,11 +306,13 @@ Skill 超时映射（三层）:
 │   ├── analyze_pblock_region: avg_distance>70 → READ-ONLY分析, 返回pblock_ranges (LLM自行调Vivado工具串)
 │   │   └── Vivado工具串: place_design -unplace → create_and_apply_pblock → place_design → route_design → report_timing_summary
 │   ├── execute_physopt_strategy: 1-2 paths with spread, WNS>-2.0 → phys_opt+route+timer
-│   └── execute_fanout_strategy: fo>100 → optimize_fanout_batch+write_checkpoint, 返回优化结果(LLM自行调Vivado工具串)
+│   ├── execute_fanout_strategy: fo>100 → optimize_fanout_batch+write_checkpoint, 返回优化结果(LLM自行调Vivado工具串)
+│   └── execute_congestion_spreading: severity=HIGH → 评分拥塞cell+扩散+write_checkpoint (LLM自行调Vivado工具串)
 
 Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列, 注意 stagnation 条件含隐含的 best_wns < 0 检查):
 ├── stagnation (global_no_improvement>=1 AND best_wns<0) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
 ├── stagnation + Fanout not failed                    → rapidwright_execute_fanout_strategy [诊断]
+├── stagnation + CongestionSpreading not failed        → rapidwright_analyze_congestion_spreading [诊断]
 ├── stagnation + 都失败                                → rapidwright_analyze_net_detour [诊断]
 ├── avg_distance > 70 + PBLOCK not failed             → rapidwright_analyze_pblock_region
 ├── max_fanout > 100 + Fanout not failed              → rapidwright_execute_fanout_strategy
@@ -604,6 +611,7 @@ class StepState:
 - PBLOCK → 工具名含 `pblock`
 - PhysOpt → 工具名含 `phys_opt`
 - Fanout → 工具名含 `fanout` 或 `optimize_fanout`
+- CongestionSpreading → 工具名含 `congestion_spread` 或 `execute_congestion_spreading`
 - PlaceRoute → 工具名含 `place_design` 或 `route_design`
 - 以上均不匹配 → Information/Unknown（不记录失败）
 
