@@ -29,6 +29,27 @@ from .pure.timing import parse_timing_summary
 logger = logging.getLogger(__name__)
 
 
+class TeeLogger:
+    """Captures print output to both console and log file."""
+
+    def __init__(self, log_file_path: Path):
+        self._file = open(log_file_path, 'w', encoding='utf-8')
+        self._original_stdout = sys.stdout
+
+    def write(self, text: str):
+        self._original_stdout.write(text)
+        self._file.write(text)
+        self._file.flush()
+
+    def flush(self):
+        self._original_stdout.flush()
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
+        sys.stdout = self._original_stdout
+
+
 class V2TestMode:
     """v2 test mode: validate MCP tools and skills without LLM."""
 
@@ -42,6 +63,7 @@ class V2TestMode:
         self.skill_test_results: list[dict] = []
         self.tool_test_results: list[dict] = []
         self._quit_requested = False
+        self._tee_logger: Optional[TeeLogger] = None
 
         # Timing state
         self.initial_wns: Optional[float] = None
@@ -1160,40 +1182,47 @@ async def run_v2_test_mode(
     run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"FPGA Design Optimization — V2 TEST MODE")
-    print(f"=========================================")
-    print(f"Input:      {input_dcp.resolve()}")
-    print(f"Output:     {output_dcp.resolve()}")
-    print(f"Run dir:    {run_dir}")
-    print(f"Skills:     {'skip' if skip_skills else 'test'}")
-    print(f"Mode:       {'skills-only' if skills_only else 'full'}")
-    print()
-
-    tester = V2TestMode(run_dir, debug=debug, skip_skills=skip_skills)
+    # Setup log file to capture all console output
+    log_file = run_dir / "v2testmode.log"
+    tee = TeeLogger(log_file)
+    sys.stdout = tee
 
     try:
-        await tester.start_servers()
+        print(f"FPGA Design Optimization — V2 TEST MODE")
+        print(f"=========================================")
+        print(f"Input:      {input_dcp.resolve()}")
+        print(f"Output:     {output_dcp.resolve()}")
+        print(f"Run dir:    {run_dir}")
+        print(f"Log file:   {log_file}")
+        print(f"Skills:     {'skip' if skip_skills else 'test'}")
+        print(f"Mode:       {'skills-only' if skills_only else 'full'}")
+        print()
 
-        if skills_only:
-            init_data = await tester.run_init_analysis(input_dcp)
-            success = await tester.run_skill_tests(init_data)
-        else:
-            # DCP-type dispatch
-            name = input_dcp.stem.lower()
-            if "corundum" in name:
-                success = await tester.run_corundum_test(input_dcp, output_dcp, max_nets)
-            elif "logicnets" in name:
-                success = await tester.run_logicnets_test(input_dcp, output_dcp)
+        tester = V2TestMode(run_dir, debug=debug, skip_skills=skip_skills)
+
+        try:
+            await tester.start_servers()
+
+            if skills_only:
+                init_data = await tester.run_init_analysis(input_dcp)
+                success = await tester.run_skill_tests(init_data)
             else:
-                print(f"[TEST] Unknown DCP type for test mode: {input_dcp.name}")
-                print(f"[TEST] Supported: corundum, logicnets")
-                return False
+                # DCP-type dispatch
+                name = input_dcp.stem.lower()
+                if "corundum" in name:
+                    success = await tester.run_corundum_test(input_dcp, output_dcp, max_nets)
+                elif "logicnets" in name:
+                    success = await tester.run_logicnets_test(input_dcp, output_dcp)
+                else:
+                    print(f"[TEST] Unknown DCP type for test mode: {input_dcp.name}")
+                    print(f"[TEST] Supported: corundum, logicnets")
+                    return False
 
-        return success
+            return success
 
-    except KeyboardInterrupt:
-        print("\n[TEST] Interrupted by user")
-        return False
+        except KeyboardInterrupt:
+            print("\n[TEST] Interrupted by user")
+            return False
 
     except Exception as e:
         logger.exception(f"v2 test mode fatal error: {e}")
@@ -1202,3 +1231,5 @@ async def run_v2_test_mode(
 
     finally:
         await tester.cleanup()
+        tee.close()
+        print(f"[TEST] Log saved to: {log_file}")

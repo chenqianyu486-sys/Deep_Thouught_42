@@ -131,6 +131,8 @@ fpl26_optimization_contest/
 - `python dcp_optimizer.py input.dcp --test-v2` — 命令行直接指定
 - `python dcp_optimizer.py input.dcp --test-v2-only-skills` — 仅 Skill 测试
 
+**日志功能**: V2测试模式自动将所有控制台输出保存至 `run_dir/v2testmode.log`，使用TeeLogger实现stdout双写。日志文件包含完整的测试执行记录，便于调试和问题排查。
+
 ### 状态模型
 ```
 OptimizerState (可变dataclass)
