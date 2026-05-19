@@ -21,6 +21,8 @@ SCENARIO_DETECTION_MATRIX = [
      "detection": "analyze_congestion: severity=HIGH or congested_ratio > 0.3"},
     {"id": "congestion_spread", "scenario": "Congestion-Aware Spreading",
      "detection": "analyze_congestion: severity=HIGH AND PBLOCK ineffective"},
+    {"id": "deep_chain", "scenario": "Deep Combinational Chains",
+     "detection": "extract_critical_path_pins: >2 LUT levels between FFs on critical paths"},
 ]
 
 SCENARIO_WORKFLOW = [
@@ -137,6 +139,24 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "RegisterRetiming": {
+        "name": "Register Retiming (Targeted Pipeline Insertion)",
+        "trigger": "WNS stuck, deep combinational chains (>2 LUTs) on critical paths",
+        "sequence": [
+            {"step": "extract_critical_path_pins", "platform": "Vivado",
+             "params": {"num_paths": 20},
+             "note": "Get pin-level critical path data"},
+            {"step": "analyze_register_retiming", "platform": "RapidWright",
+             "params": {"delay_threshold": 0.5, "min_chain_depth": 2},
+             "note": "READ-ONLY: identify retiming candidates"},
+            {"step": "execute_register_retiming", "platform": "RapidWright",
+             "params": {"max_retiming_ops": 5},
+             "note": "Insert pipeline FFs, writes checkpoint"},
+            {"step": "open_checkpoint", "platform": "Vivado", "params": None},
+            {"step": "route_design", "platform": "Vivado", "params": None},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -148,6 +168,7 @@ STRATEGY_LABEL_MAP = {
     "PinSwap": "PinSwap",
     "CellReplication": "CellReplication",
     "CongestionSpreading": "CongestionSpreading",
+    "RegisterRetiming": "RegisterRetiming",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -158,6 +179,7 @@ STRATEGY_SKILL_MAP = {
     "PinSwap": "pin_swapping_strategy",
     "CellReplication": "critical_path_cell_replication",
     "CongestionSpreading": "execute_congestion_spreading",
+    "RegisterRetiming": "execute_register_retiming",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -250,6 +272,24 @@ SKILL_GUIDANCE = {
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM — moving cells can disrupt existing good placement. Limit spread_distance to avoid excessive displacement.",
         "contraindications": "Do NOT use when congestion is LOW or MODERATE. Prefer PBLOCK for geographic constraints first.",
+    },
+    "analyze_register_retiming": {
+        "category": "ANALYSIS",
+        "input": "critical_paths JSON from Vivado extract_critical_path_pins",
+        "output": "retiming candidates with source/dest FF, chain depth, insertion point",
+        "condition": "WNS stuck, critical paths have deep combinational chains (>2 LUTs between FFs)",
+        "prerequisite": "Load DCP via read_checkpoint first, call extract_critical_path_pins in Vivado",
+        "interpretation": "Empty candidates = no deep chains found. Non-empty = segments where pipeline registers would help.",
+    },
+    "execute_register_retiming": {
+        "category": "OPTIMIZATION",
+        "input": "retiming_candidates from analyze_register_retiming, max_retiming_ops (default 5)",
+        "output": "retiming_ops_performed, checkpoint_path, per-candidate results",
+        "condition": "analyze_register_retiming identified candidates with deep chains",
+        "prerequisite": "Call analyze_register_retiming first to get candidate list",
+        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
+        "risk": "MEDIUM - inserting FFs changes logic depth and routing. Limit to 5 ops per call.",
+        "contraindications": "Do NOT use when Vivado global retiming (phys_opt_design -retime) has already been tried and caused functional errors. This targeted approach is safer but still modifies netlist topology.",
     },
 }
 

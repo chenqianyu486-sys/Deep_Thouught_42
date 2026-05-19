@@ -69,6 +69,8 @@ COMPLEX_TOOLS = {
     "flatten_lut_cascade",
     "optimize_pin_swapping",
     "replicate_critical_cells",
+    "analyze_register_retiming",
+    "execute_register_retiming",
 }
 
 
@@ -932,6 +934,82 @@ analyze_congestion severity=HIGH.""",
                 "required": ["critical_paths"]
             }
         ),
+        Tool(
+            name="analyze_register_retiming",
+            description="""Identify FF-to-FF segments with deep combinational logic for register retiming.
+
+READ-ONLY analysis. Parses critical path pin data from Vivado to find segments
+where combinational delay exceeds threshold, and identifies optimal insertion
+points for pipeline registers.
+
+Use this BEFORE execute_register_retiming to identify which paths would benefit
+from register insertion.
+
+Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs).
+Empty result = no deep chains found (valid diagnosis, not a failure).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of path dicts from Vivado extract_critical_path_pins"
+                    },
+                    "delay_threshold": {
+                        "type": "number",
+                        "description": "Minimum combinational delay (ns) to flag a segment. Default: 0.5.",
+                        "default": 0.5
+                    },
+                    "min_chain_depth": {
+                        "type": "integer",
+                        "description": "Minimum LUT chain depth to consider. Default: 2.",
+                        "default": 2
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="execute_register_retiming",
+            description="""Insert pipeline registers on deep combinational chains to reduce critical path delay.
+
+MUTATING: creates new FF cells, modifies net topology, writes checkpoint file.
+Uses RapidWright ECOTools to insert FFs inline on specific critical paths.
+Targeted approach - only inserts on identified segments, safer than Vivado global retiming.
+
+After this, call vivado_open_checkpoint, vivado_route_design,
+vivado_report_timing_summary to verify timing.
+
+LIMITATIONS: Not suitable for paths crossing clock domain boundaries.
+Max 5 FF insertions per call (safety cap).
+If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "retiming_candidates": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of retiming candidates from analyze_register_retiming"
+                    },
+                    "max_retiming_ops": {
+                        "type": "integer",
+                        "description": "Maximum FF insertions per call (default: 5)",
+                        "default": 5
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for checkpoint output",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Checkpoint filename prefix",
+                        "default": "register_retime"
+                    }
+                },
+                "required": ["retiming_candidates"]
+            }
+        ),
     ]
 
 
@@ -1157,6 +1235,27 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     max_replications=arguments.get("max_replications", 10),
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "cell_replication"),
+                )
+
+        elif name == "analyze_register_retiming":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
+            else:
+                result = rw.analyze_register_retiming(
+                    critical_paths=arguments["critical_paths"],
+                    delay_threshold=arguments.get("delay_threshold", 0.5),
+                    min_chain_depth=arguments.get("min_chain_depth", 2),
+                )
+
+        elif name == "execute_register_retiming":
+            if "retiming_candidates" not in arguments:
+                result = {"error": "Missing required parameter: retiming_candidates. Provide candidates from analyze_register_retiming."}
+            else:
+                result = rw.execute_register_retiming(
+                    retiming_candidates=arguments["retiming_candidates"],
+                    max_retiming_ops=arguments.get("max_retiming_ops", 5),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "register_retime"),
                 )
 
         else:

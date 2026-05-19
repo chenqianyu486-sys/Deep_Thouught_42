@@ -84,12 +84,17 @@ strategy_selection:
     <<: *profile-pblock
   - default:
     <<: *profile-physopt
+  - scenarios: [deep_chain]
+    strategy: register_retiming
+    skill: execute_register_retiming
 
   ordering_constraints:
     - "PBLOCK should be attempted BEFORE fanout optimization. Fanout after PBLOCK disrupts dense layout."
     - "If execute_fanout_strategy is run after PBLOCK and WNS regresses: set flow_control=ROLLBACK immediately."
     - "optimize_lut_input_cone: Skip entirely for neural network / wide-datapath designs. Check optimized_count in result — 0 means no cones were optimizable."
     - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
+    - "Register retiming should be attempted AFTER LUT cascade flattening. If chains are already flattened, retiming inserts unnecessary FFs."
+    - "Register retiming is safer than Vivado's global phys_opt_design -retime (which causes functional errors in NN designs). Use this targeted approach instead."
   strategy_risk:
     fanout_after_pblock: "HIGH RISK — fanout splitting removes the dense clustering that PBLOCK creates, likely worsening WNS."
     lut_cone_on_wide_logic: "INEFFECTIVE — neural network designs have 75+ input cones, far exceeding 6-input LUT limit."
@@ -99,6 +104,7 @@ strategies:
     pblock: "PBLOCK-Based Re-placement (physical constraint)"
     physopt: "Physical Optimization (1-2 paths with spread)"
     fanout: "High Fanout Net Optimization (fanout nets, no spread)"
+    register_retiming: "Register Retiming - Targeted Pipeline Insertion (deep combinational chains)"
   analysis_skills:
     analyze_net_detour:
       type: read-only

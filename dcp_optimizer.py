@@ -2470,6 +2470,8 @@ class DCPOptimizer(DCPOptimizerBase):
             return "CellReplication"
         if "optimize_pin_swapping" in tool_str or "pin_swap" in tool_str:
             return "PinSwap"
+        if "register_retiming" in tool_str or "register_retime" in tool_str:
+            return "RegisterRetiming"
         if "congestion_spread" in tool_str or "execute_congestion_spreading" in tool_str:
             return "CongestionSpreading"
         if "place_design" in tool_str or "route_design" in tool_str:

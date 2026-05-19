@@ -2300,6 +2300,118 @@ def replicate_critical_cells(
         return {"error": str(e)}
 
 
+def analyze_register_retiming(
+    critical_paths: list[dict],
+    delay_threshold: float = 0.5,
+    min_chain_depth: int = 2,
+) -> dict:
+    """Analyze critical paths for register retiming candidates.
+
+    Identifies FF-to-FF segments with deep combinational logic chains
+    where inserting a pipeline register would reduce critical path delay.
+
+    Args:
+        critical_paths: List of path dicts from Vivado extract_critical_path_pins
+        delay_threshold: Minimum combinational delay (ns) to flag a segment
+        min_chain_depth: Minimum LUT chain depth to consider
+
+    Returns:
+        dict with candidates list and summary
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("analyze_register_retiming")
+        if skill is None:
+            return {"error": "Skill 'analyze_register_retiming' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            delay_threshold=delay_threshold,
+            min_chain_depth=min_chain_depth,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in register retiming analysis: {e}")
+        return {"error": str(e)}
+
+
+def execute_register_retiming(
+    retiming_candidates: list[dict],
+    max_retiming_ops: int = 5,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "register_retime",
+) -> dict:
+    """Execute register retiming by inserting pipeline FFs on critical paths.
+
+    Creates new FF cells inline on combinational chains to reduce critical
+    path delay. Writes a checkpoint that must be opened in Vivado for
+    route_design and report_timing_summary.
+
+    Args:
+        retiming_candidates: List of candidate dicts from analyze_register_retiming
+        max_retiming_ops: Maximum FF insertions per call (default: 5)
+        temp_dir: Directory for checkpoint output (default: "temp")
+        checkpoint_prefix: Checkpoint filename prefix (default: "register_retime")
+
+    Returns:
+        dict with retiming results and checkpoint path
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("execute_register_retiming")
+        if skill is None:
+            return {"error": "Skill 'execute_register_retiming' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            retiming_candidates=retiming_candidates,
+            max_retiming_ops=max_retiming_ops,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing register retiming: {e}")
+        return {"error": str(e)}
+
+
 def route_design_rwroute(
     directive: str = "TimingDriven",
     timeout_minutes: int = 360,
