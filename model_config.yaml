@@ -23,7 +23,7 @@ worker:
   cost_hard_limit: 2.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-flash"    # Same as worker to reduce cost
+  model_name: "deepseek/deepseek-v4-pro"    # Default Pro model name
   max_tokens: 1000000
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)

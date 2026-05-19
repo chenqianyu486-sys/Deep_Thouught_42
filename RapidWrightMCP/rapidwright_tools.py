@@ -2484,22 +2484,6 @@ def report_timing() -> Dict[str, Any]:
         - message: 可读摘要
         - elapsed_ms: 耗时 (毫秒)
     """
-def analyze_congestion_spreading(
-    congestion_threshold: float = 0.8,
-    max_cells_to_spread: int = 20,
-) -> dict:
-    """Analyze routing congestion and identify cells to spread outward.
-
-    READ-ONLY analysis. Scores cells by how many of their connected net pins
-    are in congested columns, and returns a ranked candidate list.
-
-    Args:
-        congestion_threshold: Threshold (0-1) for column congestion detection
-        max_cells_to_spread: Maximum candidate cells to return
-
-    Returns:
-        Dictionary with congestion_analysis, candidates, and summary
-    """
     global _current_design
 
     if not _initialized:
@@ -2582,6 +2566,27 @@ def analyze_congestion_spreading(
         logger.error(f"RapidWright timing report failed: {e}")
         return {"error": f"Timing report failed: {str(e)}"}
 
+
+def analyze_congestion_spreading(
+    congestion_threshold: float = 0.8,
+    max_cells_to_spread: int = 20,
+) -> dict:
+    """Analyze routing congestion and identify cells to spread outward.
+
+    READ-ONLY analysis. Scores cells by how many of their connected net pins
+    are in congested columns, and returns a ranked candidate list.
+
+    Args:
+        congestion_threshold: Threshold (0-1) for column congestion detection
+        max_cells_to_spread: Maximum candidate cells to return
+
+    Returns:
+        Dictionary with congestion_analysis, candidates, and summary
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
     if _current_design is None:
         return {"error": "No design loaded. Use read_checkpoint first."}
 
