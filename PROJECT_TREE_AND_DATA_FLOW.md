@@ -4,7 +4,39 @@
 
 ```
 fpl26_optimization_contest/
-├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发、_build_skill_recommendation()
+├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发、_build_skill_recommendation()、optimize_v2()入口
+├── optimizer/                    # 状态机驱动Agent框架（LangGraph风格）
+│   ├── __init__.py               # build_optimizer_graph() 图构建入口，注册8个节点+条件边
+│   ├── state.py                  # 状态dataclass: OptimizerState/TimingState/IterationState/ModelState/CostState/ControlState/ContextState
+│   ├── deps.py                   # NodeDeps: 外部依赖容器（MCP会话、MemoryManager、OpenAI客户端）
+│   ├── graph.py                  # NodeGraph: 图执行引擎（节点注册、边注册、run循环）
+│   ├── edges.py                  # 条件边函数: after_init/after_check_exit + NodeName枚举
+│   ├── tracing.py                # StateTracer: 状态转换日志（JSON导出）
+│   ├── nodes/                    # 节点实现（全部完成）
+│   │   ├── __init__.py
+│   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS/高扇出网线/资源利用率）
+│   │   ├── iteration_start.py    # 迭代开始节点（递增计数器、保存prev_best_wns）
+│   │   ├── select_model.py       # 模型选择节点（评分+阈值选择planner/worker）
+│   │   ├── prepare_context.py    # 上下文准备节点（压缩、注入handoff、构建snapshot）
+│   │   ├── iteration_end.py      # 迭代结束节点（更新计数器、构建narrative、预选下轮模型）
+│   │   ├── check_exit.py         # 退出检查节点（WNS达标/无改善/超时/超成本）
+│   │   ├── save_output.py        # 保存输出节点（写DCP、打印摘要、导出tracing）
+│   │   └── subgraphs/
+│   │       └── llm_tool_loop.py  # LLM工具循环节点（内部while循环：调LLM→解析→执行工具→跟踪WNS）
+│   ├── pure/                     # 从DCPOptimizer提取的无状态纯函数（可独立单测）
+│   │   ├── __init__.py
+│   │   ├── timing.py             # parse_timing_summary/parse_high_fanout_nets/parse_resource_utilization/is_valid_wns/compute_timing_hash
+│   │   ├── constants.py          # TaskCategory/ModelTier/TOOL_MODEL_MAPPING/SKILL_TOOL_MAP/阈值常量
+│   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
+│   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
+│   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
+│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot
+│   │   ├── handoff.py            # build_handoff_prompt/build_data_driven_goal/build_stagnation_signal
+│   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
+│   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
+│   │   └── compress.py           # compress_context（CompressionContext构建+阈值检查+同步调用_compress）
+│   ├── test_graph.py             # 21项单元测试（状态/边/图/追踪/集成）
+│   └── test_mode.py              # V2测试模式：无LLM验证MCP工具调用和Skill调用（V2TestMode类）
 ├── config_loader.py              # 模型配置加载器（单例）
 ├── model_config.yaml             # 模型层级与fallback配置
 ├── validate_dcps.py              # DCP等价性验证器
@@ -77,6 +109,61 @@ fpl26_optimization_contest/
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
 │   └── test_skill_framework.py      # 28项集成测试（注册/执行/遥测/错误/幂等/追踪）
 ```
+
+## 1.1 状态机驱动Agent架构（optimizer/）
+
+与 `dcp_optimizer.py` 的消息对话驱动架构并行，`optimizer/` 包实现了显式状态机驱动架构（类似LangGraph）。
+
+### 入口
+- `make run_optimizer DCP=input.dcp` — 默认走 v2 状态机路径（自动加 `--v2`）
+- `make run_optimizer_v1 DCP=input.dcp` — 走旧 v1 消息对话路径
+- `python dcp_optimizer.py input.dcp --v2` — 命令行直接指定 v2
+- `python dcp_optimizer.py input.dcp` — 命令行走 v1（无 `--v2`）
+
+### V2 测试模式（无 LLM）
+- `make run_test_v2 DCP=input.dcp` — 完整 v2 测试流程（工具+Skill+place/route）
+- `make run_skill_test_v2 DCP=input.dcp` — 仅验证 Skill 调用（快速，无 place/route）
+- `python dcp_optimizer.py input.dcp --test-v2` — 命令行直接指定
+- `python dcp_optimizer.py input.dcp --test-v2-only-skills` — 仅 Skill 测试
+
+### 状态模型
+```
+OptimizerState (可变dataclass)
+├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones
+├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives
+├── ModelState     — 模型选择/fallback/交接提示词
+├── CostState      — token用量/成本追踪
+├── ContextState   — 压缩指标/raw_tool_outputs/重复检测
+└── ControlState   — 退出条件/路径/step_state
+```
+
+### 图拓扑
+```
+init_analysis → [条件: timing met?]
+  ├─ YES → save_output → end
+  └─ NO  → iteration_start → select_model → prepare_context
+            → llm_tool_loop(子图) → iteration_end → check_exit
+            → [条件: done?]
+              ├─ YES → save_output → end
+              └─ NO  → iteration_start (循环)
+```
+
+### 子图: llm_tool_loop
+```
+llm_call → evaluate_flow → [条件: flow_control?]
+  ├─ CONTINUE → execute_tools → update_wns → llm_call (循环)
+  ├─ DONE/SWITCH_STRATEGY → 退出子图
+  └─ RETRY/ROLLBACK → 重试/回滚
+```
+
+### 关键设计
+- **节点签名**: `async (state, deps) -> str`（返回下一节点名）
+- **依赖注入**: NodeDeps 容器（MCP会话、MemoryManager），不存入状态
+- **条件边**: 纯函数 `state -> next_node_name`，系统决定转换而非LLM
+- **状态追踪**: StateTracer 在每个节点边界记录快照，JSON导出
+- **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
+- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`
+- **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
 
 ## 2. 核心数据流
 

@@ -87,6 +87,17 @@ def patch_file(filepath):
 
     content = content.replace(old_logic, new_logic)
 
+    # 移除冗余的 CLASSPATH 检查（已被 else 分支处理）
+    redundant_check = (
+        "    if not os.environ.get('CLASSPATH') and os.environ.get('RAPIDWRIGHT_PATH'):\n"
+        "        rwPath = os.environ.get('RAPIDWRIGHT_PATH')\n"
+        "        classpath = rwPath + \"/bin:\" + rwPath + \"/jars/*\"\n"
+        "        print(\"ERROR: RAPIDWRIGHT_PATH is set but CLASSPATH is not set.  Please set CLASSPATH=\" + classpath)\n"
+        "        exit(1)\n"
+    )
+    if redundant_check in content:
+        content = content.replace(redundant_check, "")
+
     # 添加 glob import
     if "import os, urllib.request, platform, shutil" in content:
         content = content.replace(

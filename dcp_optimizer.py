@@ -7656,6 +7656,330 @@ async def run_test_mode(input_dcp: Path, output_dcp: Path, debug: bool = False, 
 
 # === Section 10: Entry Point ===
 
+async def optimize_v2(
+    input_dcp: Path,
+    output_dcp: Path,
+    api_key: str = "",
+    model_planner: str = DEFAULT_MODEL_PLANNER,
+    model_worker: str = DEFAULT_MODEL_WORKER,
+    wall_clock_timeout: float = 3600.0,
+    debug: bool = False,
+) -> bool:
+    """State-machine-driven optimizer entry point.
+
+    Uses the explicit graph-based architecture from optimizer/ package.
+    Parallel to optimize() — does not modify or depend on it.
+
+    Args:
+        input_dcp: Path to input design checkpoint.
+        output_dcp: Path to write optimized checkpoint.
+        api_key: OpenRouter API key.
+        model_planner: Planner model identifier.
+        model_worker: Worker model identifier.
+        wall_clock_timeout: Max runtime in seconds.
+        debug: Enable verbose logging.
+
+    Returns:
+        True if timing converged (WNS >= 0), False otherwise.
+    """
+    from optimizer import (
+        build_optimizer_graph,
+        OptimizerState,
+        NodeDeps,
+        StateTracer,
+    )
+
+    logger.info("=" * 60)
+    logger.info("[optimize_v2] State-machine-driven optimizer")
+    logger.info(f"  Input:  {input_dcp}")
+    logger.info(f"  Output: {output_dcp}")
+    logger.info(f"  Planner: {model_planner}")
+    logger.info(f"  Worker:  {model_worker}")
+    logger.info("=" * 60)
+
+    # ── Step 1: Create run directory and configure logging ────────
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(level="INFO", use_json=False, log_dir=str(run_dir))
+    logger.info(f"[optimize_v2] Run directory: {run_dir}")
+
+    # Build initial state
+    state = OptimizerState()
+    state.control.input_dcp = input_dcp
+    state.control.output_dcp = output_dcp
+    state.control.wall_clock_timeout = wall_clock_timeout
+    state.control.run_dir = run_dir
+    state.model.planner_model = model_planner
+    state.model.worker_model = model_worker
+
+    # Load fallback models from config
+    _v2_loader = get_model_config_loader()
+    _v2_worker_data = _v2_loader.get_worker_config()
+    _v2_planner_data = _v2_loader.get_planner_config()
+    state.model.worker_fallback_models = _v2_worker_data.fallback_models
+    state.model.planner_fallback_models = _v2_planner_data.fallback_models
+
+    # ── Step 2: Start MCP sessions ───────────────────────────────
+    exit_stack = AsyncExitStack()
+    script_dir = Path(__file__).parent.resolve()
+
+    try:
+        # RapidWright MCP server
+        rapidwright_log = run_dir / "rapidwright.log"
+        rapidwright_mcp_log = run_dir / "rapidwright-mcp.log"
+        vivado_log = run_dir / "vivado.log"
+        vivado_journal = run_dir / "vivado.jou"
+        vivado_mcp_log = run_dir / "vivado-mcp.log"
+
+        rw_log_file = open(rapidwright_mcp_log, 'w')
+        exit_stack.callback(rw_log_file.close)
+        v_log_file = open(vivado_mcp_log, 'w')
+        exit_stack.callback(v_log_file.close)
+
+        rapidwright_config = {
+            "command": sys.executable,
+            "args": [
+                str(script_dir / "RapidWrightMCP" / "server.py"),
+                "--java-log", str(rapidwright_log),
+                "--mcp-log", str(rapidwright_mcp_log),
+            ],
+            "cwd": str(run_dir),
+            "env": {**os.environ},
+        }
+        vivado_config = {
+            "command": sys.executable,
+            "args": [
+                str(script_dir / "VivadoMCP" / "vivado_mcp_server.py"),
+                "--vivado-log", str(vivado_log),
+                "--vivado-journal", str(vivado_journal),
+            ],
+            "cwd": str(run_dir),
+            "env": {**os.environ},
+        }
+
+        logger.info("[optimize_v2] Starting RapidWright MCP server...")
+        rw_params = StdioServerParameters(**rapidwright_config)
+        rw_transport = await exit_stack.enter_async_context(
+            stdio_client(rw_params, errlog=rw_log_file)
+        )
+        rw_read, rw_write = rw_transport
+        rapidwright_session = await exit_stack.enter_async_context(
+            ClientSession(rw_read, rw_write)
+        )
+        await rapidwright_session.initialize()
+        logger.info("[optimize_v2] RapidWright MCP connected")
+
+        logger.info("[optimize_v2] Starting Vivado MCP server...")
+        vivado_params = StdioServerParameters(**vivado_config)
+        vivado_transport = await exit_stack.enter_async_context(
+            stdio_client(vivado_params, errlog=v_log_file)
+        )
+        v_read, v_write = vivado_transport
+        vivado_session = await exit_stack.enter_async_context(
+            ClientSession(v_read, v_write)
+        )
+        await vivado_session.initialize()
+        logger.info("[optimize_v2] Vivado MCP connected")
+
+        # ── Step 3: Collect tool definitions ──────────────────────
+        tools = []
+        rw_response = await rapidwright_session.list_tools()
+        for tool in rw_response.tools:
+            tools.append(convert_mcp_tool_to_openai(tool, "rapidwright"))
+        v_response = await vivado_session.list_tools()
+        for tool in v_response.tools:
+            tools.append(convert_mcp_tool_to_openai(tool, "vivado"))
+
+        # Internal tool: retrieve raw tool output
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "vivado_get_raw_tool_output",
+                "description": (
+                    "Retrieve the complete raw Vivado output for a previous tool call. "
+                    "By default tool results are returned as structured summaries; "
+                    "use this when you need to inspect raw timing paths, DRC details, or error messages."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "iteration": {"type": "integer", "description": "Iteration number (default: current iteration)"},
+                        "round_index": {"type": "integer", "description": "Tool round within the iteration (default: most recent)"},
+                        "tool_name": {"type": "string", "description": "Filter by tool name, e.g. vivado_phys_opt_design (optional)"},
+                    },
+                },
+                "strict": False,
+            },
+        })
+
+        # Internal tool: cached high fanout nets
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "vivado_get_cached_high_fanout_nets",
+                "description": (
+                    "Retrieve cached high-fanout nets from initial analysis "
+                    "(no Vivado call, no truncation risk). "
+                    "Use this when vivado_get_critical_high_fanout_nets output is "
+                    "truncated or incomplete."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "max_nets": {"type": "integer", "description": "Maximum number of nets to return (0 = return all)"},
+                        "min_fanout": {"type": "integer", "description": "Minimum fanout threshold to filter (optional)"},
+                    },
+                },
+                "strict": False,
+            },
+        })
+
+        # Internal tool: report_step_state
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "report_step_state",
+                "description": (
+                    "REQUIRED in every response. Reports process control state "
+                    "(replaces old step: YAML block). Call ALONGSIDE other tool "
+                    "calls, or alone if making no other calls."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "step_id": {"type": "integer", "description": "Incrementing per message in current strategy"},
+                        "result_status": {
+                            "type": "string",
+                            "enum": ["SUCCESS", "PARTIAL", "FAIL"],
+                            "description": "SUCCESS: WNS improved; PARTIAL: executed but insufficient; FAIL: regression or tool error",
+                        },
+                        "flow_control": {
+                            "type": "string",
+                            "enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"],
+                            "description": (
+                                "CONTINUE: next step in current strategy; "
+                                "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
+                                "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
+                                "RETRY: modify params and retry (max 3); "
+                                "ROLLBACK: revert to best checkpoint"
+                            ),
+                        },
+                    },
+                    "required": ["step_id", "result_status", "flow_control"],
+                },
+                "strict": False,
+            },
+        })
+
+        logger.info(f"[optimize_v2] Collected {len(tools)} tool definitions")
+
+        # ── Step 4: Initialize MemoryManager + Compat ─────────────
+        event_bus = EventBus()
+        memory_manager = MemoryManager(event_bus=event_bus)
+        compat = DCPOptimizerCompat(memory_manager)
+        logger.info("[optimize_v2] MemoryManager + Compat initialized")
+
+        # ── Step 5: Load system prompt and inject initial messages ─
+        system_prompt_template = load_system_prompt()
+        system_prompt = system_prompt_template.format(
+            temp_dir=str(run_dir),
+            input_dcp=str(input_dcp.resolve()),
+        )
+        compat.add_message("system", system_prompt)
+
+        FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
+Every response MUST call the `report_step_state` tool (in your structured function/tool
+calls, NOT in the text body). This tool carries process control directives:
+step_id, result_status, flow_control.
+
+Call report_step_state ALONGSIDE any other tool calls you make. If you are making no
+other tool calls, call report_step_state alone.
+
+The report_step_state tool takes these parameters:
+  - step_id (integer): incrementing per message in current strategy
+  - result_status (string): SUCCESS | PARTIAL | FAIL
+  - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
+
+Your text response MUST contain your analysis (hypothesis, strategy_rationale,
+observed signals) as free-form chain-of-thought reasoning.
+Process control goes in the report_step_state tool call, analysis goes in text.
+
+STRICTLY FORBIDDEN:
+  - XML/HTML tags in text
+  - Omitting the report_step_state tool call entirely
+
+Maintain this output format throughout the entire conversation.
+"""
+        compat.add_message("user", FORMAT_GUARD)
+        logger.info("[optimize_v2] System prompt and format guard injected")
+
+        # ── Step 6: Create OpenAI client ──────────────────────────
+        openai_client = AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            timeout=300.0,
+        )
+
+        # ── Step 7: Assemble NodeDeps ─────────────────────────────
+        deps = NodeDeps(
+            openai_client=openai_client,
+            memory_manager=memory_manager,
+            compat=compat,
+            rapidwright_session=rapidwright_session,
+            vivado_session=vivado_session,
+            tools=tools,
+            event_bus=event_bus,
+            system_prompt=system_prompt,
+            model_planner=model_planner,
+            model_worker=model_worker,
+            api_key=api_key,
+        )
+
+        # ── Step 8: Build and run graph ───────────────────────────
+        tracer = StateTracer()
+        graph = build_optimizer_graph(tracer=tracer)
+
+        # Start stdin listener for graceful quit
+        def _v2_stdin_reader():
+            try:
+                for line in sys.stdin:
+                    if line.strip().lower() == "quit":
+                        logger.info("[optimize_v2] Quit requested by user")
+                        state.control.user_exit_requested = True
+                        break
+            except (EOFError, OSError):
+                pass
+
+        threading.Thread(target=_v2_stdin_reader, daemon=True).start()
+
+        final_state = await graph.run(state, deps, entry="init_analysis")
+
+        # Export tracing
+        if final_state.control.run_dir:
+            trace_path = str(final_state.control.run_dir / "state_transitions.json")
+            tracer.export(trace_path)
+
+        converged = (
+            final_state.timing.best_wns is not None
+            and final_state.timing.best_wns >= 0.0
+        )
+        logger.info(
+            f"[optimize_v2] Result: "
+            f"best_wns={final_state.timing.best_wns:.3f}ns, "
+            f"converged={converged}"
+        )
+        return converged
+
+    except Exception as e:
+        logger.exception(f"[optimize_v2] Fatal error: {e}")
+        raise
+
+    finally:
+        await exit_stack.aclose()
+        logger.info("[optimize_v2] MCP sessions closed")
+
+
 async def main():
     parser = argparse.ArgumentParser(
         description="FPGA Design Optimization Agent",
@@ -7671,6 +7995,8 @@ Examples:
   python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --max-nets 3
   python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test --skip-skills
   python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test-only-skills
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test-v2
+  python dcp_optimizer.py demo_corundum_25g_misses_timing.dcp --test-v2-only-skills
         """
     )
     parser.add_argument("input_dcp", type=Path, help="Input design checkpoint (.dcp)")
@@ -7730,6 +8056,21 @@ Examples:
         type=float,
         default=3600.0,
         help="Wall-clock timeout in seconds (default: 3600 = 1 hour). The optimizer will save the best checkpoint and exit when this limit is reached."
+    )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Use state-machine-driven optimizer (optimizer/ package). Runs alongside the default optimize() for comparison."
+    )
+    parser.add_argument(
+        "--test-v2",
+        action="store_true",
+        help="Run v2 test mode: validate MCP tools and skills via state-machine infrastructure without LLM."
+    )
+    parser.add_argument(
+        "--test-v2-only-skills",
+        action="store_true",
+        help="Run v2 skill-only test: quick validation of skill invocations without place/route."
     )
 
     args = parser.parse_args()
@@ -7807,8 +8148,53 @@ Examples:
         print("Error: OpenRouter API key required. Set OPENROUTER_API_KEY or use --api-key", file=sys.stderr)
         print("       Use --test flag to run in test mode without LLM", file=sys.stderr)
         sys.exit(1)
-    
-    
+
+    # V2 mode — state-machine-driven optimizer
+    if args.v2:
+        print(f"FPGA Design Optimization Agent (V2 — State Machine)")
+        print(f"====================================================")
+        print(f"Input:       {args.input_dcp.resolve()}")
+        print(f"Output:      {args.output_dcp.resolve()}")
+        print(f"Planner:     {args.model}")
+        print(f"Worker:      {args.model_worker}")
+        print()
+
+        success = await optimize_v2(
+            input_dcp=args.input_dcp,
+            output_dcp=args.output_dcp,
+            api_key=args.api_key,
+            model_planner=args.model,
+            model_worker=args.model_worker,
+            wall_clock_timeout=args.timeout,
+            debug=args.debug,
+        )
+        sys.exit(0 if success else 1)
+
+    # V2 test mode — validate tools/skills without LLM
+    if args.test_v2 or args.test_v2_only_skills:
+        from optimizer.test_mode import run_v2_test_mode
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
+
+        print(f"FPGA Design Optimization - V2 TEST MODE")
+        print(f"=========================================")
+        print(f"Input:       {args.input_dcp.resolve()}")
+        print(f"Output:      {args.output_dcp.resolve()}")
+        print(f"Run dir:     {run_dir}")
+        print(f"Skills only: {args.test_v2_only_skills}")
+        print()
+
+        success = await run_v2_test_mode(
+            input_dcp=args.input_dcp,
+            output_dcp=args.output_dcp,
+            debug=args.debug,
+            max_nets=args.max_nets,
+            skip_skills=args.skip_skills or args.test_v2_only_skills,
+            skills_only=args.test_v2_only_skills,
+        )
+        sys.exit(0 if success else 1)
+
     # Create run directory with timestamp (before creating optimizer so we can show it)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
