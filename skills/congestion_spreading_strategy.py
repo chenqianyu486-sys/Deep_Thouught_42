@@ -480,7 +480,7 @@ def execute_congestion_spreading(
 class AnalyzeCongestionSpreadingSkill(Skill):
     """Congestion-Aware Spreading Analysis Skill (READ-ONLY)."""
 
-    async def execute(self, context: SkillContext, **kwargs) -> SkillResult:
+    def execute(self, context: SkillContext, **kwargs) -> SkillResult:
         design = context.design
         if design is None:
             return SkillResult(

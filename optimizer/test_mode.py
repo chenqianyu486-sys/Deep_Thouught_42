@@ -380,13 +380,57 @@ class V2TestMode:
         self.initial_wns = timing_info["wns"]
         print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
 
-        # Get clock period
+        # Get clock period via run_tcl (clk_fpl26contest is the contest clock)
         try:
-            clock_result = await self.call_tool("vivado_get_clock_period", {}, timeout=60.0)
+            tcl_cmd = (
+                "set clk [get_clocks -quiet clk_fpl26contest]; "
+                "if {$clk ne {}} { "
+                "  puts [get_property PERIOD $clk]; "
+                "} else { "
+                "  puts {NO_CONTEST_CLOCK}; "
+                "}"
+            )
+            clock_result = await self.call_tool("vivado_run_tcl", {"command": tcl_cmd}, timeout=60.0)
+            period = None
             if clock_result and clock_result.strip():
-                self.clock_period = float(clock_result.strip())
+                for token in clock_result.strip().split():
+                    if token.startswith("ERROR") or token.startswith("WARNING"):
+                        continue
+                    try:
+                        val = float(token)
+                        if val > 0:
+                            period = val
+                            break
+                    except ValueError:
+                        continue
+            if period is None:
+                fallback_cmd = (
+                    "set tp [get_timing_paths -max_paths 1 -setup]; "
+                    "if {$tp ne {}} { "
+                    "  set clk [get_property ENDPOINT_CLOCK $tp]; "
+                    "  if {$clk ne {}} { "
+                    "    puts [get_property PERIOD [get_clocks $clk]]; "
+                    "  } "
+                    "}"
+                )
+                fallback_result = await self.call_tool("vivado_run_tcl", {"command": fallback_cmd}, timeout=60.0)
+                if fallback_result and fallback_result.strip():
+                    for token in fallback_result.strip().split():
+                        if token.startswith("ERROR") or token.startswith("WARNING"):
+                            continue
+                        try:
+                            val = float(token)
+                            if val > 0:
+                                period = val
+                                break
+                        except ValueError:
+                            continue
+            if period is not None:
+                self.clock_period = period
                 init_data["clock_period"] = self.clock_period
                 print(f"*** Clock period: {self.clock_period:.3f} ns ***")
+            else:
+                print("[TEST] Could not determine clock period")
         except Exception as e:
             print(f"[TEST] Could not get clock period: {e}")
 

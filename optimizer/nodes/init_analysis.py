@@ -98,15 +98,63 @@ async def init_analysis_node(
             f"FE={state.timing.initial_failing_endpoints}"
         )
 
-        # Step 4: Get clock period
+        # Step 4: Get clock period via run_tcl (clk_fpl26contest is the contest clock)
         try:
+            tcl_cmd = (
+                "set clk [get_clocks -quiet clk_fpl26contest]; "
+                "if {$clk ne {}} { "
+                "  puts [get_property PERIOD $clk]; "
+                "} else { "
+                "  puts {NO_CONTEST_CLOCK}; "
+                "}"
+            )
             clock_result = await call_tool_fn(
-                "vivado_get_clock_period", {},
+                "vivado_run_tcl", {"command": tcl_cmd},
                 deps.rapidwright_session, deps.vivado_session,
             )
+            period = None
             if clock_result and clock_result.strip():
-                state.timing.clock_period = float(clock_result.strip())
-                logger.info(f"[init_analysis] Clock period: {state.timing.clock_period:.3f} ns")
+                for token in clock_result.strip().split():
+                    if token.startswith("ERROR") or token.startswith("WARNING"):
+                        continue
+                    try:
+                        val = float(token)
+                        if val > 0:
+                            period = val
+                            break
+                    except ValueError:
+                        continue
+            if period is None:
+                # Fallback: worst-path clock
+                fallback_cmd = (
+                    "set tp [get_timing_paths -max_paths 1 -setup]; "
+                    "if {$tp ne {}} { "
+                    "  set clk [get_property ENDPOINT_CLOCK $tp]; "
+                    "  if {$clk ne {}} { "
+                    "    puts [get_property PERIOD [get_clocks $clk]]; "
+                    "  } "
+                    "}"
+                )
+                fallback_result = await call_tool_fn(
+                    "vivado_run_tcl", {"command": fallback_cmd},
+                    deps.rapidwright_session, deps.vivado_session,
+                )
+                if fallback_result and fallback_result.strip():
+                    for token in fallback_result.strip().split():
+                        if token.startswith("ERROR") or token.startswith("WARNING"):
+                            continue
+                        try:
+                            val = float(token)
+                            if val > 0:
+                                period = val
+                                break
+                        except ValueError:
+                            continue
+            if period is not None:
+                state.timing.clock_period = period
+                logger.info(f"[init_analysis] Clock period: {period:.3f} ns")
+            else:
+                logger.warning("[init_analysis] Could not determine clock period")
         except Exception as e:
             logger.warning(f"[init_analysis] Could not get clock period: {e}")
 

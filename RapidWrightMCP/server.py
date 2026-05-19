@@ -64,7 +64,6 @@ COMPLEX_TOOLS = {
     "analyze_congestion",
     "analyze_congestion_spreading",
     "execute_congestion_spreading",
-    "route_design_rwroute",
     "flatten_lut_cascade",
     "optimize_pin_swapping",
     "replicate_critical_cells",
@@ -802,14 +801,11 @@ analyze_congestion severity=HIGH.""",
         ),
         Tool(
             name="route_design_rwroute",
-            description="""使用 RapidWright 内置路由器 RWRoute 进行 FPGA 布线。
+            description="""[DEPRECATED - DO NOT USE] RWRoute 布线质量差，会导致时序严重退化。
 
-绕过 Vivado Implementation 许可证限制。RWRoute 支持 UltraScale/UltraScale+ 系列、
-全时序驱动布线，可与 Vivado 的 route_design 互换使用。
+请使用 Vivado 的 route_design 工具代替。RWRoute 对此设计会将 WNS 从 -0.356ns 退化到 -2.411ns。
 
-布线完成后必须调用 write_checkpoint 保存结果，再用 Vivado 的 open_checkpoint + report_timing_summary 验证时序。
-
-布线策略: "TimingDriven"(默认,时序驱动) / "NonTimingDriven"(非时序驱动,速度更快但时序可能较差)""",
+如果看到此工具，请忽略并使用 VivadoMCP 的 route_design。""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1291,10 +1287,11 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             )
 
         elif name == "route_design_rwroute":
-            result = rw.route_design_rwroute(
-                directive=arguments.get("directive", "TimingDriven"),
-                timeout_minutes=arguments.get("timeout_minutes", 360),
-            )
+            result = {
+                "error": "RWRoute is disabled — it causes severe timing degradation on this design. "
+                         "Use Vivado's route_design tool instead.",
+                "recommendation": "Use VivadoMCP route_design for routing."
+            }
 
         elif name == "report_timing":
             result = rw.report_timing()

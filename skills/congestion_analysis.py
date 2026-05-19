@@ -41,7 +41,7 @@ def analyze_congestion(
         from com.xilinx.rapidwright.device import Device, TileTypeEnum
 
         device = design.getDevice()
-        device_name = device.getName()
+        device_name = str(device.getName())
 
         # Count placed cells per column
         column_cell_count: dict[int, int] = {}
@@ -56,7 +56,7 @@ def analyze_congestion(
                 if site is not None:
                     tile = site.getTile()
                     if tile is not None:
-                        col = tile.getColumn()
+                        col = int(tile.getColumn())
                         column_cell_count[col] = column_cell_count.get(col, 0) + 1
 
         if placed_cells == 0:
@@ -181,7 +181,7 @@ def analyze_congestion(
 class CongestionAnalysisSkill(Skill):
     """Routing Congestion Analysis Skill."""
 
-    async def execute(self, context: SkillContext, **kwargs) -> SkillResult:
+    def execute(self, context: SkillContext, **kwargs) -> SkillResult:
         """Execute congestion analysis."""
         design = context.design
         if design is None:

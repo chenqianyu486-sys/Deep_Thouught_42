@@ -14,7 +14,7 @@ fpl26_optimization_contest/
 │   ├── tracing.py                # StateTracer: 状态转换日志（JSON导出）
 │   ├── nodes/                    # 节点实现（全部完成）
 │   │   ├── __init__.py
-│   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS/高扇出网线/资源利用率）
+│   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS、run_tcl查询clk_fpl26contest周期、高扇出网线/资源利用率）
 │   │   ├── iteration_start.py    # 迭代开始节点（递增计数器、保存prev_best_wns）
 │   │   ├── select_model.py       # 模型选择节点（评分+阈值选择planner/worker）
 │   │   ├── prepare_context.py    # 上下文准备节点（压缩、注入handoff、构建snapshot）
@@ -72,9 +72,9 @@ fpl26_optimization_contest/
 │       ├── yaml_structured_compress.py  # YAML压缩基类 + 时序报告智能截断 + 过时时序报告替换
 │       ├── planner_compress.py         # PlannerCompressor（继承 YAMLStructuredCompressor，参数来自 model_config.yaml：preserve_turns=60/min_importance=0.1/时序10K字符）
 │       └── worker_compress.py          # WorkerCompressor（继承 YAMLStructuredCompressor，参数来自 model_config.yaml：preserve_turns=40/min_importance=0.15/时序3K字符）
-├── RapidWrightMCP/               # RapidWright MCP服务器
+├── RapidWrightMCP/               # RapidWright MCP服务器（route_design_rwroute 已禁用，使用 Vivado route_design）
 │   ├── rapidwright_tools.py      # 工具函数实现
-│   ├── server.py                 # MCP服务器入口
+│   ├── server.py                 # MCP服务器入口（RWRoute 已禁用：布线质量差，会导致 WNS 严重退化）
 │   ├── test_server.py            # 服务器测试
 │   ├── setup.sh                  # 设置脚本
 │   ├── README.md                 # 自述文件
@@ -101,8 +101,10 @@ fpl26_optimization_contest/
 │   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
 │   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
 │   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
+│   ├── congestion_analysis.py        # Skill类 + 纯函数：Routing Congestion Analysis（READ-ONLY）
 │   ├── congestion_spreading_strategy.py  # Skill类：Congestion-Aware Cell Spreading（分析+执行）
 │   ├── register_retiming_strategy.py  # Skill类：Register Retiming（分析+执行，pipeline FF插入）
+│   ├── pin_swapping_optimization_strategy.py  # Skill类：Pin Swapping Optimization（LUT引脚交换）
 │   ├── net_swapping_strategy.py      # Skill类：Net Swapping（分析+执行，SLICE内BEL引脚网络交换）
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
@@ -162,7 +164,7 @@ llm_call → evaluate_flow → [条件: flow_control?]
 - **条件边**: 纯函数 `state -> next_node_name`，系统决定转换而非LLM
 - **状态追踪**: StateTracer 在每个节点边界记录快照，JSON导出
 - **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
-- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`
+- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`，并清除 `user_exit_requested` 标志防止死循环
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
 
 ### 1.2 V1→V2 迁移映射
@@ -208,7 +210,7 @@ DCPOptimizer 实例属性 → OptimizerState (6个dataclass子切片)
 | 上下文压缩散布在多处 | `prepare_context_node` (`nodes/prepare_context.py`) |
 
 **共享组件（不迁移）**：
-- `DCPOptimizerBase` (line 320): `start_servers`, `cleanup`, `calculate_fmax`, `_parse_resource_utilization`, `_parse_hold_timing`, `check_hold_timing`, `_is_routing_failure`, `_start_tool_heartbeat`
+- `DCPOptimizerBase` (line 320): `start_servers`, `cleanup`, `calculate_fmax`, `get_clock_period`（V2节点通过 `vivado_run_tcl` 直接查询 `clk_fpl26contest`，无需注册独立MCP工具）, `_parse_resource_utilization`, `_parse_hold_timing`, `check_hold_timing`, `_is_routing_failure`, `_start_tool_heartbeat`
 - `MemoryManager`, `EventBus`, MCP 服务器 (`RapidWrightMCP/`, `VivadoMCP/`)
 - Skills 框架 (`skills/`), `strategy_library.py`
 
@@ -415,10 +417,12 @@ skills/
 ├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
 ├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization
+├── analysis.analyze_congestion@1.0.0    # Routing Congestion Analysis（READ-ONLY，JSON序列化已修复）
 ├── analysis.analyze_congestion_spreading@1.0.0  # 拥塞感知扩散分析（READ-ONLY）
 ├── optimization.execute_congestion_spreading@1.0.0  # 拥塞感知单元扩散（non-idempotent）
 ├── analysis.analyze_register_retiming@1.0.0  # Register Retiming 分析（READ-ONLY）
 ├── optimization.execute_register_retiming@1.0.0  # Register Retiming 执行（non-idempotent）
+├── optimization.pin_swapping_strategy@1.0.0  # Pin Swapping Optimization（LUT引脚交换，getBELPins已修复）
 ├── analysis.analyze_net_swapping@1.0.0  # Net Swapping 分析（READ-ONLY）
 ├── optimization.execute_net_swapping@1.0.0  # Net Swapping 执行（non-idempotent）
 └── analysis.test_mock_skill@1.0.0      # 测试用Mock Skill
@@ -428,6 +432,7 @@ Skill 超时映射（三层）:
 |-------|-------------------------------|-----------------------------------|-------------------|
 | smart_region | **60000** (1min) | 60000 / 120000 | 60.0 |
 | pblock_strategy | **60000** (1min) | 60000 / 120000 | 60.0 |
+| analyze_congestion | **30000** (30s) | 30000 / 60000 | - |
 | analyze_congestion_spreading | **60000** (1min) | 60000 / 120000 | - |
 | execute_congestion_spreading | **300000** (5min) | 300000 / 600000 | - |
 | net_detour | 30000 (30s) | 30000 / 60000 | 120.0 |
@@ -436,6 +441,7 @@ Skill 超时映射（三层）:
 | optimize_cell | 60000 (1min) | 60000 / 120000 | 360.0 |
 | analyze_register_retiming | **60000** (1min) | 60000 / 120000 | - |
 | execute_register_retiming | **300000** (5min) | 300000 / 600000 | - |
+| pin_swapping_strategy | **120000** (2min) | 120000 / 240000 | - |
 | analyze_net_swapping | **60000** (1min) | 60000 / 120000 | - |
 | execute_net_swapping | **120000** (2min) | 120000 / 240000 | - |
 
@@ -485,7 +491,8 @@ Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get()
    Skill.execute_with_telemetry(context, **kwargs)
      ├── 幂等性检查（idempotent/non-idempotent）
      ├── Heartbeat daemon（30秒间隔）
-     ├── self.execute(context, **kwargs)
+     ├── self.execute(context, **kwargs)  # 必须同步（def），不支持 async def
+     ├── 协程检测安全网：若 execute 返回协程则 asyncio.run() 兜底
      ├── 追踪属性发射（SkillTraceAttributes）
      ├── SkillTelemetry.record_execution(duration_ms, status, error_code)
      └── 返回 SkillResult(success, data, error, error_code)
@@ -505,6 +512,8 @@ JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）�
 ### 2.6.1 策略库完整清单（strategy_library.py）
 
 `strategy_library.py` 定义了 9 个优化策略，按场景匹配推荐给 LLM：
+
+**注意**: `route_design_rwroute`（RapidWright RWRoute）已禁用 — 布线质量差，会导致 WNS 严重退化。所有布线操作应使用 Vivado 的 `route_design`。
 
 | 策略键 | 名称 | 触发条件 | 关联 Skill |
 |--------|------|---------|-----------|

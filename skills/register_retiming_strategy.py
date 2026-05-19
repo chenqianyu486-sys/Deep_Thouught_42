@@ -640,7 +640,7 @@ def execute_register_retiming(
 class AnalyzeRegisterRetimingSkill(Skill):
     """Analyze critical paths for register retiming candidates (READ-ONLY)."""
 
-    async def execute(self, context: SkillContext, **kwargs) -> SkillResult:
+    def execute(self, context: SkillContext, **kwargs) -> SkillResult:
         design = context.design
         if design is None:
             return SkillResult(

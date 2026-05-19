@@ -308,6 +308,10 @@ class Skill(ABC):
             try:
                 _future = _executor.submit(self.execute, context, **kwargs)
                 result = _future.result(timeout=_timeout_seconds)
+                # Handle async execute() that returns a coroutine
+                if hasattr(result, '__await__'):
+                    import asyncio
+                    result = asyncio.run(result)
             except _cfutures.TimeoutError:
                 _timed_out = True
                 result = SkillResult(

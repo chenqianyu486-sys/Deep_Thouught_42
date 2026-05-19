@@ -56,6 +56,7 @@ class NodeGraph:
                 logger.info("[GRAPH] User exit requested, routing to save_output")
                 state.control.is_done = True
                 state.control.done_reason = "user_requested"
+                state.control.user_exit_requested = False
                 current = "save_output"
                 continue
 
