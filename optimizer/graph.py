@@ -75,8 +75,11 @@ class NodeGraph:
                 logger.info(f"No edge from '{current}', stopping graph")
                 break
             if callable(edge):
-                current = edge(state)
+                resolved = edge(state)
+                self._tracer.on_edge(current, resolved, edge_type="conditional")
+                current = resolved
             else:
+                self._tracer.on_edge(current, edge, edge_type="static")
                 current = edge
 
             # Validate the resolved next node exists (unless 'end')

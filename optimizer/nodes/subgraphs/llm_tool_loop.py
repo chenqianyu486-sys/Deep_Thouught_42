@@ -70,6 +70,22 @@ async def llm_tool_loop_node(
         # ── Call LLM ──────────────────────────────────────────────
         state.model.llm_call_count += 1
         current_model = state.model.current_model
+        llm_start_time = time.time()
+        msg_count = len(api_messages)
+        logger.info(
+            f"[LLM_REQUEST] model={current_model}, messages={msg_count}"
+        )
+
+        # Log prompt to file for observability
+        if deps.prompt_logger is not None:
+            try:
+                deps.prompt_logger.log_prompt(
+                    model=current_model,
+                    messages=api_messages,
+                    iteration=state.iteration.current,
+                )
+            except Exception as e:
+                logger.debug(f"[llm_tool_loop] PromptLogger failed: {e}")
 
         try:
             response = await _call_llm_with_retry(state, deps, api_messages, current_model)
@@ -96,6 +112,20 @@ async def llm_tool_loop_node(
         if deps.compat is not None:
             metadata = {"tool_calls": message.tool_calls} if message.tool_calls else None
             deps.compat.add_message("assistant", assistant_content, metadata)
+
+        # ── Log LLM response ─────────────────────────────────────
+        llm_elapsed = time.time() - llm_start_time
+        usage = getattr(response, 'usage', None)
+        prompt_tok = getattr(usage, 'prompt_tokens', 0) if usage else 0
+        completion_tok = getattr(usage, 'completion_tokens', 0) if usage else 0
+        call_cost = float(getattr(usage, 'cost', 0.0) or 0.0) if usage else 0.0
+        tool_call_count = len(message.tool_calls) if message.tool_calls else 0
+        logger.info(
+            f"[LLM_RESPONSE] model={current_model}, latency={llm_elapsed:.1f}s, "
+            f"prompt_tokens={prompt_tok}, completion_tokens={completion_tok}, "
+            f"tool_calls={tool_call_count}, cost=${call_cost:.4f}, "
+            f"total_cost=${state.cost.total_cost:.4f}"
+        )
 
         # ── Extract step_state ────────────────────────────────────
         step_state = extract_step_state(message)
@@ -128,6 +158,10 @@ async def llm_tool_loop_node(
                     tool_args = {}
 
                 # Execute tool
+                tool_start = time.time()
+                logger.info(
+                    f"[TOOL_CALL_START] round={tool_round}, tool={tool_name}"
+                )
                 result = await call_tool_fn(
                     tool_name=tool_name,
                     arguments=tool_args,
@@ -137,6 +171,11 @@ async def llm_tool_loop_node(
                     iteration=state.iteration.current,
                     tool_round=tool_round,
                     high_fanout_nets=state.timing.high_fanout_nets,
+                )
+                tool_elapsed = time.time() - tool_start
+                logger.info(
+                    f"[TOOL_CALL_END] round={tool_round}, tool={tool_name}, "
+                    f"elapsed={tool_elapsed:.1f}s"
                 )
 
                 # Summarize result
@@ -320,6 +359,11 @@ def _track_cost(state: OptimizerState, response) -> None:
             state.cost.total_completion_tokens += completion
             state.cost.total_tokens += total
             state.cost.total_cost += cost
+            logger.info(
+                f"[LLM_USAGE] prompt={prompt}, completion={completion}, "
+                f"cost=${cost:.4f}, cumulative_tokens={state.cost.total_tokens}, "
+                f"total_cost=${state.cost.total_cost:.4f}"
+            )
     except Exception as e:
         logger.warning(f"[llm_tool_loop] Failed to parse usage: {e}")
 

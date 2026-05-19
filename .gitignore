@@ -12,5 +12,8 @@ fpl26_contest_benchmarks_v1.0.0/
 # DCP validation temporary directories
 dcp_validation_*/
 
+# Legacy workspace directory (now uses dcp_optimizer_run-*/)
+workspace/
+
 # DCP optimization output directories (*.dcp.edf with .edf and .md5 inside)
 *.dcp.edf/

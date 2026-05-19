@@ -5949,12 +5949,12 @@ CRITICAL OPTIMIZATION RULES:
             str(script_path),
             str(self.input_dcp),
             str(dcp),
-            "--vectors", str(num_vectors)
+            "--vectors", str(num_vectors),
+            "--run-dir", str(self.run_dir)
         ]
 
         # Record existing validation directories before running
-        workspace_dir = Path(__file__).parent
-        before_dirs = set(workspace_dir.glob("dcp_validation_*"))
+        before_dirs = set(self.run_dir.glob("dcp_validation_*"))
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -5965,7 +5965,7 @@ CRITICAL OPTIMIZATION RULES:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
 
             # Clean up temp directory created during this validation
-            after_dirs = set(workspace_dir.glob("dcp_validation_*"))
+            after_dirs = set(self.run_dir.glob("dcp_validation_*"))
             for temp_dir in after_dirs - before_dirs:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -7922,6 +7922,10 @@ Maintain this output format throughout the entire conversation.
         )
 
         # ── Step 7: Assemble NodeDeps ─────────────────────────────
+        # Initialize PromptLogger for LLM prompt observability
+        prompt_logger = PromptLogger.get_instance()
+        prompt_logger.setup(str(run_dir))
+
         deps = NodeDeps(
             openai_client=openai_client,
             memory_manager=memory_manager,
@@ -7930,6 +7934,7 @@ Maintain this output format throughout the entire conversation.
             vivado_session=vivado_session,
             tools=tools,
             event_bus=event_bus,
+            prompt_logger=prompt_logger,
             system_prompt=system_prompt,
             model_planner=model_planner,
             model_worker=model_worker,

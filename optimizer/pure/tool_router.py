@@ -5,11 +5,13 @@ Extracted from dcp_optimizer.py: call_tool (L3550-3700).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from typing import Any, Optional
 
+from context_manager.logging_config import sanitize_payload
 from .constants import ROUTING_FAILURE_PHRASES
 
 logger = logging.getLogger(__name__)
@@ -116,9 +118,35 @@ async def call_tool(
         return json.dumps({"error": f"No MCP session available for {tool_name}"})
 
     # Execute via MCP
+    logger.info(f"[MCP_REQUEST] tool={tool_name}, args={sanitize_payload(arguments)}")
     start_time = time.time()
+
+    # Heartbeat for long-running MCP calls
+    heartbeat_count = 0
+    heartbeat_done = asyncio.Event()
+
+    async def _heartbeat():
+        nonlocal heartbeat_count
+        while not heartbeat_done.is_set():
+            await asyncio.sleep(60.0)
+            if heartbeat_done.is_set():
+                break
+            heartbeat_count += 1
+            hb_elapsed = time.time() - start_time
+            logger.info(
+                f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {hb_elapsed:.1f}s"
+            )
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+
     try:
         result = await session.call_tool(actual_name, arguments)
+        heartbeat_done.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         elapsed = time.time() - start_time
 
         if result and hasattr(result, 'content') and result.content:
@@ -126,11 +154,30 @@ async def call_tool(
             for block in result.content:
                 if hasattr(block, 'text'):
                     text_parts.append(block.text)
-            return "\n".join(text_parts) if text_parts else "(no output)"
+            result_text = "\n".join(text_parts) if text_parts else "(no output)"
+            result_size = sum(len(p) for p in text_parts) if text_parts else 0
+            logger.info(
+                f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+                f"result_size={result_size} chars, heartbeats={heartbeat_count}"
+            )
+            return result_text
+        logger.info(
+            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+            f"result_size=0 chars, heartbeats={heartbeat_count}"
+        )
         return "(no output)"
     except Exception as e:
+        heartbeat_done.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         elapsed = time.time() - start_time
-        logger.error(f"Tool {tool_name} failed after {elapsed:.1f}s: {e}")
+        logger.error(
+            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+            f"FAILED: {e}, heartbeats={heartbeat_count}"
+        )
         return json.dumps({"error": str(e), "tool": tool_name})
 
 

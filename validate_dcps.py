@@ -42,20 +42,20 @@ logger = logging.getLogger(__name__)
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 10000, debug: bool = False):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 10000, debug: bool = False, run_dir: Optional[Path] = None):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
         self.debug = debug
-        
+
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
         self.vivado_session: Optional[ClientSession] = None
-        
-        # Create temporary directory for intermediate files in workspace
+
+        # Create temporary directory for intermediate files in run directory
         # (avoids /tmp running out of space for large designs)
-        workspace_dir = Path(__file__).parent
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="dcp_validation_", dir=workspace_dir))
+        parent_dir = run_dir if run_dir else Path(__file__).parent
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="dcp_validation_", dir=parent_dir))
         logger.info(f"Working directory: {self.temp_dir}")
         
         # Results
@@ -946,6 +946,12 @@ Examples:
         help="Number of random test vectors to simulate (default: 10000)"
     )
     parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Directory for intermediate files (default: script directory)"
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable debug logging"
@@ -975,7 +981,8 @@ Examples:
         golden_dcp=args.golden_dcp,
         revised_dcp=args.revised_dcp,
         num_vectors=args.vectors,
-        debug=args.debug
+        debug=args.debug,
+        run_dir=args.run_dir
     )
     
     try:

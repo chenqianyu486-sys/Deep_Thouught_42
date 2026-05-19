@@ -20,8 +20,10 @@ class StateTracer:
 
     def __init__(self):
         self.transitions: list[dict] = []
+        self._entry_times: dict[str, float] = {}
 
     def on_enter(self, node_name: str, state: OptimizerState) -> None:
+        self._entry_times[node_name] = time.time()
         logger.info(
             f"[GRAPH] Entering: {node_name} "
             f"(iter={state.iteration.current}, "
@@ -30,6 +32,8 @@ class StateTracer:
         )
 
     def on_exit(self, node_name: str, state: OptimizerState) -> None:
+        entry_time = self._entry_times.pop(node_name, time.time())
+        duration = time.time() - entry_time
         entry = {
             "node": node_name,
             "timestamp": time.time(),
@@ -41,12 +45,20 @@ class StateTracer:
             "tool_round": state.iteration.tool_round,
             "is_done": state.control.is_done,
             "done_reason": state.control.done_reason,
+            "duration": duration,
         }
         self.transitions.append(entry)
         logger.info(
             f"[GRAPH] Exiting: {node_name} "
             f"(wns={state.timing.latest_wns}, "
-            f"cost=${state.cost.total_cost:.4f})"
+            f"cost=${state.cost.total_cost:.4f}, "
+            f"duration={duration:.1f}s)"
+        )
+
+    def on_edge(self, from_node: str, to_node: str, edge_type: str = "static") -> None:
+        """Log edge resolution."""
+        logger.info(
+            f"[GRAPH] Edge: {from_node} -> {to_node} ({edge_type})"
         )
 
     def export(self, path: str) -> None:
