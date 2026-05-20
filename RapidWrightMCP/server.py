@@ -1360,12 +1360,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
         # Return formatted result
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         has_error = isinstance(result, dict) and "error" in result
-        # Fast-return detection: complex tools that return <1s likely did no real work
+        # Fast-return detection for complex tools
         if not has_error and duration_ms < 1000 and name in COMPLEX_TOOLS:
-            result["llm_hint"] = (
-                "Tool returned in <1s — no actual work was performed. "
-                "Try different preconditions or switch to a different strategy."
-            )
+            has_actionable_results = False
+            if isinstance(result, dict):
+                for key in ["candidates", "results", "cascades_found", "swaps_attempted",
+                             "cells_moved", "replications_performed", "paths_analyzed"]:
+                    val = result.get(key)
+                    if val is not None:
+                        if isinstance(val, (list, dict)) and len(val) > 0:
+                            has_actionable_results = True
+                        elif isinstance(val, (int, float)) and val > 0:
+                            has_actionable_results = True
+                        break
+            if has_actionable_results:
+                result["llm_hint"] = (
+                    "Tool returned in <1s with actionable results. "
+                    "The analysis found optimization candidates — review the results carefully."
+                )
+            else:
+                result["llm_hint"] = (
+                    "Tool returned in <1s with no actionable results. "
+                    "The analysis completed but found no candidates for this strategy. "
+                    "Consider trying a different optimization strategy."
+                )
         log_status = "error" if has_error else "success"
         log_msg = f"[MCP_RESPONSE] Tool '{name}' {log_status} (%dms)"
         log_args = {

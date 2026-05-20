@@ -72,13 +72,13 @@ def _group_pins_by_cell(pin_paths: list[str]) -> list[tuple[Optional[str], Optio
         return []
 
     # Parse pin names to extract cell name and pin name
-    # Format: "cell_name/pin_name" or "cell_name/subcell/pin_name"
+    # Format: "hierarchical/cell/path/pin_name" (last segment is pin)
     def parse_pin(pin_path: str) -> Tuple[str, str]:
         parts = pin_path.split('/')
         if len(parts) < 2:
             return pin_path, pin_path
-        cell_name = parts[0]
-        pin_name = '/'.join(parts[1:])
+        cell_name = '/'.join(parts[:-1])
+        pin_name = parts[-1]
         return cell_name, pin_name
 
     # Check if pin is an output (ends with O or Q)

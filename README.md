@@ -54,6 +54,38 @@ init_analysis -> [条件: WNS >= 0?]
 
 **方案**：handoff 简化为纯事实结构 -- Planner 交接仅含 SITUATION/STATE/TRAJECTORY/STATUS，Worker 交接仅含 STATE/CRITICAL PATHS/STATUS。策略选择交还给 system prompt 统一指导。
 
+### 4. 状态机驱动架构（V1 → V2）
+
+**问题**：V1 采用消息对话驱动，流程控制隐式嵌入 LLM 对话循环，状态分散在类属性和局部变量中，难以观测和调试。
+
+**方案**：V2 重构为显式状态机 -- 8 个节点 + 条件边构成有向图，集中式 `OptimizerState` 管理 6 个类型化子切片，`StateTracer` 记录每次状态转换的 JSON 轨迹。节点编排流程，纯函数封装逻辑（`optimizer/pure/` 10 个无状态模块，可独立单测）。
+
+**原则**：显式优于隐式 -- 流程控制从 LLM 对话中剥离，交由代码图拓扑驱动。
+
+### 5. 双层模型分工（Worker/Planner）
+
+**问题**：单一模型既要执行具体工具操作又要进行全局策略规划，上下文窗口和角色混杂导致两个任务都做不好。
+
+**方案**：分离为 Worker（执行层，250K tokens）和 Planner（规划层，1M tokens）两个模型层级。Worker 专注于单次迭代内的工具调用和状态报告，Planner 负责跨迭代的策略选择和上下文压缩。通过 `model_config.yaml` 配置不同的上下文窗口、压缩阈值和 fallback 模型。
+
+**原则**：关注点分离 -- 执行和规划使用不同的上下文窗口和压缩策略。
+
+### 6. 纯原生工具调用（去除文本回退）
+
+**问题**：V1 保留了 XML/YAML 文本格式作为工具调用回退，增加了 parser 复杂度，且 LLM 倾向于生成文本而非严格工具调用，导致调用成功率不稳定。
+
+**方案**：V2 仅支持 LLM 原生 function call，移除所有 XML/YAML 文本回退路径。工具 schema 通过标准 function calling 协议传递，LLM 必须生成结构化 tool_use 响应。
+
+**原则**：单一调用路径 -- 不给 LLM"偷懒"生成文本的机会，强制结构化输出。
+
+### 7. 策略库自动匹配
+
+**问题**：LLM 缺乏 FPGA 优化领域知识，随机尝试策略效率低下。
+
+**方案**：`strategy_library.py` 定义 9 个优化策略，每个策略附带触发条件（WNS 范围、fanout 阈值、congestion 等级等）和适用平台。系统根据设计特征自动匹配推荐，LLM 在推荐范围内选择而非盲目探索。
+
+**原则**：领域知识编码为规则，LLM 负责推理和执行 -- 将"该做什么"从 prompt 提示升级为结构化策略库。
+
 ## 快速开始
 
 ```bash

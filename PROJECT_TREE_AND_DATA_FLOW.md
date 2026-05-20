@@ -117,7 +117,7 @@ fpl26_optimization_contest/
 
 ## 1.1 状态机驱动Agent架构（optimizer/）
 
-与 `dcp_optimizer.py` 的消息对话驱动架构并行，`optimizer/` 包实现了显式状态机驱动架构（类似LangGraph）。
+> 架构概述和设计意图详见 [README.md](README.md) 的"架构概述"和"设计意图"章节。本节仅包含技术实现细节。
 
 ### 入口
 - `make run_optimizer DCP=input.dcp` — 默认走 v2 状态机路径（自动加 `--v2`）
@@ -181,7 +181,7 @@ llm_call → evaluate_flow → [条件: flow_control?]
 
 ### 1.2 V1→V2 迁移映射
 
-V2 状态机架构从 V1 的 `DCPOptimizer` 单体类（~8000行）拆分为 `optimizer/` 包（~3000行，20+文件），核心变更如下：
+> V1→V2 的架构决策详见 [README.md](README.md) 设计意图第 4、5、6 条。本节仅保留代码级映射表。
 
 **纯函数提取 (`optimizer/pure/`)**：
 
