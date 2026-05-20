@@ -145,7 +145,7 @@ async def llm_tool_loop_node(
                 reasoning_tok = getattr(comp_details, 'reasoning_tokens', 0) or 0
         reasoning_suffix = f", reasoning={reasoning_tok}" if reasoning_tok > 0 else ""
         logger.info(
-            f"[LLM] {current_model} | {llm_elapsed:.1f}s | "
+            green("[LLM]") + f" {current_model} | {llm_elapsed:.1f}s | "
             f"prompt={prompt_tok}, completion={completion_tok}{reasoning_suffix}, "
             f"cost=${call_cost:.4f}, total=${state.cost.total_cost:.4f} | "
             f"tools={tool_call_count}"

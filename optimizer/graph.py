@@ -13,6 +13,7 @@ from typing import Awaitable, Callable, Union
 from .state import OptimizerState
 from .deps import NodeDeps
 from .tracing import StateTracer
+from .color import cyan
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ class NodeGraph:
         while current != "end":
             # Check user exit request before each node
             if state.control.user_exit_requested:
-                logger.info("[GRAPH] User exit requested, routing to save_output")
+                logger.info(cyan("[GRAPH]") + " User exit requested, routing to save_output")
                 state.control.is_done = True
                 state.control.done_reason = "user_requested"
                 state.control.user_exit_requested = False

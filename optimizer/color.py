@@ -17,6 +17,7 @@ if os.environ.get("NO_COLOR"):
 GREEN = "\033[32m" if _ENABLED else ""
 YELLOW = "\033[33m" if _ENABLED else ""
 RED = "\033[31m" if _ENABLED else ""
+CYAN = "\033[36m" if _ENABLED else ""
 BOLD = "\033[1m" if _ENABLED else ""
 RESET = "\033[0m" if _ENABLED else ""
 
@@ -31,3 +32,7 @@ def yellow(text: str) -> str:
 
 def red(text: str) -> str:
     return f"{RED}{text}{RESET}" if _ENABLED else text
+
+
+def cyan(text: str) -> str:
+    return f"{CYAN}{text}{RESET}" if _ENABLED else text

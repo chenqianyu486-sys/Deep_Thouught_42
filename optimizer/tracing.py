@@ -11,6 +11,7 @@ import logging
 import time
 
 from .state import OptimizerState
+from .color import cyan
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class StateTracer:
     def on_enter(self, node_name: str, state: OptimizerState) -> None:
         self._entry_times[node_name] = time.time()
         logger.debug(
-            f"[GRAPH] Entering: {node_name} "
+            cyan("[GRAPH]") + f" Entering: {node_name} "
             f"(iter={state.iteration.current}, "
             f"wns={state.timing.latest_wns}, "
             f"cost=${state.cost.total_cost:.4f})"
@@ -49,7 +50,7 @@ class StateTracer:
         }
         self.transitions.append(entry)
         logger.debug(
-            f"[GRAPH] Exiting: {node_name} "
+            cyan("[GRAPH]") + f" Exiting: {node_name} "
             f"(wns={state.timing.latest_wns}, "
             f"cost=${state.cost.total_cost:.4f}, "
             f"duration={duration:.1f}s)"
@@ -58,11 +59,11 @@ class StateTracer:
     def on_edge(self, from_node: str, to_node: str, edge_type: str = "static") -> None:
         """Log edge resolution."""
         logger.info(
-            f"[GRAPH] Edge: {from_node} -> {to_node} ({edge_type})"
+            cyan("[GRAPH]") + f" Edge: {from_node} -> {to_node} ({edge_type})"
         )
 
     def export(self, path: str) -> None:
         """Export transition history to JSON file."""
         with open(path, 'w') as f:
             json.dump(self.transitions, f, indent=2)
-        logger.info(f"[GRAPH] Exported {len(self.transitions)} transitions to {path}")
+        logger.info(cyan("[GRAPH]") + f" Exported {len(self.transitions)} transitions to {path}")
