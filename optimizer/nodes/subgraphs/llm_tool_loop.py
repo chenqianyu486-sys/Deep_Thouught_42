@@ -25,6 +25,7 @@ from ...pure.step_state import extract_step_state
 from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT
 from ...pure.compress import compress_context
 from ...pure.critical_path import parse_critical_path_cells, update_critical_paths
+from ...color import green, yellow
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,6 @@ async def llm_tool_loop_node(
         state.model.llm_call_count += 1
         current_model = state.model.current_model
         llm_start_time = time.time()
-        msg_count = len(api_messages)
-        logger.info(
-            f"[LLM_REQUEST] model={current_model}, messages={msg_count}"
-        )
 
         # Log prompt to file for observability
         if deps.prompt_logger is not None:
@@ -151,10 +148,10 @@ async def llm_tool_loop_node(
         call_cost = float(getattr(usage, 'cost', 0.0) or 0.0) if usage else 0.0
         tool_call_count = len(message.tool_calls) if message.tool_calls else 0
         logger.info(
-            f"[LLM_RESPONSE] model={current_model}, latency={llm_elapsed:.1f}s, "
-            f"prompt_tokens={prompt_tok}, completion_tokens={completion_tok}, "
-            f"tool_calls={tool_call_count}, cost=${call_cost:.4f}, "
-            f"total_cost=${state.cost.total_cost:.4f}"
+            f"[LLM] {current_model} | {llm_elapsed:.1f}s | "
+            f"prompt={prompt_tok}, completion={completion_tok}, "
+            f"cost=${call_cost:.4f}, total=${state.cost.total_cost:.4f} | "
+            f"tools={tool_call_count}"
         )
 
         # ── Extract step_state ────────────────────────────────────
@@ -278,7 +275,6 @@ async def llm_tool_loop_node(
 
         # ── No tool calls — check if done ─────────────────────────
         # This handles the case where LLM returns text only (no tools, no flow_control)
-        logger.info(f"[llm_tool_loop] No tool calls, continuing to next round...")
 
         # Check WNS target
         if _check_wns_target_met(state):
@@ -295,7 +291,7 @@ def _check_exit_conditions(state: OptimizerState, tool_round: int) -> bool:
     """Check if the inner loop should exit."""
     # Tool round limit
     if tool_round > MAX_TOOL_ROUNDS:
-        logger.warning(f"[llm_tool_loop] Tool round limit reached ({tool_round} > {MAX_TOOL_ROUNDS})")
+        logger.warning(yellow(f"[llm_tool_loop] Tool round limit reached ({tool_round} > {MAX_TOOL_ROUNDS})"))
         return True
 
     # Wall-clock timeout
@@ -315,8 +311,8 @@ def _check_exit_conditions(state: OptimizerState, tool_round: int) -> bool:
     # Cost limit
     if state.cost.total_cost >= state.cost.cost_hard_limit:
         logger.warning(
-            f"[llm_tool_loop] Cost limit reached: "
-            f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}"
+            yellow(f"[llm_tool_loop] Cost limit reached: "
+                   f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}")
         )
         state.control.is_done = True
         state.control.done_reason = "cost_limit"
@@ -431,11 +427,6 @@ def _track_cost(state: OptimizerState, response) -> None:
             state.cost.total_completion_tokens += completion
             state.cost.total_tokens += total
             state.cost.total_cost += cost
-            logger.info(
-                f"[LLM_USAGE] prompt={prompt}, completion={completion}, "
-                f"cost=${cost:.4f}, cumulative_tokens={state.cost.total_tokens}, "
-                f"total_cost=${state.cost.total_cost:.4f}"
-            )
     except Exception as e:
         logger.warning(f"[llm_tool_loop] Failed to parse usage: {e}")
 
@@ -499,7 +490,7 @@ def _handle_flow_signal(
 ) -> None:
     """Handle DONE or SWITCH_STRATEGY flow signals."""
     if flow_signal == "DONE":
-        logger.info("[llm_tool_loop] LLM signaled DONE")
+        logger.info(green("[llm_tool_loop] LLM signaled DONE"))
         # Check if WNS target is actually met
         if _check_wns_target_met(state):
             state.control.is_done = True
@@ -508,7 +499,7 @@ def _handle_flow_signal(
             state.control.done_reason = "flow_control_done_next_iteration"
 
     elif flow_signal == "SWITCH_STRATEGY":
-        logger.info("[llm_tool_loop] LLM signaled SWITCH_STRATEGY")
+        logger.info(yellow("[llm_tool_loop] LLM signaled SWITCH_STRATEGY"))
         state.control.done_reason = "switch_strategy"
         # Inject analysis-forcing prompt
         if deps.compat is not None:

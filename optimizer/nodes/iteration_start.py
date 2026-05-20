@@ -14,6 +14,7 @@ import time
 from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
+from ..color import green
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,11 @@ async def iteration_start_node(
     state.iteration.tool_round = 0
 
     iter_num = state.iteration.current
-    logger.info(
+    logger.info(green(
         f"[iteration_start] === Iteration {iter_num} === "
         f"(best_wns={state.timing.best_wns:.3f}ns, "
         f"cost=${state.cost.total_cost:.4f})"
-    )
+    ))
 
     # Check wall-clock timeout
     if state.control.start_time is not None:

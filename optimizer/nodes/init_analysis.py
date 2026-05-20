@@ -55,7 +55,6 @@ async def init_analysis_node(
 
     try:
         # Step 1: Initialize RapidWright
-        logger.info("[init_analysis] Initializing RapidWright...")
         result = await call_tool_fn(
             "rapidwright_initialize_rapidwright", {},
             deps.rapidwright_session, deps.vivado_session,
@@ -64,7 +63,6 @@ async def init_analysis_node(
             raise RuntimeError(f"Failed to initialize RapidWright: {result}")
 
         # Step 2: Open checkpoint in Vivado
-        logger.info(f"[init_analysis] Opening checkpoint: {input_dcp}")
         result = await call_tool_fn(
             "vivado_open_checkpoint",
             {"dcp_path": str(input_dcp.resolve())},
@@ -74,7 +72,6 @@ async def init_analysis_node(
             raise RuntimeError(f"Failed to open checkpoint: {result}")
 
         # Step 3: Report timing summary
-        logger.info("[init_analysis] Analyzing timing...")
         timing_report = await call_tool_fn(
             "vivado_report_timing_summary", {},
             deps.rapidwright_session, deps.vivado_session,
@@ -179,7 +176,6 @@ async def init_analysis_node(
             logger.warning(f"[init_analysis] Hold timing check failed: {e}")
 
         # Step 5: Get critical high fanout nets
-        logger.info("[init_analysis] Identifying high fanout nets...")
         nets_report = await call_tool_fn(
             "vivado_get_critical_high_fanout_nets",
             {"num_paths": 50, "min_fanout": 100},
@@ -189,7 +185,6 @@ async def init_analysis_node(
         logger.info(f"[init_analysis] Found {len(state.timing.high_fanout_nets)} high fanout nets")
 
         # Step 6: Get resource utilization
-        logger.info("[init_analysis] Getting resource utilization...")
         util_report = await call_tool_fn(
             "vivado_report_utilization_for_pblock", {},
             deps.rapidwright_session, deps.vivado_session,
@@ -197,7 +192,6 @@ async def init_analysis_node(
         state.timing.resource_utilization = parse_resource_utilization(util_report)
 
         # Step 7: Load design in RapidWright
-        logger.info("[init_analysis] Loading design in RapidWright...")
         result = await call_tool_fn(
             "rapidwright_read_checkpoint",
             {"dcp_path": str(input_dcp.resolve())},

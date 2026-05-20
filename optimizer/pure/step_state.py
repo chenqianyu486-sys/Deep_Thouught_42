@@ -52,12 +52,4 @@ def extract_step_state(message) -> StepState | None:
     if _report_step_call:
         message.tool_calls = remaining_calls if remaining_calls else None
 
-    if step_state and (step_state.step_id is not None or step_state.flow_control is not None):
-        logger.info(
-            f"[STEP_STATE] step_id={step_state.step_id}, "
-            f"result_status={step_state.result_status}, "
-            f"flow_control={step_state.flow_control}, "
-            f"tool_calls={step_state.has_tool_calls}"
-        )
-
     return step_state

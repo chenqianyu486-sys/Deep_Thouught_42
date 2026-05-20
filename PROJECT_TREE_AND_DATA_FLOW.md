@@ -11,6 +11,7 @@ fpl26_optimization_contest/
 │   ├── deps.py                   # NodeDeps: 外部依赖容器（MCP会话、MemoryManager、OpenAI客户端）
 │   ├── graph.py                  # NodeGraph: 图执行引擎（节点注册、边注册、run循环）
 │   ├── edges.py                  # 条件边函数: after_init/after_check_exit + NodeName枚举
+│   ├── color.py                  # ANSI颜色工具：green/yellow/red着色函数（TTY自动检测）
 │   ├── tracing.py                # StateTracer: 状态转换日志（JSON导出）
 │   ├── nodes/                    # 节点实现（全部完成）
 │   │   ├── __init__.py

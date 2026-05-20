@@ -16,6 +16,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
 from ..pure.timing import parse_hold_timing
+from ..color import green
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +44,12 @@ async def save_output_node(
     best = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
     latest = f"{state.timing.latest_wns:.3f}" if state.timing.latest_wns is not None else "N/A"
 
-    logger.info("=" * 60)
-    logger.info("[save_output] Optimization complete")
-    logger.info(f"  Reason:     {state.control.done_reason}")
-    logger.info(f"  Iterations: {state.iteration.current}")
-    logger.info(f"  Best WNS:   {best} ns")
-    logger.info(f"  Latest WNS: {latest} ns")
-    logger.info(f"  Total cost: ${state.cost.total_cost:.4f}")
-    logger.info(f"  LLM calls:  {state.model.llm_call_count}")
-    logger.info(f"  Elapsed:    {elapsed:.1f}s")
-    logger.info("=" * 60)
+    logger.info(green(
+        f"[save_output] Optimization complete\n"
+        f"  reason={state.control.done_reason}, iterations={state.iteration.current}\n"
+        f"  best_wns={best}ns, latest_wns={latest}ns\n"
+        f"  cost=${state.cost.total_cost:.4f}, llm_calls={state.model.llm_call_count}, elapsed={elapsed:.1f}s"
+    ))
 
     # Check hold timing before final save (competition requirement)
     if state.control.output_dcp and deps.vivado_session:

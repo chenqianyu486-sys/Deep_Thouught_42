@@ -24,7 +24,7 @@ class StateTracer:
 
     def on_enter(self, node_name: str, state: OptimizerState) -> None:
         self._entry_times[node_name] = time.time()
-        logger.info(
+        logger.debug(
             f"[GRAPH] Entering: {node_name} "
             f"(iter={state.iteration.current}, "
             f"wns={state.timing.latest_wns}, "
@@ -48,7 +48,7 @@ class StateTracer:
             "duration": duration,
         }
         self.transitions.append(entry)
-        logger.info(
+        logger.debug(
             f"[GRAPH] Exiting: {node_name} "
             f"(wns={state.timing.latest_wns}, "
             f"cost=${state.cost.total_cost:.4f}, "

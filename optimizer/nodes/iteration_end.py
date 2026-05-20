@@ -25,6 +25,7 @@ from ..pure.model_select import (
     select_model as select_model_fn,
     estimate_context_complexity,
 )
+from ..color import green
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +131,10 @@ async def iteration_end_node(
         except Exception as e:
             logger.warning(f"[iteration_end] advance_iteration failed: {e}")
 
-    logger.info(
+    logger.info(green(
         f"[iteration_end] Iteration {state.iteration.current} complete: "
         f"wns_improved={wns_improved}, strategy={strategy_label}, "
         f"best_wns={state.timing.best_wns:.3f}ns"
-    )
+    ))
 
     return NodeName.CHECK_EXIT

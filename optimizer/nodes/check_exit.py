@@ -15,6 +15,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.timing import is_valid_wns
 from ..pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT
+from ..color import green, yellow
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ async def check_exit_node(
         state.control.is_done = True
         state.control.done_reason = "wns_target_met"
         logger.info(
-            f"[check_exit] WNS target met: "
-            f"{state.timing.latest_wns:.3f} ns >= {WNS_TARGET_THRESHOLD:.1f} ns"
+            green(f"[check_exit] WNS target met: "
+                  f"{state.timing.latest_wns:.3f} ns >= {WNS_TARGET_THRESHOLD:.1f} ns")
         )
         return NodeName.CHECK_EXIT
 
@@ -67,12 +68,12 @@ async def check_exit_node(
         state.control.is_done = True
         state.control.done_reason = "cost_limit"
         logger.warning(
-            f"[check_exit] Cost limit reached: "
-            f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}"
+            yellow(f"[check_exit] Cost limit reached: "
+                   f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}")
         )
         return NodeName.CHECK_EXIT
 
-    logger.info(
+    logger.debug(
         f"[check_exit] Continuing: WNS={state.timing.latest_wns}, "
         f"no_improve={state.iteration.global_no_improvement}, "
         f"cost=${state.cost.total_cost:.4f}"

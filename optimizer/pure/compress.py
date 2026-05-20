@@ -134,10 +134,6 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
             logger.warning(
                 f"[compress] Hard limit: {current_tokens:,} > {config.hard_limit:,} ({model_tier})"
             )
-        else:
-            logger.info(
-                f"[compress] Soft threshold: {current_tokens:,} > {config.soft_threshold:,} ({model_tier})"
-            )
 
         # 4. Build CompressionContext
         #    Read from OptimizerState (canonical) instead of MemoryManager (shadow),
@@ -161,7 +157,7 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
 
         # 5. Call _compress synchronously (NOT async)
         deps.memory_manager._compress("yaml_structured", context, model_tier=model_tier)
-        logger.info(f"[compress] Compressed ({model_tier}, aggressive={force_aggressive})")
+        logger.info(f"[compress] Compressed ({model_tier}, aggressive={force_aggressive}, {current_tokens:,} tokens)")
         return True
 
     except Exception as e:
