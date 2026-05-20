@@ -38,6 +38,8 @@ def build_context_snapshot(
     tools_used: list[str] | None = None,
     critical_paths: list | None = None,
     refreshed_fields: set[str] | None = None,
+    input_dcp: str | None = None,
+    output_dcp: str | None = None,
 ) -> str:
     """Build factual data dashboard for the current optimization state.
 
@@ -63,6 +65,15 @@ def build_context_snapshot(
     remaining_budget = max(0.0, cost_hard_limit - total_cost)
     lines.append(f"budget_remaining: ${remaining_budget:.3f}")
     lines.append(f"elapsed: {elapsed_time:.0f}s")
+
+    # -- Paths --
+    if input_dcp or output_dcp:
+        lines.append("")
+        lines.append("paths:")
+        if input_dcp:
+            lines.append(f"  input_dcp: {input_dcp} (ALREADY OPEN in Vivado & RapidWright, DO NOT re-open)")
+        if output_dcp:
+            lines.append(f"  output_dcp: {output_dcp} (save final result here)")
 
     # -- Trajectory (work history) --
     trajectory = _format_trajectory(iteration_narratives)

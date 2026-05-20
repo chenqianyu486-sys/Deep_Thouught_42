@@ -104,6 +104,7 @@ class ModelState:
     next_iteration_model: Optional[str] = None
     iteration_handoff_prompt: str = ""
     iteration_handoff_injected: bool = False
+    format_guard_injected: bool = False
     worker_consecutive_success: int = 0
     worker_consecutive_failures: int = 0
     worker_fallback_models: list[str] = field(default_factory=list)
@@ -124,6 +125,7 @@ class CostState:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     total_tokens: int = 0
+    total_reasoning_tokens: int = 0
     total_cost: float = 0.0
     cost_hard_limit: float = 1.0
     api_call_details: list[dict] = field(default_factory=list)

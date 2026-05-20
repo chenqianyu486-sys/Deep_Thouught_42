@@ -5,7 +5,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "deepseek/deepseek-v4-flash"  # Default worker model name
+  model_name: "qwen/qwen3-235b-a22b-2507"  # Default worker model name
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -19,13 +19,15 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "stepfun/step-3.5-flash"
-    - "xiaomi/mimo-v2-flash"
+    - "openai/gpt-oss-120b"
+    - "google/gemma-4-26b-a4b-it"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
   model_name: "deepseek/deepseek-v4-flash"    # Default planner model name
   max_tokens: 1000000
+  reasoning_enabled: true                     # Enable reasoning/thinking mode for planner
+  reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
   soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
   token_budget: 80000        # Target compressed output ~80K tokens (8% of max)
@@ -38,5 +40,5 @@ planner:
   history_retrieval_limit: 10
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "xiaomi/mimo-v2.5"
+    - "qwen/qwen3.6-plus"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)

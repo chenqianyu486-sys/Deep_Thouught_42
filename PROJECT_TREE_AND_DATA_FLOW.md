@@ -18,7 +18,7 @@ fpl26_optimization_contest/
 │   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS、run_tcl查询clk_fpl26contest周期、高扇出网线/资源利用率）
 │   │   ├── iteration_start.py    # 迭代开始节点（递增计数器、保存prev_best_wns）
 │   │   ├── select_model.py       # 模型选择节点（评分+阈值选择planner/worker）
-│   │   ├── prepare_context.py    # 上下文准备节点（压缩、注入handoff；Dashboard注入移至tool loop）
+│   │   ├── prepare_context.py    # 上下文准备节点（压缩、FORMAT_GUARD注入、注入handoff；Dashboard注入移至tool loop）
 │   │   ├── iteration_end.py      # 迭代结束节点（更新计数器、构建narrative、预选下轮模型）
 │   │   ├── check_exit.py         # 退出检查节点（WNS达标/无改善/超时/超成本）
 │   │   ├── save_output.py        # 保存输出节点（写DCP、打印摘要、导出tracing）
@@ -139,7 +139,7 @@ fpl26_optimization_contest/
 OptimizerState (可变dataclass)
 ├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones/critical_paths(动态列表)/critical_paths_stale/refreshed_fields(Dashboard字段新鲜度)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
-├── ModelState     — 模型选择/fallback/交接提示词
+├── ModelState     — 模型选择/fallback/交接提示词/format_guard_injected
 ├── CostState      — token用量/成本追踪
 ├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)
 └── ControlState   — 退出条件/路径/step_state
@@ -329,6 +329,10 @@ build_context_snapshot() 构建纯数据 Dashboard（参数来源：state 直接
     budget_remaining: $0.936
     elapsed: 125s
 
+    paths:
+      input_dcp: /home/.../logicnets_jscl.dcp (ALREADY OPEN in Vivado & RapidWright, DO NOT re-open)
+      output_dcp: /home/.../logicnets_jscl_optimized_20260520_194714.dcp (save final result here)
+
     trajectory:
       - iter: 1
         strategy: pblock
@@ -362,8 +366,10 @@ inject_context_snapshot_at_end(api_messages):
 - `tools_used` 来自 `state.iteration.tools_used`（tool loop 中每次工具执行后 append）
 - `iteration_narratives` 来自 `state.iteration.narratives`
 - `critical_paths` 来自 `state.timing.critical_paths`
+- `input_dcp` 来自 `state.control.input_dcp`（Path → str，带 "ALREADY OPEN" 标注）
+- `output_dcp` 来自 `state.control.output_dcp`（Path → str，带 "save final result here" 标注）
 - 其余指标从 `state.timing`/`state.cost`/`state.control` 直接读取
-- `prepare_context_node` 不再注入 Dashboard（仅做压缩 + handoff injection）
+- `prepare_context_node` 不再注入 Dashboard（仅做压缩 + FORMAT_GUARD注入 + handoff injection）
 
 **设计要点**：
 - **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
@@ -446,14 +452,14 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 ### 2.5 模型选择
 
 ```
-PLANNER: deepseek/deepseek-v4-flash (1M context, 复杂推理)
-WORKER: deepseek/deepseek-v4-flash (250K context, 快速执行)
-- 两者使用相同基础模型，通过不同上下文窗口和压缩参数区分层级
-- 429降级: 按层级fallback列表，轮询+耗尽追踪
-  - Worker fallback: stepfun/step-3.5-flash → xiaomi/mimo-v2-flash
-  - Planner fallback: xiaomi/mimo-v2.5
+PLANNER: 见 model_config.yaml planner.model_name（推理优化, 1M max）
+WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
+- 两者可通过不同模型或相同模型 + 不同上下文窗口/压缩参数区分层级
+- 429降级: 按层级fallback列表，轮询+耗尽追踪（见 model_config.yaml fallback_models）
 - 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
 - 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
+- Planner推理模式: model_config.yaml 中 reasoning_enabled=true 时，通过 extra_body={"reasoning": {"enabled": true}} 开启 OpenRouter reasoning 模式；reasoning_max_output_tokens 限制推理链长度；仅 planner 模型激活，worker 不启用
+- 推理token追踪: CostState.total_reasoning_tokens 累计推理token用量，LLM日志中 reasoning>0 时显示
 ```
 
 ### 2.5.1 模型选择维度（`_select_model()`）
@@ -723,10 +729,13 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 
 ## 4. 配置（model_config.yaml）
 
+> 模型名称和 fallback 列表以 `model_config.yaml` 为准，此处不重复列举。
+> 文档仅保留压缩/阈值参数说明。
+
 ```yaml
 # Worker: 速度优化, 250K max
 worker:
-  model_name: "deepseek/deepseek-v4-flash"
+  model_name: "<见 model_config.yaml>"
   soft_threshold: 175K, hard_limit: 200K
   token_budget: 80K
   preserve_turns: 40, preserve_turns_aggressive: 10
@@ -734,12 +743,12 @@ worker:
   preserve_turns_hard_limit: 25, min_importance_threshold_hard_limit: 0.35
   preserve_role_turns: 6
   history_retrieval_limit: 8, history_retrieval_min_importance: 0.5
-  fallback_models: ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
+  fallback_models: "<见 model_config.yaml>"
   cost_hard_limit: 1.00  # USD
 
-# Planner: 推理优化, 1M max（与 Worker 使用相同基础模型，通过上下文窗口和压缩参数区分）
+# Planner: 推理优化, 1M max
 planner:
-  model_name: "deepseek/deepseek-v4-flash"
+  model_name: "<见 model_config.yaml>"
   soft_threshold: 200K, hard_limit: 300K
   token_budget: 80K
   preserve_turns: 60, preserve_turns_aggressive: 10
@@ -747,8 +756,10 @@ planner:
   preserve_turns_hard_limit: 40, min_importance_threshold_hard_limit: 0.25
   preserve_role_turns: 6
   history_retrieval_limit: 10, history_retrieval_min_importance: 0.3
-  fallback_models: ["xiaomi/mimo-v2.5"]
+  fallback_models: "<见 model_config.yaml>"
   cost_hard_limit: 1.00  # USD
+  reasoning_enabled: true           # 开启推理模式（OpenRouter reasoning）
+  reasoning_max_output_tokens: 16384  # 推理链最大token数（None=不限制）
 ```
 
 ## 5. 迭代控制
@@ -911,19 +922,27 @@ class StepState:
 
 **提醒 1 — User Message（一次性，会话起始）**
 ```
-optimize() 中:
+V1 optimize() 中:
 1. system_prompt → system prompt
 2. user(FORMAT_GUARD)  ← report_step_state tool 完整定义（参数、枚举值、禁止项）
 3. user(initial_optimization_instructions)
+
+V2 optimize_v2() 中:
+1. system_prompt → system prompt
+2. prepare_context_node 首次执行时: user(FORMAT_GUARD)  ← state.model.format_guard_injected 标志控制
 ```
 User role 消息注意力权重大于 System role，只需注入一次。
 
 **提醒 2 — System Prompt 头部压印（每 LLM API 调用前）**
 ```
-get_completion() 中 _inject_wns_state_to_system_prompt() 返回后:
+V1 get_completion() 中 _inject_wns_state_to_system_prompt() 返回后:
 system_content = "[FORMAT: EVERY response MUST call the report_step_state tool with "
                  "step_id/result_status/flow_control. Chain-of-thought text OK.]\n\n"
                  + updated_content
+
+V2 llm_tool_loop 中 _prepare_api_messages():
+api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
+（仅在 system_content 不以 "[FORMAT:" 开头时追加，防止重复）
 ```
 确保格式约束始终处于 system prompt 最前沿，注意力权重最高。
 
@@ -1014,9 +1033,9 @@ REFLECTION CHECKPOINT (tool round 8):
 ```
 1. 保存rate_limited_model（修复日志错误）
 2. 标记为耗尽
-3. 尝试下一fallback（轮询）
+3. 尝试下一fallback（轮询，列表见 model_config.yaml fallback_models）
 4. 成功后清last_exception，更新model_worker
-5. 全耗尽则切换到model_planner
+5. 全耗尽则切换到另一层级模型
 6. 切换时清空双方耗尽集合
 
 _select_model()检查: worker在耗尽列表则强制planner

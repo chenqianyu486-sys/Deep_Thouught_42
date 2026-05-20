@@ -33,6 +33,8 @@ class ModelConfigData:
     history_retrieval_limit: int = 5
     history_retrieval_min_importance: float = 0.6
     fallback_models: list[str] = None  # Fallback models for 429 handling
+    reasoning_enabled: bool = False  # Enable reasoning/thinking mode (OpenRouter)
+    reasoning_max_output_tokens: int | None = None  # Max tokens for reasoning chain
 
     def __post_init__(self):
         if self.fallback_models is None:
@@ -114,6 +116,8 @@ class ModelConfigLoader:
             history_retrieval_limit=config['planner']['history_retrieval_limit'],
             history_retrieval_min_importance=config['planner']['history_retrieval_min_importance'],
             fallback_models=config['planner'].get('fallback_models', []),
+            reasoning_enabled=config['planner'].get('reasoning_enabled', False),
+            reasoning_max_output_tokens=config['planner'].get('reasoning_max_output_tokens', None),
         )
 
     def get_worker_config(self) -> ModelConfigData:

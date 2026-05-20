@@ -88,8 +88,16 @@ async def llm_tool_loop_node(
             except Exception as e:
                 logger.debug(f"[llm_tool_loop] PromptLogger failed: {e}")
 
+        # Use reasoning mode when planner model is active
+        reasoning_cfg = None
+        if current_model == state.model.planner_model and deps.reasoning_config:
+            reasoning_cfg = deps.reasoning_config
+
         try:
-            response = await _call_llm_with_retry(state, deps, api_messages, current_model)
+            response = await _call_llm_with_retry(
+                state, deps, api_messages, current_model,
+                reasoning_config=reasoning_cfg,
+            )
         except Exception as e:
             logger.error(f"[llm_tool_loop] LLM call failed: {e}")
             return NodeName.ITERATION_END
@@ -121,9 +129,16 @@ async def llm_tool_loop_node(
         completion_tok = getattr(usage, 'completion_tokens', 0) if usage else 0
         call_cost = float(getattr(usage, 'cost', 0.0) or 0.0) if usage else 0.0
         tool_call_count = len(message.tool_calls) if message.tool_calls else 0
+        # Reasoning tokens (OpenRouter extended fields)
+        reasoning_tok = 0
+        if usage:
+            comp_details = getattr(usage, 'completion_tokens_details', None)
+            if comp_details:
+                reasoning_tok = getattr(comp_details, 'reasoning_tokens', 0) or 0
+        reasoning_suffix = f", reasoning={reasoning_tok}" if reasoning_tok > 0 else ""
         logger.info(
             f"[LLM] {current_model} | {llm_elapsed:.1f}s | "
-            f"prompt={prompt_tok}, completion={completion_tok}, "
+            f"prompt={prompt_tok}, completion={completion_tok}{reasoning_suffix}, "
             f"cost=${call_cost:.4f}, total=${state.cost.total_cost:.4f} | "
             f"tools={tool_call_count}"
         )
@@ -297,6 +312,12 @@ def _check_wns_target_met(state: OptimizerState) -> bool:
     )
 
 
+FORMAT_STAMP = (
+    "[FORMAT: EVERY response MUST call the report_step_state tool with "
+    "step_id/result_status/flow_control. Chain-of-thought text OK.]"
+)
+
+
 def _prepare_api_messages(deps: NodeDeps, state: OptimizerState) -> list:
     """Prepare API messages with fresh dashboard as last user message."""
     if deps.compat is None:
@@ -305,6 +326,12 @@ def _prepare_api_messages(deps: NodeDeps, state: OptimizerState) -> list:
         api_messages = deps.compat.get_formatted_for_api()
     except Exception:
         return []
+
+    # Prepend FORMAT stamp to system prompt for persistent attention
+    if api_messages and api_messages[0].get("role") == "system":
+        system_content = api_messages[0].get("content", "")
+        if not system_content.startswith("[FORMAT:"):
+            api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
 
     # Rebuild and inject dashboard as last user message for maximum attention
     _inject_dashboard_at_end(api_messages, state, deps)
@@ -341,6 +368,8 @@ def _inject_dashboard_at_end(
         tools_used=state.iteration.tools_used,
         critical_paths=state.timing.critical_paths,
         refreshed_fields=state.timing.refreshed_fields,
+        input_dcp=str(state.control.input_dcp.resolve()) if state.control.input_dcp else None,
+        output_dcp=str(state.control.output_dcp.resolve()) if state.control.output_dcp else None,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)
@@ -353,21 +382,35 @@ async def _call_llm_with_retry(
     model: str,
     max_retries: int = 3,
     retry_delay: float = 2.0,
+    reasoning_config: dict | None = None,
 ):
     """Call LLM with retry logic for rate limits and errors."""
     if deps.openai_client is None:
         logger.error("[llm_tool_loop] No OpenAI client available")
         return None
 
+    # Build extra_body for reasoning mode (OpenRouter)
+    extra_body = None
+    if reasoning_config and reasoning_config.get("enabled"):
+        reasoning_payload: dict = {"enabled": True}
+        max_output_tokens = reasoning_config.get("max_output_tokens")
+        if max_output_tokens is not None:
+            reasoning_payload["max_output_tokens"] = max_output_tokens
+        extra_body = {"reasoning": reasoning_payload}
+        logger.info(f"[llm_tool_loop] Reasoning mode enabled for {model}")
+
     last_exception = None
     for retry in range(max_retries):
         try:
-            response = await deps.openai_client.chat.completions.create(
+            kwargs = dict(
                 model=model,
                 messages=api_messages,
                 tools=deps.tools if deps.tools else None,
                 timeout=600.0,
             )
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            response = await deps.openai_client.chat.completions.create(**kwargs)
             return response
         except Exception as e:
             last_exception = e
@@ -433,6 +476,12 @@ def _track_cost(state: OptimizerState, response) -> None:
             state.cost.total_completion_tokens += completion
             state.cost.total_tokens += total
             state.cost.total_cost += cost
+
+            # Track reasoning tokens (OpenRouter extended fields)
+            completion_details = getattr(usage, 'completion_tokens_details', None)
+            if completion_details:
+                reasoning = getattr(completion_details, 'reasoning_tokens', 0) or 0
+                state.cost.total_reasoning_tokens += reasoning
     except Exception as e:
         logger.warning(f"[llm_tool_loop] Failed to parse usage: {e}")
 
