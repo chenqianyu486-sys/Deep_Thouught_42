@@ -59,6 +59,11 @@ EXAMPLE_DCP_1 := demo_corundum_25g_misses_timing.dcp
 EXAMPLE_DCP_2 := logicnets_jscl.dcp
 DCP_URL_BASE := http://data.rapidwright.io/example-dcps
 
+# tiktoken pre-cache (avoids runtime download failures behind firewalls/proxies)
+TIKTOKEN_CACHE_DIR ?= $(HOME)/.cache/tiktoken
+TIKTOKEN_BPE_URL := https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken
+TIKTOKEN_BPE_CACHE_KEY := 9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+
 # Colors for output
 COLOR_GREEN := \033[0;32m
 COLOR_YELLOW := \033[0;33m
@@ -133,7 +138,7 @@ setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[1/7] Checking for wget/curl (required for downloads)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[1/8] Checking for wget/curl (required for downloads)...$(COLOR_RESET)\n"
 	@if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then \
 		printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
 		echo "Please install wget or curl:"; \
@@ -143,7 +148,7 @@ setup:
 	@printf "$(COLOR_GREEN)✓ wget/curl available$(COLOR_RESET)\n"
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[2/7] Installing Python dependencies...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[2/8] Installing Python dependencies...$(COLOR_RESET)\n"
 	@EXTERNALLY_MANAGED=$$($(PYTHON) -c "import sysconfig; print(sysconfig.get_path('stdlib') + '/EXTERNALLY-MANAGED')") && \
 	if [ -f "$$EXTERNALLY_MANAGED" ]; then \
 		printf "$(COLOR_YELLOW)PEP 668 detected (Ubuntu 22.04+), using --break-system-packages$(COLOR_RESET)\n"; \
@@ -168,7 +173,24 @@ setup:
 		fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[3/7] Checking Vivado...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[3/8] Pre-caching tiktoken encoding...$(COLOR_RESET)\n"
+	@mkdir -p $(TIKTOKEN_CACHE_DIR)
+	@if [ -f "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY)" ]; then \
+		printf "$(COLOR_GREEN)✓ tiktoken cl100k_base already cached$(COLOR_RESET)\n"; \
+	else \
+		echo "Downloading cl100k_base.tiktoken..."; \
+		if wget -q --timeout=30 -O "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY).tmp" "$(TIKTOKEN_BPE_URL)" 2>/dev/null || \
+		   curl -sS --connect-timeout 30 -o "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY).tmp" "$(TIKTOKEN_BPE_URL)" 2>/dev/null; then \
+			mv "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY).tmp" "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY)"; \
+			printf "$(COLOR_GREEN)✓ tiktoken cl100k_base cached$(COLOR_RESET)\n"; \
+		else \
+			printf "$(COLOR_YELLOW)⚠ tiktoken download failed (non-fatal, will retry at runtime)$(COLOR_RESET)\n"; \
+			rm -f "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY).tmp"; \
+		fi; \
+	fi
+	@echo ""
+
+	@printf "$(COLOR_YELLOW)[4/8] Checking Vivado...$(COLOR_RESET)\n"
 	@if command -v $(VIVADO_EXEC) >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
@@ -182,7 +204,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[4/7] Checking Java...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[5/8] Checking Java...$(COLOR_RESET)\n"
 	@if command -v java >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Java found: %s$(COLOR_RESET)\n" "$$(command -v java)"; \
 		java -version 2>&1 | head -n 1; \
@@ -215,11 +237,11 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[5/7] Building RapidWright from source...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[6/8] Building RapidWright from source...$(COLOR_RESET)\n"
 	@$(MAKE) build-rapidwright
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[6/7] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[7/8] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_1)" ]; then \
@@ -235,7 +257,7 @@ setup:
 	fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[7/7] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[8/8] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_2)" ]; then \
@@ -313,7 +335,7 @@ run_optimizer:
 		fi; \
 	fi; \
 	echo ""; \
-	$(PYTHON) dcp_optimizer.py "$(DCP)" --v2
+	TIKTOKEN_CACHE_DIR=$(TIKTOKEN_CACHE_DIR) $(PYTHON) dcp_optimizer.py "$(DCP)" --v2
 
 # Run optimizer using v1 legacy message-driven agent (no --v2 flag)
 run_optimizer_v1:
