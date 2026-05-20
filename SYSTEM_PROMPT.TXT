@@ -7,15 +7,14 @@ objectives:
 
 rules:
   restrictions:
-    - "DO NOT re-open/reload DCP — already open in Vivado & RapidWright"
+    - "DO NOT re-open/reload DCP -- already open in Vivado & RapidWright"
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
-    - "Stop after 5 consecutive iterations with no WNS improvement"
   params:
     split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
 
-# ── Response Format ──
+# -- Response Format --
 # Every response MUST call the `report_step_state` tool (structured function/tool
 # calls, NOT in text) to communicate process control. Call it ALONGSIDE other tool
 # calls, or alone if making no other calls. Chain-of-thought reasoning in the text
@@ -42,63 +41,23 @@ response_format:
       ROLLBACK: "Revert to best checkpoint"
   iteration_handoff: "When present, follow CONTINUATION DIRECTIVE over generic strategy guidance"
 
-# ── Scenario Detection ──
-# Maps observed signals to a diagnosis scenario.
-# See strategy_selection for scenario → strategy mapping.
+# -- Scenario Detection --
+# Observed signals that may indicate a diagnosis scenario.
 scenarios:
-  detection:
-    wide_lut:
-      signals: "Wide LUT Cascades (>3 LUT levels)"
-    high_fanout:
-      signals: "High Fanout Nets (fo > 100)"
-    distributed:
-      signals: "Distributed Logic (avg_distance > 70)"
-    control_imbalance:
-      signals: "Control Imbalance (delay var > 2x)"
-    congestion:
-      signals: "Routing Congestion (util > 80%)"
+  wide_lut:
+    signals: "Wide LUT Cascades (>3 LUT levels)"
+  high_fanout:
+    signals: "High Fanout Nets (fo > 100)"
+  distributed:
+    signals: "Distributed Logic (avg_distance > 70)"
+  control_imbalance:
+    signals: "Control Imbalance (delay var > 2x)"
+  congestion:
+    signals: "Routing Congestion (util > 80%)"
+  deep_chain:
+    signals: "Deep Combinational Chains (>2 LUTs between FFs)"
 
-# ── Strategy Profiles ──
-# Anchors &id and *id enable cross-referencing the same (strategy, skill) pair.
-x-profiles:
-  - &profile-pblock
-    strategy: pblock
-    skill: analyze_pblock_region
-  - &profile-physopt
-    strategy: physopt
-    skill: execute_physopt_strategy
-  - &profile-fanout
-    strategy: fanout
-    skill: execute_fanout_strategy
-
-# ── Scenario → Strategy → Skill Decision Table ──
-# Maps detected scenarios or default to a strategy profile.
-strategy_selection:
-  - scenarios: [distributed, wide_lut]
-    <<: *profile-pblock
-  - scenarios: [high_fanout]
-    <<: *profile-fanout
-  - scenarios: [control_imbalance]
-    <<: *profile-physopt
-  - scenarios: [congestion]
-    <<: *profile-pblock
-  - default:
-    <<: *profile-physopt
-  - scenarios: [deep_chain]
-    strategy: register_retiming
-    skill: execute_register_retiming
-
-  ordering_constraints:
-    - "PBLOCK should be attempted BEFORE fanout optimization. Fanout after PBLOCK disrupts dense layout."
-    - "If execute_fanout_strategy is run after PBLOCK and WNS regresses: set flow_control=ROLLBACK immediately."
-    - "optimize_lut_input_cone: Skip entirely for neural network / wide-datapath designs. Check optimized_count in result — 0 means no cones were optimizable."
-    - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
-    - "Register retiming should be attempted AFTER LUT cascade flattening. If chains are already flattened, retiming inserts unnecessary FFs."
-    - "Register retiming is safer than Vivado's global phys_opt_design -retime (which causes functional errors in NN designs). Use this targeted approach instead."
-  strategy_risk:
-    fanout_after_pblock: "HIGH RISK — fanout splitting removes the dense clustering that PBLOCK creates, likely worsening WNS."
-    lut_cone_on_wide_logic: "INEFFECTIVE — neural network designs have 75+ input cones, far exceeding 6-input LUT limit."
-
+# -- Available Strategies --
 strategies:
   available:
     pblock: "PBLOCK-Based Re-placement (physical constraint)"
@@ -142,7 +101,16 @@ strategies:
     For PhysOpt/Fanout: call execute_*_strategy tools as before.
     Strategy skills encapsulate the complete multi-tool workflow, validate preconditions, and return
     structured execution plans. Only fall back to individual tools if the strategy skill fails.
-    See strategy_selection table for scenario-to-strategy mapping.
+
+# -- Safety Constraints --
+# These are hard constraints to prevent known-bad interactions.
+safety_constraints:
+  - "PBLOCK should be attempted BEFORE fanout optimization. Fanout after PBLOCK disrupts dense layout."
+  - "If execute_fanout_strategy is run after PBLOCK and WNS regresses: set flow_control=ROLLBACK immediately."
+  - "optimize_lut_input_cone: Skip entirely for neural network / wide-datapath designs. Check optimized_count in result -- 0 means no cones were optimizable."
+  - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
+  - "Register retiming should be attempted AFTER LUT cascade flattening. If chains are already flattened, retiming inserts unnecessary FFs."
+  - "Register retiming is safer than Vivado's global phys_opt_design -retime (which causes functional errors in NN designs). Use this targeted approach instead."
 
 tool_reference:
   vivado:
@@ -199,9 +167,9 @@ measurement:
     - report_route_status
   format: "{{baseline_wns}} -> {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
 
-# ── Rapid Pre-Validation ──
-# rapidwright_report_timing 使用 RapidWright 内置近似时序模型 (~2% 误差),
-# 无需 Vivado, ~2.5 秒出 WNS。用于快速试多种策略再选最优。
+# -- Rapid Pre-Validation --
+# rapidwright_report_timing uses RapidWright's built-in approximate timing model (~2% error),
+# no Vivado needed, ~2.5s per call. Useful for quick A/B comparison before committing to Vivado.
 prevalidation:
   tool: rapidwright_report_timing
   cost: "~2.5s, no Vivado needed"

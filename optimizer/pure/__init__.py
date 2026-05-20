@@ -50,8 +50,8 @@ from .context_snapshot import (
 )
 from .handoff import (
     build_handoff_prompt,
-    build_data_driven_goal,
-    build_stagnation_signal,
+    build_situation_summary,
+    build_status_signal,
 )
 from .tool_router import (
     call_tool,
@@ -82,7 +82,7 @@ __all__ = [
     # context_snapshot
     "build_context_snapshot", "inject_context_snapshot",
     # handoff
-    "build_handoff_prompt", "build_data_driven_goal", "build_stagnation_signal",
+    "build_handoff_prompt", "build_situation_summary", "build_status_signal",
     # tool_router
     "call_tool", "is_routing_failure",
     # step_state

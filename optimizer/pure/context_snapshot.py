@@ -16,141 +16,168 @@ from .critical_path import format_critical_paths_snapshot
 
 logger = logging.getLogger(__name__)
 
-SNAPSHOT_HEADER = "# === FPGA Context Snapshot ==="
+SNAPSHOT_HEADER = "--- Optimization Dashboard ---"
 
 
 def build_context_snapshot(
+    *,
+    clock_period: float | None,
     current_wns: float | None,
     best_wns: float | None,
     best_wns_iteration: int | None,
+    tns: float | None,
+    failing_endpoints: int | None,
+    high_fanout_nets: list,
+    critical_path_spread: dict | None,
+    resource_utilization: dict | None,
     strategy_sequence: list[str],
-    failed_strategy_names: list[str],
-    global_no_improvement: int,
-    cost_hard_limit: float,
-    total_cost: float,
     elapsed_time: float,
     remaining_time: float,
-    iteration_narratives: list[dict],
-    tool_call_details: list[dict],
+    total_cost: float,
+    cost_hard_limit: float,
+    iteration_narratives: list[dict] | None = None,
+    tool_call_details: list[dict] | None = None,
     critical_paths: list | None = None,
 ) -> str:
-    """Build compact YAML context snapshot of current optimization state.
+    """Build factual data dashboard for the current optimization state.
 
     Injected as the first user message before every LLM call.
+    Presents raw measurements only — the LLM decides the next action.
     """
-    # --- current_best_wns ---
-    if best_wns is not None:
-        best_wns_label = ""
-        if best_wns_iteration is not None:
-            for entry in iteration_narratives:
-                if entry.get("iteration") == best_wns_iteration:
-                    strat = entry.get("strategy_label", "")
-                    if strat and strat not in ("Information", "Unknown"):
-                        best_wns_label = f" via {strat}"
-                    break
-        cb_wns = f"{best_wns:.3f} ns{best_wns_label}"
-    else:
-        cb_wns = "N/A"
-
-    # --- remaining_violation ---
-    if current_wns is not None and current_wns < 0:
-        remaining_str = f"{-current_wns:.3f} ns"
-    else:
-        remaining_str = "N/A"
-
-    # --- active_strategy ---
-    strategy_parts = []
-    for s in strategy_sequence[-4:]:
-        if s in failed_strategy_names:
-            strategy_parts.append(f"{s} (FAILED)")
-        elif global_no_improvement >= 2:
-            strategy_parts.append(f"{s} (PLATEAUED)")
-        else:
-            strategy_parts.append(f"{s} (ACTIVE)")
-    active_strategy = " -> ".join(strategy_parts) if strategy_parts else "None"
-
-    # --- do_not_repeat ---
-    dnr_entries = []
-    tool_stats: dict[str, list[float]] = {}
-    for td in tool_call_details:
-        name = td.get("tool_name", "")
-        wns_val = td.get("wns")
-        if name and wns_val is not None and not td.get("error", False):
-            tool_stats.setdefault(name, []).append(wns_val)
-    for tool_name, wns_values in tool_stats.items():
-        if len(wns_values) > 3:
-            delta = max(wns_values) - min(wns_values)
-            if delta < 0.01:
-                dnr_entries.append(f'  - "{tool_name} (already called {len(wns_values)} times with no improvement)"')
-
     lines = []
     lines.append(SNAPSHOT_HEADER)
-    lines.append('primary_goal: "Achieve WNS >= 0 ns"')
-    lines.append(f'current_best_wns: "{cb_wns}"')
-    lines.append(f'remaining_violation: "{remaining_str}"')
-    lines.append(f'active_strategy: "{active_strategy}"')
-    if failed_strategy_names:
-        lines.append("failed_strategies:")
-        for fs in failed_strategy_names[-5:]:
-            lines.append(f'  - "{fs}"')
-    else:
-        lines.append("failed_strategies: []")
-    if dnr_entries:
-        lines.append("do_not_repeat:")
-        lines.extend(dnr_entries[:5])
-    else:
-        lines.append("do_not_repeat: []")
+    lines.append("This is a factual data dashboard for the current optimization state.")
+    lines.append("All values are raw measurements. You decide the next action.")
+    lines.append("")
 
-    # --- iteration_history ---
-    narrative_lines = _format_narrative_summary(iteration_narratives, max_entries=5)
-    if narrative_lines:
-        lines.append("iteration_history:")
-        for nl in narrative_lines:
-            lines.append(f'  - "{nl}"')
-    else:
-        lines.append("iteration_history: []")
+    # -- Core timing metrics --
+    lines.append(f"clock_period: {clock_period:.3f}" if clock_period else "clock_period: N/A")
+    lines.append(f"wns_current: {current_wns:.3f}" if current_wns is not None else "wns_current: N/A")
+    lines.append(f"wns_best: {best_wns:.3f}" if best_wns is not None and best_wns > float('-inf') else "wns_best: N/A")
+    lines.append(f"wns_best_iter: {best_wns_iteration}" if best_wns_iteration is not None else "wns_best_iter: N/A")
+    lines.append(f"tns: {tns:.3f}" if tns is not None else "tns: N/A")
+    lines.append(f"failing_endpoints: {failing_endpoints}" if failing_endpoints is not None else "failing_endpoints: N/A")
 
-    # --- critical_paths ---
+    # -- Budget --
+    remaining_budget = max(0.0, cost_hard_limit - total_cost)
+    lines.append(f"budget_remaining: ${remaining_budget:.3f}")
+    lines.append(f"elapsed: {elapsed_time:.0f}s")
+
+    # -- Trajectory (work history) --
+    trajectory = _format_trajectory(iteration_narratives)
+    if trajectory:
+        lines.append("")
+        lines.append("trajectory:")
+        for entry in trajectory:
+            lines.append(f"  - iter: {entry['iter']}")
+            lines.append(f"    strategy: {entry['strategy']}")
+            if "wns_before" in entry:
+                lines.append(f"    wns_before: {entry['wns_before']:.3f}")
+                lines.append(f"    wns_after: {entry['wns_after']:.3f}")
+                lines.append(f"    delta: {entry['delta']:+.4f}")
+    else:
+        lines.append("")
+        lines.append("trajectory: []")
+
+    # -- Design signals --
+    signals = _compute_design_signals(high_fanout_nets, critical_path_spread, resource_utilization)
+    if signals:
+        lines.append("")
+        lines.append("design_signals:")
+        for k, v in signals.items():
+            lines.append(f"  {k}: {v}")
+    else:
+        lines.append("")
+        lines.append("design_signals: {}")
+
+    # -- Critical paths --
     if critical_paths:
         cp_lines = format_critical_paths_snapshot(critical_paths)
         if cp_lines:
+            lines.append("")
             lines.append("critical_paths:")
             for cp in cp_lines:
-                lines.append(f'  - "{cp}"')
+                lines.append(f"  - {cp}")
+        else:
+            lines.append("")
+            lines.append("critical_paths: []")
     else:
+        lines.append("")
         lines.append("critical_paths: []")
 
-    # --- budget_status ---
-    remaining_budget = max(0.0, cost_hard_limit - total_cost)
-    budget_pct = (total_cost / cost_hard_limit * 100) if cost_hard_limit > 0 else 0
-    lines.append(f'remaining_budget: "${remaining_budget:.2f}" ({budget_pct:.0f}% used)')
-    lines.append(f'elapsed_time: "{elapsed_time:.0f}s" (remaining: {remaining_time:.0f}s)')
+    # -- Active tools --
+    active = _compute_active_tools(tool_call_details)
+    if active:
+        lines.append("")
+        lines.append("active_tools:")
+        for tool in active:
+            lines.append(f"  - {tool}")
+    else:
+        lines.append("")
+        lines.append("active_tools: []")
 
+    lines.append("--- End Dashboard ---")
     return "\n".join(lines)
 
 
-def _format_narrative_summary(narratives: list[dict], max_entries: int = 5) -> list[str]:
-    """Format recent iteration narratives into summary lines."""
-    if not narratives:
-        return []
-    recent = narratives[-max_entries:]
-    lines = []
-    for entry in recent:
-        it = entry.get("iteration", "?")
-        model = entry.get("model", "?")
-        outcome = entry.get("outcome", "?")
-        wns_before = entry.get("wns_before")
-        wns_after = entry.get("wns_after")
-        wns_delta = entry.get("wns_delta", 0)
-        strategy = entry.get("strategy_label", "")
+def _compute_design_signals(
+    high_fanout_nets: list,
+    critical_path_spread: dict | None,
+    resource_utilization: dict | None,
+) -> dict:
+    """Compute objective signals from raw data. No judgments."""
+    signals = {}
+    if high_fanout_nets:
+        fanouts = []
+        for n in high_fanout_nets:
+            if isinstance(n, dict) and "fanout" in n:
+                fanouts.append(n["fanout"])
+        if fanouts:
+            signals["max_fanout"] = max(fanouts)
+            signals["high_fanout_count"] = len(fanouts)
+    if critical_path_spread and isinstance(critical_path_spread, dict):
+        for k, v in critical_path_spread.items():
+            if isinstance(v, (int, float)):
+                signals[f"cp_spread_{k}"] = round(v, 2)
+    if resource_utilization:
+        for k, v in resource_utilization.items():
+            if isinstance(v, (int, float)):
+                signals[k] = round(v, 1)
+    return signals
 
-        before_str = f"{wns_before:.3f}" if wns_before is not None else "N/A"
-        after_str = f"{wns_after:.3f}" if wns_after is not None else "N/A"
-        lines.append(
-            f"Iter {it}: {model} | {strategy} | "
-            f"WNS {before_str}->{after_str} ({wns_delta:+.3f}) | {outcome}"
-        )
-    return lines
+
+def _compute_active_tools(tool_call_details: list[dict] | None) -> list[str]:
+    """Extract deduplicated tool names (preserving order)."""
+    if not tool_call_details:
+        return []
+    seen = set()
+    result = []
+    for detail in tool_call_details:
+        name = detail.get("tool_name", "")
+        if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _format_trajectory(iteration_narratives: list[dict] | None) -> list[dict]:
+    """Extract brief trajectory from iteration narratives."""
+    if not iteration_narratives:
+        return []
+    trajectory = []
+    for n in iteration_narratives:
+        entry: dict = {
+            "iter": n.get("iteration", "?"),
+            "strategy": n.get("strategy_label", n.get("strategy", "unknown")),
+        }
+        wns_before = n.get("wns_before")
+        wns_after = n.get("wns_after")
+        if wns_before is not None and wns_after is not None:
+            entry["wns_before"] = wns_before
+            entry["wns_after"] = wns_after
+            entry["delta"] = round(wns_after - wns_before, 4)
+        trajectory.append(entry)
+    return trajectory
 
 
 def inject_context_snapshot(api_messages: list[dict], snapshot_yaml: str) -> None:

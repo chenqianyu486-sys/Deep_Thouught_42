@@ -63,20 +63,23 @@ async def prepare_context_node(
         remaining = max(0, state.control.wall_clock_timeout - elapsed)
 
     # Read from compat (MemoryManager) for data that lives there
-    failed_strategy_names = deps.compat.failed_strategy_names if deps.compat else []
     tool_call_details = deps.compat.tool_call_details if deps.compat else []
 
     snapshot = build_context_snapshot(
+        clock_period=state.timing.clock_period,
         current_wns=current_wns,
         best_wns=best_wns,
         best_wns_iteration=state.timing.best_wns_iteration,
+        tns=state.timing.latest_tns,
+        failing_endpoints=state.timing.latest_failing_endpoints,
+        high_fanout_nets=state.timing.high_fanout_nets or [],
+        critical_path_spread=state.timing.critical_path_spread,
+        resource_utilization=state.timing.resource_utilization,
         strategy_sequence=state.iteration.strategy_sequence,
-        failed_strategy_names=failed_strategy_names,
-        global_no_improvement=state.iteration.global_no_improvement,
-        cost_hard_limit=state.cost.cost_hard_limit,
-        total_cost=state.cost.total_cost,
         elapsed_time=elapsed,
         remaining_time=remaining,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
         iteration_narratives=state.iteration.narratives,
         tool_call_details=tool_call_details,
         critical_paths=state.timing.critical_paths,

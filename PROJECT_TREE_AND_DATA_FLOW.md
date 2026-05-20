@@ -30,8 +30,8 @@ fpl26_optimization_contest/
 │   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
-│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot
-│   │   ├── handoff.py            # build_handoff_prompt/build_data_driven_goal/build_stagnation_signal
+│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot（数据dashboard）
+│   │   ├── handoff.py            # build_handoff_prompt/build_situation_summary/build_status_signal
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
 │   │   ├── compress.py           # compress_context（CompressionContext构建+阈值检查+同步调用_compress）
@@ -191,8 +191,8 @@ V2 状态机架构从 V1 的 `DCPOptimizer` 单体类（~8000行）拆分为 `op
 | `_select_model()` | `pure/model_select.py` | 任务分类、9维评分、模型选择 |
 | `_summarize_tool_result()` | `pure/tool_summary.py` | 工具结果YAML摘要化 |
 | `_on_iteration_end()` | `pure/iteration_logic.py` | 迭代计数器更新、策略推断、迭代叙事 |
-| `_build_context_snapshot()` | `pure/context_snapshot.py` | 上下文快照构建与注入 |
-| `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、数据驱动目标、停滞信号 |
+| `_build_context_snapshot()` | `pure/context_snapshot.py` | 数据dashboard构建与注入（纯事实，无引导） |
+| `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、状态摘要、状态信号 |
 | `call_tool()` | `pure/tool_router.py` | MCP工具路由（含 phys_opt 安全守卫） |
 | `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析（无XML/YAML回退） |
 | `_compress_context()` | `pure/compress.py` | CompressionContext构建 + 阈值检查 + 同步调用 |
@@ -309,39 +309,58 @@ API调用前 → _inject_wns_state_to_system_prompt()
 WNS动态状态 → 已迁移至 _build_context_snapshot()，作为 user message 注入（见 2.3.1）
 ```
 
-### 2.3.1 Agent 上下文快照注入（user message，紧凑 YAML）
+### 2.3.1 Agent 上下文快照注入（user message，数据 Dashboard）
 
 ```
 API调用前 → _prepare_api_messages() 中末尾调用 _inject_context_snapshot()
     ↓
-_build_context_snapshot() 从现有实例变量构建 YAML：
-    # === FPGA Context Snapshot ===
-    primary_goal: "Achieve WNS >= 0 ns"
-    current_best_wns: "-0.978 ns"
-    remaining_violation: "0.978 ns"
-    active_strategy: "PBLOCK (ACTIVE) -> PhysOpt (PLATEAUED)"
-    failed_strategies: []
-    do_not_repeat:
-      - "phys_opt_design (already called 12 times with no improvement)"
+build_context_snapshot() 构建纯数据 Dashboard：
+    --- Optimization Dashboard ---
+    This is a factual data dashboard for the current optimization state.
+    All values are raw measurements. You decide the next action.
+
+    clock_period: 1.500
+    wns_current: -0.978
+    wns_best: -0.978
+    wns_best_iter: 1
+    tns: -835.005
+    failing_endpoints: 1529
+    budget_remaining: $0.936
+    elapsed: 125s
+
+    trajectory:
+      - iter: 1
+        strategy: pblock
+        wns_before: -0.978
+        wns_after: -0.978
+        delta: +0.0000
+
+    design_signals:
+      max_fanout: 247
+      high_fanout_count: 24
+      cp_spread_max_distance: 3.2
+      lut: 45.2
+
     critical_paths:
-      - "path1: cellA -> cellB -> cellC -> cellD (4 cells, iter 5)"
-      - "path2: cellE -> cellF -> cellG (3 cells, iter 5)"
-    iteration_history:
-      - "iter1(IMP): -0.500->-0.352ns(+0.1480) 7toks PBLOCK"
-      - "iter2(UNC): -0.352->-0.352ns(+0.0000) 5toks PhysOpt"
-      - "iter3(REG): -0.352->-0.380ns(-0.0280) 9toks Fanout"
+      - path1: cellA -> cellB -> cellC (3 cells, iter 1)
+
+    active_tools:
+      - rapidwright_report_timing
+    --- End Dashboard ---
     ↓
-_inject_context_snapshot(api_messages):
-    1. 扫描 api_messages 查找以 "# === FPGA Context Snapshot ==="
+inject_context_snapshot(api_messages):
+    1. 扫描 api_messages 查找以 "--- Optimization Dashboard ---"
        开头的 user 消息 → 找到则移除（防止累积）
-    2. 调用 _build_context_snapshot() 构建新 YAML
-    3. 在第一个非 system 消息位置插入新的 user 消息
+    2. 在第一个非 system 消息位置插入新的 user 消息
     → 每次 API 调用最多一条快照消息，零残留
 ```
 
 **设计要点**：
-- **User 角色**：不同于旧的 WNS 状态注入（system prompt），上下文快照放在 user 消息中，处于 system 消息之后、对话历史之前
-- **紧凑格式**：仅 8 个字段，~200 tokens；合并 `current_wns` + `best_wns` 为 `current_best_wns`；`active_strategy` 展示策略链及各状态（ACTIVE/FAILED/PLATEAUED）；`critical_paths` 展示 top 5 关键路径（每条路径前 6 个 cell 名 + 总 cell 数 + 提取迭代号）；`iteration_history` 展示最近 5 次迭代 WNS 轨迹
+- **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
+- **trajectory**：工作轨迹，记录每轮迭代策略名、前后 WNS、delta
+- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）
+- **active_tools**：最近使用过的工具列表（去重保序）
+- **明确声明**："This is a factual data dashboard" + "You decide the next action"
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`（注意：无 "WNS" 字样，包含工具计数）
@@ -384,7 +403,7 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 **展示位置**：
 | 位置 | 来源 | 限制 |
 |------|------|------|
-| Context Snapshot (2.3.1) | `build_context_snapshot(critical_paths=...)` | top 5, 6 cells/path |
+| Context Dashboard (2.3.1) | `build_context_snapshot(critical_paths=...)` | top 5, 6 cells/path |
 | Planner Handoff (5.1) | `_generate_planner_handoff()` | top 5, 6 cells/path |
 | Worker Handoff (5.1) | `_generate_worker_handoff()` | top 3, 6 cells/path |
 
@@ -401,12 +420,12 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 | 类型 | 存储位置 | 保护机制 |
 |------|----------|----------|
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
-| WNS/TNS/策略状态 | 上下文快照（user message，独立于压缩系统） | 通过 `_build_context_snapshot()` → `_inject_context_snapshot()` 每 API 调用前注入为第一条 user 消息 |
+| WNS/TNS/策略状态 | 上下文Dashboard（user message，独立于压缩系统） | 通过 `build_context_snapshot()` → `inject_context_snapshot()` 每 API 调用前注入为第一条 user 消息 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在8个检测点被调用（工具超时/工具异常/工具错误/SWITCH_STRATEGY/PBLOCK验证失败/Fanout后评估缺失/路由失败/策略中断） |
 | Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 | report_step_state tool call 格式 | ① User message（会话起始）+ ② System prompt 头部压印（每API调用前） | 双重提醒：User role 高注意力 + System prompt 前导压印 |
-| Agent 上下文快照 | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `_inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；包含 current_best_wns/active_strategy(含状态)/failed_strategies/do_not_repeat/critical_paths |
+| Agent 上下文Dashboard | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；纯数据dashboard：wns/tns/fep/trajectory/design_signals/critical_paths/active_tools |
 | 动态 Critical Path | `state.timing.critical_paths` | 被动更新：LLM 调 `vivado_extract_critical_path_cells` 时解析缓存；主动更新：phys_opt/route_design 后标记 stale 并 auto-refresh；top 10 路径按长度排序 |
 | 工具重复检测 | DCPOptimizer._recent_tools（滑动窗口） | 连续>=3次相同工具且WNS总变化<0.05ns时，注入 REPETITION DETECTED 警告 |
 | 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT，要求LLM评估策略有效性并显式 justify CONTINUE vs SWITCH_STRATEGY |
@@ -550,9 +569,9 @@ Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列,
 └── 以上均不匹配                                        → 空（不推荐）
 
 Skill 推荐注入点:
-├── _build_data_driven_goal() → 追加在NEXT OPTIMIZATION GOAL末尾
-├── _generate_planner_handoff() → 新增=== RECOMMENDED SKILL ===段
-├── _generate_worker_handoff() → 新增=== RECOMMENDED SKILL ===段
+├── build_situation_summary() → 纯事实状态摘要（无推荐）
+├── _generate_planner_handoff() → 简化交接（SITUATION/STATE/TRAJECTORY/STATUS）
+├── _generate_worker_handoff() → 精简交接（STATE/CRITICAL PATHS/STATUS）
 └── SWITCH_STRATEGY 处理器 → 注入消息末尾追加skill推荐
 
 调用链:
@@ -756,7 +775,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - 首次迭代: 注入 `**FIRST ITERATION** - Begin with initial design analysis...`
 - Handoff 注入: 独立 system message（index=1）
 - 辅助数据: `_iteration_narratives[]`（最多 20 条）、`_build_tool_effect_summary()`（最近 8 条）、`_build_failed_strategy_summary()`（最近 5 条）
-- 数据驱动目标: `_build_data_driven_goal()` 基于 WNS 轨迹和策略效果
+- 状态摘要: `build_situation_summary()` 纯事实状态（WNS/best/no-improvement/time）
 
 **限制迭代内切换**: 仅首次迭代或 fallback 场景允许迭代内模型重新选择。
 

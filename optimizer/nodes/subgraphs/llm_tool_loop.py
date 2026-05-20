@@ -34,6 +34,31 @@ MAX_TOOL_ROUNDS = 80
 # Compression check interval: only check every N rounds to reduce CPU overhead
 COMPRESS_CHECK_INTERVAL = 5
 
+# Max consecutive missing report_step_state before auto-synthesis
+MAX_MISSING_STEP_STATE = 3
+
+
+def _build_step_state_warning(missing_count: int) -> str:
+    """Build escalating warning for missing report_step_state calls."""
+    if missing_count == 1:
+        return (
+            "[WARNING] report_step_state not called. You MUST include "
+            "report_step_state(step_id='...', result_status='SUCCESS'|'FAILURE'|'PARTIAL', "
+            "flow_control='CONTINUE'|'DONE'|'SWITCH_STRATEGY') in your next response. "
+            "Tool execution skipped."
+        )
+    elif missing_count == 2:
+        return (
+            "[ERROR] report_step_state missing for 2 consecutive rounds. "
+            "Tool execution skipped. Next round must include report_step_state, "
+            "or a default CONTINUE state will be auto-generated."
+        )
+    else:
+        return (
+            "[FATAL] report_step_state missing for 3 consecutive rounds. "
+            "Auto-generated default CONTINUE state. Proceeding to next iteration."
+        )
+
 
 async def llm_tool_loop_node(
     state: OptimizerState, deps: NodeDeps
@@ -52,6 +77,7 @@ async def llm_tool_loop_node(
     """
     tool_round = 0
     iteration_start_wns = state.timing.best_wns
+    consecutive_missing_step_state = 0
 
     while True:
         tool_round += 1
@@ -141,10 +167,28 @@ async def llm_tool_loop_node(
                 f"result_status={step_state.result_status}, "
                 f"flow_control={step_state.flow_control}"
             )
+            consecutive_missing_step_state = 0
+            flow_signal = step_state.flow_control
+        else:
+            consecutive_missing_step_state += 1
+            logger.warning(
+                f"[llm_tool_loop] Missing report_step_state "
+                f"({consecutive_missing_step_state}/{MAX_MISSING_STEP_STATE})"
+            )
+
+            if consecutive_missing_step_state < MAX_MISSING_STEP_STATE:
+                # Stage 1-2: inject warning, skip tool execution, force LLM retry
+                warning = _build_step_state_warning(consecutive_missing_step_state)
+                deps.compat.add_message("user", warning)
+                continue
+            else:
+                # Stage 3: synthesize default state, continue normal flow
+                warning = _build_step_state_warning(consecutive_missing_step_state)
+                deps.compat.add_message("user", warning)
+                flow_signal = "CONTINUE"
+                logger.warning("[llm_tool_loop] Synthesized default step_state with CONTINUE")
 
         # ── Check flow_control before tool execution ──────────────
-        flow_signal = step_state.flow_control if step_state else None
-
         if flow_signal in ("DONE", "SWITCH_STRATEGY"):
             _handle_flow_signal(state, deps, flow_signal, assistant_content)
             return NodeName.ITERATION_END

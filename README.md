@@ -1,8 +1,8 @@
-# FPL26 优化竞赛 — FPGA 时序收敛 Agent
+# FPL26 优化竞赛 -- FPGA 时序收敛 Agent
 
 基于 LLM Agent 的 FPGA EDA 全流程优化系统，参赛 FPL 2026 优化竞赛。
 
-通过 LLM（DeepSeek V4 Flash）编排 Vivado 和 RapidWright 工具链，自动执行 P&R 优化策略（PBLOCK、PhysOpt、Fanout 优化等），迭代逼近时序收敛目标（WNS ≥ 0）。
+通过 LLM（DeepSeek V4 Flash）编排 Vivado 和 RapidWright 工具链，自动执行 P&R 优化策略（PBLOCK、PhysOpt、Fanout 优化等），迭代逼近时序收敛目标（WNS >= 0）。
 
 ## 架构概述
 
@@ -19,16 +19,40 @@
 
 **V2 状态机拓扑**:
 ```
-init_analysis → [条件: WNS ≥ 0?]
-  ├─ YES → save_output → end
-  └─ NO  → iteration_start → select_model → prepare_context
-            → llm_tool_loop(子图) → iteration_end → check_exit
-            → [条件: done?]
-              ├─ YES → save_output → end
-              └─ NO  → iteration_start (循环)
+init_analysis -> [条件: WNS >= 0?]
+  |-- YES -> save_output -> end
+  +-- NO  -> iteration_start -> select_model -> prepare_context
+            -> llm_tool_loop(子图) -> iteration_end -> check_exit
+            -> [条件: done?]
+              |-- YES -> save_output -> end
+              +-- NO  -> iteration_start (循环)
 ```
 
 详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的第 1.1 和 1.2 节。
+
+## 设计意图
+
+### 1. 代码级流程控制（强制 report_step_state）
+
+**问题**：LLM 在大多数轮次中不会主动调用 `report_step_state`，导致系统丧失流程控制信号，无法驱动迭代切换。
+
+**方案**：在工具循环中检测 `report_step_state` 缺失，递进式升级处理 -- 跳过工具执行并警告，多次缺失后自动合成默认状态继续流程。不依赖 prompt 提醒，在代码逻辑中强制执行。
+
+**原则**：强制但不阻塞 -- 给 LLM 适应空间，但不因 LLM 的疏忽而死锁优化。
+
+### 2. 弱引导 Dashboard（最大化 LLM 自主推理）
+
+**问题**：原上下文快照包含 `FAILED`/`PLATEAUED` 标签、`do_not_repeat` 列表、具体策略建议，与 system prompt 重复约束 LLM。LLM 被告知"该做什么"而非"当前是什么"，推理空间被过度压缩。
+
+**方案**：上下文快照重构为纯数据 Dashboard -- 只呈现原始测量值（WNS/TNS/trajectory/design_signals/critical_paths），不含判断标签或行动建议。明确声明 "This is a factual data dashboard... You decide the next action"。
+
+**原则**：事实而非判断，数据而非建议，轨迹而非指令。system prompt 负责"规则"，Dashboard 负责"现状"，LLM 负责"决策"。
+
+### 3. 简化交接提示词（去除重复引导）
+
+**问题**：迭代交接提示词包含具体策略建议、失败列表、4步指令，与 system prompt 的策略选择指导重复，造成信息冗余和约束冲突。
+
+**方案**：handoff 简化为纯事实结构 -- Planner 交接仅含 SITUATION/STATE/TRAJECTORY/STATUS，Worker 交接仅含 STATE/CRITICAL PATHS/STATUS。策略选择交还给 system prompt 统一指导。
 
 ## 快速开始
 
@@ -48,9 +72,9 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 ```
 
 **环境变量**:
-- `OPENROUTER_API_KEY` — OpenRouter API 密钥（必需）
-- `VIVADO_EXEC` — Vivado 可执行文件路径（默认 `vivado`）
-- `JAVA_HOME` — Java 安装路径（RapidWright 依赖）
+- `OPENROUTER_API_KEY` -- OpenRouter API 密钥（必需）
+- `VIVADO_EXEC` -- Vivado 可执行文件路径（默认 `vivado`）
+- `JAVA_HOME` -- Java 安装路径（RapidWright 依赖）
 
 ## 项目结构
 
@@ -115,6 +139,6 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 
 ## 文档
 
-- [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) — 完整项目结构、数据流、v1→v2 迁移映射
-- [skills/SKILL_SPECIFICATION.md](skills/SKILL_SPECIFICATION.md) — Skill Descriptor v3 规范
-- [docs/](docs/) — 竞赛提交文档站点（benchmarks、FAQ、submission 指南）
+- [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) -- 完整项目结构、数据流、v1->v2 迁移映射
+- [skills/SKILL_SPECIFICATION.md](skills/SKILL_SPECIFICATION.md) -- Skill Descriptor v3 规范
+- [docs/](docs/) -- 竞赛提交文档站点（benchmarks、FAQ、submission 指南）

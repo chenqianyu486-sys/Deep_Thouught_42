@@ -1,7 +1,7 @@
 """Handoff prompt generation pure functions.
 
 Extracted from dcp_optimizer.py: _generate_planner_handoff (L3071-3121),
-_generate_worker_handoff (L3123-3174), _build_data_driven_goal (L2997-3069).
+_generate_worker_handoff (L3123-3174).
 """
 
 from __future__ import annotations
@@ -9,8 +9,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from .iteration_logic import infer_strategy_from_tools
-from .context_snapshot import _format_narrative_summary
 from .critical_path import format_critical_paths_handoff, DISPLAY_LIMIT_HANDOFF_PLANNER, DISPLAY_LIMIT_HANDOFF_WORKER
 
 if TYPE_CHECKING:
@@ -19,63 +17,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def build_data_driven_goal(
-    state: OptimizerState,
+def build_situation_summary(
     current_wns: float | None,
-    tool_call_details: list[dict],
+    best_wns: float | None,
+    best_wns_iteration: int | None,
+    global_no_improvement: int,
+    elapsed_time: float,
+    remaining_time: float,
 ) -> str:
-    """Build data-driven next goal from WNS trajectory and strategy effects."""
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
+    """Build factual situation summary. No prescriptions."""
+    wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
+    best_str = f"{best_wns:.3f}ns" if best_wns is not None and best_wns > float('-inf') else "N/A"
+    best_iter_str = f"@iter {best_wns_iteration}" if best_wns_iteration is not None else ""
 
-    if not state.iteration.narratives:
-        if best_wns is not None and best_wns >= 0:
-            return "WNS target met. Focus on further optimization."
-        elif best_wns is not None and best_wns > -0.5:
-            return "Close to target. Fine-tuning critical paths."
-        elif best_wns is not None and best_wns > -2.0:
-            return "Moderate violation. Consider phys_opt or PBLOCK."
-        else:
-            return "Severe violation. Consider aggressive strategies."
-
-    recent = state.iteration.narratives[-5:]
-    improved = [e for e in recent if e.get('outcome') == 'improved']
-    regressed = [e for e in recent if e.get('outcome') == 'regression']
-
-    if best_wns is not None and best_wns >= 0:
-        return "WNS target met. Focus on further optimization."
-    elif not improved and regressed:
-        return f"No improvement in {len(recent)} iters. Rollback to best checkpoint and try alternative strategy."
-    elif improved:
-        last_improved_tools = [
-            t.get('tool_name', '')
-            for t in tool_call_details
-            if t.get('iteration') == improved[-1].get('iteration')
-        ]
-        strategy = infer_strategy_from_tools(last_improved_tools)
-        return f"Last success via {strategy}. Continue or refine approach."
-    elif best_wns is not None and best_wns > -2.0:
-        return "Moderate violation. Consider phys_opt or PBLOCK."
-    else:
-        return "Severe violation. Consider aggressive strategies."
+    lines = [f"WNS: {wns_str} (best: {best_str} {best_iter_str})"]
+    if global_no_improvement > 0:
+        lines.append(f"No-improvement rounds: {global_no_improvement}")
+    lines.append(f"Time: {elapsed_time:.0f}s used, {remaining_time:.0f}s remaining")
+    return "\n".join(lines)
 
 
-def build_stagnation_signal(state: OptimizerState) -> str:
-    """Build stagnation warning signal if optimization is stuck."""
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
-    if state.iteration.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
-        current_wns = state.timing.latest_wns
-        current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
-        return (
-            f"STAGNATION DETECTED: {state.iteration.global_no_improvement} consecutive iterations without improvement. "
-            f"Current WNS={current_wns_str}. Your current approach is NOT WORKING.\n"
-            f"STOP executing optimization strategies. You MUST initiate a fresh diagnosis cycle:\n"
-            f"1. Gather current timing data (report_timing_summary, extract_critical_path_cells)\n"
-            f"2. Analyze what has changed and why prior strategies failed\n"
-            f"3. Form a new hypothesis about the dominant timing obstacle\n"
-            f"4. Select a strategy that has NOT been tried yet\n"
-            f"Do NOT repeat the same pattern."
-        )
-    return ""
+def build_status_signal(
+    global_no_improvement: int,
+    consecutive_same_strategy: int = 0,
+) -> str:
+    """Build objective status signal. No instructions."""
+    parts = []
+    if global_no_improvement >= 3:
+        parts.append(f"No-improvement rounds: {global_no_improvement}")
+    if consecutive_same_strategy >= 3:
+        parts.append(f"Same-strategy streak: {consecutive_same_strategy}")
+    return "\n".join(parts) if parts else ""
 
 
 def build_handoff_prompt(
@@ -91,143 +63,117 @@ def build_handoff_prompt(
         state: Current optimizer state.
         tier: "planner" or "worker".
         tool_call_details: Recent tool call details.
-        failed_strategies: List of failed strategy dicts.
+        failed_strategies: List of failed strategy dicts (unused, kept for compat).
         current_wns: Current WNS value.
     """
     if tier == "planner":
-        return _generate_planner_handoff(state, tool_call_details, failed_strategies, current_wns)
+        return _generate_planner_handoff(state, current_wns)
     else:
-        return _generate_worker_handoff(state, tool_call_details, failed_strategies, current_wns)
+        return _generate_worker_handoff(state, current_wns)
 
 
-def _format_failed_strategies(failed_strategies: list[dict]) -> str:
-    """Format failed strategies list into readable text."""
-    if not failed_strategies:
-        return "(none)"
+def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> str:
+    """Format recent iteration trajectories into brief lines."""
+    if not narratives:
+        return "(no history)"
+    recent = narratives[-max_entries:]
     lines = []
-    for fs in failed_strategies[-5:]:
-        name = fs.get("strategy", "?")
-        reason = fs.get("reason", "unknown")
-        lines.append(f"- {name}: {reason}")
-    return "\n".join(lines)
+    for entry in recent:
+        it = entry.get("iteration", "?")
+        strategy = entry.get("strategy_label", entry.get("strategy", "?"))
+        wns_before = entry.get("wns_before")
+        wns_after = entry.get("wns_after")
+        wns_delta = entry.get("wns_delta", 0)
 
-
-def _format_recent_tools(tool_call_details: list[dict], iteration: int) -> str:
-    """Format recent tool calls for this iteration."""
-    tools = [t for t in tool_call_details if t.get('iteration') == iteration]
-    if not tools:
-        return "(none)"
-    lines = []
-    for t in tools[-10:]:
-        name = t.get('tool_name', '?')
-        wns = t.get('wns')
-        error = t.get('error', False)
-        status = "ERROR" if error else "OK"
-        wns_str = f" WNS={wns:.3f}" if wns is not None else ""
-        lines.append(f"- {name}: {status}{wns_str}")
+        before_str = f"{wns_before:.3f}" if wns_before is not None else "N/A"
+        after_str = f"{wns_after:.3f}" if wns_after is not None else "N/A"
+        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({wns_delta:+.3f})")
     return "\n".join(lines)
 
 
 def _generate_planner_handoff(
     state: OptimizerState,
-    tool_call_details: list[dict],
-    failed_strategies: list[dict],
     current_wns: float | None,
 ) -> str:
-    """Generate rich handoff for planner models (1M context)."""
+    """Generate handoff for planner models (1M context)."""
     best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
     best_wns_iter = state.timing.best_wns_iteration
     clock_period = state.timing.clock_period
 
-    recent_tools = _format_recent_tools(tool_call_details, state.iteration.current)
-    failed_str = _format_failed_strategies(failed_strategies)
-    narrative_lines = _format_narrative_summary(state.iteration.narratives, max_entries=10)
-    narrative = "\n".join(narrative_lines) if narrative_lines else "(no history)"
-    goal = build_data_driven_goal(state, current_wns, tool_call_details)
-    stagnation = build_stagnation_signal(state)
-    stagnation_section = f"\n=== STAGNATION SIGNAL ===\n{stagnation}\n" if stagnation else ""
+    situation = build_situation_summary(
+        current_wns=current_wns,
+        best_wns=best_wns,
+        best_wns_iteration=best_wns_iter,
+        global_no_improvement=state.iteration.global_no_improvement,
+        elapsed_time=0.0,
+        remaining_time=state.control.wall_clock_timeout,
+    )
+    trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
+    status = build_status_signal(
+        state.iteration.global_no_improvement,
+        _count_consecutive_same_strategy(state.iteration.strategy_sequence),
+    )
+    status_section = f"\nSTATUS:\n{status}\n" if status else ""
 
     wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
-    best_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
-    best_iter_str = f"iter {best_wns_iter}" if best_wns_iter is not None else "N/A"
-    clock_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
+    tns_str = f"{state.timing.latest_tns:.3f}ns" if state.timing.latest_tns is not None else "N/A"
+    fep_str = str(state.timing.latest_failing_endpoints) if state.timing.latest_failing_endpoints is not None else "N/A"
 
     critical_paths_str = format_critical_paths_handoff(
         state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_PLANNER
     )
 
-    return f"""**ITERATION HANDOFF - Planner**
+    return f"""--- Iteration {state.iteration.current} Handoff ---
 
-=== ITERATION TRAJECTORY ===
-{narrative}
+SITUATION:
+{situation}
 
-=== CURRENT STATE ===
-- Iteration: {state.iteration.current} -> {state.iteration.current + 1}
-- Current WNS: {wns_str}
-- Best WNS: {best_str} ({best_iter_str})
-- Clock Period: {clock_str}
+STATE:
+WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
 
-=== CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_PLANNER}) ===
+CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_PLANNER}):
 {critical_paths_str}
 
-=== NEXT OPTIMIZATION GOAL ===
-{goal}
-
-=== LAST ITERATION TOOLS ===
-{recent_tools}
-
-=== FAILED STRATEGIES ===
-{failed_str}
-{stagnation_section}
-Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
+TRAJECTORY:
+{trajectory}
+{status_section}"""
 
 
 def _generate_worker_handoff(
     state: OptimizerState,
-    tool_call_details: list[dict],
-    failed_strategies: list[dict],
     current_wns: float | None,
 ) -> str:
-    """Generate lean handoff for worker models (250K context)."""
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
-    best_wns_iter = state.timing.best_wns_iteration
-    clock_period = state.timing.clock_period
-
-    recent_tools = _format_recent_tools(tool_call_details, state.iteration.current)
-    failed_str = _format_failed_strategies(failed_strategies)
-    narrative_lines = _format_narrative_summary(state.iteration.narratives, max_entries=3)
-    narrative = "\n".join(narrative_lines) if narrative_lines else "(no history)"
-    goal = build_data_driven_goal(state, current_wns, tool_call_details)
-    stagnation = build_stagnation_signal(state)
-    stagnation_section = f"\n=== STAGNATION SIGNAL ===\n{stagnation}\n" if stagnation else ""
-
+    """Generate handoff for worker models (250K context)."""
     wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
-    best_str = f"{best_wns:.3f}ns" if best_wns is not None else "N/A"
-    best_iter_str = f"iter{best_wns_iter}" if best_wns_iter is not None else "N/A"
-    clock_str = f"{clock_period:.3f}ns" if clock_period is not None else "N/A"
+    tns_str = f"{state.timing.latest_tns:.3f}ns" if state.timing.latest_tns is not None else "N/A"
+    fep_str = str(state.timing.latest_failing_endpoints) if state.timing.latest_failing_endpoints is not None else "N/A"
 
     critical_paths_str = format_critical_paths_handoff(
         state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_WORKER
     )
 
-    return f"""**ITERATION HANDOFF - Worker**
+    status = build_status_signal(
+        state.iteration.global_no_improvement,
+        _count_consecutive_same_strategy(state.iteration.strategy_sequence),
+    )
+    status_section = f"\n{status}" if status else ""
 
-=== RECENT TRAJECTORY (last 3) ===
-{narrative}
+    return f"""--- Iteration {state.iteration.current} ---
 
-=== STATE ===
-- Iter: {state.iteration.current} -> {state.iteration.current + 1} | WNS: {wns_str} | Best: {best_str} ({best_iter_str}) | Clock: {clock_str}
-
-=== CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_WORKER}) ===
+WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
 {critical_paths_str}
+{status_section}"""
 
-=== GOAL ===
-{goal}
 
-=== LAST ITERATION TOOLS ===
-{recent_tools}
-
-=== AVOID ===
-{failed_str}
-{stagnation_section}
-Current WNS/checkpoint/clock values are in the system prompt 'Current Optimization State' section."""
+def _count_consecutive_same_strategy(strategy_sequence: list[str]) -> int:
+    """Count consecutive occurrences of the last strategy."""
+    if not strategy_sequence:
+        return 0
+    last = strategy_sequence[-1]
+    count = 0
+    for s in reversed(strategy_sequence):
+        if s == last:
+            count += 1
+        else:
+            break
+    return count
