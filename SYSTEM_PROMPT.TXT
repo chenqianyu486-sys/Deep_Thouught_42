@@ -114,7 +114,7 @@ measurement:
   baseline: [report_timing_summary, get_wns]
   intermediate: "report_timing_summary → compare WNS"
   final: [report_timing_summary, report_route_status]
-  format: "{baseline_wns} → {final_wns}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
+  format: "{{baseline_wns}} → {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
 
 # rapidwright_report_timing uses RapidWright's approximate timing model (~2% error),
 # no Vivado needed, ~2.5s per call. Useful for quick A/B comparison.
