@@ -137,7 +137,7 @@ fpl26_optimization_contest/
 ### 状态模型
 ```
 OptimizerState (可变dataclass)
-├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones/critical_paths(动态列表)/critical_paths_stale
+├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones/critical_paths(动态列表)/critical_paths_stale/refreshed_fields(Dashboard字段新鲜度)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
 ├── ModelState     — 模型选择/fallback/交接提示词
 ├── CostState      — token用量/成本追踪
@@ -368,7 +368,8 @@ inject_context_snapshot_at_end(api_messages):
 **设计要点**：
 - **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
 - **trajectory**：工作轨迹，记录每轮迭代策略名、前后 WNS、delta
-- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）
+- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等），未刷新的字段标注 `(initial, not refreshed)`
+- **Dashboard 新鲜度机制**：`DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注。新增工具只需在 MAP 中添加映射
 - **active_tools**：最近使用过的工具列表（去重保序）
 - **明确声明**："This is a factual data dashboard" + "You decide the next action"
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
@@ -1074,6 +1075,13 @@ tool call 入口:
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
 cost_hard_limit（从 model_config.yaml 加载）
+
+# Dashboard freshness tracking
+DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
+    "vivado_report_utilization_for_pblock": {"resource_utilization"},
+    "vivado_get_critical_high_fanout_nets": {"high_fanout_nets"},
+    "rapidwright_analyze_critical_path_spread": {"critical_path_spread"},
+}
 ```
 
 ## 13. 工具输出摘要化 + 历史自动裁剪
@@ -1133,10 +1141,11 @@ FIFO 淘汰（最多 50 条）。仅当 LLM 调 `vivado_get_raw_tool_output` 时
 **4. 压缩阶段旧消息裁剪** (yaml_structured_compress.py)
 
 `_compress_outdated_tool_results()`: 迭代差 > 2 的工具消息替换为（反"鬼打墙"机制）：
-- YAML 格式: `[SYSTEM COMPRESSED TOOL: vivado_phys_opt_design (iteration 3), wns=-0.939]`
-- 原始格式: `[SYSTEM COMPRESSED: tool result (iteration N), wns=...: ...]`
-- 受保护工具（PROTECTED_ANALYSIS_TOOLS）跳过压缩，保留完整 YAML 摘要
-- 压缩后在 YAML summary 末尾注入 `SYSTEM NOTICE: Context compression was applied...` 通知消息
+- 增强格式: `[COMPRESSED: {tool} iter={N} | {summary} | WNS={w} TNS={t} FE={f} delta={d} | status={s}]`
+- 保留关键指标：summary 文本、WNS、TNS、failing_endpoints、delta、status
+- 失败策略工具结果仅压缩非当前迭代的（`msg_iter < current_iteration` 守卫）
+- 受保护工具（PROTECTED_ANALYSIS_TOOLS，14个）跳过压缩，保留完整 YAML 摘要
+- 压缩后注入通知消息，告知 LLM 标记格式和 `vivado_get_raw_tool_output` 可用性
 - 放在 timing report 压缩之后，系统消息分离之前
 
 **5. 压缩后角色保留** (yaml_structured_compress.py)

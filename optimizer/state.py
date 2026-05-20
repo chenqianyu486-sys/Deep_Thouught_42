@@ -73,6 +73,9 @@ class TimingState:
     critical_paths_iteration: int = 0
     critical_paths_stale: bool = False
     resource_utilization: Optional[dict] = None
+    refreshed_fields: set[str] = field(default_factory=set)
+    # Tracks which dashboard fields have been refreshed since init.
+    # Values are field names from DASHBOARD_REFRESH_MAP values.
 
 
 @dataclass

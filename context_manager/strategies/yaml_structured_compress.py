@@ -190,6 +190,7 @@ TOOL_RESULT_KEYWORDS = [
 # decision-making. Compressing them triggers re-call loops ("ghosting") because the
 # marker looks like truncated output, causing the model to re-invoke the tool.
 PROTECTED_ANALYSIS_TOOLS = frozenset({
+    # Original protected tools
     'rapidwright_analyze_pblock_region',
     'rapidwright_analyze_fabric_for_pblock',
     'rapidwright_analyze_net_detour',
@@ -197,6 +198,14 @@ PROTECTED_ANALYSIS_TOOLS = frozenset({
     'rapidwright_read_checkpoint',
     'vivado_get_cached_high_fanout_nets',
     'vivado_get_raw_tool_output',
+    # Additional analysis/diagnostic tools (prevent ghosting)
+    'rapidwright_analyze_congestion',
+    'rapidwright_analyze_congestion_spreading',
+    'rapidwright_analyze_net_swapping',
+    'rapidwright_analyze_register_retiming',
+    'rapidwright_analyze_critical_path_spread',
+    'vivado_extract_critical_path_cells',
+    'vivado_extract_critical_path_pins',
 })
 
 
@@ -244,6 +253,73 @@ class YAMLStructuredCompressor(CompressionStrategy):
             if fs_lower == "placeroute" and ("place_design" in name_lower or "route_design" in name_lower):
                 return True
         return False
+
+    def _build_compressed_marker(self, msg: Message, msg_iter: int) -> str:
+        """Build a rich compressed marker preserving key metrics from YAML summary.
+
+        New format: [COMPRESSED: {tool} iter={N} | {summary} | WNS={w} TNS={t} FE={f} delta={d} | status={s}]
+        Preserves enough information for LLM decision-making without re-calling the tool.
+        """
+        stripped = msg.content.strip()
+
+        # Parse YAML fields from the summary
+        tool_name = ""
+        summary_text = ""
+        wns = tns = fe = delta = None
+        status = ""
+
+        for line in stripped.split('\n'):
+            line_s = line.strip()
+            if line_s.startswith('tool:'):
+                tool_name = line_s.split(':', 1)[1].strip()
+            elif line_s.startswith('summary:'):
+                summary_text = line_s.split(':', 1)[1].strip().strip('"')
+            elif line_s.startswith('status:'):
+                status = line_s.split(':', 1)[1].strip()
+            elif line_s.startswith('wns:') and 'wns_delta' not in line_s:
+                try:
+                    wns = float(line_s.split(':', 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line_s.startswith('tns:'):
+                try:
+                    tns = float(line_s.split(':', 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line_s.startswith('failing_endpoints:'):
+                try:
+                    fe = int(line_s.split(':', 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line_s.startswith('wns_delta:'):
+                try:
+                    delta = float(line_s.split(':', 1)[1].strip())
+                except ValueError:
+                    pass
+
+        # Build structured marker
+        parts = [f"COMPRESSED: {tool_name or 'unknown'} iter={msg_iter}"]
+
+        if summary_text:
+            s = summary_text[:80] + ("..." if len(summary_text) > 80 else "")
+            parts.append(s)
+
+        metrics = []
+        if wns is not None:
+            metrics.append(f"WNS={wns:.3f}")
+        if tns is not None:
+            metrics.append(f"TNS={tns:.3f}")
+        if fe is not None:
+            metrics.append(f"FE={fe}")
+        if delta is not None:
+            metrics.append(f"delta={delta:+.3f}")
+        if metrics:
+            parts.append(" ".join(metrics))
+
+        if status and status != "completed":
+            parts.append(f"status={status}")
+
+        return "[" + " | ".join(parts) + "]"
 
     def _compress_outdated_timing_reports(
         self, scored: List[tuple], current_iteration: int
@@ -310,36 +386,10 @@ class YAMLStructuredCompressor(CompressionStrategy):
                 msg_iter = msg.metadata.get('iteration', 0)
                 is_tool_result = msg_iter > 0 and len(msg.content) > 100
                 is_outdated = is_tool_result and msg_iter < boundary
-                is_failed = is_tool_result and self._is_failed_strategy_tool_result(msg, failed_strategies)
+                is_failed = is_tool_result and msg_iter < current_iteration and self._is_failed_strategy_tool_result(msg, failed_strategies)
                 is_protected = msg.name in PROTECTED_ANALYSIS_TOOLS if msg.name else False
                 if (is_outdated or is_failed) and not is_protected:
-                    # Try to extract key metrics from YAML summary format
-                    stripped = msg.content.strip()
-                    lines = stripped.split('\n')
-                    tool_name = ""
-                    summary_text = ""
-                    key_details = {}
-
-                    for line in lines:
-                        line_stripped = line.strip()
-                        if line_stripped.startswith('tool:'):
-                            tool_name = line_stripped.split(':', 1)[1].strip()
-                        elif line_stripped.startswith('summary:'):
-                            summary_text = line_stripped.split(':', 1)[1].strip().strip('"')
-                        elif line_stripped.startswith('wns:'):
-                            key_details['wns'] = line_stripped.split(':', 1)[1].strip()
-
-                    if tool_name:
-                        # Structured YAML summary format — keep only metadata
-                        detail_str = f", wns={key_details['wns']}" if 'wns' in key_details else ""
-                        marker = f"[SYSTEM COMPRESSED TOOL: {tool_name} (iteration {msg_iter}){detail_str}]"
-                    else:
-                        # Raw text format — try regex extraction for WNS
-                        wns_match = re.search(r'WNS[=:]\s*([-\d.]+)', stripped, re.IGNORECASE)
-                        wns_str = f", wns={wns_match.group(1)}" if wns_match else ""
-                        # Truncate tool name from first line
-                        first_line = lines[0][:80] if lines else ""
-                        marker = f"[SYSTEM COMPRESSED: tool result (iteration {msg_iter}){wns_str}: {first_line}]"
+                    marker = self._build_compressed_marker(msg, msg_iter)
 
                     saved_chars += len(msg.content)
                     replaced_count += 1
@@ -531,7 +581,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
         # Keep the last `preserve_role_turns` messages as their original API roles
         # (user/assistant/tool) so the LLM's API-level role processing works correctly.
         # Older messages go into the YAML conversation block.
-        preserve_role_count = getattr(self, 'preserve_role_turns', 3)
+        preserve_role_count = getattr(self, 'preserve_role_turns', 6)
         if preserve_role_count > 0 and len(selected) > preserve_role_count:
             role_preserved = selected[-preserve_role_count:]
             yaml_selected = selected[:-preserve_role_count]
@@ -649,10 +699,11 @@ class YAMLStructuredCompressor(CompressionStrategy):
             notification_msg = Message(
                 role=MessageRole.USER,
                 content=(
-                    "SYSTEM NOTICE: Context compression was applied to conserve tokens. "
-                    "Tool results marked with [SYSTEM COMPRESSED TOOL: ...] were intentionally "
-                    "compressed by the system; their key metrics are preserved in the YAML "
-                    "summary above. Do NOT re-call tools whose results show as compressed."
+                    "SYSTEM NOTICE: Older tool results were compressed to save context space. "
+                    "Results marked with [COMPRESSED: ...] retain their key metrics "
+                    "(summary, WNS, TNS, failing endpoints, delta, status). "
+                    "Do NOT re-call compressed tools. "
+                    "If you need full details, call vivado_get_raw_tool_output(iteration=N, tool_name=X)."
                 ),
                 metadata={
                     'protected': True,
@@ -742,7 +793,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
             ts = msg.metadata.get('timestamp')
             if ts is not None:
                 return ts
-            return -1  # Items without timestamp go first
+            return float('inf')  # Items without timestamp go last (oldest)
 
         sorted_msgs = sorted(messages, key=get_sort_key, reverse=True)
         return sorted_msgs[:count]

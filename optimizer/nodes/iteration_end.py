@@ -83,7 +83,7 @@ async def iteration_end_node(
 
         # Record failure if iteration didn't improve and we have a known strategy
         if not wns_improved and deps.compat is not None:
-            reason = "strategy_ineffective" if state.control.done_reason == "switch_strategy" else "strategy_ineffective"
+            reason = "strategy_ineffective" if state.control.done_reason == "switch_strategy" else "no_improvement"
             deps.compat.record_failure(
                 strategy=strategy_label,
                 reason=reason,

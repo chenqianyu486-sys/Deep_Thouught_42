@@ -83,11 +83,12 @@ def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> st
         strategy = entry.get("strategy_label", entry.get("strategy", "?"))
         wns_before = entry.get("wns_before")
         wns_after = entry.get("wns_after")
-        wns_delta = entry.get("wns_delta", 0)
+        wns_delta = entry.get("wns_delta")
 
         before_str = f"{wns_before:.3f}" if wns_before is not None else "N/A"
         after_str = f"{wns_after:.3f}" if wns_after is not None else "N/A"
-        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({wns_delta:+.3f})")
+        delta_str = f"{wns_delta:+.3f}" if wns_delta is not None else "N/A"
+        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({delta_str})")
     return "\n".join(lines)
 
 
@@ -100,13 +101,16 @@ def _generate_planner_handoff(
     best_wns_iter = state.timing.best_wns_iteration
     clock_period = state.timing.clock_period
 
+    import time as _time
+    elapsed = _time.time() - state.control.start_time if state.control.start_time else 0.0
+
     situation = build_situation_summary(
         current_wns=current_wns,
         best_wns=best_wns,
         best_wns_iteration=best_wns_iter,
         global_no_improvement=state.iteration.global_no_improvement,
-        elapsed_time=0.0,
-        remaining_time=state.control.wall_clock_timeout,
+        elapsed_time=elapsed,
+        remaining_time=max(0, state.control.wall_clock_timeout - elapsed),
     )
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
     status = build_status_signal(
@@ -123,7 +127,7 @@ def _generate_planner_handoff(
         state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_PLANNER
     )
 
-    return f"""--- Iteration {state.iteration.current} Handoff ---
+    return f"""--- Iteration {state.iteration.current + 1} Handoff ---
 
 SITUATION:
 {situation}
@@ -158,7 +162,7 @@ def _generate_worker_handoff(
     )
     status_section = f"\n{status}" if status else ""
 
-    return f"""--- Iteration {state.iteration.current} ---
+    return f"""--- Iteration {state.iteration.current + 1} ---
 
 WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
 {critical_paths_str}

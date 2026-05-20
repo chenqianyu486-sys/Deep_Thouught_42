@@ -37,6 +37,7 @@ def build_context_snapshot(
     iteration_narratives: list[dict] | None = None,
     tools_used: list[str] | None = None,
     critical_paths: list | None = None,
+    refreshed_fields: set[str] | None = None,
 ) -> str:
     """Build factual data dashboard for the current optimization state.
 
@@ -82,10 +83,12 @@ def build_context_snapshot(
     # -- Design signals --
     signals = _compute_design_signals(high_fanout_nets, critical_path_spread, resource_utilization)
     if signals:
+        refreshed = refreshed_fields or set()
         lines.append("")
         lines.append("design_signals:")
         for k, v in signals.items():
-            lines.append(f"  {k}: {v}")
+            stale_tag = _stale_annotation(k, refreshed)
+            lines.append(f"  {k}: {v}{stale_tag}")
     else:
         lines.append("")
         lines.append("design_signals: {}")
@@ -120,6 +123,20 @@ def build_context_snapshot(
     lines.append("next_action: Call report_step_state(step_id, result_status, flow_control) alongside your optimization/analysis tools. Text body = chain-of-thought analysis.")
     lines.append("--- End Dashboard ---")
     return "\n".join(lines)
+
+
+def _stale_annotation(signal_key: str, refreshed_fields: set[str]) -> str:
+    """Map a derived signal key back to its source field and check freshness."""
+    # Signal keys are derived from source fields:
+    #   high_fanout_nets → max_fanout, high_fanout_count
+    #   critical_path_spread → cp_spread_*
+    #   resource_utilization → direct keys (lut, ff, etc.)
+    if signal_key in ("max_fanout", "high_fanout_count"):
+        return "" if "high_fanout_nets" in refreshed_fields else " (initial, not refreshed)"
+    if signal_key.startswith("cp_spread_"):
+        return "" if "critical_path_spread" in refreshed_fields else " (initial, not refreshed)"
+    # resource_utilization keys pass through directly
+    return "" if "resource_utilization" in refreshed_fields else " (initial, not refreshed)"
 
 
 def _compute_design_signals(

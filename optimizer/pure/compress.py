@@ -90,13 +90,17 @@ def _estimate_tokens_from_messages(messages) -> int:
     return total_chars // 4
 
 
-def _infer_model_tier(model_name: str | None) -> str:
+def _infer_model_tier(model_name: str | None, state_model=None) -> str:
     """Infer model tier from model name."""
     if not model_name:
         return "worker"
     name = model_name.lower()
     if any(k in name for k in ("pro", "plus")):
         return "planner"
+    # Compare against configured planner model
+    if state_model and hasattr(state_model, 'planner_model'):
+        if model_name == state_model.planner_model:
+            return "planner"
     return "worker"
 
 
@@ -119,7 +123,7 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
         current_tokens = _estimate_tokens_from_messages(messages)
 
         # 2. Determine model tier and config
-        model_tier = _infer_model_tier(state.model.current_model)
+        model_tier = _infer_model_tier(state.model.current_model, state.model)
         config = _get_model_config(model_tier)
 
         # 3. Check thresholds

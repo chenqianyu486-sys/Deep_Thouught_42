@@ -32,59 +32,18 @@ init_analysis -> [条件: WNS >= 0?]
 
 ## 设计意图
 
-### 1. 代码级流程控制（强制 report_step_state）
-
-**问题**：LLM 在大多数轮次中不会主动调用 `report_step_state`，导致系统丧失流程控制信号，无法驱动迭代切换。
-
-**方案**：在工具循环中检测 `report_step_state` 缺失，递进式升级处理 -- 跳过工具执行并警告，多次缺失后自动合成默认状态继续流程。不依赖 prompt 提醒，在代码逻辑中强制执行。
-
-**原则**：强制但不阻塞 -- 给 LLM 适应空间，但不因 LLM 的疏忽而死锁优化。
-
-### 2. 弱引导 Dashboard（最大化 LLM 自主推理）
-
-**问题**：原上下文快照包含 `FAILED`/`PLATEAUED` 标签、`do_not_repeat` 列表、具体策略建议，与 system prompt 重复约束 LLM。LLM 被告知"该做什么"而非"当前是什么"，推理空间被过度压缩。
-
-**方案**：上下文快照重构为纯数据 Dashboard -- 只呈现原始测量值（WNS/TNS/trajectory/design_signals/critical_paths），不含判断标签或行动建议。明确声明 "This is a factual data dashboard... You decide the next action"。
-
-**原则**：事实而非判断，数据而非建议，轨迹而非指令。system prompt 负责"规则"，Dashboard 负责"现状"，LLM 负责"决策"。
-
-### 3. 简化交接提示词（去除重复引导）
-
-**问题**：迭代交接提示词包含具体策略建议、失败列表、4步指令，与 system prompt 的策略选择指导重复，造成信息冗余和约束冲突。
-
-**方案**：handoff 简化为纯事实结构 -- Planner 交接仅含 SITUATION/STATE/TRAJECTORY/STATUS，Worker 交接仅含 STATE/CRITICAL PATHS/STATUS。策略选择交还给 system prompt 统一指导。
-
-### 4. 状态机驱动架构（V1 → V2）
-
-**问题**：V1 采用消息对话驱动，流程控制隐式嵌入 LLM 对话循环，状态分散在类属性和局部变量中，难以观测和调试。
-
-**方案**：V2 重构为显式状态机 -- 8 个节点 + 条件边构成有向图，集中式 `OptimizerState` 管理 6 个类型化子切片，`StateTracer` 记录每次状态转换的 JSON 轨迹。节点编排流程，纯函数封装逻辑（`optimizer/pure/` 10 个无状态模块，可独立单测）。
-
-**原则**：显式优于隐式 -- 流程控制从 LLM 对话中剥离，交由代码图拓扑驱动。
-
-### 5. 双层模型分工（Worker/Planner）
-
-**问题**：单一模型既要执行具体工具操作又要进行全局策略规划，上下文窗口和角色混杂导致两个任务都做不好。
-
-**方案**：分离为 Worker（执行层，250K tokens）和 Planner（规划层，1M tokens）两个模型层级。Worker 专注于单次迭代内的工具调用和状态报告，Planner 负责跨迭代的策略选择和上下文压缩。通过 `model_config.yaml` 配置不同的上下文窗口、压缩阈值和 fallback 模型。
-
-**原则**：关注点分离 -- 执行和规划使用不同的上下文窗口和压缩策略。
-
-### 6. 纯原生工具调用（去除文本回退）
-
-**问题**：V1 保留了 XML/YAML 文本格式作为工具调用回退，增加了 parser 复杂度，且 LLM 倾向于生成文本而非严格工具调用，导致调用成功率不稳定。
-
-**方案**：V2 仅支持 LLM 原生 function call，移除所有 XML/YAML 文本回退路径。工具 schema 通过标准 function calling 协议传递，LLM 必须生成结构化 tool_use 响应。
-
-**原则**：单一调用路径 -- 不给 LLM"偷懒"生成文本的机会，强制结构化输出。
-
-### 7. 策略库自动匹配
-
-**问题**：LLM 缺乏 FPGA 优化领域知识，随机尝试策略效率低下。
-
-**方案**：`strategy_library.py` 定义 9 个优化策略，每个策略附带触发条件（WNS 范围、fanout 阈值、congestion 等级等）和适用平台。系统根据设计特征自动匹配推荐，LLM 在推荐范围内选择而非盲目探索。
-
-**原则**：领域知识编码为规则，LLM 负责推理和执行 -- 将"该做什么"从 prompt 提示升级为结构化策略库。
+| # | 原则 | 一句话 |
+|---|------|--------|
+| 1 | 强制但不阻塞 | 代码级检测 `report_step_state` 缺失，自动合成 CONTINUE，不因 LLM 疏忽死锁 |
+| 2 | 事实而非判断 | Dashboard 只含原始测量值，注入为末条 user message（最大注意力权重） |
+| 3 | 去除冗余 | Handoff 简化为纯事实结构，策略选择交还 system prompt |
+| 4 | 显式优于隐式 | 8 节点状态机 + 条件边，`StateTracer` 记录 JSON 轨迹 |
+| 5 | 关注点分离 | Worker（250K，执行）/ Planner（1M，规划），不同压缩策略 |
+| 6 | 单一调用路径 | V2 仅原生 function call，移除 XML/YAML 文本回退 |
+| 7 | 单一事实来源 | 运行时数据写入 `OptimizerState`，消除 `MemoryManager` shadow 副本 |
+| 8 | 领域知识编码 | 9 个策略 + 触发条件，系统匹配推荐，LLM 在推荐范围内选择 |
+| 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
+| 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
 
 ## 快速开始
 
@@ -116,7 +75,7 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 | `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，8节点图） |
 | `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（10个模块，可独立单测） |
 | `optimizer/nodes/` | 8个节点实现 + llm_tool_loop 子图 |
-| `context_manager/` | 上下文/记忆管理、YAML 压缩 |
+| `context_manager/` | 上下文/记忆管理、YAML 压缩（增强标记格式、14 个受保护分析工具） |
 | `skills/` | Skill 框架（13个已注册 Skill：9策略 + 3分析 + 1测试） |
 | `RapidWrightMCP/` | RapidWright MCP 服务器 |
 | `VivadoMCP/` | Vivado MCP 服务器 |

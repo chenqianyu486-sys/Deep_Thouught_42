@@ -88,3 +88,15 @@ RECENT_TURNS_TO_KEEP = 20         # Recent messages to keep during compression
 # These are 60% and 80% of the worker model's max_tokens
 WORKER_CONTEXT_WARN_TOKENS = 120_000   # 60% of 200K
 WORKER_CONTEXT_FORCE_TOKENS = 160_000  # 80% of 200K
+
+
+# ── Dashboard freshness tracking ──────────────────────────────
+
+# Maps tool names → dashboard fields they refresh.
+# Used to track dashboard data freshness after tool execution.
+# Extensible: add new tool→field mappings here when developing new tools.
+DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
+    "vivado_report_utilization_for_pblock": frozenset({"resource_utilization"}),
+    "vivado_get_critical_high_fanout_nets": frozenset({"high_fanout_nets"}),
+    "rapidwright_analyze_critical_path_spread": frozenset({"critical_path_spread"}),
+}

@@ -20,7 +20,7 @@ from ...pure.timing import parse_timing_summary, is_valid_wns
 from ...pure.tool_summary import summarize_tool_result
 from ...pure.tool_router import call_tool as call_tool_fn
 from ...pure.step_state import extract_step_state
-from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT
+from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT, DASHBOARD_REFRESH_MAP
 from ...pure.compress import compress_context
 from ...pure.critical_path import parse_critical_path_cells, update_critical_paths
 from ...pure.context_snapshot import build_context_snapshot, inject_context_snapshot_at_end
@@ -218,6 +218,11 @@ async def llm_tool_loop_node(
                 if tool_name in ("vivado_phys_opt_design", "vivado_route_design"):
                     state.timing.critical_paths_stale = True
 
+                # Track dashboard field freshness
+                refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
+                if refreshable:
+                    state.timing.refreshed_fields |= refreshable
+
                 # Track tool errors
                 result_lower = summary.lower() if summary else ""
                 if "error" in result_lower and "success" not in result_lower:
@@ -335,6 +340,7 @@ def _inject_dashboard_at_end(
         iteration_narratives=state.iteration.narratives,
         tools_used=state.iteration.tools_used,
         critical_paths=state.timing.critical_paths,
+        refreshed_fields=state.timing.refreshed_fields,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)

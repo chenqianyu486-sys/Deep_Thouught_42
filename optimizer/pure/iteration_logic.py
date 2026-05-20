@@ -26,17 +26,19 @@ def update_iteration_counters(
 
     Mutates state.iteration and state.model in-place.
     """
+    # Use last tool name for task classification (current_task_type is always "")
+    last_tool = state.iteration.tools_used[-1] if state.iteration.tools_used else ""
+    is_optimization = classify_task(last_tool) == TaskCategory.OPTIMIZATION
+
     if wns_improved:
         state.model.worker_consecutive_failures = 0
         state.iteration.global_no_improvement = 0
-        if model_used == state.model.worker_model:
-            if classify_task(state.model.current_task_type) == TaskCategory.OPTIMIZATION:
-                state.model.worker_consecutive_success += 1
+        if model_used == state.model.worker_model and is_optimization:
+            state.model.worker_consecutive_success += 1
     else:
         state.model.worker_consecutive_success = 0
-        if model_used == state.model.worker_model:
-            if classify_task(state.model.current_task_type) == TaskCategory.OPTIMIZATION:
-                state.model.worker_consecutive_failures += 1
+        if model_used == state.model.worker_model and is_optimization:
+            state.model.worker_consecutive_failures += 1
         state.iteration.global_no_improvement += 1
 
 
@@ -87,9 +89,11 @@ def build_iteration_narrative(
     if wns_before is not None and wns_after is not None:
         wns_delta = wns_after - wns_before
     else:
-        wns_delta = 0.0
+        wns_delta = None
 
-    if wns_delta > 0.001:
+    if wns_delta is None:
+        outcome = "unknown"
+    elif wns_delta > 0.001:
         outcome = "improved"
     elif wns_delta < -0.001:
         outcome = "regression"
