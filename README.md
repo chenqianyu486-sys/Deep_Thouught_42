@@ -128,6 +128,18 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 | `make run_optimizer DCP=x.dcp` | v2 完整优化 | 是 | 状态机驱动 LLM 优化 |
 | `make run_optimizer_v1 DCP=x.dcp` | v1 完整优化 | 是 | 消息对话驱动 LLM 优化 |
 
+## 扩展性维护清单
+
+新增工具或策略时，需同步更新以下位置以保持 Dashboard 可信度和压缩保护机制：
+
+| 新增内容 | 需更新的文件/常量 | 说明 |
+|---------|------------------|------|
+| 分析型工具（`rapidwright_analyze_*`） | `yaml_structured_compress.py` → `PROTECTED_ANALYSIS_TOOLS` | 加入集合防止结果被压缩为标记（鬼打墙） |
+| 刷新 Dashboard 字段的工具 | `optimizer/pure/constants.py` → `DASHBOARD_REFRESH_MAP` | 工具名→字段名映射，Dashboard 自动标注新鲜度 |
+| 新策略类型 | `yaml_structured_compress.py` → `_is_failed_strategy_tool_result()` | 添加策略名→工具名模式匹配，支持失败策略压缩 |
+| 新策略类型 | `optimizer/pure/iteration_logic.py` → `infer_strategy_from_tools()` | 添加工具名→策略名推断映射 |
+| 压缩标记需保留的新 YAML 字段 | `yaml_structured_compress.py` → `_build_compressed_marker()` | 在 YAML 解析循环中添加字段提取 |
+
 ## 文档
 
 - [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) -- 完整项目结构、数据流、v1->v2 迁移映射
