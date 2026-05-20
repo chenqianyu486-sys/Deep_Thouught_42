@@ -43,7 +43,7 @@ scenarios:
   congestion:
     signals: "Routing Congestion (util > 80%)"
   deep_chain:
-    signals: "Deep Combinational Chains (>2 LUTs between FFs)"
+    signals: "Deep Combinational Chains (>2 LUTs between FFs). Requires FF>0 — not applicable to purely combinational designs (FF=0)."
 
 strategies:
   available:
@@ -51,31 +51,6 @@ strategies:
     physopt: "Physical Optimization (1-2 paths with spread)"
     fanout: "High Fanout Net Optimization (fanout nets, no spread)"
     register_retiming: "Register Retiming — Targeted Pipeline Insertion (deep combinational chains)"
-
-  analysis_skills:
-    analyze_net_detour:
-      type: read-only
-      description: "Compute detour_ratio = routed_distance / manhattan_distance"
-      input: "pin_paths from extract_critical_path_pins"
-    optimize_cell_placement:
-      type: mutating
-      description: "Move cells to centroid of connections"
-      requires: "write_checkpoint after execution"
-    smart_region_search:
-      type: read-only
-      description: "Find optimal rectangular pblock region"
-      input: "resource counts from utilization report"
-
-  strategy_skills:
-    analyze_pblock_region:
-      description: "Analyze FPGA fabric to find optimal PBLOCK region (READ-ONLY)"
-      returns: "region coordinates, pblock_ranges string, estimated resources"
-      post_action: "Call vivado: place_design -unplace, create_and_apply_pblock, place_design, route_design, report_timing_summary"
-    execute_physopt_strategy:
-      description: "Physical Optimization via Vivado phys_opt_design"
-    execute_fanout_strategy:
-      description: "High Fanout Net Optimization via RapidWright"
-      note: "If vivado_get_critical_high_fanout_nets output is truncated, call vivado_get_cached_high_fanout_nets to retrieve complete net list from cache."
 
   skill_workflow:
     - "DIAGNOSE — Call analyze_net_detour to identify placement problems on critical paths"
@@ -91,24 +66,6 @@ safety_constraints:
   - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
   - "Register retiming is safer than Vivado's global phys_opt_design -retime (causes functional errors in NN designs)."
-
-tool_reference:
-  vivado:
-    checkpoint: [open_checkpoint, write_checkpoint]
-    timing: [report_timing_summary, get_wns, report_timing]
-    placement: [place_design, create_and_apply_pblock, report_utilization_for_pblock]
-    routing: [route_design, report_route_status]
-    optimization: [phys_opt_design, get_critical_high_fanout_nets, vivado_get_cached_high_fanout_nets]
-    extraction: [extract_critical_path_cells, write_edif, write_verilog_simulation]
-    misc: [run_tcl, restart_vivado, vivado_get_raw_tool_output, report_step_state]
-  rapidwright:
-    init: [initialize_rapidwright, get_supported_devices, get_device_info, get_device_topology]
-    checkpoint: [read_checkpoint, write_checkpoint, get_design_info, compare_design_structure]
-    query: [search_cells, get_tile_info, search_sites]
-    optimize: [optimize_lut_input_cone, optimize_fanout_batch, optimize_cell_placement]
-    analysis: [analyze_critical_path_spread, analyze_net_detour, analyze_congestion, smart_region_search]
-    pblock: [analyze_fabric_for_pblock, convert_fabric_region_to_pblock, analyze_pblock_region]
-    timing: [report_timing, rapidwright_report_timing]
 
 measurement:
   baseline: [report_timing_summary, get_wns]

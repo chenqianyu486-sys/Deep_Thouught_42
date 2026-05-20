@@ -138,10 +138,15 @@ def build_context_snapshot(
 
 def _stale_annotation(signal_key: str, refreshed_fields: set[str]) -> str:
     """Map a derived signal key back to its source field and check freshness."""
+    # Static resource fields: design resources don't change during optimization,
+    # so stale annotations are misleading.
+    _STATIC_RESOURCE_KEYS = frozenset({"lut", "ff", "dsp", "bram", "uram", "design_type"})
+    if signal_key.lower() in _STATIC_RESOURCE_KEYS:
+        return ""
     # Signal keys are derived from source fields:
     #   high_fanout_nets → max_fanout, high_fanout_count
     #   critical_path_spread → cp_spread_*
-    #   resource_utilization → direct keys (lut, ff, etc.)
+    #   resource_utilization → dynamic keys
     if signal_key in ("max_fanout", "high_fanout_count"):
         return "" if "high_fanout_nets" in refreshed_fields else " (initial, not refreshed)"
     if signal_key.startswith("cp_spread_"):
@@ -173,6 +178,10 @@ def _compute_design_signals(
         for k, v in resource_utilization.items():
             if isinstance(v, (int, float)):
                 signals[k] = round(v, 1)
+        # Infer design type from resource utilization
+        ff_count = resource_utilization.get("FF", resource_utilization.get("ff", None))
+        if ff_count is not None and ff_count == 0:
+            signals["design_type"] = "combinational_only"
     return signals
 
 

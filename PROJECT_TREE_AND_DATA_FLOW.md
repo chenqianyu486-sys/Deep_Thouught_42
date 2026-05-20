@@ -159,7 +159,7 @@ init_analysis → [条件: timing met?]
 ### 子图: llm_tool_loop
 ```
 llm_call → evaluate_flow → [条件: flow_control?]
-  ├─ CONTINUE → execute_tools → update_wns → update_critical_paths → llm_call (循环)
+  ├─ CONTINUE → execute_tools → post_eval_hook → update_wns → update_critical_paths → llm_call (循环)
   ├─ DONE/SWITCH_STRATEGY → 退出子图
   └─ RETRY/ROLLBACK → 重试/回滚
 
@@ -167,6 +167,11 @@ llm_call → evaluate_flow → [条件: flow_control?]
   - execute_tools 后: 若 tool=vivado_extract_critical_path_cells → 解析JSON缓存到 state.timing.critical_paths
   - execute_tools 后: 若 tool=vivado_phys_opt_design/vivado_route_design → 标记 critical_paths_stale=True
   - 循环末尾: 若 critical_paths_stale → 自动调用 vivado_extract_critical_path_cells(num_paths=10) 刷新
+
+Post-eval hook（POST_EVAL_TOOLS = {vivado_route_design, rapidwright_execute_fanout_strategy}）:
+  - 工具执行后自动调用 vivado_report_timing_summary
+  - 解析 WNS，计算 delta，注入 [EVAL] 通知到上下文
+  - 确保 LLM 在 flow_control 决策前有具体 WNS 数据
 ```
 
 ### 关键设计
@@ -374,8 +379,9 @@ inject_context_snapshot_at_end(api_messages):
 **设计要点**：
 - **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
 - **trajectory**：工作轨迹，记录每轮迭代策略名、前后 WNS、delta
-- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等），未刷新的字段标注 `(initial, not refreshed)`
-- **Dashboard 新鲜度机制**：`DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注。新增工具只需在 MAP 中添加映射
+- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）。静态资源字段（LUT/FF/DSP/BRAM/URAM）不标注新鲜度（设计资源在优化过程中不变）。动态字段未刷新时标注 `(initial, not refreshed)`
+- **design_type**：当 FF=0 时自动添加 `design_type: combinational_only`，帮助 LLM 判断策略适用性（如跳过 RegisterRetiming）
+- **Dashboard 新鲜度机制**：`DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注。新增工具只需在 MAP 中添加映射。当前映射：`vivado_report_utilization_for_pblock`→resource_utilization, `vivado_get_critical_high_fanout_nets`→high_fanout_nets, `rapidwright_analyze_critical_path_spread`/`vivado_extract_critical_path_pins`→critical_path_spread
 - **active_tools**：最近使用过的工具列表（去重保序）
 - **明确声明**："This is a factual data dashboard" + "You decide the next action"
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
@@ -895,6 +901,12 @@ class StepState:
 - `reason="strategy_ineffective"` → 永久排除（LLM 自主判定策略无效）
 - `reason ∈ {tool_error, execution_failure}` → 冷却 2 个迭代后可重试（工具/执行问题，非策略本身无效）
 - `_strategy_blocked(name)` 辅助函数统一判断逻辑
+
+**`_determine_failure_reason()` 精细化判定**（iteration_end.py）：
+- 工具错误（`state.iteration.tool_errors` 非空）→ `tool_error`
+- SWITCH_STRATEGY + 工具返回空结果（`_EMPTY_RESULT_PATTERNS` 匹配：`0 candidates`、`no candidates`、`no cells exceeded` 等）→ `tool_error`（可重试）
+- SWITCH_STRATEGY + 非空结果 → `strategy_ineffective`（永久排除）
+- 其他 → `no_improvement`
 
 **`failed_strategies` 的使用**：
 - `_build_skill_recommendation()`: 分级过滤（truly_failed vs tool_failed），而非简单的 `set` 排除

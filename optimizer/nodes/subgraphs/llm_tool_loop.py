@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 # Max tool rounds per iteration (safety limit)
 MAX_TOOL_ROUNDS = 80
 
+# Tools that require mandatory WNS evaluation after execution.
+# After these tools complete, report_timing_summary is auto-called
+# and the WNS delta is injected into context for the LLM's next decision.
+POST_EVAL_TOOLS = frozenset({
+    "vivado_route_design",
+    "rapidwright_execute_fanout_strategy",
+})
+
 # Compression check interval: only check every N rounds to reduce CPU overhead
 COMPRESS_CHECK_INTERVAL = 5
 
@@ -237,6 +245,13 @@ async def llm_tool_loop_node(
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                 if refreshable:
                     state.timing.refreshed_fields |= refreshable
+
+                # Post-eval hook: force WNS check after critical tools
+                if tool_name in POST_EVAL_TOOLS:
+                    try:
+                        await _post_eval_hook(state, deps, tool_name)
+                    except Exception as e:
+                        logger.warning(f"[llm_tool_loop] Post-eval hook failed for {tool_name}: {e}")
 
                 # Track tool errors
                 result_lower = summary.lower() if summary else ""
@@ -508,6 +523,76 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
         logger.info(f"[llm_tool_loop] Auto-refreshed {len(cell_paths)} critical paths")
     else:
         state.timing.critical_paths_stale = False
+
+
+async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str) -> None:
+    """Force WNS evaluation after critical tools (route_design, fanout_strategy).
+
+    Calls report_timing_summary, computes WNS delta, and injects an eval
+    notice into the conversation so the LLM has concrete data for its next
+    flow_control decision.
+    """
+    prev_wns = state.timing.latest_wns
+
+    # Call report_timing_summary
+    timing_result = await call_tool_fn(
+        "vivado_report_timing_summary",
+        {},
+        deps.rapidwright_session, deps.vivado_session,
+    )
+
+    # Parse WNS from result
+    timing = parse_timing_summary(timing_result)
+    wns = timing.get("wns")
+    tns = timing.get("tns")
+    fe = timing.get("failing_endpoints")
+
+    if wns is None:
+        logger.warning(f"[llm_tool_loop] Post-eval: could not parse WNS from report_timing_summary")
+        return
+
+    # Update state
+    state.timing.latest_wns = wns
+    if tns is not None:
+        state.timing.latest_tns = tns
+    if fe is not None:
+        state.timing.latest_failing_endpoints = fe
+
+    # Update best WNS
+    if wns > state.timing.best_wns:
+        state.timing.best_wns = wns
+        state.timing.best_wns_iteration = state.iteration.current
+        state.timing.best_wns_tns = tns
+        state.timing.best_wns_failing_endpoints = fe
+        state.control.needs_save = True
+
+    # Compute delta
+    delta = wns - prev_wns if prev_wns is not None else 0.0
+    if delta > 0.001:
+        verdict = "IMPROVED"
+    elif abs(delta) <= 0.001:
+        verdict = "UNCHANGED"
+    else:
+        verdict = "REGRESSED"
+
+    # Build eval notice
+    prev_str = f"{prev_wns:.3f}ns" if prev_wns is not None else "unknown"
+    eval_notice = (
+        f"[EVAL] After {tool_name}: WNS={wns:.3f}ns "
+        f"(delta={delta:+.3f}ns vs previous {prev_str}). "
+        f"{verdict}. "
+        f"Use this data for your next report_step_state decision."
+    )
+    if tns is not None:
+        eval_notice += f" TNS={tns:.3f}ns"
+    if fe is not None:
+        eval_notice += f" FE={fe}"
+
+    # Inject into conversation
+    if deps.compat is not None:
+        deps.compat.add_message("user", eval_notice)
+
+    logger.info(f"[llm_tool_loop] Post-eval: {tool_name} -> WNS={wns:.3f}ns (delta={delta:+.3f}, {verdict})")
 
 
 def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: str) -> None:

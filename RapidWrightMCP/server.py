@@ -679,7 +679,7 @@ async def list_tools() -> list[Tool]:
                             "type": "array",
                             "items": {"type": "string"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]"
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths to avoid excessive prompt size."
                     },
                     "min_cascade_depth": {
                         "type": "integer",

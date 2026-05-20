@@ -131,7 +131,7 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 
 ## 扩展性维护清单
 
-新增工具或策略时，需同步更新以下位置以保持 Dashboard 可信度和压缩保护机制：
+新增工具或策略时，需同步更新以下位置以保持 Dashboard 可信度、压缩保护机制和状态机行为：
 
 | 新增内容 | 需更新的文件/常量 | 说明 |
 |---------|------------------|------|
@@ -140,6 +140,9 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 | 新策略类型 | `yaml_structured_compress.py` → `_is_failed_strategy_tool_result()` | 添加策略名→工具名模式匹配，支持失败策略压缩 |
 | 新策略类型 | `optimizer/pure/iteration_logic.py` → `infer_strategy_from_tools()` | 添加工具名→策略名推断映射 |
 | 压缩标记需保留的新 YAML 字段 | `yaml_structured_compress.py` → `_build_compressed_marker()` | 在 YAML 解析循环中添加字段提取 |
+| 执行后需强制 WNS 评估的工具 | `optimizer/nodes/subgraphs/llm_tool_loop.py` → `POST_EVAL_TOOLS` | 工具执行后自动调 `report_timing_summary` 并注入 `[EVAL]` 通知 |
+| Dashboard 中不应标注新鲜度的静态字段 | `optimizer/pure/context_snapshot.py` → `_STATIC_RESOURCE_KEYS` | 设计资源（LUT/FF 等）在优化中不变，跳过 `(initial, not refreshed)` 标注 |
+| 工具返回空结果的新模式 | `optimizer/nodes/iteration_end.py` → `_EMPTY_RESULT_PATTERNS` | 空结果匹配时用 `reason=tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
 
 ## 文档
 

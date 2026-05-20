@@ -83,7 +83,7 @@ async def iteration_end_node(
 
         # Record failure if iteration didn't improve and we have a known strategy
         if not wns_improved and deps.compat is not None:
-            reason = "strategy_ineffective" if state.control.done_reason == "switch_strategy" else "no_improvement"
+            reason = _determine_failure_reason(state, strategy_label)
             deps.compat.record_failure(
                 strategy=strategy_label,
                 reason=reason,
@@ -133,3 +133,50 @@ async def iteration_end_node(
     ))
 
     return NodeName.CHECK_EXIT
+
+
+# Patterns indicating a tool returned empty/zero results (not a strategy failure,
+# but a design constraint mismatch). These should use reason="tool_error" so the
+# strategy can be retried after a 2-iteration cooldown.
+_EMPTY_RESULT_PATTERNS = (
+    "0 candidates",
+    "no candidates",
+    "no cells exceeded",
+    "no deep combinational",
+    "no actionable results",
+    "optimized_count: 0",
+    "optimized_count\": 0",
+    "total_candidates\": 0",
+    "no high fanout",
+)
+
+
+def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str:
+    """Determine failure reason with finer granularity.
+
+    Returns:
+        "tool_error" — tool returned empty/zero results or had errors;
+                       strategy can be retried after cooldown.
+        "strategy_ineffective" — strategy executed but didn't help;
+                                 permanently blocked.
+        "no_improvement" — non-switch_strategy exit with no WNS gain.
+    """
+    # Actual tool errors always get "tool_error"
+    if state.iteration.tool_errors:
+        return "tool_error"
+
+    if state.control.done_reason == "switch_strategy":
+        # Check raw tool outputs for empty-result indicators
+        for (iter_num, _round), (tool_name, raw_output) in state.context.raw_tool_outputs.items():
+            if iter_num != state.iteration.current:
+                continue
+            output_lower = raw_output.lower() if raw_output else ""
+            if any(pattern in output_lower for pattern in _EMPTY_RESULT_PATTERNS):
+                logger.info(
+                    f"[iteration_end] Empty result detected in {tool_name}, "
+                    f"using tool_error (retriable) instead of strategy_ineffective"
+                )
+                return "tool_error"
+        return "strategy_ineffective"
+
+    return "no_improvement"
