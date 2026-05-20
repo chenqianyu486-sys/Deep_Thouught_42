@@ -7988,32 +7988,7 @@ async def optimize_v2(
             input_dcp=str(input_dcp.resolve()),
         )
         compat.add_message("system", system_prompt)
-
-        FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
-Every response MUST call the `report_step_state` tool (in your structured function/tool
-calls, NOT in the text body). This tool carries process control directives:
-step_id, result_status, flow_control.
-
-Call report_step_state ALONGSIDE any other tool calls you make. If you are making no
-other tool calls, call report_step_state alone.
-
-The report_step_state tool takes these parameters:
-  - step_id (integer): incrementing per message in current strategy
-  - result_status (string): SUCCESS | PARTIAL | FAIL
-  - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
-
-Your text response MUST contain your analysis (hypothesis, strategy_rationale,
-observed signals) as free-form chain-of-thought reasoning.
-Process control goes in the report_step_state tool call, analysis goes in text.
-
-STRICTLY FORBIDDEN:
-  - XML/HTML tags in text
-  - Omitting the report_step_state tool call entirely
-
-Maintain this output format throughout the entire conversation.
-"""
-        compat.add_message("user", FORMAT_GUARD)
-        logger.info("[optimize_v2] System prompt and format guard injected")
+        logger.info("[optimize_v2] System prompt injected")
 
         # ── Step 6: Create OpenAI client ──────────────────────────
         openai_client = AsyncOpenAI(

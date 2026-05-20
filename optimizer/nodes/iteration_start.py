@@ -36,6 +36,7 @@ async def iteration_start_node(
     # Increment iteration
     state.iteration.current += 1
     state.iteration.tool_errors.clear()
+    state.iteration.tools_used.clear()
     state.iteration.tool_round = 0
 
     iter_num = state.iteration.current

@@ -13,9 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from types import SimpleNamespace
-
-from ...state import OptimizerState, StepState
+from ...state import OptimizerState
 from ...deps import NodeDeps
 from ...edges import NodeName
 from ...pure.timing import parse_timing_summary, is_valid_wns
@@ -25,6 +23,7 @@ from ...pure.step_state import extract_step_state
 from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT
 from ...pure.compress import compress_context
 from ...pure.critical_path import parse_critical_path_cells, update_critical_paths
+from ...pure.context_snapshot import build_context_snapshot, inject_context_snapshot_at_end
 from ...color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -35,30 +34,6 @@ MAX_TOOL_ROUNDS = 80
 # Compression check interval: only check every N rounds to reduce CPU overhead
 COMPRESS_CHECK_INTERVAL = 5
 
-# Max consecutive missing report_step_state before auto-synthesis
-MAX_MISSING_STEP_STATE = 3
-
-
-def _build_step_state_warning(missing_count: int) -> str:
-    """Build escalating warning for missing report_step_state calls."""
-    if missing_count == 1:
-        return (
-            "[WARNING] report_step_state not called. You MUST include "
-            "report_step_state(step_id='...', result_status='SUCCESS'|'FAILURE'|'PARTIAL', "
-            "flow_control='CONTINUE'|'DONE'|'SWITCH_STRATEGY') in your next response. "
-            "Tool execution skipped."
-        )
-    elif missing_count == 2:
-        return (
-            "[ERROR] report_step_state missing for 2 consecutive rounds. "
-            "Tool execution skipped. Next round must include report_step_state, "
-            "or a default CONTINUE state will be auto-generated."
-        )
-    else:
-        return (
-            "[FATAL] report_step_state missing for 3 consecutive rounds. "
-            "Auto-generated default CONTINUE state. Proceeding to next iteration."
-        )
 
 
 async def llm_tool_loop_node(
@@ -78,7 +53,6 @@ async def llm_tool_loop_node(
     """
     tool_round = 0
     iteration_start_wns = state.timing.best_wns
-    consecutive_missing_step_state = 0
 
     while True:
         tool_round += 1
@@ -96,7 +70,7 @@ async def llm_tool_loop_node(
                 logger.warning(f"[llm_tool_loop] Compression failed: {e}")
 
         # ── Prepare API messages ──────────────────────────────────
-        api_messages = _prepare_api_messages(deps)
+        api_messages = _prepare_api_messages(deps, state)
 
         # ── Call LLM ──────────────────────────────────────────────
         state.model.llm_call_count += 1
@@ -164,26 +138,13 @@ async def llm_tool_loop_node(
                 f"result_status={step_state.result_status}, "
                 f"flow_control={step_state.flow_control}"
             )
-            consecutive_missing_step_state = 0
             flow_signal = step_state.flow_control
         else:
-            consecutive_missing_step_state += 1
-            logger.warning(
-                f"[llm_tool_loop] Missing report_step_state "
-                f"({consecutive_missing_step_state}/{MAX_MISSING_STEP_STATE})"
-            )
-
-            if consecutive_missing_step_state < MAX_MISSING_STEP_STATE:
-                # Stage 1-2: inject warning, skip tool execution, force LLM retry
-                warning = _build_step_state_warning(consecutive_missing_step_state)
-                deps.compat.add_message("user", warning)
-                continue
-            else:
-                # Stage 3: synthesize default state, continue normal flow
-                warning = _build_step_state_warning(consecutive_missing_step_state)
-                deps.compat.add_message("user", warning)
-                flow_signal = "CONTINUE"
-                logger.warning("[llm_tool_loop] Synthesized default step_state with CONTINUE")
+            # report_step_state missing — do NOT skip tool execution.
+            # Inject a short note and synthesize default CONTINUE.
+            logger.warning("[llm_tool_loop] report_step_state missing, auto-CONTINUE")
+            deps.compat.add_message("user", "[NOTE] report_step_state missing. Auto-CONTINUE. Include it next turn.")
+            flow_signal = "CONTINUE"
 
         # ── Check flow_control before tool execution ──────────────
         if flow_signal in ("DONE", "SWITCH_STRATEGY"):
@@ -197,6 +158,7 @@ async def llm_tool_loop_node(
                     continue
 
                 tool_name = tc.function.name
+                state.iteration.tools_used.append(tool_name)
                 try:
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
@@ -330,14 +292,52 @@ def _check_wns_target_met(state: OptimizerState) -> bool:
     )
 
 
-def _prepare_api_messages(deps: NodeDeps) -> list:
-    """Prepare API messages from compat."""
-    if deps.compat is not None:
-        try:
-            return deps.compat.get_formatted_for_api()
-        except Exception:
-            pass
-    return []
+def _prepare_api_messages(deps: NodeDeps, state: OptimizerState) -> list:
+    """Prepare API messages with fresh dashboard as last user message."""
+    if deps.compat is None:
+        return []
+    try:
+        api_messages = deps.compat.get_formatted_for_api()
+    except Exception:
+        return []
+
+    # Rebuild and inject dashboard as last user message for maximum attention
+    _inject_dashboard_at_end(api_messages, state, deps)
+    return api_messages
+
+
+def _inject_dashboard_at_end(
+    api_messages: list, state: OptimizerState, deps: NodeDeps
+) -> None:
+    """Build fresh dashboard from current state and inject as last user message."""
+    current_wns = state.timing.latest_wns
+    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
+    elapsed = 0.0
+    remaining = state.control.wall_clock_timeout
+    if state.control.start_time:
+        elapsed = time.time() - state.control.start_time
+        remaining = max(0, state.control.wall_clock_timeout - elapsed)
+
+    snapshot = build_context_snapshot(
+        clock_period=state.timing.clock_period,
+        current_wns=current_wns,
+        best_wns=best_wns,
+        best_wns_iteration=state.timing.best_wns_iteration,
+        tns=state.timing.latest_tns,
+        failing_endpoints=state.timing.latest_failing_endpoints,
+        high_fanout_nets=state.timing.high_fanout_nets or [],
+        critical_path_spread=state.timing.critical_path_spread,
+        resource_utilization=state.timing.resource_utilization,
+        elapsed_time=elapsed,
+        remaining_time=remaining,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
+        iteration_narratives=state.iteration.narratives,
+        tools_used=state.iteration.tools_used,
+        critical_paths=state.timing.critical_paths,
+    )
+
+    inject_context_snapshot_at_end(api_messages, snapshot)
 
 
 async def _call_llm_with_retry(

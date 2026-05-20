@@ -18,7 +18,7 @@ fpl26_optimization_contest/
 │   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS、run_tcl查询clk_fpl26contest周期、高扇出网线/资源利用率）
 │   │   ├── iteration_start.py    # 迭代开始节点（递增计数器、保存prev_best_wns）
 │   │   ├── select_model.py       # 模型选择节点（评分+阈值选择planner/worker）
-│   │   ├── prepare_context.py    # 上下文准备节点（压缩、注入handoff、构建snapshot）
+│   │   ├── prepare_context.py    # 上下文准备节点（压缩、注入handoff；Dashboard注入移至tool loop）
 │   │   ├── iteration_end.py      # 迭代结束节点（更新计数器、构建narrative、预选下轮模型）
 │   │   ├── check_exit.py         # 退出检查节点（WNS达标/无改善/超时/超成本）
 │   │   ├── save_output.py        # 保存输出节点（写DCP、打印摘要、导出tracing）
@@ -31,7 +31,7 @@ fpl26_optimization_contest/
 │   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
-│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot（数据dashboard）
+│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot/inject_context_snapshot_at_end（数据dashboard）
 │   │   ├── handoff.py            # build_handoff_prompt/build_situation_summary/build_status_signal
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
@@ -113,7 +113,7 @@ fpl26_optimization_contest/
 │   ├── SKILL_SPECIFICATION.md        # Skill规范文档
 │   ├── descriptors/                 # 自动生成的JSON描述符文件
 │   ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
-│   └── test_skill_framework.py      # 28项集成测试（注册/执行/遥测/错误/幂等/追踪）
+│   └── test_skill_framework.py      # 30项集成测试（注册/执行/遥测/错误/幂等/追踪）
 ```
 
 ## 1.1 状态机驱动Agent架构（optimizer/）
@@ -138,7 +138,7 @@ fpl26_optimization_contest/
 ```
 OptimizerState (可变dataclass)
 ├── TimingState    — WNS/TNS/best_wns/latest_wns/milestones/critical_paths(动态列表)/critical_paths_stale
-├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives
+├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
 ├── ModelState     — 模型选择/fallback/交接提示词
 ├── CostState      — token用量/成本追踪
 ├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)
@@ -177,7 +177,7 @@ llm_call → evaluate_flow → [条件: flow_control?]
 - **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
 - **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`，并清除 `user_exit_requested` 标志防止死循环
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
-- **V2 上下文数据流**: `compress_context()` 从 `OptimizerState`（canonical）读取 `iteration`/`best_wns`/`current_wns`/`clock_period`/`initial_wns`，而非从 `MemoryManager`（shadow）。`failed_strategies` 仍从 `deps.compat` 读取（由 `iteration_end_node` 调用 `record_failure()` 填充）。上下文快照的 `failed_strategy_names` 和 `tool_call_details` 从 `deps.compat` 读取。
+- **V2 上下文数据流**: `compress_context()` 从 `OptimizerState`（canonical）读取 `iteration`/`best_wns`/`current_wns`/`clock_period`/`initial_wns`，而非从 `MemoryManager`（shadow）。`failed_strategies` 仍从 `deps.compat` 读取（由 `iteration_end_node` 调用 `record_failure()` 填充）。Dashboard 的 `tools_used` 从 `state.iteration.tools_used` 读取（tool loop 中每次工具执行后 append），不再依赖 `deps.compat.tool_call_details`（V2 中始终为空）。
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`。`_sync_state_to_memory_manager()` 已删除（原实现访问不存在的 `_state` 属性，始终为空操作）。
 
 ### 1.2 V1→V2 迁移映射
@@ -192,7 +192,7 @@ llm_call → evaluate_flow → [条件: flow_control?]
 | `_select_model()` | `pure/model_select.py` | 任务分类、9维评分、模型选择 |
 | `_summarize_tool_result()` | `pure/tool_summary.py` | 工具结果YAML摘要化 |
 | `_on_iteration_end()` | `pure/iteration_logic.py` | 迭代计数器更新、策略推断、迭代叙事 |
-| `_build_context_snapshot()` | `pure/context_snapshot.py` | 数据dashboard构建与注入（纯事实，无引导） |
+| `_build_context_snapshot()` | `pure/context_snapshot.py` | 数据dashboard构建与注入（V1: 首条user msg；V2: 末条user msg via `inject_context_snapshot_at_end`） |
 | `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、状态摘要、状态信号 |
 | `call_tool()` | `pure/tool_router.py` | MCP工具路由（含 phys_opt 安全守卫） |
 | `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析（无XML/YAML回退） |
@@ -313,9 +313,9 @@ WNS动态状态 → 已迁移至 _build_context_snapshot()，作为 user message
 ### 2.3.1 Agent 上下文快照注入（user message，数据 Dashboard）
 
 ```
-API调用前 → _prepare_api_messages() 中末尾调用 _inject_context_snapshot()
+V2 tool loop 每轮 LLM 调用前 → _inject_dashboard_at_end()
     ↓
-build_context_snapshot() 构建纯数据 Dashboard：
+build_context_snapshot() 构建纯数据 Dashboard（参数来源：state 直接读取）：
     --- Optimization Dashboard ---
     This is a factual data dashboard for the current optimization state.
     All values are raw measurements. You decide the next action.
@@ -347,14 +347,23 @@ build_context_snapshot() 构建纯数据 Dashboard：
 
     active_tools:
       - rapidwright_report_timing
+
+    next_action: Call report_step_state(step_id, result_status, flow_control) alongside your optimization/analysis tools. Text body = chain-of-thought analysis.
     --- End Dashboard ---
     ↓
-inject_context_snapshot(api_messages):
+inject_context_snapshot_at_end(api_messages):
     1. 扫描 api_messages 查找以 "--- Optimization Dashboard ---"
        开头的 user 消息 → 找到则移除（防止累积）
-    2. 在第一个非 system 消息位置插入新的 user 消息
+    2. 追加为最后一条 user 消息（最大注意力权重）
     → 每次 API 调用最多一条快照消息，零残留
 ```
+
+**数据来源**（V2 修复后）：
+- `tools_used` 来自 `state.iteration.tools_used`（tool loop 中每次工具执行后 append）
+- `iteration_narratives` 来自 `state.iteration.narratives`
+- `critical_paths` 来自 `state.timing.critical_paths`
+- 其余指标从 `state.timing`/`state.cost`/`state.control` 直接读取
+- `prepare_context_node` 不再注入 Dashboard（仅做压缩 + handoff injection）
 
 **设计要点**：
 - **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
@@ -363,7 +372,7 @@ inject_context_snapshot(api_messages):
 - **active_tools**：最近使用过的工具列表（去重保序）
 - **明确声明**："This is a factual data dashboard" + "You decide the next action"
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
-- **`do_not_repeat` 推导**：从 `tool_call_details` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
+- **`do_not_repeat` 推导**：从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`（注意：无 "WNS" 字样，包含工具计数）
 
 ### 2.3.2 动态 Critical Path 管理
@@ -423,10 +432,10 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
 | WNS/TNS/策略状态 | 上下文Dashboard（user message，独立于压缩系统） | 通过 `build_context_snapshot()` → `inject_context_snapshot()` 每 API 调用前注入为第一条 user 消息 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在8个检测点被调用（工具超时/工具异常/工具错误/SWITCH_STRATEGY/PBLOCK验证失败/Fanout后评估缺失/路由失败/策略中断） |
-| Tool调用摘要 | MemoryManager._tool_call_details | 独立存储 |
+| Tool调用摘要 | V1: MemoryManager._tool_call_details / V2: state.iteration.tools_used | V2 中工具名直接追加到 state，iteration_end_node 和 Dashboard 均从此读取 |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6, 保持 user/assistant/tool 原始role不压缩进YAML |
 | report_step_state tool call 格式 | ① User message（会话起始）+ ② System prompt 头部压印（每API调用前） | 双重提醒：User role 高注意力 + System prompt 前导压印 |
-| Agent 上下文Dashboard | 临时 api_messages 列表（不进入 MessageStore） | 每次 API 调用前通过 `inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；纯数据dashboard：wns/tns/fep/trajectory/design_signals/critical_paths/active_tools |
+| Agent 上下文Dashboard | 临时 api_messages 列表（不进入 MessageStore） | V2: tool loop 每轮 LLM 调用前通过 `inject_context_snapshot_at_end()` 注入为**最后一条** user 消息（最大注意力权重）；V1: `inject_context_snapshot()` 注入为第一条 user 消息；查找并替换旧快照防止累积；数据源：`state.iteration.tools_used`（非 `compat.tool_call_details`） |
 | 动态 Critical Path | `state.timing.critical_paths` | 被动更新：LLM 调 `vivado_extract_critical_path_cells` 时解析缓存；主动更新：phys_opt/route_design 后标记 stale 并 auto-refresh；top 10 路径按长度排序 |
 | 工具重复检测 | DCPOptimizer._recent_tools（滑动窗口） | 连续>=3次相同工具且WNS总变化<0.05ns时，注入 REPETITION DETECTED 警告 |
 | 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT，要求LLM评估策略有效性并显式 justify CONTINUE vs SWITCH_STRATEGY |
@@ -497,7 +506,7 @@ skills/
 ├── SKILL_SPECIFICATION.md        # Skill规范文档
 ├── descriptors/                 # 自动生成的JSON描述符文件（含test_mock_skill）
 ├── test_net_detour_optimization.py  # 单元测试（_group_pins_by_cell）
-└── test_skill_framework.py      # 28项集成测试（含test_mock_skill）
+└── test_skill_framework.py      # 30项集成测试（含test_mock_skill）
 
 已注册 Skills:
 ├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率（READ-ONLY）

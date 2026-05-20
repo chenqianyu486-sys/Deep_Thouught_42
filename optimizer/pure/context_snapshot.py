@@ -30,19 +30,19 @@ def build_context_snapshot(
     high_fanout_nets: list,
     critical_path_spread: dict | None,
     resource_utilization: dict | None,
-    strategy_sequence: list[str],
     elapsed_time: float,
     remaining_time: float,
     total_cost: float,
     cost_hard_limit: float,
     iteration_narratives: list[dict] | None = None,
-    tool_call_details: list[dict] | None = None,
+    tools_used: list[str] | None = None,
     critical_paths: list | None = None,
 ) -> str:
     """Build factual data dashboard for the current optimization state.
 
-    Injected as the first user message before every LLM call.
+    Injected as the last user message before every LLM call in the tool loop.
     Presents raw measurements only — the LLM decides the next action.
+    Appends a call-to-action reminding the LLM to call report_step_state.
     """
     lines = []
     lines.append(SNAPSHOT_HEADER)
@@ -106,7 +106,7 @@ def build_context_snapshot(
         lines.append("critical_paths: []")
 
     # -- Active tools --
-    active = _compute_active_tools(tool_call_details)
+    active = _compute_active_tools(tools_used)
     if active:
         lines.append("")
         lines.append("active_tools:")
@@ -116,6 +116,8 @@ def build_context_snapshot(
         lines.append("")
         lines.append("active_tools: []")
 
+    lines.append("")
+    lines.append("next_action: Call report_step_state(step_id, result_status, flow_control) alongside your optimization/analysis tools. Text body = chain-of-thought analysis.")
     lines.append("--- End Dashboard ---")
     return "\n".join(lines)
 
@@ -146,14 +148,13 @@ def _compute_design_signals(
     return signals
 
 
-def _compute_active_tools(tool_call_details: list[dict] | None) -> list[str]:
-    """Extract deduplicated tool names (preserving order)."""
-    if not tool_call_details:
+def _compute_active_tools(tools_used: list[str] | None) -> list[str]:
+    """Deduplicate tool names preserving order."""
+    if not tools_used:
         return []
     seen = set()
     result = []
-    for detail in tool_call_details:
-        name = detail.get("tool_name", "")
+    for name in tools_used:
         if name and name not in seen:
             seen.add(name)
             result.append(name)
@@ -204,3 +205,21 @@ def inject_context_snapshot(api_messages: list[dict], snapshot_yaml: str) -> Non
         insert_idx = len(api_messages)
 
     api_messages.insert(insert_idx, {"role": "user", "content": snapshot_yaml})
+
+
+def inject_context_snapshot_at_end(api_messages: list[dict], snapshot_yaml: str) -> None:
+    """Inject or update the context snapshot as the LAST user message.
+
+    Unlike inject_context_snapshot() which places the snapshot after system messages,
+    this function appends it at the end of the message list so the LLM sees it
+    with maximum attention weight right before generating a response.
+    """
+    # Find and remove existing snapshot message
+    for i, msg in enumerate(api_messages):
+        if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+            if msg["content"].startswith(SNAPSHOT_HEADER):
+                del api_messages[i]
+                break
+
+    # Append at end
+    api_messages.append({"role": "user", "content": snapshot_yaml})

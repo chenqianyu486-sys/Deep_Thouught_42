@@ -47,6 +47,7 @@ from .iteration_logic import (
 from .context_snapshot import (
     build_context_snapshot,
     inject_context_snapshot,
+    inject_context_snapshot_at_end,
 )
 from .handoff import (
     build_handoff_prompt,
@@ -80,7 +81,7 @@ __all__ = [
     # iteration_logic
     "update_iteration_counters", "infer_strategy_from_tools", "build_iteration_narrative",
     # context_snapshot
-    "build_context_snapshot", "inject_context_snapshot",
+    "build_context_snapshot", "inject_context_snapshot", "inject_context_snapshot_at_end",
     # handoff
     "build_handoff_prompt", "build_situation_summary", "build_status_signal",
     # tool_router

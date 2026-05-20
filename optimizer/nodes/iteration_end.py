@@ -56,12 +56,7 @@ async def iteration_end_node(
     update_iteration_counters(state, wns_improved, state.model.current_model)
 
     # Build narrative
-    tool_call_details = deps.compat.tool_call_details if deps.compat else []
-    tools_this_iter = [
-        t.get('tool_name', '')
-        for t in tool_call_details
-        if t.get('iteration') == state.iteration.current
-    ]
+    tools_this_iter = state.iteration.tools_used
     strategy_label = infer_strategy_from_tools(tools_this_iter)
 
     narrative = build_iteration_narrative(
@@ -117,7 +112,7 @@ async def iteration_end_node(
     handoff = build_handoff_prompt(
         state=state,
         tier="planner" if next_model == state.model.planner_model else "worker",
-        tool_call_details=tool_call_details,
+        tool_call_details=[],
         failed_strategies=failed_strategies,
         current_wns=current_wns,
     )

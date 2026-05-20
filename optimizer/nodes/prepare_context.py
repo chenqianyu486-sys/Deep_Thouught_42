@@ -9,12 +9,10 @@ _prepare_api_messages() (L1423-1477).
 from __future__ import annotations
 
 import logging
-import time
 
 from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
-from ..pure.context_snapshot import build_context_snapshot, inject_context_snapshot
 from ..pure.compress import compress_context
 
 logger = logging.getLogger(__name__)
@@ -28,7 +26,9 @@ async def prepare_context_node(
     Actions:
         1. Compress context if needed
         2. Inject handoff prompt if not yet injected
-        3. Build and inject context snapshot
+
+    Note: Dashboard is injected per-LLM-call in the tool loop
+    (via _inject_dashboard_at_end), not here.
 
     Returns:
         Next node name (deterministic: llm_tool_loop).
@@ -52,46 +52,5 @@ async def prepare_context_node(
                 logger.info("[prepare_context] Handoff prompt injected")
             except Exception as e:
                 logger.warning(f"[prepare_context] Handoff injection failed: {e}")
-
-    # 3. Build context snapshot
-    current_wns = state.timing.latest_wns
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
-    elapsed = 0.0
-    remaining = state.control.wall_clock_timeout
-    if state.control.start_time:
-        elapsed = time.time() - state.control.start_time
-        remaining = max(0, state.control.wall_clock_timeout - elapsed)
-
-    # Read from compat (MemoryManager) for data that lives there
-    tool_call_details = deps.compat.tool_call_details if deps.compat else []
-
-    snapshot = build_context_snapshot(
-        clock_period=state.timing.clock_period,
-        current_wns=current_wns,
-        best_wns=best_wns,
-        best_wns_iteration=state.timing.best_wns_iteration,
-        tns=state.timing.latest_tns,
-        failing_endpoints=state.timing.latest_failing_endpoints,
-        high_fanout_nets=state.timing.high_fanout_nets or [],
-        critical_path_spread=state.timing.critical_path_spread,
-        resource_utilization=state.timing.resource_utilization,
-        strategy_sequence=state.iteration.strategy_sequence,
-        elapsed_time=elapsed,
-        remaining_time=remaining,
-        total_cost=state.cost.total_cost,
-        cost_hard_limit=state.cost.cost_hard_limit,
-        iteration_narratives=state.iteration.narratives,
-        tool_call_details=tool_call_details,
-        critical_paths=state.timing.critical_paths,
-    )
-
-    # Inject snapshot into messages
-    if deps.compat is not None:
-        try:
-            messages = deps.compat.messages
-            inject_context_snapshot(messages, snapshot)
-            logger.info("[prepare_context] Context snapshot injected")
-        except Exception as e:
-            logger.warning(f"[prepare_context] Snapshot injection failed: {e}")
 
     return NodeName.LLM_TOOL_LOOP
