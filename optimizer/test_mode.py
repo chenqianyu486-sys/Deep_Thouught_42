@@ -707,7 +707,17 @@ class V2TestMode:
             if dep and dep_key:
                 dep_data = dep_results.get(dep)
                 if dep_data and dep_result_key in dep_data:
-                    args[dep_key] = dep_data[dep_result_key]
+                    dep_value = dep_data[dep_result_key]
+                    if isinstance(dep_value, list) and len(dep_value) == 0:
+                        print(f"\n{'─' * 60}")
+                        print(f"SKILL {idx}: [SKIP] {name} — dependency '{dep}' returned empty list")
+                        print(f"{'─' * 60}")
+                        self.skill_test_results.append({
+                            "skill": name, "success": True,
+                            "error": f"dependency '{dep}' returned empty list — skipped"
+                        })
+                        continue
+                    args[dep_key] = dep_value
                 else:
                     print(f"\n{'─' * 60}")
                     print(f"SKILL {idx}: [SKIP] {name} — dependency '{dep}' key '{dep_result_key}' not available")
@@ -1187,6 +1197,8 @@ async def run_v2_test_mode(
     tee = TeeLogger(log_file)
     sys.stdout = tee
 
+    tester = V2TestMode(run_dir, debug=debug, skip_skills=skip_skills)
+
     try:
         print(f"FPGA Design Optimization — V2 TEST MODE")
         print(f"=========================================")
@@ -1197,8 +1209,6 @@ async def run_v2_test_mode(
         print(f"Skills:     {'skip' if skip_skills else 'test'}")
         print(f"Mode:       {'skills-only' if skills_only else 'full'}")
         print()
-
-        tester = V2TestMode(run_dir, debug=debug, skip_skills=skip_skills)
 
         try:
             await tester.start_servers()

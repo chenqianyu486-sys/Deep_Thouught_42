@@ -39,7 +39,7 @@ endif
 # See: https://www.rapidwright.io/docs/Install_RapidWright_as_a_Python_PIP_Package.html#java-development-and-python
 RAPIDWRIGHT_PATH := $(CURDIR)/RapidWright
 export RAPIDWRIGHT_PATH
-export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*
+export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*:$(RAPIDWRIGHT_PATH)/build/libs/rapidwright.jar
 
 # Vivado license file (set to empty to skip)
 XILINXD_LICENSE_FILE ?= $(HOME)/.Xilinx/Xilinx.lic
@@ -159,6 +159,13 @@ setup:
 		else \
 			printf "$(COLOR_YELLOW)  ⚠ rapidwright patch skipped (non-critical)$(COLOR_RESET)\n"; \
 		fi
+	@printf "$(COLOR_YELLOW)  Patching skill DesignTools import paths...$(COLOR_RESET)\n"
+	@$(PYTHON) scripts/patch_skill_imports.py 2>/dev/null; \
+		if [ $$? -eq 0 ]; then \
+			printf "$(COLOR_GREEN)  ✓ skill imports patched$(COLOR_RESET)\n"; \
+		else \
+			printf "$(COLOR_YELLOW)  ⚠ skill import patch skipped (non-critical)$(COLOR_RESET)\n"; \
+		fi
 	@echo ""
 
 	@printf "$(COLOR_YELLOW)[3/7] Checking Vivado...$(COLOR_RESET)\n"
@@ -266,7 +273,7 @@ build-rapidwright:
 		printf "$(COLOR_YELLOW)Initializing RapidWright git submodule...$(COLOR_RESET)\n"; \
 		git submodule update --init RapidWright; \
 	fi
-	@cd "$(RAPIDWRIGHT_PATH)" && JAVA_HOME=$$JAVA_HOME ./gradlew compileJava -p "$(RAPIDWRIGHT_PATH)"
+	@cd "$(RAPIDWRIGHT_PATH)" && JAVA_HOME=$$JAVA_HOME ./gradlew jar -p "$(RAPIDWRIGHT_PATH)"
 	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"

@@ -446,7 +446,7 @@ def optimize_cell_placement(
 
     try:
         from com.xilinx.rapidwright.eco import ECOPlacementHelper, PlacementModification
-        from com.xilinx.rapidwright.design.tools import DesignTools
+        from com.xilinx.rapidwright.design import DesignTools
     except ImportError:
         # Return error for all cells
         return {name: PlacementOptimizationResult(

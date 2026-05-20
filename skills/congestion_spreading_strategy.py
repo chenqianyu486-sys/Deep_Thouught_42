@@ -241,7 +241,7 @@ def execute_congestion_spreading(
 
     try:
         from com.xilinx.rapidwright.eco import ECOPlacementHelper
-        from com.xilinx.rapidwright.design.tools import DesignTools
+        from com.xilinx.rapidwright.design import DesignTools
     except ImportError:
         return {"error": "RapidWright ECO classes not available"}
 
