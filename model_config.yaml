@@ -5,7 +5,9 @@
 
 worker:
   model_tier: "worker"
-  model_name: "qwen/qwen3-235b-a22b-2507"  # Default worker model name
+  model_name: "google/gemma-4-26b-a4b-it"  # Default worker model name
+  reasoning_enabled: true                     # Enable reasoning/thinking mode for worker
+  reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
   max_tokens: 250000
   soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -19,8 +21,7 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "openai/gpt-oss-120b"
-    - "google/gemma-4-26b-a4b-it"
+    - "qwen/qwen3.5-flash-02-23"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"

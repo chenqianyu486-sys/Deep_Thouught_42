@@ -464,7 +464,7 @@ WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
 - 429降级: 按层级fallback列表，轮询+耗尽追踪（见 model_config.yaml fallback_models）
 - 迭代边界切换: 模型切换在迭代结束保存检查点后，下一迭代开始时发生
 - 交接提示词: 新模型收到包含最优状态、下一步目标的上下文
-- Planner推理模式: model_config.yaml 中 reasoning_enabled=true 时，通过 extra_body={"reasoning": {"enabled": true}} 开启 OpenRouter reasoning 模式；reasoning_max_output_tokens 限制推理链长度；仅 planner 模型激活，worker 不启用
+- 推理模式: model_config.yaml 中 reasoning_enabled=true 时，通过 extra_body={"reasoning": {"enabled": true}} 开启 OpenRouter reasoning 模式；reasoning_max_output_tokens 限制推理链长度；planner 和 worker 均可独立配置
 - 推理token追踪: CostState.total_reasoning_tokens 累计推理token用量，LLM日志中 reasoning>0 时显示
 ```
 
@@ -751,6 +751,8 @@ worker:
   history_retrieval_limit: 8, history_retrieval_min_importance: 0.5
   fallback_models: "<见 model_config.yaml>"
   cost_hard_limit: 1.00  # USD
+  reasoning_enabled: true           # 开启推理模式（OpenRouter reasoning）
+  reasoning_max_output_tokens: 16384  # 推理链最大token数（None=不限制）
 
 # Planner: 推理优化, 1M max
 planner:

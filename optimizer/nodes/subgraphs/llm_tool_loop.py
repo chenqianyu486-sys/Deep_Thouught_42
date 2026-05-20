@@ -96,10 +96,13 @@ async def llm_tool_loop_node(
             except Exception as e:
                 logger.debug(f"[llm_tool_loop] PromptLogger failed: {e}")
 
-        # Use reasoning mode when planner model is active
+        # Use reasoning mode based on current model tier
         reasoning_cfg = None
-        if current_model == state.model.planner_model and deps.reasoning_config:
-            reasoning_cfg = deps.reasoning_config
+        if deps.reasoning_config:
+            if current_model == state.model.planner_model:
+                reasoning_cfg = deps.reasoning_config.get("planner")
+            elif current_model == state.model.worker_model:
+                reasoning_cfg = deps.reasoning_config.get("worker")
 
         try:
             response = await _call_llm_with_retry(

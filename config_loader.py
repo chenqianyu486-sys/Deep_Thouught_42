@@ -97,6 +97,8 @@ class ModelConfigLoader:
             history_retrieval_limit=config['worker']['history_retrieval_limit'],
             history_retrieval_min_importance=config['worker']['history_retrieval_min_importance'],
             fallback_models=config['worker'].get('fallback_models', []),
+            reasoning_enabled=config['worker'].get('reasoning_enabled', False),
+            reasoning_max_output_tokens=config['worker'].get('reasoning_max_output_tokens', None),
         )
 
         self._planner_config = ModelConfigData(

@@ -8016,8 +8016,14 @@ async def optimize_v2(
             model_worker=model_worker,
             api_key=api_key,
             reasoning_config={
-                "enabled": _v2_planner_data.reasoning_enabled,
-                "max_output_tokens": _v2_planner_data.reasoning_max_output_tokens,
+                "worker": {
+                    "enabled": _v2_worker_data.reasoning_enabled,
+                    "max_output_tokens": _v2_worker_data.reasoning_max_output_tokens,
+                },
+                "planner": {
+                    "enabled": _v2_planner_data.reasoning_enabled,
+                    "max_output_tokens": _v2_planner_data.reasoning_max_output_tokens,
+                },
             },
         )
 
