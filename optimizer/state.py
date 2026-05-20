@@ -19,7 +19,7 @@ class StepState:
     """Process control signal from the LLM's report_step_state tool call."""
     step_id: Optional[int] = None
     result_status: Optional[str] = None   # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None    # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
+    flow_control: Optional[str] = None    # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
 

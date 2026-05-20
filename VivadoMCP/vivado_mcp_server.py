@@ -1696,22 +1696,36 @@ async def call_tool(name: str, arguments: dict):
         elif name == "place_design":
             directive = arguments.get("directive")
             timeout = arguments.get("timeout", 3600)  # 1 hour default for placement
-            
+
+            # Log unexpected parameters to help debug LLM misuse
+            expected_keys = {"directive", "timeout"}
+            unexpected = set(arguments.keys()) - expected_keys
+            if unexpected:
+                logger.warning(f"place_design: ignoring unexpected parameters: {unexpected}. "
+                               f"Use run_tcl for unplace_design or other custom commands.")
+
             cmd = "place_design"
             if directive:
                 cmd += f" -directive {directive}"
-            
+
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Placement complete.\n\n{output}")]
         
         elif name == "route_design":
             directive = arguments.get("directive")
             timeout = arguments.get("timeout", 3600)  # 1 hour default for routing
-            
+
+            # Log unexpected parameters to help debug LLM misuse
+            expected_keys = {"directive", "timeout"}
+            unexpected = set(arguments.keys()) - expected_keys
+            if unexpected:
+                logger.warning(f"route_design: ignoring unexpected parameters: {unexpected}. "
+                               f"Use run_tcl for custom routing commands.")
+
             cmd = "route_design"
             if directive:
                 cmd += f" -directive {directive}"
-            
+
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Routing complete.\n\n{output}")]
         

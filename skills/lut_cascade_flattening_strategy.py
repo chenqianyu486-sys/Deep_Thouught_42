@@ -188,7 +188,12 @@ def execute_lut_cascade_flattening(
             "cascades_found": len(cascades),
             "optimized_count": 0,
             "checkpoint_path": ckpt_path,
-            "message": "Found cascades but could not resolve any input pins",
+            "failure_reason": "wide_input_cones",
+            "message": (
+                f"Found {len(cascades)} cascades but all have wide input cones "
+                f"that cannot be resolved. This typically means the LUT logic is "
+                f"too complex for cascade flattening. Consider alternative strategies."
+            ),
             "cascades": cascades,
         }
 

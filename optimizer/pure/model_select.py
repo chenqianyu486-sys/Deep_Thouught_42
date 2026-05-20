@@ -135,7 +135,7 @@ def compute_model_scores(
 
     # ── Dimension 6: Global no-improvement signal ─────────────────
     if state.iteration.global_no_improvement >= GLOBAL_NO_IMPROVEMENT_LIMIT // 2:
-        worker_score += 1
+        planner_score += 1
 
     # ── Dimension 7: Context window capacity ──────────────────────
     if current_tokens >= WORKER_CONTEXT_WARN_TOKENS:

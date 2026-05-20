@@ -13,11 +13,12 @@ rules:
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
+    - "Check the Dashboard for existing utilization/timing data before calling report tools. Data marked as fresh does not need re-querying."
   params:
     split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
 
 response_format:
-  rule: "Every response MUST call report_step_state(step_id:int, result_status:SUCCESS|PARTIAL|FAIL, flow_control:CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK) as a structured tool call."
+  rule: "Every response MUST call report_step_state(step_id:int, result_status:SUCCESS|PARTIAL|FAIL, flow_control:CONTINUE|SWITCH_STRATEGY|DONE|RETRY|ROLLBACK|EXHAUSTED) as a structured tool call."
   parameters:
     step_id: "Incrementing integer per message"
     result_status:
@@ -30,6 +31,7 @@ response_format:
       DONE: "WNS >= 0 (ONLY when timing met)"
       RETRY: "Modify params and retry"
       ROLLBACK: "Revert to best checkpoint"
+      EXHAUSTED: "All applicable strategies exhausted, no further improvement possible. Use ONLY when you have high confidence that no remaining strategy can help."
 
 scenarios:
   wide_lut:

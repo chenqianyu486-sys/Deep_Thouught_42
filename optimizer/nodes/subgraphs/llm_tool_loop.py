@@ -170,7 +170,7 @@ async def llm_tool_loop_node(
             flow_signal = "CONTINUE"
 
         # ── Check flow_control before tool execution ──────────────
-        if flow_signal in ("DONE", "SWITCH_STRATEGY"):
+        if flow_signal in ("DONE", "SWITCH_STRATEGY", "EXHAUSTED"):
             _handle_flow_signal(state, deps, flow_signal, assistant_content)
             return NodeName.ITERATION_END
 
@@ -628,7 +628,7 @@ def _handle_flow_signal(
     flow_signal: str,
     assistant_content: str,
 ) -> None:
-    """Handle DONE or SWITCH_STRATEGY flow signals."""
+    """Handle DONE, SWITCH_STRATEGY, or EXHAUSTED flow signals."""
     if flow_signal == "DONE":
         logger.info(green("[llm_tool_loop] LLM signaled DONE"))
         # Check if WNS target is actually met
@@ -654,6 +654,11 @@ def _handle_flow_signal(
                 f"DO NOT repeat the same strategy that just failed."
             )
             deps.compat.add_message("user", enforced_msg)
+
+    elif flow_signal == "EXHAUSTED":
+        logger.info(yellow("[llm_tool_loop] LLM signaled EXHAUSTED — all strategies exhausted"))
+        state.control.is_done = True
+        state.control.done_reason = "strategies_exhausted"
 
 
 def _inject_reflection(state: OptimizerState, deps: NodeDeps, tool_round: int) -> None:

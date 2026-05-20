@@ -63,13 +63,29 @@ def build_handoff_prompt(
         state: Current optimizer state.
         tier: "planner" or "worker".
         tool_call_details: Recent tool call details.
-        failed_strategies: List of failed strategy dicts (unused, kept for compat).
+        failed_strategies: List of failed strategy dicts with strategy/reason/detail.
         current_wns: Current WNS value.
     """
     if tier == "planner":
-        return _generate_planner_handoff(state, current_wns)
+        return _generate_planner_handoff(state, current_wns, failed_strategies)
     else:
-        return _generate_worker_handoff(state, current_wns)
+        return _generate_worker_handoff(state, current_wns, failed_strategies)
+
+
+def _format_failed_strategies(failed_strategies: list[dict]) -> str:
+    """Format failed strategies into a brief summary for the handoff."""
+    if not failed_strategies:
+        return ""
+    lines = []
+    for f in failed_strategies:
+        strategy = f.get("strategy", "?")
+        reason = f.get("reason", "unknown")
+        detail = f.get("detail", "")
+        line = f"  - {strategy} ({reason})"
+        if detail:
+            line += f": {detail[:100]}"
+        lines.append(line)
+    return "\nFAILED STRATEGIES:\n" + "\n".join(lines)
 
 
 def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> str:
@@ -84,17 +100,19 @@ def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> st
         wns_before = entry.get("wns_before")
         wns_after = entry.get("wns_after")
         wns_delta = entry.get("wns_delta")
+        outcome = entry.get("outcome", "unknown")
 
         before_str = f"{wns_before:.3f}" if wns_before is not None else "N/A"
         after_str = f"{wns_after:.3f}" if wns_after is not None else "N/A"
         delta_str = f"{wns_delta:+.3f}" if wns_delta is not None else "N/A"
-        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({delta_str})")
+        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({delta_str}) | {outcome}")
     return "\n".join(lines)
 
 
 def _generate_planner_handoff(
     state: OptimizerState,
     current_wns: float | None,
+    failed_strategies: list[dict] | None = None,
 ) -> str:
     """Generate handoff for planner models (1M context)."""
     best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
@@ -140,12 +158,13 @@ CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_PLANNER}):
 
 TRAJECTORY:
 {trajectory}
-{status_section}"""
+{status_section}{_format_failed_strategies(failed_strategies or [])}"""
 
 
 def _generate_worker_handoff(
     state: OptimizerState,
     current_wns: float | None,
+    failed_strategies: list[dict] | None = None,
 ) -> str:
     """Generate handoff for worker models (250K context)."""
     wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
@@ -166,7 +185,7 @@ def _generate_worker_handoff(
 
 WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
 {critical_paths_str}
-{status_section}"""
+{status_section}{_format_failed_strategies(failed_strategies or [])}"""
 
 
 def _count_consecutive_same_strategy(strategy_sequence: list[str]) -> int:
