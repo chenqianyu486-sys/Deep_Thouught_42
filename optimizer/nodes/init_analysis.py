@@ -18,6 +18,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.timing import parse_timing_summary, parse_high_fanout_nets, parse_resource_utilization, parse_hold_timing
 from ..pure.tool_router import call_tool as call_tool_fn
+from config_loader import get_worker_model_config
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +262,10 @@ async def init_analysis_node(
                 deps.compat.set_clock_period(state.timing.clock_period)
         except Exception as e:
             logger.warning(f"[init_analysis] Failed to sync initial values to MemoryManager: {e}")
+
+    # Load cost_hard_limit from config (shared planner+worker budget)
+    state.cost.cost_hard_limit = get_worker_model_config().cost_hard_limit
+    logger.info(f"[init_analysis] Cost hard limit: ${state.cost.cost_hard_limit:.2f}")
 
     logger.info(
         f"[init_analysis] Complete: WNS={state.timing.initial_wns}, "

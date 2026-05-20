@@ -268,6 +268,16 @@ def _check_exit_conditions(state: OptimizerState, tool_round: int) -> bool:
         logger.info("[llm_tool_loop] User exit requested")
         return True
 
+    # Cost limit
+    if state.cost.total_cost >= state.cost.cost_hard_limit:
+        logger.warning(
+            f"[llm_tool_loop] Cost limit reached: "
+            f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}"
+        )
+        state.control.is_done = True
+        state.control.done_reason = "cost_limit"
+        return True
+
     return False
 
 

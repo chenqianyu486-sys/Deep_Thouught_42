@@ -99,7 +99,7 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 | hard_limit | 200K | 300K |
 | preserve_turns | 40 (正常) / 25 (硬限制) | 60 (正常) / 40 (硬限制) |
 | min_importance | 0.15 (正常) / 0.35 (硬限制) | 0.10 (正常) / 0.25 (硬限制) |
-| cost_hard_limit | $2.00 | $1.00 |
+| cost_hard_limit | $1.00 | $1.00 |
 | fallback | stepfun/step-3.5-flash, xiaomi/mimo-v2-flash | xiaomi/mimo-v2.5 |
 
 ## 测试

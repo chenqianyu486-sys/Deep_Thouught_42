@@ -705,7 +705,7 @@ worker:
   preserve_role_turns: 6
   history_retrieval_limit: 8, history_retrieval_min_importance: 0.5
   fallback_models: ["stepfun/step-3.5-flash", "xiaomi/mimo-v2-flash"]
-  cost_hard_limit: 2.00  # USD
+  cost_hard_limit: 1.00  # USD
 
 # Planner: 推理优化, 1M max（与 Worker 使用相同基础模型，通过上下文窗口和压缩参数区分）
 planner:
@@ -1044,7 +1044,7 @@ tool call 入口:
 ```python
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
-cost_hard_limit（从 model_config.yaml 加载：worker $2.00, planner $1.00；v1代码使用worker的$2.00作为全局限制）
+cost_hard_limit（从 model_config.yaml 加载）
 ```
 
 ## 13. 工具输出摘要化 + 历史自动裁剪
