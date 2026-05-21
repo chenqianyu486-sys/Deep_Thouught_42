@@ -94,6 +94,35 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090  # 自定义端�
 - `VIVADO_EXEC` -- Vivado 可执行文件路径（默认 `vivado`）
 - `JAVA_HOME` -- Java 安装路径（RapidWright 依赖）
 
+## Web Dashboard 实时监控
+
+启动优化器时附加 `--dashboard` 即可开启 Web 监控界面，基于 aiohttp + WebSocket 实时推送状态快照。
+
+```bash
+# 启动（默认端口 8080）
+make run_optimizer_dashboard DCP=input.dcp
+
+# 自定义端口
+make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
+```
+
+浏览器打开 `http://localhost:8080`（或指定端口），页面包含以下面板：
+
+| 面板 | 监控内容 |
+|------|---------|
+| **Timing** | WNS / TNS / Failing Endpoints 实时值，WNS 历史折线图（含零线标注），Critical Paths 列表 |
+| **Iteration** | 当前迭代数、无改善计数、工具轮次、错误数、策略序列、本轮工具使用情况 |
+| **Model** | 当前模型名称、Worker / Planner 模型、LLM 调用次数、连续成功 / 失败计数 |
+| **Cost** | 总费用（带进度条）、Token 统计（prompt / completion / reasoning） |
+| **Control** | 运行状态（Running / DONE）、已耗时、超时阈值、压缩次数、输入 / 输出 DCP 路径 |
+| **Transition History** | 节点切换历史表格（时间、节点、迭代、WNS、模型、费用、耗时） |
+| **LLM Log** | 最新的 LLM 用户 prompt 和 assistant 响应 |
+
+**特性**:
+- 断线自动重连（3 秒间隔），心跳检测保持连接活性
+- 状态值变化时闪烁高亮，WNS 图表自动滚动
+- 通过 `DashboardStateTracer` 在每次状态机节点退出时推送序列化快照
+
 ## 项目结构
 
 | 目录/文件 | 用途 |
@@ -169,6 +198,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090  # 自定义端�
 | 新策略类型 | `optimizer/pure/iteration_logic.py` → `infer_strategy_from_tools()` | 添加工具名→策略名推断映射 |
 | 压缩标记需保留的新 YAML 字段 | `yaml_structured_compress.py` → `_build_compressed_marker()` | 在 YAML 解析循环中添加字段提取 |
 | 执行后需强制 WNS 评估的工具 | `optimizer/nodes/subgraphs/llm_tool_loop.py` → `POST_EVAL_TOOLS` | 工具执行后自动调 `report_timing_summary` 并注入 `[EVAL]` 通知 |
+| 执行后需自动串联 Vivado 工具的 Skill | `optimizer/pure/constants.py` → `SKILL_CHAIN_ACTIONS` | Skill 名→工具链列表，含 `args_from_skill` 参数传递机制。新增链式 Skill 时添加映射 |
 | Dashboard 中不应标注新鲜度的静态字段 | `optimizer/pure/context_snapshot.py` → `_STATIC_RESOURCE_KEYS` | 设计资源（LUT/FF 等）在优化中不变，跳过 `(initial, not refreshed)` 标注 |
 | 工具返回空结果的新模式 | `optimizer/nodes/iteration_end.py` → `_EMPTY_RESULT_PATTERNS` | 空结果匹配时用 `reason=tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
 

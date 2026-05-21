@@ -8040,6 +8040,7 @@ async def optimize_v2(
             logger.info(f"[optimize_v2] Dashboard at http://localhost:{dashboard_port}")
         else:
             tracer = StateTracer()
+        deps.tracer = tracer
         graph = build_optimizer_graph(tracer=tracer)
 
         # Start stdin listener for graceful quit

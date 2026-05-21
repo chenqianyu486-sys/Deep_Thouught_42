@@ -35,8 +35,7 @@ def _get_lut_pins(cell) -> dict[str, str]:
     bel = cell.getBEL()
     if bel is None:
         return pin_map
-    for i in range(bel.getNumPins()):
-        bel_pin = bel.getPin(i)
+    for bel_pin in bel.getPins():
         if str(bel_pin.getName()) in _PIN_PRIORITY:
             net = cell.getNetFromSitePin(bel_pin)
             if net is not None:

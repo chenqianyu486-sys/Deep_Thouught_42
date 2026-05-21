@@ -67,6 +67,28 @@ class DashboardStateTracer:
         except Exception as e:
             logger.debug(f"[dashboard] Snapshot serialization failed: {e}")
 
+    def push_tool_event(self, state) -> None:
+        """Push a lightweight update containing only tool trace data."""
+        try:
+            import dataclasses
+            from .serializer import _make_json_safe
+            snapshot = {
+                "type": "tool_trace_update",
+                "tool_call_trace": _make_json_safe(dataclasses.asdict(state.context))["tool_call_trace"],
+                "iteration": {"current": state.iteration.current, "tool_round": state.iteration.tool_round},
+                "timing": {"latest_wns": state.timing.latest_wns, "best_wns": state.timing.best_wns},
+            }
+            try:
+                self._queue.put_nowait(snapshot)
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self._queue.put_nowait(snapshot)
+        except Exception as e:
+            logger.debug(f"[dashboard] Tool event push failed: {e}")
+
 
 async def _websocket_handler(request: web.Request) -> web.WebSocketResponse:
     """WebSocket handler: send current state, then stream updates."""

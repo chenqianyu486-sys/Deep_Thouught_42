@@ -27,3 +27,4 @@ class NodeDeps:
     model_worker: str = ""
     api_key: str = ""
     reasoning_config: dict = field(default_factory=dict)  # Per-tier reasoning config: {"worker": {"enabled": bool, "max_output_tokens": int|None}, "planner": {...}}
+    tracer: Any = None  # DashboardStateTracer for real-time tool event push

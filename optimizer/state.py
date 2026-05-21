@@ -136,6 +136,21 @@ class CostState:
 
 
 @dataclass
+class ToolCallRecord:
+    """Single tool call trace entry for dashboard tracking."""
+    tool_name: str = ""
+    tool_call_id: str = ""
+    arguments: dict = field(default_factory=dict)
+    summary: str = ""
+    result_chars: int = 0
+    elapsed_seconds: float = 0.0
+    iteration: int = 0
+    tool_round: int = 0
+    status: str = "completed"    # completed | error
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -144,6 +159,9 @@ class ContextState:
     # LLM message log for dashboard (not used by compression logic)
     latest_user_prompt: str = ""
     latest_assistant_response: str = ""
+    # Tool call trace for dashboard (bounded FIFO)
+    tool_call_trace: list[ToolCallRecord] = field(default_factory=list)
+    tool_call_trace_max: int = 100
 
 
 @dataclass

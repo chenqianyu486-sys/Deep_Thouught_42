@@ -52,6 +52,7 @@ app = Server("rapidwright-mcp")
 # Tools that perform real computation/optimization (expected >>1s execution time)
 COMPLEX_TOOLS = {
     "analyze_pblock_region",
+    "execute_pblock_strategy",
     "execute_physopt_strategy",
     "execute_fanout_strategy",
     "analyze_net_detour",
@@ -568,6 +569,61 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="execute_pblock_strategy",
+            description="""Execute complete PBLOCK workflow: analyze FPGA fabric and prepare for automated Vivado chaining.
+
+            Calls the execute_pblock_strategy skill which finds the optimal contiguous
+            fabric region fitting the design's resource needs. After this tool succeeds,
+            the system will AUTOMATICALLY chain the following Vivado tools in order:
+              1. vivado_place_design -unplace
+              2. vivado_create_and_apply_pblock (with returned pblock_ranges)
+              3. vivado_place_design (re-place within constraint)
+              4. vivado_route_design
+
+            MUTATING (via chained Vivado tools). The returned checkpoint preserves
+            pre-pblock state for rollback.
+
+            ORDERING: For distributed designs (avg_distance > 70), run this BEFORE
+            fanout_strategy. Running fanout before PBLOCK disrupts placement and
+            typically worsens WNS by > 0.5ns.
+
+            Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts.
+            Input: target_lut_count, target_ff_count from utilization report.
+            Output: pblock_ranges, pblock_name, region, capacity_ok.
+
+            NOTE: resource_multiplier defaults to 1.2x (tighter than analyze_pblock_region's 1.5x).
+            Reduce to 1.0x for already-dense designs.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_lut_count": {
+                        "type": "integer",
+                        "description": "Current LUT usage from Vivado report_utilization_for_pblock"
+                    },
+                    "target_ff_count": {
+                        "type": "integer",
+                        "description": "Current FF usage from Vivado report_utilization_for_pblock"
+                    },
+                    "target_dsp_count": {
+                        "type": "integer",
+                        "description": "Current DSP usage",
+                        "default": 0
+                    },
+                    "target_bram_count": {
+                        "type": "integer",
+                        "description": "Current BRAM usage",
+                        "default": 0
+                    },
+                    "resource_multiplier": {
+                        "type": "number",
+                        "description": "Buffer multiplier for resource targets (default: 1.2 for tighter regions)",
+                        "default": 1.2
+                    }
+                },
+                "required": ["target_lut_count", "target_ff_count"]
+            }
+        ),
+        Tool(
             name="execute_physopt_strategy",
             description="""Generate PhysOpt execution plan for Vivado.
 
@@ -612,6 +668,12 @@ async def list_tools() -> list[Tool]:
             - Running fanout splitting AFTER PBLOCK placement can WORSEN WNS by disrupting the dense PBLOCK layout.
             - If WNS regresses after fanout+reroute, set flow_control=ROLLBACK to revert to pre-fanout checkpoint.
             - Prefer running fanout optimization BEFORE applying PBLOCK constraints, or as a standalone strategy.
+
+            ORDERING CONSTRAINT:
+            - For distributed designs (avg_distance > 70 tiles): run execute_pblock_strategy FIRST, then fanout_strategy.
+            - CONTRAINDICATION: Do NOT run fanout_strategy before PBLOCK on distributed designs. Without placement
+              constraint, fanout tree insertion increases cell count and routing complexity, causing WNS regression
+              of 0.5ns or more (observed: -0.978ns → -1.660ns).
 
             RESULT INTERPRETATION:
             - successful_count > 0: nets were split. Always verify WNS delta after Vivado route_design.
@@ -1238,6 +1300,30 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     target_dsp_count=arguments.get("target_dsp_count", 0),
                     target_bram_count=arguments.get("target_bram_count", 0),
                     resource_multiplier=arguments.get("resource_multiplier", 1.5),
+                )
+
+        elif name == "execute_pblock_strategy":
+            # Validate required parameters before calling
+            missing_params = []
+            if "target_lut_count" not in arguments:
+                missing_params.append("target_lut_count")
+            if "target_ff_count" not in arguments:
+                missing_params.append("target_ff_count")
+            if missing_params:
+                result = {
+                    "error": f"Missing required parameters: {', '.join(missing_params)}. "
+                             f"Run report_utilization_for_pblock first to get current resource counts.",
+                    "missing_params": missing_params,
+                    "hint": "Run report_utilization_for_pblock first to get current LUT/FF usage, "
+                            "then retry with target_lut_count and target_ff_count set to those values.",
+                }
+            else:
+                result = rw.execute_pblock_strategy(
+                    target_lut_count=arguments["target_lut_count"],
+                    target_ff_count=arguments["target_ff_count"],
+                    target_dsp_count=arguments.get("target_dsp_count", 0),
+                    target_bram_count=arguments.get("target_bram_count", 0),
+                    resource_multiplier=arguments.get("resource_multiplier", 1.2),
                 )
 
         elif name == "execute_physopt_strategy":

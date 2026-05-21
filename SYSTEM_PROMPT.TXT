@@ -75,8 +75,9 @@ strategies:
   selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region (RapidWright), then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools. Strategy skills encapsulate the full workflow, validate preconditions, and return structured plans. Fall back to individual tools only if a strategy skill fails."
 
 safety_constraints:
-  - "PBLOCK BEFORE fanout. Fanout after PBLOCK disrupts dense layout."
-  - "If execute_fanout_strategy after PBLOCK regresses WNS → ROLLBACK immediately."
+  - "PBLOCK MUST be applied BEFORE fanout on distributed designs (avg_distance > 70). Running fanout without PBLOCK causes WNS regression of 0.5ns+."
+  - "If execute_fanout_strategy runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately. Do NOT retry."
+  - "Pure combinational designs (FF=0): PBLOCK placement is the primary lever. PhysOpt and RegisterRetiming have limited impact on routing-delay-dominated paths."
   - "optimize_lut_input_cone: Skip for NN / wide-datapath designs. optimized_count=0 means no cones."
   - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."

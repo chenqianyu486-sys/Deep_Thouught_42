@@ -373,7 +373,8 @@ def generate_pblock_plan(
                 "and next_steps (ONLY when capacity is sufficient). "
                 "Trigger: recommendation == 'PBLOCK' or avg spread > 70 tiles. "
                 "NOTE: If resource_multiplier is too high (default 1.5x), the returned region "
-                "may be larger than necessary. Reduce to 1.0x-1.2x for congested designs.",
+                "may be larger than necessary. Reduce to 1.0x-1.2x for congested designs. "
+                "PREFERRED: Use execute_pblock_strategy instead for automatic Vivado tool chaining.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="safe",
     side_effects=[],
@@ -410,6 +411,79 @@ class PblockStrategySkill(Skill):
             is_error = result.get("status") == "error"
             error_msg = result.get("message") if is_error else None
             return SkillResult(success=not is_error, data=result, error=error_msg)
+        except Exception as e:
+            return SkillResult(success=False, data=None, error=str(e))
+
+    def validate_inputs(self, **kwargs) -> tuple[bool, str]:
+        if "target_lut_count" not in kwargs:
+            return False, "target_lut_count is required"
+        if "target_ff_count" not in kwargs:
+            return False, "target_ff_count is required"
+        lut = kwargs["target_lut_count"]
+        ff = kwargs["target_ff_count"]
+        if not isinstance(lut, int) or lut<= 0:
+            return False, "target_lut_count must be a positive integer"
+        if not isinstance(ff, int) or ff <= 0:
+            return False, "target_ff_count must be a positive integer"
+        return True, ""
+
+
+@skill(
+    name="execute_pblock_strategy",
+    namespace="optimization",
+    version="1.0.0",
+    display_name="Execute PBLOCK Full Strategy",
+    description="Complete PBLOCK workflow: analyze FPGA fabric, compute optimal region, "
+                "and return pblock_ranges for automatic Vivado tool chaining. "
+                "MUTATING (via chained Vivado tools). "
+                "Side effects: cell placement changes, routing changes (via chain). "
+                "Trigger: avg_distance > 70 tiles (distributed design), or recommendation == 'PBLOCK'. "
+                "ORDERING: For distributed designs (avg_distance > 70), run this BEFORE fanout optimization. "
+                "The system will automatically chain place_design -unplace, create_and_apply_pblock, "
+                "place_design, route_design, and report_timing_summary after this skill returns. "
+                "Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts. "
+                "NOTE: resource_multiplier defaults to 1.2x for tighter regions. "
+                "CONSTRAINTS: Only proceed if capacity_ok is true in the result.",
+    category=SkillCategory.OPTIMIZATION,
+    idempotency="non-idempotent",
+    side_effects=["cell_placement", "checkpoint_file"],
+    timeout_ms=120000,
+    parameters=[
+        ParameterSpec("target_lut_count", int,
+                      "Current LUT usage from vivado_report_utilization_for_pblock"),
+        ParameterSpec("target_ff_count", int,
+                      "Current FF usage from vivado_report_utilization_for_pblock"),
+        ParameterSpec("target_dsp_count", int,
+                      "Current DSP usage", default=0),
+        ParameterSpec("target_bram_count", int,
+                      "Current BRAM usage", default=0),
+        ParameterSpec("resource_multiplier", float,
+                      "Buffer multiplier for resource targets. Default 1.2x for tighter regions.", default=1.2),
+    ],
+    required_context=["design"],
+    error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
+)
+class ExecutePblockStrategySkill(Skill):
+    """Skill for full PBLOCK execution: analyze + prepare for automatic Vivado chaining."""
+
+    def execute(self, context: SkillContext,
+                target_lut_count: int, target_ff_count: int,
+                target_dsp_count: int = 0, target_bram_count: int = 0,
+                resource_multiplier: float = 1.2) -> SkillResult:
+        try:
+            result = generate_pblock_plan(
+                context.design,
+                target_lut_count, target_ff_count,
+                target_dsp_count, target_bram_count,
+                resource_multiplier,
+            )
+            if result.get("status") == "error":
+                return SkillResult(success=False, data=result,
+                                   error=result.get("message", "PBLOCK analysis failed"))
+            if not result.get("capacity_ok"):
+                return SkillResult(success=False, data=result,
+                                   error=f"PBLOCK capacity insufficient: {result.get('deficit', {})}")
+            return SkillResult(success=True, data=result)
         except Exception as e:
             return SkillResult(success=False, data=None, error=str(e))
 

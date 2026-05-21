@@ -20,7 +20,7 @@ from ...pure.timing import parse_timing_summary, is_valid_wns
 from ...pure.tool_summary import summarize_tool_result
 from ...pure.tool_router import call_tool as call_tool_fn
 from ...pure.step_state import extract_step_state
-from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT, DASHBOARD_REFRESH_MAP
+from ...pure.constants import WNS_TARGET_THRESHOLD, GLOBAL_NO_IMPROVEMENT_LIMIT, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS
 from ...pure.compress import compress_context
 from ...pure.critical_path import parse_critical_path_cells, update_critical_paths
 from ...pure.context_snapshot import build_context_snapshot, inject_context_snapshot_at_end
@@ -235,6 +235,26 @@ async def llm_tool_loop_node(
                     oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
                     del state.context.raw_tool_outputs[oldest_key]
 
+                # Record tool call trace for dashboard
+                from optimizer.state import ToolCallRecord
+                trace_record = ToolCallRecord(
+                    tool_name=tool_name,
+                    tool_call_id=tc.id,
+                    arguments=tool_args,
+                    summary=summary[:500],
+                    result_chars=len(raw_result) if isinstance(raw_result, str) else 0,
+                    elapsed_seconds=tool_elapsed,
+                    iteration=state.iteration.current,
+                    tool_round=tool_round,
+                    status="error" if ("error" in (summary or "").lower() and "success" not in (summary or "").lower()) else "completed",
+                )
+                state.context.tool_call_trace.append(trace_record)
+                if len(state.context.tool_call_trace) > state.context.tool_call_trace_max:
+                    state.context.tool_call_trace = state.context.tool_call_trace[-state.context.tool_call_trace_max:]
+                # Push real-time update to dashboard
+                if deps.tracer and hasattr(deps.tracer, 'push_tool_event'):
+                    deps.tracer.push_tool_event(state)
+
                 # Add tool result to compat
                 if deps.compat is not None:
                     deps.compat.add_message("tool", summary, {
@@ -263,6 +283,15 @@ async def llm_tool_loop_node(
                         await _post_eval_hook(state, deps, tool_name)
                     except Exception as e:
                         logger.warning(f"[llm_tool_loop] Post-eval hook failed for {tool_name}: {e}")
+
+                # Chain actions: auto-execute chained Vivado tools after specific skills
+                if tool_name in SKILL_CHAIN_ACTIONS:
+                    try:
+                        import json as _json
+                        skill_data = _json.loads(raw_result) if raw_result else {}
+                        await _execute_chain_actions(state, deps, tool_name, skill_data)
+                    except Exception as e:
+                        logger.warning(f"[llm_tool_loop] Chain actions failed for {tool_name}: {e}")
 
                 # Track tool errors
                 result_lower = summary.lower() if summary else ""
@@ -534,6 +563,55 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
         logger.info(f"[llm_tool_loop] Auto-refreshed {len(cell_paths)} critical paths")
     else:
         state.timing.critical_paths_stale = False
+
+
+async def _execute_chain_actions(
+    state: OptimizerState, deps: NodeDeps,
+    tool_name: str, skill_result_data: dict,
+) -> None:
+    """Auto-execute chained MCP tools after a skill with chain actions completes.
+
+    After a skill marked in SKILL_CHAIN_ACTIONS returns, this function executes
+    the chained tools sequentially (e.g. place_design -unplace → create_pblock
+    → place_design → route_design after execute_pblock_strategy).
+    Results are injected into context and WNS is tracked from each step.
+    """
+    chain = SKILL_CHAIN_ACTIONS.get(tool_name)
+    if not chain:
+        return
+
+    for step in chain:
+        target_tool = step["tool"]
+        args = dict(step.get("args", {}))
+
+        # Resolve args from skill result data
+        for key, skill_key in step.get("args_from_skill", {}).items():
+            if isinstance(skill_key, str) and skill_key in skill_result_data:
+                args[key] = skill_result_data[skill_key]
+            elif isinstance(skill_key, bool):
+                args[key] = skill_key
+
+        try:
+            logger.info(f"[chain] Auto-executing {target_tool} after {tool_name}")
+            raw_result = await call_tool_fn(
+                target_tool, args,
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            # Produce summary and inject into context
+            summary = summarize_tool_result(target_tool, raw_result, state)
+            if deps.compat is not None:
+                deps.compat.add_message("user",
+                    f"[AUTO-CHAIN] After {tool_name}: {target_tool} completed — {summary[:400]}")
+            # Track WNS from timing-affecting tools
+            _track_wns_from_result(state, target_tool, raw_result)
+            # Track tool name
+            state.iteration.tools_used.append(target_tool)
+        except Exception as e:
+            logger.warning(f"[chain] Tool {target_tool} failed after {tool_name}: {e}")
+            if deps.compat is not None:
+                deps.compat.add_message("user",
+                    f"[AUTO-CHAIN ERROR] {target_tool} after {tool_name} failed: {str(e)[:300]}")
+            # Continue chain even on failure (some steps may still work)
 
 
 async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str) -> None:

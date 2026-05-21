@@ -106,7 +106,7 @@ fpl26_optimization_contest/
 │   ├── strategy_plan.py             # 共享数据结构：StrategyPlan, StrategyStep
 │   ├── net_detour_optimization.py   # Skill类 + 纯函数：绕路比率分析 + 重心放置优化
 │   ├── smart_region_search.py       # Skill类 + 纯函数：智能PBlock区域搜索
-│   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略
+│   ├── pblock_strategy.py           # Skill类：PBLOCK-Based Re-placement 策略（分析 + 执行）
 │   ├── physopt_strategy.py          # Skill类：Physical Optimization 策略
 │   ├── fanout_strategy.py           # Skill类：High Fanout Net Optimization
 │   ├── congestion_analysis.py        # Skill类 + 纯函数：Routing Congestion Analysis（READ-ONLY）
@@ -410,6 +410,7 @@ inject_context_snapshot_at_end(api_messages):
 - **trajectory**：工作轨迹，记录每轮迭代策略名、前后 WNS、delta
 - **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）。静态资源字段（LUT/FF/DSP/BRAM/URAM）不标注新鲜度（设计资源在优化过程中不变）。动态字段未刷新时标注 `(initial, not refreshed)`
 - **design_type**：当 FF=0 时自动添加 `design_type: combinational_only`，帮助 LLM 判断策略适用性（如跳过 RegisterRetiming）
+- **design_type_note**：当 `design_type == "combinational_only"` 时注入策略优先级提示："PBLOCK placement is the primary lever for reducing routing delay. PhysOpt and RegisterRetiming have limited effect on routing-delay-dominated paths."
 - **Dashboard 新鲜度机制**：`DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注。新增工具只需在 MAP 中添加映射。当前映射：`vivado_report_utilization_for_pblock`→resource_utilization, `vivado_get_critical_high_fanout_nets`→high_fanout_nets, `rapidwright_analyze_critical_path_spread`/`vivado_extract_critical_path_pins`→critical_path_spread
 - **active_tools**：最近使用过的工具列表（去重保序）
 - **明确声明**："This is a factual data dashboard" + "You decide the next action"
@@ -558,7 +559,8 @@ skills/
 ├── analysis.net_detour@1.0.0           # 分析关键路径网络的绕路比率（READ-ONLY）
 ├── placement.optimize_cell@1.0.0       # 基于重心优化单元布局（non-idempotent）
 ├── placement.smart_region@1.0.0        # 智能 PBlock 区域搜索（READ-ONLY）
-├── optimization.pblock_strategy@1.0.0   # PBLOCK-Based Re-placement 策略
+├── optimization.pblock_strategy@1.0.0   # PBLOCK Region Analysis（READ-ONLY）
+├── optimization.execute_pblock_strategy@1.0.0  # PBLOCK Full Strategy（分析+执行，自动串联Vivado工具）
 ├── optimization.physopt_strategy@1.0.0  # Physical Optimization 策略
 ├── optimization.fanout_strategy@1.0.0   # High Fanout Net Optimization
 ├── analysis.analyze_congestion@1.0.0    # Routing Congestion Analysis（READ-ONLY，JSON序列化已修复）
@@ -578,6 +580,7 @@ Skill 超时映射（三层）:
 |-------|-------------------------------|-----------------------------------|-------------------|
 | smart_region | **60000** (1min) | 60000 / 120000 | 60.0 |
 | pblock_strategy | **60000** (1min) | 60000 / 120000 | 60.0 |
+| execute_pblock_strategy | **120000** (2min) | 120000 / 240000 | - |
 | analyze_congestion | **30000** (30s) | 30000 / 60000 | - |
 | analyze_congestion_spreading | **60000** (1min) | 60000 / 120000 | - |
 | execute_congestion_spreading | **300000** (5min) | 300000 / 600000 | - |
@@ -618,7 +621,7 @@ Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列,
 ├── stagnation + Fanout not failed                    → rapidwright_execute_fanout_strategy [诊断]
 ├── stagnation + CongestionSpreading not failed        → rapidwright_analyze_congestion_spreading [诊断]
 ├── stagnation + 都失败                                → rapidwright_analyze_net_detour [诊断]
-├── avg_distance > 70 + PBLOCK not failed             → rapidwright_analyze_pblock_region
+├── avg_distance > 70 + PBLOCK not failed             → rapidwright_analyze_pblock_region（推荐改用 `rapidwright_execute_pblock_strategy` 自动串联 Vivado 工具）
 ├── max_fanout > 100 + Fanout not failed              → rapidwright_execute_fanout_strategy
 ├── no_improvement>=2 + physopt tried                 → rapidwright_analyze_net_detour（分析型）
 ├── WNS > -2.0 + PhysOpt not failed                   → rapidwright_execute_physopt_strategy
@@ -644,6 +647,57 @@ Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get()
      ├── SkillTelemetry.record_execution(duration_ms, status, error_code)
      └── 返回 SkillResult(success, data, error, error_code)
 
+### 2.6.2 SKILL_CHAIN_ACTIONS 自动工具链执行
+
+**动机**：分析型 Skill（如 `analyze_pblock_region`）返回 `pblock_ranges` 后需 LLM 手动串联 5 步 Vivado 命令。LLM 常被其他策略分散注意力，未完成后续步骤，导致核心策略（PBLOCK）分析完成但未实际应用。
+
+**方案**：定义 `SKILL_CHAIN_ACTIONS` 映射（`optimizer/pure/constants.py`），当特定 Skill 执行后，`llm_tool_loop` 自动串联后续 Vivado MCP 工具，绕过 LLM 决策。
+
+```python
+SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
+    "rapidwright_execute_pblock_strategy": [
+        {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
+        {"tool": "vivado_create_and_apply_pblock",
+         "args_from_skill": {
+             "pblock_name": "pblock_name",
+             "pblock_ranges": "pblock_ranges",
+             "is_soft": False,
+         }},
+        {"tool": "vivado_place_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {}},
+    ],
+}
+```
+
+**执行流程**：
+```
+Skill execute() 返回 SkillResult(success=True, data={pblock_ranges, pblock_name, ...})
+         ↓
+llm_tool_loop._execute_chain_actions() 
+         ↓
+遍历 SKILL_CHAIN_ACTIONS[tool_name]:
+  ├── 从 skill_result_data 解析 args_from_skill 参数
+  ├── 调用 call_tool_fn() 执行 Vivado MCP 工具
+  ├── summarize_tool_result() + add_message("user", "[AUTO-CHAIN] ...")
+  ├── _track_wns_from_result() 更新 WNS 状态
+  └── state.iteration.tools_used.append(target_tool)
+         ↓
+链式执行完成 → LLM 在下一轮对话中看到 [AUTO-CHAIN] 结果
+```
+
+**关键设计**：
+- **`args_from_skill`**：参数从 Skill 返回值中动态提取，如 `pblock_ranges`、`pblock_name`
+- **`is_soft` = False**：硬约束 PBLOCK（非软约束），强制 Vivado 在指定区域内布局
+- **错误容错**：单步失败不中断链式执行，错误注入为 `[AUTO-CHAIN ERROR]` 消息
+- **WNS 追踪**：每步执行后解析时序结果，更新 `state.timing.latest_wns`
+- **新增 Skill**：`optimization.execute_pblock_strategy@1.0.0`（`skills/pblock_strategy.py`），默认 `resource_multiplier=1.2x`（比旧 `analyze_pblock_region` 的 1.5x 更紧凑）
+
+**与 `POST_EVAL_TOOLS` 的区别**：
+| 机制 | 触发 | 执行内容 |
+|------|------|---------|
+| `POST_EVAL_TOOLS` | 指定工具执行后 | 仅 `report_timing_summary`（单一评估） |
+| `SKILL_CHAIN_ACTIONS` | 指定 Skill 返回后 | 完整工具链（多步串联，含参数传递） |
+
 JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）：
 ├── $schema / specVersion / id / displayName
 ├── idempotency: "safe" | sideEffects: []
@@ -664,7 +718,7 @@ JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）�
 
 | 策略键 | 名称 | 触发条件 | 关联 Skill |
 |--------|------|---------|-----------|
-| `PBLOCK` | Pblock-Based Re-placement | distributed 场景（avg_distance>70） | `rapidwright_analyze_pblock_region` |
+| `PBLOCK` | Pblock-Based Re-placement | distributed 场景（avg_distance>70） | `rapidwright_execute_pblock_strategy`（分析+自动串联Vivado） / `rapidwright_analyze_pblock_region`（仅分析） |
 | `PhysOpt` | Physical Optimization | 1-2 paths with spread, WNS>-2.0 | `rapidwright_execute_physopt_strategy` |
 | `Fanout` | High Fanout Net Optimization | fanout>100, 无 spread | `rapidwright_execute_fanout_strategy` |
 | `PinSwap` | Pin Swapping | WNS 卡在 ~-0.3ns, LUT 输入引脚延迟差异 | `rapidwright_analyze_net_swapping` |
@@ -676,7 +730,7 @@ JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）�
 
 **场景检测矩阵** (`SCENARIO_DETECTION_MATRIX`): 7 个场景 — `wide_lut`, `high_fanout`, `distributed`, `control_imbalance`, `congestion`, `congestion_spread`, `deep_chain`
 
-**已知问题**: `get_strategy_catalog()` (line 376) 仅遍历 `["PBLOCK", "PhysOpt", "Fanout"]` 3 个策略，遗漏了其余 6 个。系统提示词注入时仅展示部分策略目录。
+**已知问题**: 修复后 `get_strategy_catalog()` 遍历全部 9 个策略 `["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]`。
 
 ### 2.7 Tool 描述增强（2026-05 新增）
 
@@ -705,15 +759,17 @@ JSON 描述符示例（skills/descriptors/analysis.net_detour-at-1.0.0.json）�
 **5. SYSTEM_PROMPT.TXT 策略排序约束**
 ```
 ordering_constraints:
-  - "PBLOCK should be attempted BEFORE fanout optimization."
-  - "If execute_fanout_strategy is run after PBLOCK and WNS regresses: set flow_control=ROLLBACK."
+  - "PBLOCK MUST be applied BEFORE fanout on distributed designs (avg_distance > 70)."
+  - "If execute_fanout_strategy runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately."
+  - "Pure combinational designs (FF=0): PBLOCK placement is the primary lever."
   - "optimize_lut_input_cone: Skip for neural network / wide-datapath designs."
   - "analyze_net_detour returning zero results = routing already compact, not a failure."
 ```
 
 **6. strategy_library.py SKILL_GUIDANCE 增强字段**
 - `analyze_net_detour`: 新增 `interpretation` 字段（解释空结果含义）
-- `execute_fanout_strategy`: 新增 `risk` 和 `contraindications` 字段（标注 PBLOCK 后运行风险）
+- `execute_fanout_strategy`: 新增 `prerequisite`、`risk` 和 `contraindications` 字段（标注 PBLOCK 前置依赖、运行风险及实测数据：-0.978→-1.660ns）
+- `execute_fanout_strategy` description (server.py): 新增 `ORDERING CONSTRAINT` + `CONTRAINDICATION` 含实测退化数据
 
 ### 2.8 phys_opt_design 安全守卫（2026-05-18 新增）
 

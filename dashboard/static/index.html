@@ -39,6 +39,8 @@ canvas { width: 100%; height: 100%; }
 .tag.tool { background: #1e2a4a; color: #66aaff; }
 .tag.strategy { background: #2a1e4a; color: #aa88ff; }
 .tag.error { background: #4a1e1e; color: #ff6666; }
+.tag.status-ok { background: #1a3a1a; color: #44ff88; }
+.tag.status-error { background: #4a1e1e; color: #ff6666; }
 
 .list { max-height: 200px; overflow-y: auto; }
 .list-item { padding: 4px 0; font-size: 13px; border-bottom: 1px solid #1a1a2e; font-family: 'Cascadia Code', 'Fira Code', monospace; }
@@ -59,6 +61,11 @@ table.transitions tr:hover { background: #12122a; }
 .progress-bar .fill.cost { background: linear-gradient(90deg, #44ff88, #ffaa44, #ff4444); }
 
 .scroll-top { position: sticky; top: 0; background: #1a1a2e; z-index: 1; }
+
+.args-preview { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.args-preview:hover { white-space: normal; word-break: break-all; }
+.summary-preview { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.summary-preview:hover { white-space: normal; word-break: break-word; }
 </style>
 </head>
 <body>
@@ -254,6 +261,27 @@ table.transitions tr:hover { background: #12122a; }
     </div>
   </div>
 
+  <!-- Tool Call Trace Panel -->
+  <div class="panel full-width">
+    <h2>Tool Call Trace</h2>
+    <div class="stat-grid" style="margin-bottom:8px; grid-template-columns: repeat(4, 1fr)">
+      <div class="stat">
+        <div class="label">Total Calls</div>
+        <div class="value" id="traceTotal">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Errors</div>
+        <div class="value" id="traceErrors">0</div>
+      </div>
+    </div>
+    <div class="table-scroll" style="max-height:400px">
+      <table class="transitions">
+        <thead><tr><th>Time</th><th>Iter</th><th>Round</th><th>Tool</th><th>Status</th><th>Duration</th><th>Args</th><th>Summary</th></tr></thead>
+        <tbody id="traceBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Transition History Panel -->
   <div class="panel full-width">
     <h2>Transition History</h2>
@@ -289,6 +317,13 @@ function connect() {
 }
 
 function updateDashboard(d) {
+  if (d.type === 'tool_trace_update') {
+    updateToolTrace(d);
+    // Also update iteration/timing from lightweight push
+    if (d.iteration) updateIterationLight(d.iteration);
+    if (d.timing) updateTimingLight(d.timing);
+    return;
+  }
   if (d.timing) updateTiming(d.timing);
   if (d.iteration) updateIteration(d.iteration);
   if (d.model) updateModel(d.model);
@@ -296,7 +331,18 @@ function updateDashboard(d) {
   if (d.context) updateContext(d.context);
   if (d.control) updateControl(d.control);
   if (d.transitions) updateTransitions(d.transitions);
+  if (d.context) updateLLMLog(d);
+  updateToolTrace(d);
   updateClock();
+}
+
+function updateIterationLight(it) {
+  $('toolRound').textContent = it.tool_round ?? 0;
+}
+
+function updateTimingLight(t) {
+  $('wns').textContent = t.latest_wns != null ? formatNum(t.latest_wns) + 'ns' : '--';
+  $('bestWns').textContent = t.best_wns != null && t.best_wns !== -Infinity ? formatNum(t.best_wns) + 'ns' : '--';
 }
 
 function flashIfChanged(el, newVal) {
@@ -506,6 +552,40 @@ function updateLLMLog(d) {
   }
 }
 
+function updateToolTrace(d) {
+  const trace = d.tool_call_trace || (d.context && d.context.tool_call_trace);
+  if (!trace || !trace.length) return;
+
+  const total = trace.length;
+  const errors = trace.filter(function(t) { return t.status === 'error'; }).length;
+  $('traceTotal').textContent = total;
+  $('traceErrors').textContent = errors;
+  $('traceErrors').className = 'value ' + (errors > 0 ? 'negative' : '');
+
+  var body = $('traceBody');
+  var recent = trace.slice(-100);
+  body.innerHTML = recent.map(function(t) {
+    var ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleTimeString() : '--';
+    var dur = t.elapsed_seconds != null ? t.elapsed_seconds.toFixed(1) + 's' : '--';
+    var statusClass = t.status === 'error' ? 'status-error' : 'status-ok';
+    var argsText = t.arguments ? JSON.stringify(t.arguments) : '';
+    var summaryText = t.summary || '';
+    return '<tr>' +
+      '<td>' + ts + '</td>' +
+      '<td>' + (t.iteration != null ? t.iteration : '--') + '</td>' +
+      '<td>' + (t.tool_round != null ? t.tool_round : '--') + '</td>' +
+      '<td><span class="tag tool">' + esc(t.tool_name) + '</span></td>' +
+      '<td><span class="tag ' + statusClass + '">' + esc(t.status) + '</span></td>' +
+      '<td>' + dur + '</td>' +
+      '<td><div class="args-preview" title="' + esc(argsText) + '">' + esc(argsText.substring(0, 80)) + '</div></td>' +
+      '<td><div class="summary-preview" title="' + esc(summaryText) + '">' + esc(summaryText.substring(0, 120)) + '</div></td>' +
+      '</tr>';
+  }).join('');
+  // Auto-scroll to bottom
+  var scroll = body.parentElement.parentElement;
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
 function updateClock() {
   $('clock').textContent = new Date().toLocaleTimeString();
 }
@@ -516,13 +596,6 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
-
-// Override updateDashboard to also update LLM log
-const _origUpdate = updateDashboard;
-window.updateDashboard = function(d) {
-  _origUpdate(d);
-  updateLLMLog(d);
-};
 
 connect();
 setInterval(updateClock, 1000);

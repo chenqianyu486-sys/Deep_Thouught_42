@@ -104,6 +104,13 @@ def build_context_snapshot(
         lines.append("")
         lines.append("design_signals: {}")
 
+    # -- Design type hint --
+    if signals and signals.get("design_type") == "combinational_only":
+        lines.append("")
+        lines.append("design_type_note: Pure combinational design (no FFs). "
+                      "PBLOCK placement is the primary lever for reducing routing delay. "
+                      "PhysOpt and RegisterRetiming have limited effect on routing-delay-dominated paths.")
+
     # -- Critical paths --
     if critical_paths:
         cp_lines = format_critical_paths_snapshot(critical_paths)

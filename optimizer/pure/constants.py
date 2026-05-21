@@ -63,6 +63,7 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_smart_region_search": "smart_region",
     "rapidwright_analyze_pblock_region": "pblock_strategy",
     "rapidwright_execute_physopt_strategy": "physopt_strategy",
+    "rapidwright_execute_pblock_strategy": "execute_pblock_strategy",
     "rapidwright_execute_fanout_strategy": "fanout_strategy",
     "rapidwright_analyze_congestion_spreading": "analyze_congestion_spreading",
     "rapidwright_execute_congestion_spreading": "execute_congestion_spreading",
@@ -100,4 +101,22 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_get_critical_high_fanout_nets": frozenset({"high_fanout_nets"}),
     "rapidwright_analyze_critical_path_spread": frozenset({"critical_path_spread"}),
     "vivado_extract_critical_path_pins": frozenset({"critical_path_spread"}),
+}
+
+# ── Skill chain actions ──────────────────────────────────────────
+# After a skill completes, auto-execute the listed MCP tools in order.
+# Each step: {"tool": str, "args": dict, "args_from_skill": {param: skill_result_key}}
+# args_from_skill extracts values from the skill's returned data dict.
+SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
+    "rapidwright_execute_pblock_strategy": [
+        {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
+        {"tool": "vivado_create_and_apply_pblock",
+         "args_from_skill": {
+             "pblock_name": "pblock_name",
+             "pblock_ranges": "pblock_ranges",
+             "is_soft": False,
+         }},
+        {"tool": "vivado_place_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {}},
+    ],
 }

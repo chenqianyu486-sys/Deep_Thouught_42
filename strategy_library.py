@@ -232,8 +232,11 @@ SKILL_GUIDANCE = {
         "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "note": "split_factor is calculated internally as max(3, min(8, fanout // 100)) — do NOT provide it",
-        "risk": "HIGH when used after PBLOCK placement. Fanout splitting disrupts PBLOCK dense layout — WNS often regresses.",
-        "contraindications": "Do NOT use after PBLOCK placement. Prefer running BEFORE PBLOCK or as standalone strategy.",
+        "prerequisite": "PBLOCK placement for distributed designs (avg_distance > 70). Run execute_pblock_strategy first.",
+        "risk": "HIGH when used after PBLOCK placement. Fanout splitting disrupts PBLOCK dense layout — WNS often regresses. "
+                "Running fanout BEFORE PBLOCK on distributed designs causes WNS regression of 0.5ns+ (observed: -0.978 → -1.660ns).",
+        "contraindications": "Do NOT use after PBLOCK placement. Do NOT use before PBLOCK on distributed designs. "
+                             "Prefer running as standalone strategy after PBLOCK constraint is applied.",
     },
     "analyze_pblock_region": {
        "category": "ANALYSIS",
@@ -373,7 +376,8 @@ def get_strategy_catalog() -> str:
     """Compact strategy catalog for system prompt (names + purposes only)."""
     parts = ["Available strategies:"]
     # ordered list matching original numbering
-    ordered = ["PBLOCK", "PhysOpt", "Fanout"]
+    ordered = ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade",
+               "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]
     for i, key in enumerate(ordered, 1):
         s = STRATEGIES.get(key)
         if s:

@@ -2018,6 +2018,75 @@ def analyze_pblock_region(
         return {"error": str(e)}
 
 
+def execute_pblock_strategy(
+    target_lut_count: int,
+    target_ff_count: int,
+    target_dsp_count: int = 0,
+    target_bram_count: int = 0,
+    resource_multiplier: float = 1.2,
+) -> dict:
+    """Execute full PBLOCK workflow: analyze region + prepare for Vivado chaining.
+
+    Calls the execute_pblock_strategy skill which analyzes the FPGA fabric
+    and returns pblock_ranges for automatic Vivado tool chaining.
+    The system will chain: place_design -unplace, create_and_apply_pblock,
+    place_design, route_design, report_timing_summary.
+
+    Args:
+        target_lut_count: Current LUT usage from Vivado
+        target_ff_count: Current FF usage from Vivado
+        target_dsp_count: Current DSP usage
+        target_bram_count: Current BRAM usage
+        resource_multiplier: Buffer multiplier (default 1.2x)
+
+    Returns:
+        Dict with pblock_ranges, pblock_name, region, estimated_resources,
+        capacity_ok, and next_steps.
+    """
+    global _current_design
+
+    if not _initialized:
+        logger.warning("execute_pblock_strategy: RapidWright not initialized")
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    if _current_design is None:
+        logger.warning("execute_pblock_strategy: No design loaded")
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("execute_pblock_strategy")
+        if skill is None:
+            logger.warning("execute_pblock_strategy: Skill 'execute_pblock_strategy' not found in registry")
+            return {"error": "Skill 'execute_pblock_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            target_lut_count=target_lut_count,
+            target_ff_count=target_ff_count,
+            target_dsp_count=target_dsp_count,
+            target_bram_count=target_bram_count,
+            resource_multiplier=resource_multiplier,
+        )
+
+        if not result.success:
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = result.data.get("message") if isinstance(result.data, dict) else None
+            return {"error": error_msg or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing pblock strategy: {e}")
+        return {"error": str(e)}
+
+
 def execute_physopt_strategy(
     directive: str = "Default",
     design_is_routed: bool = True,
