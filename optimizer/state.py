@@ -19,17 +19,21 @@ class StepState:
     """Process control signal from the LLM's report_step_state tool call."""
     step_id: Optional[int] = None
     result_status: Optional[str] = None   # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None    # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
+    flow_control: Optional[str] = None    # CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
 
 
 @dataclass
 class CriticalPathEntry:
-    """Single critical path with cell list."""
+    """Single critical path with cell list and per-path timing detail."""
     cells: list[str] = field(default_factory=list)
     path_length: int = 0
     iteration: int = 0
+    slack: Optional[float] = None        # per-path slack (ns)
+    logic_delay: Optional[float] = None   # total logic delay (ns)
+    net_delay: Optional[float] = None     # total net delay (ns)
+    levels: Optional[int] = None          # logic levels/depth
 
 
 @dataclass
@@ -137,6 +141,9 @@ class ContextState:
     compression_count: int = 0
     raw_tool_outputs: dict[tuple[int, int], tuple[str, str]] = field(default_factory=dict)
     raw_tool_output_max: int = 50
+    # LLM message log for dashboard (not used by compression logic)
+    latest_user_prompt: str = ""
+    latest_assistant_response: str = ""
 
 
 @dataclass

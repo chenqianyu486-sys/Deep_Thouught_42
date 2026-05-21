@@ -28,10 +28,23 @@ response_format:
     flow_control:
       CONTINUE: "Next step in current strategy"
       SWITCH_STRATEGY: "Strategy exhausted, WNS < 0. End iteration."
+      NEXT_ITERATION: "Significant improvement achieved, diminishing returns on current strategy. End iteration and start fresh with updated context."
       DONE: "WNS >= 0 (ONLY when timing met)"
       RETRY: "Modify params and retry"
       ROLLBACK: "Revert to best checkpoint"
       EXHAUSTED: "All applicable strategies exhausted, no further improvement possible. Use ONLY when you have high confidence that no remaining strategy can help."
+
+iteration_strategy:
+  rule: "After significant WNS improvement (delta > 0.1ns) with no further gain
+         in 3-5 tool rounds, signal NEXT_ITERATION to start a fresh iteration."
+  when_to_use_next_iteration: "Current strategy produced good improvement but
+         subsequent attempts show diminishing returns. Fresh iteration provides:
+         re-compressed context, model re-evaluation, updated critical paths."
+  when_to_use_switch_strategy: "Current strategy failed to produce any improvement.
+         The strategy itself was wrong for this design."
+  anti_pattern: "Do NOT exhaust all strategies in one iteration. If PBLOCK gives
+                 +0.4ns and subsequent tools show 0 improvement for 3-5 rounds,
+                 signal NEXT_ITERATION, not CONTINUE."
 
 scenarios:
   wide_lut:

@@ -51,6 +51,24 @@ async def save_output_node(
         f"  cost=${state.cost.total_cost:.4f}, llm_calls={state.model.llm_call_count}, elapsed={elapsed:.1f}s"
     ))
 
+    # Print summary to stdout for user visibility (logger goes to stderr/JSON)
+    elapsed_min = elapsed / 60
+    print(f"\n{'='*70}")
+    print(f"Optimization Summary")
+    print(f"{'='*70}")
+    print(f"  Reason:        {state.control.done_reason}")
+    print(f"  Iterations:    {state.iteration.current}")
+    print(f"  Best WNS:      {best}ns")
+    print(f"  Latest WNS:    {latest}ns")
+    if state.cost.total_tokens > 0:
+        print(f"  Tokens:        {state.cost.total_tokens:,} (prompt={state.cost.total_prompt_tokens:,}, completion={state.cost.total_completion_tokens:,})")
+        if state.cost.total_reasoning_tokens > 0:
+            print(f"  Reasoning:     {state.cost.total_reasoning_tokens:,}")
+    print(f"  LLM calls:     {state.model.llm_call_count}")
+    print(f"  Total cost:    ${state.cost.total_cost:.4f}")
+    print(f"  Elapsed:       {elapsed:.1f}s ({elapsed_min:.1f}min)")
+    print(f"{'='*70}\n")
+
     # Check hold timing before final save (competition requirement)
     if state.control.output_dcp and deps.vivado_session:
         try:

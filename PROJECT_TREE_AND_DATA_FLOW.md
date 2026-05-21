@@ -50,6 +50,12 @@ fpl26_optimization_contest/
 ├── LICENSE-APACHE-2.0.txt        # Apache 2.0 许可证
 ├── RapidWright/                  # RapidWright Java 子模块（src/、jars/、python/、data/）
 ├── docs/                         # GitHub Pages 文档站点（benchmarks、FAQ、submission 指南等）
+├── dashboard/                    # Web Dashboard 实时状态监控（aiohttp + WebSocket）
+│   ├── __init__.py               # 导出 start_dashboard, DashboardStateTracer
+│   ├── server.py                 # aiohttp 服务器 + DashboardStateTracer（继承 StateTracer）
+│   ├── serializer.py             # OptimizerState → JSON dict 序列化
+│   └── static/
+│       └── index.html            # 自包含 HTML/CSS/JS 前端（暗色主题，7面板+LLM日志+转换历史）
 ├── context_manager/              # 内存管理模块
 │   ├── __init__.py
 │   ├── manager.py                # MemoryManager - 中心编排，单次_compress()触发
@@ -134,6 +140,29 @@ fpl26_optimization_contest/
 
 **日志功能**: V2测试模式自动将所有控制台输出保存至 `run_dir/v2testmode.log`，使用TeeLogger实现stdout双写。日志文件包含完整的测试执行记录，便于调试和问题排查。
 
+### V2 Web Dashboard（实时状态监控）
+
+- `python dcp_optimizer.py input.dcp --v2 --dashboard` — 启用 Web Dashboard（默认端口 8080）
+- `python dcp_optimizer.py input.dcp --v2 --dashboard --dashboard-port 9090` — 自定义端口
+- 浏览器打开 `http://localhost:8080` 查看实时状态
+
+**架构**:
+```
+NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer）
+                                    │
+                              serialize_state() → asyncio.Queue(maxsize=10)
+                                    │
+                              aiohttp WebSocket handler
+                                    │
+                              Browser（自包含 HTML/CSS/JS 前端）
+```
+
+**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response）、Transition History
+
+**依赖**: `aiohttp>=3.9.0`（通过 `requirements.txt`，`make setup` 自动安装）
+
+**LLM 消息记录**: `ContextState.latest_user_prompt` / `latest_assistant_response` 在 `llm_tool_loop.py` 每次 LLM 调用后更新（截取 2000 字符），Dashboard 实时展示。
+
 ### 状态模型
 ```
 OptimizerState (可变dataclass)
@@ -141,7 +170,7 @@ OptimizerState (可变dataclass)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
 ├── ModelState     — 模型选择/fallback/交接提示词/format_guard_injected
 ├── CostState      — token用量/成本追踪
-├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)
+├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)
 └── ControlState   — 退出条件/路径/step_state
 ```
 
@@ -180,7 +209,7 @@ Post-eval hook（POST_EVAL_TOOLS = {vivado_route_design, rapidwright_execute_fan
 - **条件边**: 纯函数 `state -> next_node_name`，系统决定转换而非LLM
 - **状态追踪**: StateTracer 在每个节点边界记录快照，JSON导出
 - **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
-- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`，并清除 `user_exit_requested` 标志防止死循环
+- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`；`NodeGraph.run()` 循环顶部检查该标志，路由到 `save_output`，并清除 `user_exit_requested` 标志防止死循环。`save_output_node` 通过 `print()` 输出 Optimization Summary（reason/iterations/WNS/tokens/cost/elapsed），`optimize_v2()` 返回前打印最终结果行
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
 - **V2 上下文数据流**: `compress_context()` 从 `OptimizerState`（canonical）读取 `iteration`/`best_wns`/`current_wns`/`clock_period`/`initial_wns`，而非从 `MemoryManager`（shadow）。`failed_strategies` 仍从 `deps.compat` 读取（由 `iteration_end_node` 调用 `record_failure()` 填充）。Dashboard 的 `tools_used` 从 `state.iteration.tools_used` 读取（tool loop 中每次工具执行后 append），不再依赖 `deps.compat.tool_call_details`（V2 中始终为空）。
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`。`_sync_state_to_memory_manager()` 已删除（原实现访问不存在的 `_state` 属性，始终为空操作）。
@@ -394,10 +423,14 @@ inject_context_snapshot_at_end(api_messages):
 ```python
 @dataclass
 class CriticalPathEntry:
-    """Single critical path with cell list."""
+    """Single critical path with cell list and per-path timing detail."""
     cells: list[str]           # Ordered cell names on this path
     path_length: int = 0       # Number of cells
     iteration: int = 0         # When this path was extracted
+    slack: Optional[float] = None        # Per-path slack (ns)
+    logic_delay: Optional[float] = None   # Total logic delay (ns)
+    net_delay: Optional[float] = None     # Total net delay (ns)
+    levels: Optional[int] = None          # Logic levels/depth
 ```
 
 `TimingState` 新增字段：
@@ -411,7 +444,7 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 
 ```
 触发1（被动）: LLM 调用 vivado_extract_critical_path_cells
-  → tool_router 返回 JSON [[cell_name, ...], ...]
+  → tool_router 返回 JSON [{"cells":[...], "slack":-0.493, "logic_delay":1.234, "net_delay":0.759, "levels":5}, ...]
   → llm_tool_loop._update_critical_paths_from_tool() 解析结果
   → pure/critical_path.update_critical_paths() 存入 state.timing.critical_paths
 
@@ -426,15 +459,15 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 **展示位置**：
 | 位置 | 来源 | 限制 |
 |------|------|------|
-| Context Dashboard (2.3.1) | `build_context_snapshot(critical_paths=...)` | top 5, 6 cells/path |
-| Planner Handoff (5.1) | `_generate_planner_handoff()` | top 5, 6 cells/path |
-| Worker Handoff (5.1) | `_generate_worker_handoff()` | top 3, 6 cells/path |
+| Context Dashboard (2.3.1) | `build_context_snapshot(critical_paths=...)` | top 8, 6 cells/path, 含 slack/logic/net/levels |
+| Planner Handoff (5.1) | `_generate_planner_handoff()` | top 5, 6 cells/path, 含 slack |
+| Worker Handoff (5.1) | `_generate_worker_handoff()` | top 3, 6 cells/path, 含 slack |
 
 **纯函数**（`optimizer/pure/critical_path.py`）：
-- `parse_critical_path_cells(result: str) -> list[list[str]]` — 解析 JSON 工具结果
+- `parse_critical_path_cells(result: str) -> list[dict]` — 解析 JSON 工具结果（兼容新旧格式）
 - `update_critical_paths(state, cell_paths, iteration)` — 更新 state，保留 top 10
-- `format_critical_paths_snapshot(critical_paths, limit)` — YAML 格式化（快照用）
-- `format_critical_paths_handoff(critical_paths, limit)` — 纯文本格式化（handoff 用）
+- `format_critical_paths_snapshot(critical_paths, limit)` — YAML 格式化（快照用，含 slack/logic/net/levels）
+- `format_critical_paths_handoff(critical_paths, limit)` — 纯文本格式化（handoff 用，含 slack）
 
 **节流**：仅在 `critical_paths_stale == True` 时触发 auto-refresh，避免冗余 MCP 调用。
 
@@ -817,7 +850,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 
 **语义定义**:
 - `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化（非退出信号）
-- `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽，系统强制执行迭代切换，注入分析引导 + skill推荐 + 强制下一轮先分析再选策略
+- `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽/失败，系统强制执行迭代切换，注入分析引导 + skill推荐 + 强制下一轮先分析再选策略
+- `flow_control: NEXT_ITERATION` = 本轮取得显著改善，当前策略边际收益已趋零，进入下一轮迭代（新上下文 + 模型重评估 + 更新的 critical path 数据）。不记录失败。
 - `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换
 - 真正退出条件 = WNS >= 0
 
@@ -828,6 +862,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | `flow_control: DONE`，WNS>=0 | 退出优化 |
 | 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理） |
 | `flow_control: SWITCH_STRATEGY` | 强制结束迭代 + 记录策略失败 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
+| `flow_control: NEXT_ITERATION` | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
 | 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
 ### 5.4 DONE 优化补丁
@@ -857,13 +892,13 @@ LLM response arrives
    ↓ 未找到
    StepState 保持为空（flow_control=None，纯文本视为 CONTINUE）
    ↓
-2. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY}
+2. 如果 flow_control ∈ {DONE, SWITCH_STRATEGY, NEXT_ITERATION}
    → 跳过工具执行（即使同时有 tool_calls），跳转到 flow_control 处理
    else if tool_calls
    → 正常执行工具
    else （纯文本）
    → 现有纯文本处理逻辑
-3. DONE/SWITCH_STRATEGY 时跳过工具执行
+3. DONE/SWITCH_STRATEGY/NEXT_ITERATION 时跳过工具执行
 ```
 
 **StepState 数据结构**（纯控制信令，无分析字段）：
@@ -872,8 +907,7 @@ LLM response arrives
 class StepState:
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
-    has_tool_calls: bool = False
+    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
 ```
@@ -1058,11 +1092,19 @@ _select_model()检查: worker在耗尽列表则强制planner
 ## 7. 控制台退出
 
 ```
-_user_exit_requested: threading.Event   # 同步退出标志
-_async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼容）
-检查点: optimize()循环开始、get_completion()工具轮次间、LLM调用返回后
-输入"quit"请求优雅退出
-响应延迟: LLM调用完成后立即检查（最多等待LLM调用完成）
+V1:
+  _user_exit_requested: threading.Event   # 同步退出标志
+  _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼容）
+  检查点: optimize()循环开始、get_completion()工具轮次间、LLM调用返回后
+  输入"quit"请求优雅退出
+  响应延迟: LLM调用完成后立即检查（最多等待LLM调用完成）
+
+V2:
+  stdin监听线程: 输入"quit" → state.control.user_exit_requested = True
+  检查点: NodeGraph.run()循环顶部 + llm_tool_loop工具轮次边界
+  路由: user_exit_requested → save_output → end（清除标志防死循环）
+  摘要输出: save_output_node 通过 print() 输出 Optimization Summary 到 stdout
+            optimize_v2() 返回前打印最终结果行（best_wns + converged）
 ```
 
 ## 8. 退出原因
@@ -1076,6 +1118,7 @@ _async_exit_requested: asyncio.Event    # 异步退出标志（与async代码兼
 | `user_requested` | 用户输入quit |
 | `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |
 | `switch_strategy` | LLM返回SWITCH_STRATEGY，系统强制执行迭代切换，下一轮分析后选新策略 |
+| `iteration_success` | LLM返回NEXT_ITERATION，本轮成功改善，进入下一轮继续优化（不记录失败） |
 
 ## 11. DCP验证
 

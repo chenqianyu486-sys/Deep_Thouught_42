@@ -80,6 +80,12 @@ async def llm_tool_loop_node(
         # ── Prepare API messages ──────────────────────────────────
         api_messages = _prepare_api_messages(deps, state)
 
+        # Store latest user prompt for dashboard
+        for msg in reversed(api_messages):
+            if msg.get("role") == "user":
+                state.context.latest_user_prompt = str(msg.get("content", ""))[:2000]
+                break
+
         # ── Call LLM ──────────────────────────────────────────────
         state.model.llm_call_count += 1
         current_model = state.model.current_model
@@ -127,6 +133,8 @@ async def llm_tool_loop_node(
 
         message = response.choices[0].message
         assistant_content = message.content or ""
+        # Store latest assistant response for dashboard
+        state.context.latest_assistant_response = assistant_content[:2000]
 
         # Add assistant message to compat
         if deps.compat is not None:
@@ -173,7 +181,7 @@ async def llm_tool_loop_node(
             flow_signal = "CONTINUE"
 
         # ── Check flow_control before tool execution ──────────────
-        if flow_signal in ("DONE", "SWITCH_STRATEGY", "EXHAUSTED"):
+        if flow_signal in ("DONE", "SWITCH_STRATEGY", "EXHAUSTED", "NEXT_ITERATION"):
             _handle_flow_signal(state, deps, flow_signal, assistant_content)
             return NodeName.ITERATION_END
 
@@ -657,6 +665,13 @@ def _handle_flow_signal(
                 f"DO NOT repeat the same strategy that just failed."
             )
             deps.compat.add_message("user", enforced_msg)
+
+    elif flow_signal == "NEXT_ITERATION":
+        logger.info(green("[llm_tool_loop] LLM signaled NEXT_ITERATION — success, moving to next iteration"))
+        state.control.done_reason = "iteration_success"
+        # No is_done — optimization continues to next iteration.
+        # No failure recording — this iteration was successful.
+        # No forced analysis injection — next iteration gets natural handoff.
 
     elif flow_signal == "EXHAUSTED":
         logger.info(yellow("[llm_tool_loop] LLM signaled EXHAUSTED — all strategies exhausted"))

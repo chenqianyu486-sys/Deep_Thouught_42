@@ -71,7 +71,7 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup build-rapidwright run_optimizer run_optimizer_v1 run_test run_skill_test validate validate_demo validate-submission run-submission clean veryclean help
+.PHONY: setup build-rapidwright run_optimizer run_optimizer_dashboard run_optimizer_v1 run_test run_skill_test validate validate_demo validate-submission run-submission clean veryclean help
 
 # Default target
 help:
@@ -84,25 +84,28 @@ help:
 	@echo "  make validate-submission DCP=fpl26_contest_benchmarks/benchmark1.dcp"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  setup              - Install dependencies, build RapidWright, download example DCPs"
-	@echo "  build-rapidwright  - Build RapidWright from source (git submodule)"
-	@echo "  run_optimizer      - Run optimizer on a DCP file (v2 state-machine, default)"
-	@echo "  run_optimizer_v1   - Run optimizer using v1 legacy message-driven agent"
-	@echo "  run_test           - Run optimizer in test mode (no LLM, hardcoded optimization)"
-	@echo "  run_skill_test     - Run only skill invocation tests (quick, no place/route)"
-	@echo "  run_test_v2        - Run v2 test mode (validate MCP tools/skills, no LLM)"
-	@echo "  run_skill_test_v2  - Run v2 skill-only test (quick validation, no place/route)"
-	@echo "  validate           - Validate functional equivalence between two DCPs"
-	@echo "  validate_demo      - Run validation demo (self-check)"
-	@echo "  validate-submission - Find and validate optimized DCP against original"
-	@echo "  clean              - Remove generated files (run directories, logs, Vivado outputs)"
-	@echo "  veryclean          - Remove all generated files including example DCPs"
+	@echo "  setup                - Install dependencies, build RapidWright, download example DCPs"
+	@echo "  build-rapidwright    - Build RapidWright from source (git submodule)"
+	@echo "  run_optimizer        - Run optimizer on a DCP file (v2 state-machine, default)"
+	@echo "  run_optimizer_dashboard - Run optimizer with web dashboard (real-time monitoring)"
+	@echo "  run_optimizer_v1     - Run optimizer using v1 legacy message-driven agent"
+	@echo "  run_test             - Run optimizer in test mode (no LLM, hardcoded optimization)"
+	@echo "  run_skill_test       - Run only skill invocation tests (quick, no place/route)"
+	@echo "  run_test_v2          - Run v2 test mode (validate MCP tools/skills, no LLM)"
+	@echo "  run_skill_test_v2    - Run v2 skill-only test (quick validation, no place/route)"
+	@echo "  validate             - Validate functional equivalence between two DCPs"
+	@echo "  validate_demo        - Run validation demo (self-check)"
+	@echo "  validate-submission  - Find and validate optimized DCP against original"
+	@echo "  clean                - Remove generated files (run directories, logs, Vivado outputs)"
+	@echo "  veryclean            - Remove all generated files including example DCPs"
 	@echo ""
 	@echo "Usage examples:"
 	@echo "  make setup"
 	@echo "  make setup SKIP_EXAMPLES=1"
 	@echo "  make setup VIVADO_EXEC=/tools/Xilinx/Vivado/2025.1/bin/vivado"
 	@echo "  make run_optimizer DCP=logicnets_jscl.dcp"
+	@echo "  make run_optimizer_dashboard DCP=logicnets_jscl.dcp  # With web dashboard"
+	@echo "  make run_optimizer_dashboard DCP=logicnets_jscl.dcp DASHBOARD_PORT=9090  # Custom port"
 	@echo "  make run_optimizer_v1 DCP=logicnets_jscl.dcp  # Use legacy v1 agent"
 	@echo "  make run_test DCP=logicnets_jscl.dcp"
 	@echo "  make run_test DCP=demo_corundum_25g_misses_timing.dcp MAX_NETS=3"
@@ -121,6 +124,7 @@ help:
 	@echo "  JAVA_HOME            - Java installation directory (auto-detected from PATH if not set)"
 	@echo "  OPENROUTER_API_KEY   - OpenRouter API key (required for run_optimizer, set by organizers)"
 	@echo "  DCP                  - Input DCP file for run_optimizer / run_test targets"
+	@echo "  DASHBOARD_PORT       - HTTP port for web dashboard (default: 8080)"
 	@echo "  MAX_NETS             - Max high fanout nets to optimize in test mode (default: 5)"
 	@echo "  SKIP_SKILLS          - Set to 1 to skip skill invocation tests in test mode"
 	@echo "  SKIP_EXAMPLES        - Set to 1 to skip example DCP downloads in setup"
@@ -336,6 +340,45 @@ run_optimizer:
 	fi; \
 	echo ""; \
 	TIKTOKEN_CACHE_DIR=$(TIKTOKEN_CACHE_DIR) $(PYTHON) dcp_optimizer.py "$(DCP)" --v2
+
+# Run optimizer with web dashboard (v2 state-machine + real-time monitoring)
+DASHBOARD_PORT ?= 8080
+run_optimizer_dashboard:
+	@if [ -z "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
+		echo "Usage: make run_optimizer_dashboard DCP=input.dcp [DASHBOARD_PORT=8080]"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP file not found: $(DCP)$(COLOR_RESET)\n"; \
+		exit 1; \
+	fi
+	@if [ -z "$(OPENROUTER_API_KEY)" ]; then \
+		printf "$(COLOR_RED)Error: OPENROUTER_API_KEY environment variable not set$(COLOR_RESET)\n"; \
+		echo "The contest organizers set this automatically."; \
+		echo "For local testing: export OPENROUTER_API_KEY=your_key"; \
+		exit 1; \
+	fi
+	@printf "$(COLOR_GREEN)Running optimizer with dashboard on $(DCP)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_GREEN)Dashboard: http://localhost:$(DASHBOARD_PORT)$(COLOR_RESET)\n"
+	@# Set up Java from Vivado if Java is not available
+	@if ! command -v java >/dev/null 2>&1; then \
+		printf "$(COLOR_YELLOW)Java not found on PATH, attempting to use Java from Vivado...$(COLOR_RESET)\n"; \
+		VIVADO_PATH=$$(command -v $(VIVADO_EXEC) 2>/dev/null); \
+		if [ -n "$$VIVADO_PATH" ]; then \
+			VIVADO_BIN_DIR=$$(dirname $$VIVADO_PATH); \
+			VIVADO_ROOT=$$(dirname $$VIVADO_BIN_DIR); \
+			VIVADO_JAVA="$$VIVADO_ROOT/tps/lnx64/jre11*/bin/java"; \
+			if ls $$VIVADO_JAVA >/dev/null 2>&1; then \
+				JAVA_FOUND=$$(ls $$VIVADO_JAVA | head -n 1); \
+				export JAVA_HOME=$$(dirname $$(dirname $$JAVA_FOUND)); \
+				export PATH="$$JAVA_HOME/bin:$$PATH"; \
+				printf "$(COLOR_GREEN)Using Java from Vivado: %s$(COLOR_RESET)\n" "$$JAVA_HOME"; \
+			fi; \
+		fi; \
+	fi; \
+	echo ""; \
+	TIKTOKEN_CACHE_DIR=$(TIKTOKEN_CACHE_DIR) $(PYTHON) dcp_optimizer.py "$(DCP)" --v2 --dashboard --dashboard-port $(DASHBOARD_PORT)
 
 # Run optimizer using v1 legacy message-driven agent (no --v2 flag)
 run_optimizer_v1:

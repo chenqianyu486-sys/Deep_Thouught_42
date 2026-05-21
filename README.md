@@ -45,10 +45,33 @@ init_analysis -> [条件: WNS >= 0?]
 | 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
 
+## flow_control Tool 设计
+
+LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_control)` 工具，通过 `flow_control` 字段控制迭代行为。系统在工具执行前检查该信号，决定是继续执行还是退出循环。
+
+**信号语义**:
+
+| 信号 | 含义 | 系统行为 | is_done | 记录失败 |
+|------|------|---------|---------|---------|
+| `CONTINUE` | 当前策略仍在推进 | 继续工具循环 | - | - |
+| `NEXT_ITERATION` | 本轮成功改善，边际收益趋零 | 结束迭代，进入下一轮（新上下文 + 模型重评估） | False | 否 |
+| `SWITCH_STRATEGY` | 当前策略无效/失败 | 结束迭代 + 注入强制分析引导 | False | **是** |
+| `DONE` | WNS >= 0，时序收敛 | 退出优化 | **True** | 否 |
+| `EXHAUSTED` | 所有策略用尽 | 退出优化 | **True** | 否 |
+| `RETRY` / `ROLLBACK` | LLM 级别指导 | 不触发系统动作，继续循环 | - | - |
+
+**设计要点**:
+- `NEXT_ITERATION` 与 `SWITCH_STRATEGY` 的关键区别：前者表示"策略成功但该换轮了"，后者表示"策略失败了"。这避免了 LLM 在一个迭代内穷举所有策略。
+- `DONE` 的安全网：若 LLM 在 WNS < 0 时误用 `DONE`，系统不退出优化，而是以 `done_reason="flow_control_done_next_iteration"` 进入下一轮。
+- 缺失处理：若 LLM 未调用 `report_step_state`，系统自动合成 `CONTINUE` 并注入提示，不因格式疏忽死锁。
+- Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。
+
+详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的 5.3 节。
+
 ## 快速开始
 
 ```bash
-# 环境设置（Java、Vivado、RapidWright）
+# 环境设置（Java、Vivado、RapidWright、aiohttp）
 make setup
 
 # 运行 v2 优化器（默认，状态机驱动）
@@ -60,6 +83,10 @@ make run_optimizer_v1 DCP=input.dcp
 # V2 测试模式（无 LLM，验证工具和 Skill 调用）
 make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
+
+# 启用 Web Dashboard 实时监控（浏览器打开 http://localhost:8080）
+make run_optimizer_dashboard DCP=input.dcp
+make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090  # 自定义端口
 ```
 
 **环境变量**:
@@ -82,6 +109,7 @@ make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
 | `strategy_library.py` | 策略库（9个策略 + 12个 Skill 指导） |
 | `config_loader.py` / `model_config.yaml` | 模型层级与压缩阈值配置 |
 | `validate_dcps.py` | DCP 等价性验证 |
+| `dashboard/` | Web Dashboard 实时状态监控（aiohttp + WebSocket，`--dashboard` 启用） |
 | `docs/` | 竞赛提交文档站点 |
 
 ## 策略库

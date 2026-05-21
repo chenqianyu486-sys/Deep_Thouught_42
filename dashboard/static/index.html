@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FPL26 Optimizer Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #0f0f1a; color: #e0e0e0; font-size: 14px; }
+.header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #1a1a2e; border-bottom: 1px solid #2a2a4a; }
+.header h1 { font-size: 18px; color: #7c8aff; font-weight: 600; }
+.header .status { display: flex; align-items: center; gap: 12px; }
+.status-dot { width: 10px; height: 10px; border-radius: 50%; background: #ff4444; }
+.status-dot.connected { background: #44ff88; }
+.header .time { font-size: 13px; color: #888; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 20px; max-width: 1600px; margin: 0 auto; }
+.panel { background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 8px; padding: 16px; }
+.panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #7c8aff; margin-bottom: 12px; border-bottom: 1px solid #2a2a4a; padding-bottom: 8px; }
+.panel.full-width { grid-column: 1 / -1; }
+
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat { padding: 8px 12px; background: #12122a; border-radius: 6px; }
+.stat .label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+.stat .value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; transition: color 0.3s; }
+.stat .value.positive { color: #44ff88; }
+.stat .value.negative { color: #ff6666; }
+.stat .value.warn { color: #ffaa44; }
+.stat .value.flash { animation: flash 0.5s; }
+@keyframes flash { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+.stat.wide { grid-column: 1 / -1; }
+.stat .sub { font-size: 12px; color: #666; margin-top: 2px; }
+
+.chart-container { width: 100%; height: 120px; margin-top: 8px; }
+canvas { width: 100%; height: 100%; }
+
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin: 2px; }
+.tag.tool { background: #1e2a4a; color: #66aaff; }
+.tag.strategy { background: #2a1e4a; color: #aa88ff; }
+.tag.error { background: #4a1e1e; color: #ff6666; }
+
+.list { max-height: 200px; overflow-y: auto; }
+.list-item { padding: 4px 0; font-size: 13px; border-bottom: 1px solid #1a1a2e; font-family: 'Cascadia Code', 'Fira Code', monospace; }
+
+.llm-log { max-height: 400px; overflow-y: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; line-height: 1.5; }
+.llm-log .section { margin-bottom: 12px; }
+.llm-log .section-title { font-size: 11px; text-transform: uppercase; color: #7c8aff; letter-spacing: 1px; margin-bottom: 4px; position: sticky; top: 0; background: #1a1a2e; padding: 4px 0; }
+.llm-log pre { white-space: pre-wrap; word-break: break-word; color: #ccc; background: #12122a; padding: 8px; border-radius: 4px; max-height: 180px; overflow-y: auto; }
+
+table.transitions { width: 100%; border-collapse: collapse; font-size: 12px; font-family: 'Cascadia Code', 'Fira Code', monospace; }
+table.transitions th { text-align: left; padding: 6px 8px; color: #7c8aff; border-bottom: 1px solid #2a2a4a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; position: sticky; top: 0; background: #1a1a2e; }
+table.transitions td { padding: 4px 8px; border-bottom: 1px solid #12122a; }
+table.transitions tr:hover { background: #12122a; }
+.table-scroll { max-height: 300px; overflow-y: auto; }
+
+.progress-bar { height: 6px; background: #12122a; border-radius: 3px; margin-top: 6px; overflow: hidden; }
+.progress-bar .fill { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.progress-bar .fill.cost { background: linear-gradient(90deg, #44ff88, #ffaa44, #ff4444); }
+
+.scroll-top { position: sticky; top: 0; background: #1a1a2e; z-index: 1; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>FPL26 Optimizer Dashboard</h1>
+  <div class="status">
+    <span class="time" id="clock"></span>
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText" style="font-size:13px">Disconnected</span>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Timing Panel -->
+  <div class="panel" id="timingPanel">
+    <h2>Timing</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">WNS</div>
+        <div class="value" id="wns">--</div>
+        <div class="sub" id="wnsInitial">initial: --</div>
+      </div>
+      <div class="stat">
+        <div class="label">Best WNS</div>
+        <div class="value" id="bestWns">--</div>
+        <div class="sub" id="bestWnsIter">iter: --</div>
+      </div>
+      <div class="stat">
+        <div class="label">TNS</div>
+        <div class="value" id="tns">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Failing Endpoints</div>
+        <div class="value" id="failingEndpoints">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Clock Period</div>
+        <div class="value" id="clockPeriod">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Critical Paths Stale</div>
+        <div class="value" id="cpStale">--</div>
+      </div>
+    </div>
+    <div class="chart-container">
+      <canvas id="wnsChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Iteration Panel -->
+  <div class="panel">
+    <h2>Iteration</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Iteration</div>
+        <div class="value" id="iterCurrent">0</div>
+        <div class="sub" id="iterMax">/ 50</div>
+      </div>
+      <div class="stat">
+        <div class="label">No Improvement</div>
+        <div class="value" id="noImprove">0</div>
+        <div class="sub" id="noImproveLimit">/ 3</div>
+      </div>
+      <div class="stat">
+        <div class="label">Tool Round</div>
+        <div class="value" id="toolRound">0</div>
+        <div class="sub" id="toolRoundMax">/ 80</div>
+      </div>
+      <div class="stat">
+        <div class="label">Tool Errors</div>
+        <div class="value" id="toolErrors">0</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Strategy Sequence</div>
+        <div id="strategySeq" style="margin-top:4px"></div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Tools Used (this iter)</div>
+        <div id="toolsUsed" style="margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model Panel -->
+  <div class="panel">
+    <h2>Model</h2>
+    <div class="stat-grid">
+      <div class="stat wide">
+        <div class="label">Current Model</div>
+        <div class="value" style="font-size:14px" id="currentModel">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Planner</div>
+        <div class="value" style="font-size:12px" id="plannerModel">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Worker</div>
+        <div class="value" style="font-size:12px" id="workerModel">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">LLM Calls</div>
+        <div class="value" id="llmCalls">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Consecutive Success/Fail</div>
+        <div class="value" id="consecStatus">0 / 0</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cost Panel -->
+  <div class="panel">
+    <h2>Cost</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Total Cost</div>
+        <div class="value" id="totalCost">$0.00</div>
+        <div class="sub" id="costLimit">limit: $1.00</div>
+      </div>
+      <div class="stat">
+        <div class="label">Total Tokens</div>
+        <div class="value" id="totalTokens">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Prompt Tokens</div>
+        <div class="value" id="promptTokens">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Completion Tokens</div>
+        <div class="value" id="completionTokens">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Reasoning Tokens</div>
+        <div class="value" id="reasoningTokens">0</div>
+      </div>
+    </div>
+    <div class="progress-bar">
+      <div class="fill cost" id="costBar" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- Control Panel -->
+  <div class="panel">
+    <h2>Control</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Status</div>
+        <div class="value" id="isDone">Running</div>
+        <div class="sub" id="doneReason">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Elapsed</div>
+        <div class="value" id="elapsed">0s</div>
+      </div>
+      <div class="stat">
+        <div class="label">Timeout</div>
+        <div class="value" id="timeout">3600s</div>
+      </div>
+      <div class="stat">
+        <div class="label">Compressions</div>
+        <div class="value" id="compressions">0</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Input DCP</div>
+        <div class="value" style="font-size:11px;word-break:break-all" id="inputDcp">--</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Output DCP</div>
+        <div class="value" style="font-size:11px;word-break:break-all" id="outputDcp">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Critical Paths Panel -->
+  <div class="panel">
+    <h2>Critical Paths</h2>
+    <div class="list" id="criticalPaths"><div style="color:#666">No data yet</div></div>
+  </div>
+
+  <!-- LLM Log Panel -->
+  <div class="panel full-width">
+    <h2>LLM Log (Latest)</h2>
+    <div class="llm-log">
+      <div class="section">
+        <div class="section-title">User Prompt (last)</div>
+        <pre id="llmPrompt">Waiting for LLM call...</pre>
+      </div>
+      <div class="section">
+        <div class="section-title">Assistant Response (last)</div>
+        <pre id="llmResponse">Waiting for LLM response...</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transition History Panel -->
+  <div class="panel full-width">
+    <h2>Transition History</h2>
+    <div class="table-scroll">
+      <table class="transitions">
+        <thead><tr><th>Time</th><th>Node</th><th>Iter</th><th>WNS</th><th>Best WNS</th><th>Model</th><th>Cost</th><th>Duration</th></tr></thead>
+        <tbody id="transitionsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let prevWns = null;
+let wnsHistory = [];
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => {
+    $('statusDot').classList.add('connected');
+    $('statusText').textContent = 'Connected';
+  };
+  ws.onmessage = e => {
+    try { updateDashboard(JSON.parse(e.data)); } catch(err) { console.error('Parse error:', err); }
+  };
+  ws.onclose = () => {
+    $('statusDot').classList.remove('connected');
+    $('statusText').textContent = 'Disconnected — reconnecting...';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+function updateDashboard(d) {
+  if (d.timing) updateTiming(d.timing);
+  if (d.iteration) updateIteration(d.iteration);
+  if (d.model) updateModel(d.model);
+  if (d.cost) updateCost(d.cost);
+  if (d.context) updateContext(d.context);
+  if (d.control) updateControl(d.control);
+  if (d.transitions) updateTransitions(d.transitions);
+  updateClock();
+}
+
+function flashIfChanged(el, newVal) {
+  const old = el.textContent;
+  if (old !== String(newVal)) {
+    el.textContent = newVal;
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 500);
+  }
+}
+
+function formatNum(n, decimals=3) {
+  if (n == null || n === '--') return '--';
+  return Number(n).toFixed(decimals);
+}
+
+function updateTiming(t) {
+  const wns = t.latest_wns;
+  flashIfChanged($('wns'), wns != null ? formatNum(wns) + 'ns' : '--');
+  $('wns').className = 'value ' + (wns != null ? (wns >= 0 ? 'positive' : 'negative') : '');
+
+  const best = t.best_wns;
+  flashIfChanged($('bestWns'), best != null && best !== -Infinity ? formatNum(best) + 'ns' : '--');
+  $('bestWns').className = 'value ' + (best != null && best >= 0 ? 'positive' : (best != null ? 'negative' : ''));
+  $('bestWnsIter').textContent = t.best_wns_iteration != null ? 'iter: ' + t.best_wns_iteration : '--';
+
+  $('wnsInitial').textContent = t.initial_wns != null ? 'initial: ' + formatNum(t.initial_wns) + 'ns' : '--';
+  flashIfChanged($('tns'), t.latest_tns != null ? formatNum(t.latest_tns) + 'ns' : '--');
+  flashIfChanged($('failingEndpoints'), t.latest_failing_endpoints ?? '--');
+  $('clockPeriod').textContent = t.clock_period != null ? formatNum(t.clock_period) + 'ns' : '--';
+  $('cpStale').textContent = t.critical_paths_stale ? 'YES' : 'no';
+  $('cpStale').className = 'value ' + (t.critical_paths_stale ? 'warn' : '');
+
+  // WNS history for chart
+  if (wns != null && wns !== prevWns) {
+    wnsHistory.push(wns);
+    if (wnsHistory.length > 200) wnsHistory.shift();
+    drawWnsChart();
+    prevWns = wns;
+  }
+
+  // Critical paths
+  updateCriticalPaths(t.critical_paths);
+}
+
+function drawWnsChart() {
+  const canvas = $('wnsChart');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  ctx.clearRect(0, 0, W, H);
+
+  if (wnsHistory.length < 2) return;
+
+  const min = Math.min(...wnsHistory);
+  const max = Math.max(...wnsHistory, 0);
+  const range = max - min || 1;
+  const pad = 8;
+
+  // Grid lines
+  ctx.strokeStyle = '#2a2a4a';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + (H - 2*pad) * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W-pad, y); ctx.stroke();
+  }
+
+  // Zero line
+  if (min < 0 && max >= 0) {
+    const zeroY = pad + (H - 2*pad) * (max / range);
+    ctx.strokeStyle = '#44ff8844';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(pad, zeroY); ctx.lineTo(W-pad, zeroY); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Line
+  const n = wnsHistory.length;
+  const stepX = (W - 2*pad) / Math.max(n - 1, 1);
+  ctx.beginPath();
+  ctx.strokeStyle = '#7c8aff';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < n; i++) {
+    const x = pad + i * stepX;
+    const y = pad + (H - 2*pad) * ((max - wnsHistory[i]) / range);
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Dots for recent
+  const start = Math.max(0, n - 20);
+  for (let i = start; i < n; i++) {
+    const x = pad + i * stepX;
+    const y = pad + (H - 2*pad) * ((max - wnsHistory[i]) / range);
+    ctx.beginPath();
+    ctx.arc(x, y, i === n-1 ? 4 : 2, 0, Math.PI*2);
+    ctx.fillStyle = wnsHistory[i] >= 0 ? '#44ff88' : '#ff6666';
+    ctx.fill();
+  }
+}
+
+function updateIteration(it) {
+  flashIfChanged($('iterCurrent'), it.current ?? 0);
+  $('iterMax').textContent = '/ ' + (it.max_iterations ?? 50);
+  flashIfChanged($('noImprove'), it.global_no_improvement ?? 0);
+  $('noImproveLimit').textContent = '/ ' + (it.no_improvement_limit ?? 3);
+  flashIfChanged($('toolRound'), it.tool_round ?? 0);
+  $('toolRoundMax').textContent = '/ ' + (it.max_tool_rounds ?? 80);
+  $('toolErrors').textContent = (it.tool_errors ?? []).length;
+
+  // Strategy sequence
+  const seq = it.strategy_sequence ?? [];
+  $('strategySeq').innerHTML = seq.map(s => `<span class="tag strategy">${esc(s)}</span>`).join('') || '<span style="color:#666">none</span>';
+
+  // Tools used
+  const tools = it.tools_used ?? [];
+  const counts = {};
+  tools.forEach(t => counts[t] = (counts[t]||0)+1);
+  $('toolsUsed').innerHTML = Object.entries(counts).map(([t,c]) =>
+    `<span class="tag tool">${esc(t)}${c>1?' x'+c:''}</span>`
+  ).join('') || '<span style="color:#666">none</span>';
+}
+
+function updateModel(m) {
+  $('currentModel').textContent = m.current_model || '--';
+  $('plannerModel').textContent = m.planner_model || '--';
+  $('workerModel').textContent = m.worker_model || '--';
+  flashIfChanged($('llmCalls'), m.llm_call_count ?? 0);
+  $('consecStatus').textContent = `${m.worker_consecutive_success ?? 0} / ${m.worker_consecutive_failures ?? 0}`;
+}
+
+function updateCost(c) {
+  const cost = c.total_cost ?? 0;
+  const limit = c.cost_hard_limit ?? 1.0;
+  flashIfChanged($('totalCost'), '$' + cost.toFixed(3));
+  $('totalCost').className = 'value ' + (cost > limit * 0.8 ? 'warn' : (cost >= limit ? 'negative' : ''));
+  $('costLimit').textContent = 'limit: $' + limit.toFixed(2);
+  flashIfChanged($('totalTokens'), (c.total_tokens ?? 0).toLocaleString());
+  flashIfChanged($('promptTokens'), (c.total_prompt_tokens ?? 0).toLocaleString());
+  flashIfChanged($('completionTokens'), (c.total_completion_tokens ?? 0).toLocaleString());
+  $('reasoningTokens').textContent = (c.total_reasoning_tokens ?? 0).toLocaleString();
+  $('costBar').style.width = Math.min(100, (cost / limit) * 100) + '%';
+}
+
+function updateContext(cx) {
+  $('compressions').textContent = cx.compression_count ?? 0;
+}
+
+function updateControl(ctrl) {
+  const done = ctrl.is_done;
+  $('isDone').textContent = done ? 'DONE' : 'Running';
+  $('isDone').className = 'value ' + (done ? 'warn' : 'positive');
+  $('doneReason').textContent = ctrl.done_reason ?? '--';
+  const start = ctrl.start_time;
+  if (start) {
+    const end = ctrl.end_time || (Date.now()/1000);
+    $('elapsed').textContent = Math.round(end - start) + 's';
+  }
+  $('timeout').textContent = Math.round(ctrl.wall_clock_timeout ?? 3600) + 's';
+  $('inputDcp').textContent = ctrl.input_dcp ?? '--';
+  $('outputDcp').textContent = ctrl.output_dcp ?? '--';
+}
+
+function updateCriticalPaths(paths) {
+  if (!paths || paths.length === 0) {
+    $('criticalPaths').innerHTML = '<div style="color:#666">No critical paths extracted</div>';
+    return;
+  }
+  $('criticalPaths').innerHTML = paths.map((p, i) => {
+    const cells = (p.cells || []).slice(0, 8).join(' → ');
+    const more = (p.cells || []).length > 8 ? ' ...' : '';
+    return `<div class="list-item">${i+1}. ${esc(cells)}${more} <span style="color:#666">(${p.path_length ?? '?'} cells, iter ${p.iteration ?? '?'})</span></div>`;
+  }).join('');
+}
+
+function updateTransitions(trans) {
+  if (!trans || trans.length === 0) return;
+  const body = $('transitionsBody');
+  // Only render last 50
+  const recent = trans.slice(-50);
+  body.innerHTML = recent.map(t => {
+    const ts = t.timestamp ? new Date(t.timestamp * 1000).toLocaleTimeString() : '--';
+    const wns = t.latest_wns != null ? formatNum(t.latest_wns) : '--';
+    const best = t.best_wns != null && t.best_wns !== -Infinity ? formatNum(t.best_wns) : '--';
+    const dur = t.duration != null ? t.duration.toFixed(1) + 's' : '--';
+    const model = t.model ? t.model.split('/').pop() : '--';
+    const cost = t.total_cost != null ? '$' + t.total_cost.toFixed(3) : '--';
+    return `<tr><td>${ts}</td><td>${esc(t.node)}</td><td>${t.iteration ?? '--'}</td><td>${wns}</td><td>${best}</td><td>${esc(model)}</td><td>${cost}</td><td>${dur}</td></tr>`;
+  }).join('');
+  // Auto-scroll to bottom
+  body.parentElement.parentElement.scrollTop = body.parentElement.parentElement.scrollHeight;
+}
+
+function updateLLMLog(d) {
+  if (d.context) {
+    if (d.context.latest_user_prompt) {
+      $('llmPrompt').textContent = d.context.latest_user_prompt;
+    }
+    if (d.context.latest_assistant_response) {
+      $('llmResponse').textContent = d.context.latest_assistant_response;
+    }
+  }
+}
+
+function updateClock() {
+  $('clock').textContent = new Date().toLocaleTimeString();
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Override updateDashboard to also update LLM log
+const _origUpdate = updateDashboard;
+window.updateDashboard = function(d) {
+  _origUpdate(d);
+  updateLLMLog(d);
+};
+
+connect();
+setInterval(updateClock, 1000);
+</script>
+</body>
+</html>

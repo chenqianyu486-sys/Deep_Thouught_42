@@ -490,59 +490,107 @@ def extract_critical_path_cells(
     timeout: float = 600.0
 ) -> str:
     """
-    Extract cell names from critical timing paths for spread analysis.
-    
-    Parses timing report to get ordered list of cells on each critical path.
+    Extract cell names and per-path timing data from critical timing paths.
+
+    Parses timing report to get ordered list of cells on each critical path,
+    along with slack, logic delay, net delay, and logic levels.
     Output is JSON format that can be passed to RapidWright's analyze_critical_path_spread.
-    
+
     Args:
         num_paths: Number of critical paths to extract
         output_file: Optional path to write JSON output to file instead of returning it
         timeout: Command timeout in seconds
-    
+
     Returns:
-        JSON string with list of paths, or success message if output_file is specified
+        JSON string with list of path dicts, or success message if output_file is specified
     """
     import re
     import json
-    
+
     # Generate detailed timing report
     cmd = f"report_timing -return_string -max_paths {num_paths} -delay_type max -sort_by slack -nworst 1"
-    
+
     try:
         timing_report = run_tcl_command(cmd, timeout=timeout)
     except Exception as e:
         return json.dumps({"error": f"Error generating timing report: {str(e)}"})
-    
+
     # Parse paths
     path_sections = re.split(r'Slack \(', timing_report)
-    
+
+    PIN_SUFFIXES = ('/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
+                    '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6')
+    PIN_RE = re.compile(
+        r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$'
+    )
+    DELAY_RE = re.compile(r'^\s*(\d+\.\d+)\s+(\d+\.\d+)\s+')
+
     all_paths = []
-    
-    for path_idx, path_section in enumerate(path_sections[1:], 1):  # Skip first (header)
+
+    for path_section in path_sections[1:]:  # Skip first (header)
+        # Extract slack from first line: "VIOLATED): -0.493ns" or "MET): 0.025ns"
+        slack = None
+        slack_match = re.search(r'(-?\d+\.\d+)ns', path_section.split('\n')[0])
+        if slack_match:
+            slack = float(slack_match.group(1))
+
+        # Parse data path section (between ---2--- and ---3---)
         cell_names = []
-        
+        logic_delay = 0.0
+        net_delay = 0.0
+        levels = 0
+        in_data_path = False
+        dash_count = 0
+
         for line in path_section.split('\n'):
-            # Match cell instances - look for hierarchical paths
-            if '/' in line and not line.strip().startswith('net'):
-                parts = line.split()
-                for part in parts:
-                    if '/' in part and not part.startswith('('):
-                        # Remove pin suffix (e.g., /C, /D, /O, /Q, /CE, etc.)
-                        cell_path = part
-                        pin_suffixes = ['/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE', 
-                                       '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6']
-                        for suffix in pin_suffixes:
-                            if cell_path.endswith(suffix):
-                                cell_path = cell_path[:-len(suffix)]
-                                break
-                        if cell_path and cell_path not in cell_names:
-                            cell_names.append(cell_path)
-                        break
-        
-        if len(cell_names) >= 2:  # Only include paths with at least 2 cells
-            all_paths.append(cell_names)
-    
+            stripped = line.strip()
+
+            # Detect section boundaries (same as extract_critical_path_pins)
+            if re.match(r'^-{3,}', stripped):
+                dash_count += 1
+                if dash_count <= 2:
+                    continue  # Skip clock launch (---1 to ---2)
+                elif dash_count >= 3:
+                    break  # End of data path
+
+            if dash_count < 2:
+                continue
+            in_data_path = True
+
+            # Parse delay values: "X.XXX  Y.YYY  cell/pin  ..."
+            delay_match = DELAY_RE.match(line)
+            incr_delay = float(delay_match.group(2)) if delay_match else 0.0
+
+            # Classify line: logic (has pin suffix) or net
+            has_pin = False
+            for part in stripped.split():
+                if PIN_RE.match(part):
+                    has_pin = True
+                    # Extract cell name (remove pin suffix)
+                    cell_path = part
+                    for suffix in PIN_SUFFIXES:
+                        if cell_path.endswith(suffix):
+                            cell_path = cell_path[:-len(suffix)]
+                            break
+                    if cell_path and cell_path not in cell_names:
+                        cell_names.append(cell_path)
+                    break
+
+            if has_pin:
+                logic_delay += incr_delay
+                levels += 1
+            elif stripped.startswith('net') or (delay_match and not has_pin):
+                net_delay += incr_delay
+
+        if len(cell_names) >= 2:
+            all_paths.append({
+                "cells": cell_names,
+                "slack": round(slack, 4) if slack is not None else None,
+                "logic_delay": round(logic_delay, 4),
+                "net_delay": round(net_delay, 4),
+                "levels": levels,
+            })
+
     # Write to file if specified, otherwise return JSON
     if output_file:
         try:

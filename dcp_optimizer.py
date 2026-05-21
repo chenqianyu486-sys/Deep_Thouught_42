@@ -7765,6 +7765,8 @@ async def optimize_v2(
     model_worker: str = DEFAULT_MODEL_WORKER,
     wall_clock_timeout: float = 3600.0,
     debug: bool = False,
+    dashboard: bool = False,
+    dashboard_port: int = 8080,
 ) -> bool:
     """State-machine-driven optimizer entry point.
 
@@ -7779,6 +7781,8 @@ async def optimize_v2(
         model_worker: Worker model identifier.
         wall_clock_timeout: Max runtime in seconds.
         debug: Enable verbose logging.
+        dashboard: Enable web dashboard for real-time state monitoring.
+        dashboard_port: HTTP port for the dashboard.
 
     Returns:
         True if timing converged (WNS >= 0), False otherwise.
@@ -8028,7 +8032,14 @@ async def optimize_v2(
         )
 
         # ── Step 8: Build and run graph ───────────────────────────
-        tracer = StateTracer()
+        dashboard_runner = None
+        if dashboard:
+            from dashboard import DashboardStateTracer, start_dashboard
+            tracer = DashboardStateTracer()
+            dashboard_runner = await start_dashboard(state, tracer, port=dashboard_port)
+            logger.info(f"[optimize_v2] Dashboard at http://localhost:{dashboard_port}")
+        else:
+            tracer = StateTracer()
         graph = build_optimizer_graph(tracer=tracer)
 
         # Start stdin listener for graceful quit
@@ -8060,6 +8071,7 @@ async def optimize_v2(
             f"best_wns={final_state.timing.best_wns:.3f}ns, "
             f"converged={converged}"
         )
+        print(f"\n[optimize_v2] Result: best_wns={final_state.timing.best_wns:.3f}ns, converged={converged}")
         return converged
 
     except Exception as e:
@@ -8067,6 +8079,9 @@ async def optimize_v2(
         raise
 
     finally:
+        if dashboard_runner:
+            await dashboard_runner.cleanup()
+            logger.info("[optimize_v2] Dashboard stopped")
         await exit_stack.aclose()
         logger.info("[optimize_v2] MCP sessions closed")
 
@@ -8162,6 +8177,17 @@ Examples:
         "--test-v2-only-skills",
         action="store_true",
         help="Run v2 skill-only test: quick validation of skill invocations without place/route."
+    )
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Enable web dashboard for real-time state monitoring (default port: 8080)."
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8080,
+        help="Dashboard HTTP port (default: 8080). Only used with --dashboard."
     )
 
     args = parser.parse_args()
@@ -8283,6 +8309,8 @@ Examples:
             model_worker=args.model_worker,
             wall_clock_timeout=args.timeout,
             debug=args.debug,
+            dashboard=args.dashboard,
+            dashboard_port=args.dashboard_port,
         )
         sys.exit(0 if success else 1)
 
