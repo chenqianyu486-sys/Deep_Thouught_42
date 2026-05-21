@@ -5,7 +5,7 @@
 
 worker:
   model_tier: "worker"
-  model_name: "google/gemma-4-26b-a4b-it"  # Default worker model name
+  model_name: "qwen/qwen3.5-flash-02-23"  # Default worker model name
   reasoning_enabled: true                     # Enable reasoning/thinking mode for worker
   reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
   max_tokens: 250000
@@ -21,7 +21,7 @@ worker:
   history_retrieval_limit: 8
   history_retrieval_min_importance: 0.5
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
-    - "qwen/qwen3.5-flash-02-23"
+    - "tencent/hy3-preview"
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
