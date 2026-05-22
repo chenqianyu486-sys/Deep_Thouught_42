@@ -309,6 +309,7 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
     for in_pin, out_pin, cell_name in cell_groups:
         cell = design.getCell(cell_name)
         if cell is None:
+            logger.warning("[DIAG] Cell '%s' not found in physical design, skipping", cell_name)
             continue
 
         max_ratio = 0.0
@@ -317,54 +318,71 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
         in_net_detour = None
         out_net_detour = None
 
-        # Analyze incoming net (input pin)
+        # Analyze incoming net (input pin) — use physical SitePinInst to get physical Net
         if in_pin:
             try:
-                hier_port = design.getNetlist().getHierPortInstFromName(f"{cell_name}/{in_pin}")
-                if hier_port:
-                    net = hier_port.getNet()
-                    if net:
-                        # Find the SitePinInst matching this cell's input pin
-                        # (the previous code incorrectly passed source pin to _detour_ratio)
-                        cell_site_pins = cell.getSitePinInsts()
-                        sink_pin_inst = None
-                        for sp in cell_site_pins:
-                            if sp.getNet() == net and sp.getName() == in_pin:
-                                sink_pin_inst = sp
-                                break
+                cell_site_pins = cell.getSitePinInsts()
+                if cell_site_pins:
+                    sink_pin_inst = None
+                    for sp in cell_site_pins:
+                        if sp.getName() == in_pin:
+                            sink_pin_inst = sp
+                            break
 
-                        if sink_pin_inst:
-                            ratio, src_pin_name, sink_pin_name = _detour_ratio(net, sink_pin_inst)
+                    if sink_pin_inst:
+                        physical_net = sink_pin_inst.getNet()
+                        if physical_net:
+                            ratio, src_pin_name, sink_pin_name = _detour_ratio(physical_net, sink_pin_inst)
                             if ratio > max_ratio:
                                 max_ratio = ratio
                                 source_pin_result = src_pin_name
                                 worst_sink_result = sink_pin_name
                             in_net_detour = ratio
                         else:
-                            logger.debug("[DIAG] No matching SitePinInst for %s/%s on net %s",
-                                         cell_name, in_pin, net.getName())
+                            logger.warning("[DIAG] No physical net for input %s/%s", cell_name, in_pin)
+                    else:
+                        pin_names = [str(sp.getName()) for sp in cell_site_pins] if cell_site_pins else []
+                        logger.warning("[DIAG] No SitePinInst matching input %s/%s (available: %s)",
+                                       cell_name, in_pin, pin_names)
+                else:
+                    logger.warning("[DIAG] No SitePinInsts for cell %s", cell_name)
             except Exception:
                 pass
 
-        # Analyze outgoing net (output pin) - check max across all sinks
+        # Analyze outgoing net (output pin) — check max detour across all physical sinks
         if out_pin:
             try:
-                hier_port = design.getNetlist().getHierPortInstFromName(f"{cell_name}/{out_pin}")
-                if hier_port:
-                    net = hier_port.getNet()
-                    if net:
-                        sink_pins = net.getSinkPins()
-                        if sink_pins and sink_pins.size() > 0:
-                            # For output pin, check max detour across all sinks
-                            # Since SitePinInst is the net's source, checking it against
-                            # itself would yield zero, so we iterate over sinks
-                            for sink_p in sink_pins:
-                                ratio, src_pin_name, sink_pin_name = _detour_ratio(net, sink_p)
-                                if ratio > max_ratio:
-                                    max_ratio = ratio
-                                    source_pin_result = src_pin_name
-                                    worst_sink_result = sink_pin_name
-                            out_net_detour = max((_detour_ratio(net, sp)[0] for sp in sink_pins), default=0.0)
+                cell_site_pins = cell.getSitePinInsts()
+                if cell_site_pins:
+                    source_pin_inst = None
+                    for sp in cell_site_pins:
+                        if sp.getName() == out_pin:
+                            source_pin_inst = sp
+                            break
+
+                    if source_pin_inst:
+                        physical_net = source_pin_inst.getNet()
+                        if physical_net:
+                            sink_pins = physical_net.getSinkPins()
+                            if sink_pins and sink_pins.size() > 0:
+                                for sink_p in sink_pins:
+                                    ratio, src_pin_name, sink_pin_name = _detour_ratio(physical_net, sink_p)
+                                    if ratio > max_ratio:
+                                        max_ratio = ratio
+                                        source_pin_result = src_pin_name
+                                        worst_sink_result = sink_pin_name
+                                out_net_detour = max((_detour_ratio(physical_net, sp)[0] for sp in sink_pins), default=0.0)
+                            else:
+                                logger.warning("[DIAG] No sink pins on net %s for cell %s/%s",
+                                               physical_net.getName(), cell_name, out_pin)
+                        else:
+                            logger.warning("[DIAG] No physical net for output %s/%s", cell_name, out_pin)
+                    else:
+                        pin_names = [str(sp.getName()) for sp in cell_site_pins] if cell_site_pins else []
+                        logger.warning("[DIAG] No SitePinInst matching output %s/%s (available: %s)",
+                                       cell_name, out_pin, pin_names)
+                else:
+                    logger.warning("[DIAG] No SitePinInsts for cell %s (output pin)", cell_name)
             except Exception:
                 pass
 
