@@ -37,7 +37,7 @@ fpl26_optimization_contest/
 │   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
-│   │   ├── context_snapshot.py   # build_context_snapshot(phase感知区块过滤)/inject_merged_dashboard(handoff+dashboard合并注入)/PHASE_DASHBOARD_SECTIONS
+│   │   ├── context_snapshot.py   # build_context_snapshot(phase感知区块过滤,含strategy_catalog/skill_guidance)/inject_merged_dashboard/PHASE_DASHBOARD_SECTIONS/STRATEGY_TO_PRIMARY_TOOL
 │   │   ├── handoff.py            # build_handoff_prompt/build_status_signal（精简handoff：trajectory+failed_strategies+exit_reason，WNS/critical paths仅在Dashboard）
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
@@ -427,6 +427,12 @@ build_context_snapshot() 构建纯数据 Dashboard（参数来源：state 直接
       current_phase: EXECUTE_STRATEGY
       current_strategy: PBLOCK
 
+    skill_guidance:
+      tool: rapidwright_execute_pblock_strategy
+      auto_chain: vivado_place_design(unplace) → vivado_create_and_apply_pblock → vivado_place_design → vivado_route_design
+      sequence: report_utilization_for_pblock(Vivado) → analyze_pblock_region(RapidWright) → [auto_chain] → report_timing_summary(Vivado)
+      avoid: vivado_run_tcl — use the tool above instead.
+
     --- End Dashboard ---
     ↓
 inject_context_snapshot_at_end(api_messages):
@@ -457,6 +463,8 @@ inject_context_snapshot_at_end(api_messages):
 - **无持久化**：快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**：从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**：来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`（注意：无 "WNS" 字样，包含工具计数）
+- **`strategy_catalog`**（SELECT_STRATEGY 阶段独占）：当 `show_strategy_catalog=True` 时，在 dashboard 首部注入 `strategy_library.get_strategy_catalog()` 输出，列出全部 9 个策略的名称+触发条件，让 LLM 在选择前看到完整策略空间
+- **`skill_guidance`**（EXECUTE 阶段）：当 `current_strategy` 非空时注入，显示该策略对应的 primary skill 工具名（`STRATEGY_TO_PRIMARY_TOOL` 映射）、`SKILL_CHAIN_ACTIONS` 自动链步骤、`strategy_library.STRATEGIES` 执行序列、以及 `avoid: vivado_run_tcl` 提示，引导 LLM 使用专用 skill 而非 `vivado_run_tcl`
 
 ### 2.3.2 动态 Critical Path 管理
 

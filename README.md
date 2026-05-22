@@ -65,7 +65,7 @@ LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_con
 - `NEXT_ITERATION` 与 `SWITCH_STRATEGY` 的关键区别：前者表示"策略成功但该换轮了"，后者表示"策略失败了"。这避免了 LLM 在一个迭代内穷举所有策略。
 - `DONE` 的安全网：若 LLM 在 WNS < 0 时误用 `DONE`，系统不退出优化，而是以 `done_reason="flow_control_done_next_iteration"` 进入下一轮。
 - 缺失处理：若 LLM 未调用 `report_step_state`，系统自动合成 `CONTINUE` 并注入提示，不因格式疏忽死锁。
-- Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。
+- Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。额外功能区：SELECT_STRATEGY 阶段注入 `strategy_catalog`（全量策略目录+触发条件），EXECUTE 阶段注入 `skill_guidance`（策略→skill 工具映射+auto_chain 指引）。
 
 详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的 5.3 节。
 

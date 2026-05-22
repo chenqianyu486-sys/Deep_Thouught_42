@@ -20,6 +20,19 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_HEADER = "--- Optimization Dashboard ---"
 
+# Map strategy names → primary skill tool names for skill_guidance.
+STRATEGY_TO_PRIMARY_TOOL: dict[str, str] = {
+    "PBLOCK": "rapidwright_execute_pblock_strategy",
+    "PhysOpt": "vivado_phys_opt_design",
+    "Fanout": "rapidwright_execute_fanout_strategy",
+    "PinSwap": "rapidwright_optimize_pin_swapping",
+    "LUTCascade": "rapidwright_flatten_lut_cascade",
+    "CellReplication": "rapidwright_replicate_critical_cells",
+    "CongestionSpreading": "rapidwright_execute_congestion_spreading",
+    "RegisterRetiming": "rapidwright_execute_register_retiming",
+    "NetSwap": "rapidwright_execute_net_swapping",
+}
+
 # Phase-aware section filters: which sections to show for each phase.
 PHASE_DASHBOARD_SECTIONS: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
@@ -61,12 +74,14 @@ def build_context_snapshot(
     evaluation_result: str = "",
     phase: LoopPhase | None = None,
     handoff_summary: str = "",
+    show_strategy_catalog: bool = False,
 ) -> str:
     """Build a phase-aware data dashboard.
 
     Args:
         phase: Current LoopPhase. Controls which sections are shown.
         handoff_summary: Text from PhaseHandoff.to_phase_context_string().
+        show_strategy_catalog: If True, inject strategy catalog from strategy_library.
         All other args: same as before, data values for the dashboard.
 
     Returns:
@@ -79,6 +94,19 @@ def build_context_snapshot(
     phase_label = phase.value.upper() if phase else ""
     lines.append(f"[{phase_label} — Context & Dashboard]")
     lines.append("")
+
+    # ── Strategy catalog (SELECT_STRATEGY phase only) ─────────────
+    if show_strategy_catalog:
+        try:
+            from strategy_library import get_strategy_catalog as _get_catalog
+            catalog = _get_catalog()
+            if catalog:
+                lines.append("strategy_catalog:")
+                for line in catalog.strip().split("\n"):
+                    lines.append(f"  {line}")
+                lines.append("")
+        except Exception as e:
+            logger.debug(f"[context_snapshot] strategy_catalog unavailable: {e}")
 
     # ── Handoff summary (from previous phase) ─────────────────────
     if handoff_summary:
@@ -169,6 +197,48 @@ def build_context_snapshot(
             if evaluation_result and evaluation_result != "PENDING":
                 lines.append(f"  evaluation: {evaluation_result}")
         lines.append("")
+
+    # ── Skill guidance (EXECUTE phase) ──────────────────────────
+    if current_strategy:
+        try:
+            from strategy_library import STRATEGIES as _STRATEGIES
+            from .constants import SKILL_CHAIN_ACTIONS as _CHAIN_ACTIONS
+
+            tool = STRATEGY_TO_PRIMARY_TOOL.get(current_strategy)
+            if tool:
+                lines.append("skill_guidance:")
+                lines.append(f"  tool: {tool}")
+
+                # Auto-chain info
+                chain = _CHAIN_ACTIONS.get(tool)
+                if chain:
+                    chain_steps = []
+                    for a in chain:
+                        args = a.get("args", {})
+                        args_from = a.get("args_from_skill", {})
+                        step = a["tool"]
+                        if args:
+                            arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
+                            step += f"({arg_str})"
+                        if args_from:
+                            step += f"<{', '.join(args_from.keys())}>"
+                        chain_steps.append(step)
+                    lines.append(f"  auto_chain: {' → '.join(chain_steps)}")
+
+                # Sequence from strategy_library
+                strat = _STRATEGIES.get(current_strategy)
+                if strat and "sequence" in strat:
+                    seq_steps = []
+                    for s in strat["sequence"]:
+                        step = s["step"]
+                        platform = s.get("platform", "")
+                        seq_steps.append(f"{step}({platform})" if platform else step)
+                    lines.append(f"  sequence: {' → '.join(seq_steps)}")
+
+                # Anti-guidance for vivado_run_tcl
+                lines.append("  avoid: vivado_run_tcl — use the tool above instead.")
+        except Exception as e:
+            logger.debug(f"[context_snapshot] skill_guidance unavailable: {e}")
 
     lines.append("--- End Dashboard ---")
     return "\n".join(lines)
@@ -336,6 +406,7 @@ def inject_merged_dashboard(
         evaluation_result=state.strategy.evaluation_result,
         phase=phase,
         handoff_summary=state.strategy.last_handoff_text,
+        show_strategy_catalog=(phase == LoopPhase.SELECT_STRATEGY),
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)
