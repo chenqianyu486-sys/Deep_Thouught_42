@@ -175,6 +175,17 @@ class FlowControlRecord:
 
 
 @dataclass
+class LLMCallRecord:
+    """Single LLM call record for Dashboard history display."""
+    timestamp: float = 0.0
+    phase: str = ""            # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    model: str = ""
+    iteration: int = 0
+    user_prompt: str = ""
+    assistant_response: str = ""
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -183,6 +194,8 @@ class ContextState:
     # LLM message log for dashboard (not used by compression logic)
     latest_user_prompt: str = ""
     latest_assistant_response: str = ""
+    llm_call_history: list[LLMCallRecord] = field(default_factory=list)
+    llm_call_history_max: int = 50
     # Tool call trace for dashboard (bounded FIFO)
     tool_call_trace: list[ToolCallRecord] = field(default_factory=list)
     tool_call_trace_max: int = 100

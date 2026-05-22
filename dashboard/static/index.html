@@ -289,15 +289,19 @@ table.transitions tr:hover { background: #12122a; }
 
   <!-- LLM Log Panel -->
   <div class="panel full-width">
-    <h2>LLM Log (Latest)</h2>
+    <h2>LLM Log</h2>
     <div class="llm-log">
       <div class="section">
-        <div class="section-title">User Prompt (last)</div>
+        <div class="section-title">User Prompt (latest)</div>
         <pre id="llmPrompt">Waiting for LLM call...</pre>
       </div>
       <div class="section">
-        <div class="section-title">Assistant Response (last)</div>
+        <div class="section-title">Assistant Response (latest)</div>
         <pre id="llmResponse">Waiting for LLM response...</pre>
+      </div>
+      <div class="section">
+        <div class="section-title">Call History</div>
+        <div id="llmCallHistory" style="max-height:300px;overflow-y:auto;font-size:12px;color:#aaa;">No calls yet</div>
       </div>
     </div>
   </div>
@@ -407,6 +411,7 @@ function updateDashboard(d) {
   if (d.strategy) updateStrategy(d.strategy);
   if (d.transitions) updateTransitions(d.transitions);
   if (d.context) updateLLMLog(d);
+  if (d.context && d.context.llm_call_history) updateLLMCallHistory(d);
   updateToolTrace(d);
   updateTrajectory(d);
   updateClock();
@@ -655,6 +660,26 @@ function updateLLMLog(d) {
       $('llmResponse').textContent = d.context.latest_assistant_response;
     }
   }
+}
+
+function updateLLMCallHistory(d) {
+  var history = d.context && d.context.llm_call_history;
+  if (!history || !history.length) return;
+  var container = $('llmCallHistory');
+  container.innerHTML = history.map(function(rec) {
+    var ts = new Date(rec.timestamp * 1000).toLocaleTimeString();
+    var model = (rec.model || '').split('/').pop() || '--';
+    return '<div style="border-bottom:1px solid #2a2a4a;padding:6px 0;">' +
+      '<div style="display:flex;gap:10px;color:#7c8aff;margin-bottom:4px;font-size:11px;">' +
+        '<span>' + esc(rec.phase) + '</span>' +
+        '<span>' + esc(model) + '</span>' +
+        '<span>iter ' + (rec.iteration ?? 0) + '</span>' +
+        '<span>' + ts + '</span>' +
+      '</div>' +
+      '<details><summary style="cursor:pointer;color:#888;font-size:12px;">Prompt</summary><pre style="margin-top:4px;max-height:150px;overflow-y:auto;">' + esc((rec.user_prompt || '').slice(0, 500)) + '</pre></details>' +
+      '<details><summary style="cursor:pointer;color:#888;font-size:12px;">Response</summary><pre style="margin-top:4px;max-height:150px;overflow-y:auto;">' + esc(rec.assistant_response || '') + '</pre></details>' +
+    '</div>';
+  }).join('');
 }
 
 function updateToolTrace(d) {

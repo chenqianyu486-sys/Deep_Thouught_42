@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry
+from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord
 from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
@@ -51,6 +51,16 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         message = response.choices[0].message
         assistant_content = message.content or ""
         state.context.latest_assistant_response = assistant_content[:2000]
+        state.context.llm_call_history.append(LLMCallRecord(
+            timestamp=time.time(),
+            phase=state.strategy.current_phase,
+            model=state.model.current_model,
+            iteration=state.iteration.current,
+            user_prompt=state.context.latest_user_prompt,
+            assistant_response=assistant_content[:2000],
+        ))
+        if len(state.context.llm_call_history) > state.context.llm_call_history_max:
+            state.context.llm_call_history = state.context.llm_call_history[-state.context.llm_call_history_max:]
 
         if deps.compat is not None:
             metadata = {"tool_calls": message.tool_calls} if message.tool_calls else None
@@ -196,6 +206,17 @@ async def _call_phase_llm(state, deps, phase_tools):
         )
         if extra_body:
             kwargs["extra_body"] = extra_body
+        # Log prompt for observability
+        if deps.prompt_logger:
+            deps.prompt_logger.log_prompt(
+                model=model,
+                messages=api_messages,
+                iteration=state.iteration.current,
+                job_id=state.control.run_dir.name if state.control.run_dir else ""
+            )
+        state.context.latest_user_prompt = (
+            api_messages[-1].get("content", "") if api_messages else ""
+        )[:2000]
         return await deps.openai_client.chat.completions.create(**kwargs)
     except Exception as e:
         logger.error(f"[SELECT_STRATEGY] LLM call failed: {e}")
