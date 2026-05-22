@@ -2,7 +2,7 @@
 
 基于 LLM Agent 的 FPGA EDA 全流程优化系统，参赛 FPL 2026 优化竞赛。
 
-通过 LLM（DeepSeek V4 Flash）编排 Vivado 和 RapidWright 工具链，自动执行 P&R 优化策略（PBLOCK、PhysOpt、Fanout 优化等），迭代逼近时序收敛目标（WNS >= 0）。
+通过 LLM（DeepSeek V4 Flash）编排 Vivado 和 RapidWright 工具链，自动执行 P&R 优化策略（PBLOCK、PhysOpt、Fanout 优化等），迭代逼近时序收敛目标（WNS >= 0）。**所有优化均保证输出 DCP 与原设计逻辑等效** — 通过 `validate_dcps.py` 的两阶段验证（结构对比 + 功能仿真）确保优化不改变设计行为。
 
 ## 架构概述
 
@@ -44,6 +44,7 @@ init_analysis -> [条件: WNS >= 0?]
 | 8 | 领域知识编码 | 9 个策略 + 触发条件，系统呈现可用选项，LLM 自主选择 |
 | 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
+| 11 | **逻辑等效硬约束** | 所有优化操作（retiming、replication、pin swap 等）不得改变设计功能。输出 DCP 需通过 `validate_dcps.py` 两阶段验证 |
 
 ## flow_control Tool 设计
 
@@ -138,7 +139,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 | `VivadoMCP/` | Vivado MCP 服务器 |
 | `strategy_library.py` | 策略库（9个策略 + 12个 Skill 指导） |
 | `config_loader.py` / `model_config.yaml` | 模型层级与压缩阈值配置 |
-| `validate_dcps.py` | DCP 等价性验证 |
+| `validate_dcps.py` | DCP 逻辑等价性验证（两阶段：Phase 1 结构对比 + Phase 2 功能仿真，硬约束） |
 | `dashboard/` | Web Dashboard 实时状态监控（aiohttp + WebSocket，`--dashboard` 启用） |
 | `docs/` | 竞赛提交文档站点 |
 

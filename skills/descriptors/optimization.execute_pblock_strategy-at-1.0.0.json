@@ -1,0 +1,74 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.execute_pblock_strategy@1.0.0",
+  "displayName": "Execute PBLOCK Full Strategy",
+  "description": "Complete PBLOCK workflow: analyze FPGA fabric, compute optimal region, and return pblock_ranges for automatic Vivado tool chaining. MUTATING (via chained Vivado tools). Side effects: cell placement changes, routing changes (via chain). Trigger: avg_distance > 70 tiles (distributed design), or recommendation == 'PBLOCK'. ORDERING: For distributed designs (avg_distance > 70), run this BEFORE fanout optimization. The system will automatically chain place_design -unplace, create_and_apply_pblock, place_design, route_design, and report_timing_summary after this skill returns. Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts. NOTE: resource_multiplier defaults to 1.2x for tighter regions. CONSTRAINTS: Only proceed if capacity_ok is true in the result.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "cell_placement",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 120000,
+    "maxMs": 240000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "target_lut_count": {
+        "type": "integer",
+        "description": "Current LUT usage from vivado_report_utilization_for_pblock"
+      },
+      "target_ff_count": {
+        "type": "integer",
+        "description": "Current FF usage from vivado_report_utilization_for_pblock"
+      },
+      "target_dsp_count": {
+        "type": "integer",
+        "description": "Current DSP usage",
+        "default": 0
+      },
+      "target_bram_count": {
+        "type": "integer",
+        "description": "Current BRAM usage",
+        "default": 0
+      },
+      "resource_multiplier": {
+        "type": "number",
+        "description": "Buffer multiplier for resource targets. Default 1.2x for tighter regions.",
+        "default": 1.2
+      }
+    },
+    "required": [
+      "target_lut_count",
+      "target_ff_count"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

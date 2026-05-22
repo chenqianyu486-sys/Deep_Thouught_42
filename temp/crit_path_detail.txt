@@ -1,0 +1,219 @@
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved. Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+| Tool Version      : Vivado v.2025.1 (lin64) Build 6140274 Wed May 21 22:58:25 MDT 2025
+| Date              : Fri May 22 16:55:04 2026
+| Host              : Refrain running 64-bit Ubuntu 24.04.4 LTS
+| Command           : report_timing -max_paths 3 -nworst 1 -delay_type max -input_pins -path_type full_clock -file /home/qianyu/fpl26_optimization_contest/temp/crit_path_detail.txt
+| Design            : logicnet
+| Device            : xcvu3p-ffvc1517
+| Speed File        : -2  PRODUCTION 1.28 03-30-2022
+| Design State      : Physopt postRoute
+| Temperature Grade : E
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Timing Report
+
+Slack (VIOLATED) :        -0.495ns  (required time - arrival time)
+  Source:                 layer0_reg/data_out_reg[12]/C
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Destination:            layer1_reg/data_out_reg[21]_rep__1/D
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Path Group:             clk
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            1.500ns  (clk rise@1.500ns - clk rise@0.000ns)
+  Data Path Delay:        1.974ns  (logic 0.596ns (30.186%)  route 1.378ns (69.814%))
+  Logic Levels:           5  (LUT5=1 LUT6=2 MUXF7=2)
+  Clock Path Skew:        -0.010ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.020ns = ( 1.520 - 1.500 ) 
+    Source Clock Delay      (SCD):    0.030ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.035ns  ((TSJ^2 + TIJ^2)^1/2 + DJ) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.000ns
+    Discrete Jitter          (DJ):    0.000ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    PBlock               Netlist Resource(s)
+  -------------------------------------------------------------------    ----------------------------------------
+                         (clock clk rise edge)        0.000     0.000 r                       
+                                                      0.000     0.000 r                       clk (IN)
+                         net (fo=1657, unset)         0.030     0.030                         layer0_reg/clk
+    SLICE_X127Y188       FDRE                                         r  pblock_tight         layer0_reg/data_out_reg[12]/C
+  -------------------------------------------------------------------    ----------------------------------------
+    SLICE_X127Y188       FDRE (Prop_FFF_SLICEM_C_Q)
+                                                      0.076     0.106 r  pblock_tight         layer0_reg/data_out_reg[12]/Q
+                         net (fo=182, routed)         0.310     0.416                         layer0_inst/layer0_N7_inst/M0w[0]
+    SLICE_X128Y186                                                    r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_39/I0
+    SLICE_X128Y186       LUT6 (Prop_F6LUT_SLICEL_I0_O)
+                                                      0.123     0.539 r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_39/O
+                         net (fo=1, routed)           0.142     0.681                         layer0_inst/layer0_N7_inst/data_out[21]_i_39_n_0
+    SLICE_X128Y189                                                    r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_15/I2
+    SLICE_X128Y189       LUT5 (Prop_A6LUT_SLICEL_I2_O)
+                                                      0.124     0.805 r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_15/O
+                         net (fo=1, routed)           0.009     0.814                         layer0_inst/layer0_N7_inst/data_out[21]_i_15_n_0
+    SLICE_X128Y189                                                    r  pblock_tight         layer0_inst/layer0_N7_inst/data_out_reg[21]_i_5/I1
+    SLICE_X128Y189       MUXF7 (Prop_F7MUX_AB_SLICEL_I1_O)
+                                                      0.064     0.878 r  pblock_tight         layer0_inst/layer0_N7_inst/data_out_reg[21]_i_5/O
+                         net (fo=1, routed)           0.197     1.075                         layer0_inst/layer0_N7_inst/data_out_reg[21]_i_5_n_0
+    SLICE_X128Y189                                                    r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_2/I1
+    SLICE_X128Y189       LUT6 (Prop_D6LUT_SLICEL_I1_O)
+                                                      0.146     1.221 r  pblock_tight         layer0_inst/layer0_N7_inst/data_out[21]_i_2/O
+                         net (fo=1, routed)           0.009     1.230                         layer0_inst/layer0_N7_inst/data_out[21]_i_2_n_0
+    SLICE_X128Y189                                                    r  pblock_tight         layer0_inst/layer0_N7_inst/data_out_reg[21]_i_1/I0
+    SLICE_X128Y189       MUXF7 (Prop_F7MUX_CD_SLICEL_I0_O)
+                                                      0.063     1.293 r  pblock_tight         layer0_inst/layer0_N7_inst/data_out_reg[21]_i_1/O
+                         net (fo=4, routed)           0.711     2.004                         layer1_reg/M1[21]
+    SLICE_X128Y140       FDRE                                         r  pblock_tight         layer1_reg/data_out_reg[21]_rep__1/D
+  -------------------------------------------------------------------    ----------------------------------------
+
+                         (clock clk rise edge)        1.500     1.500 r                       
+                                                      0.000     1.500 r                       clk (IN)
+                         net (fo=1657, unset)         0.020     1.520                         layer1_reg/clk
+    SLICE_X128Y140       FDRE                                         r  pblock_tight         layer1_reg/data_out_reg[21]_rep__1/C
+                         clock pessimism              0.000     1.520                           
+                         clock uncertainty           -0.035     1.485                           
+    SLICE_X128Y140       FDRE (Setup_AFF_SLICEL_C_D)
+                                                      0.025     1.510    pblock_tight           layer1_reg/data_out_reg[21]_rep__1
+  -------------------------------------------------------------------
+                         required time                          1.510                           
+                         arrival time                          -2.004                           
+  -------------------------------------------------------------------
+                         slack                                 -0.495                           
+
+Slack (VIOLATED) :        -0.495ns  (required time - arrival time)
+  Source:                 layer1_reg/data_out_reg[73]/C
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Destination:            layer2_reg/data_out_reg[183]_rep__0/D
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Path Group:             clk
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            1.500ns  (clk rise@1.500ns - clk rise@0.000ns)
+  Data Path Delay:        1.976ns  (logic 0.454ns (22.974%)  route 1.522ns (77.026%))
+  Logic Levels:           5  (LUT5=1 LUT6=2 MUXF7=2)
+  Clock Path Skew:        -0.008ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.020ns = ( 1.520 - 1.500 ) 
+    Source Clock Delay      (SCD):    0.028ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.035ns  ((TSJ^2 + TIJ^2)^1/2 + DJ) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.000ns
+    Discrete Jitter          (DJ):    0.000ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    PBlock               Netlist Resource(s)
+  -------------------------------------------------------------------    ----------------------------------------
+                         (clock clk rise edge)        0.000     0.000 r                       
+                                                      0.000     0.000 r                       clk (IN)
+                         net (fo=1657, unset)         0.028     0.028                         layer1_reg/clk
+    SLICE_X132Y147       FDRE                                         r  pblock_tight         layer1_reg/data_out_reg[73]/C
+  -------------------------------------------------------------------    ----------------------------------------
+    SLICE_X132Y147       FDRE (Prop_AFF_SLICEL_C_Q)
+                                                      0.079     0.107 r  pblock_tight         layer1_reg/data_out_reg[73]/Q
+                         net (fo=133, routed)         0.365     0.472                         layer1_inst/layer1_N61_inst/M1w[73]_alias
+    SLICE_X128Y142                                                    r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_16/I4
+    SLICE_X128Y142       LUT6 (Prop_A6LUT_SLICEL_I4_O)
+                                                      0.098     0.570 r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_16/O
+                         net (fo=3, routed)           0.292     0.862                         layer1_inst/layer1_N61_inst/data_out[183]_i_16_n_0
+    SLICE_X124Y136                                                    r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_10/I0
+    SLICE_X124Y136       LUT6 (Prop_D6LUT_SLICEL_I0_O)
+                                                      0.099     0.961 r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_10/O
+                         net (fo=1, routed)           0.009     0.970                         layer1_inst/layer1_N61_inst/data_out[183]_i_10_n_0
+    SLICE_X124Y136                                                    r  pblock_tight         layer1_inst/layer1_N61_inst/data_out_reg[183]_i_5/I0
+    SLICE_X124Y136       MUXF7 (Prop_F7MUX_CD_SLICEL_I0_O)
+                                                      0.063     1.033 r  pblock_tight         layer1_inst/layer1_N61_inst/data_out_reg[183]_i_5/O
+                         net (fo=1, routed)           0.177     1.210                         layer1_inst/layer1_N61_inst/data_out_reg[183]_i_5_n_0
+    SLICE_X124Y136                                                    r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_2/I2
+    SLICE_X124Y136       LUT5 (Prop_H6LUT_SLICEL_I2_O)
+                                                      0.051     1.261 r  pblock_tight         layer1_inst/layer1_N61_inst/data_out[183]_i_2/O
+                         net (fo=1, routed)           0.010     1.271                         layer1_inst/layer1_N61_inst/data_out[183]_i_2_n_0
+    SLICE_X124Y136                                                    r  pblock_tight         layer1_inst/layer1_N61_inst/data_out_reg[183]_i_1/I0
+    SLICE_X124Y136       MUXF7 (Prop_F7MUX_GH_SLICEL_I0_O)
+                                                      0.064     1.335 r  pblock_tight         layer1_inst/layer1_N61_inst/data_out_reg[183]_i_1/O
+                         net (fo=3, routed)           0.669     2.004                         layer2_reg/M2[182]
+    SLICE_X124Y83        FDRE                                         r  pblock_tight         layer2_reg/data_out_reg[183]_rep__0/D
+  -------------------------------------------------------------------    ----------------------------------------
+
+                         (clock clk rise edge)        1.500     1.500 r                       
+                                                      0.000     1.500 r                       clk (IN)
+                         net (fo=1657, unset)         0.020     1.520                         layer2_reg/clk
+    SLICE_X124Y83        FDRE                                         r  pblock_tight         layer2_reg/data_out_reg[183]_rep__0/C
+                         clock pessimism              0.000     1.520                           
+                         clock uncertainty           -0.035     1.485                           
+    SLICE_X124Y83        FDRE (Setup_HFF2_SLICEL_C_D)
+                                                      0.025     1.510    pblock_tight           layer2_reg/data_out_reg[183]_rep__0
+  -------------------------------------------------------------------
+                         required time                          1.510                           
+                         arrival time                          -2.004                           
+  -------------------------------------------------------------------
+                         slack                                 -0.495                           
+
+Slack (VIOLATED) :        -0.493ns  (required time - arrival time)
+  Source:                 layer0_reg/data_out_reg[54]_rep__0/C
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Destination:            layer1_reg/data_out_reg[63]_rep/D
+                            (rising edge-triggered cell FDRE clocked by clk  {rise@0.000ns fall@0.750ns period=1.500ns})
+  Path Group:             clk
+  Path Type:              Setup (Max at Slow Process Corner)
+  Requirement:            1.500ns  (clk rise@1.500ns - clk rise@0.000ns)
+  Data Path Delay:        1.972ns  (logic 0.524ns (26.566%)  route 1.448ns (73.434%))
+  Logic Levels:           5  (LUT6=3 MUXF7=1 MUXF8=1)
+  Clock Path Skew:        -0.010ns (DCD - SCD + CPR)
+    Destination Clock Delay (DCD):    0.020ns = ( 1.520 - 1.500 ) 
+    Source Clock Delay      (SCD):    0.030ns
+    Clock Pessimism Removal (CPR):    0.000ns
+  Clock Uncertainty:      0.035ns  ((TSJ^2 + TIJ^2)^1/2 + DJ) / 2 + PE
+    Total System Jitter     (TSJ):    0.071ns
+    Total Input Jitter      (TIJ):    0.000ns
+    Discrete Jitter          (DJ):    0.000ns
+    Phase Error              (PE):    0.000ns
+
+    Location             Delay type                Incr(ns)  Path(ns)    PBlock               Netlist Resource(s)
+  -------------------------------------------------------------------    ----------------------------------------
+                         (clock clk rise edge)        0.000     0.000 r                       
+                                                      0.000     0.000 r                       clk (IN)
+                         net (fo=1657, unset)         0.030     0.030                         layer0_reg/clk
+    SLICE_X125Y185       FDRE                                         r  pblock_tight         layer0_reg/data_out_reg[54]_rep__0/C
+  -------------------------------------------------------------------    ----------------------------------------
+    SLICE_X125Y185       FDRE (Prop_AFF_SLICEM_C_Q)
+                                                      0.077     0.107 r  pblock_tight         layer0_reg/data_out_reg[54]_rep__0/Q
+                         net (fo=67, routed)          0.504     0.611                         layer0_inst/layer0_N21_inst/data_out[63]_i_15_0
+    SLICE_X127Y174                                                    r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_i_43/I1
+    SLICE_X127Y174       LUT6 (Prop_H6LUT_SLICEM_I1_O)
+                                                      0.152     0.763 r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_i_43/O
+                         net (fo=1, routed)           0.097     0.860                         layer0_inst/layer0_N21_inst/data_out[63]_i_43_n_0
+    SLICE_X126Y174                                                    r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_i_19/I1
+    SLICE_X126Y174       LUT6 (Prop_D6LUT_SLICEL_I1_O)
+                                                      0.122     0.982 r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_i_19/O
+                         net (fo=1, routed)           0.009     0.991                         layer0_inst/layer0_N21_inst/data_out[63]_i_19_n_0
+    SLICE_X126Y174                                                    r  pblock_tight         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_8/I0
+    SLICE_X126Y174       MUXF7 (Prop_F7MUX_CD_SLICEL_I0_O)
+                                                      0.056     1.047 r  pblock_tight         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_8/O
+                         net (fo=1, routed)           0.000     1.047                         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_8_n_0
+    SLICE_X126Y174                                                    r  pblock_tight         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_3/I0
+    SLICE_X126Y174       MUXF8 (Prop_F8MUX_BOT_SLICEL_I0_O)
+                                                      0.026     1.073 r  pblock_tight         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_3/O
+                         net (fo=6, routed)           0.225     1.298                         layer0_inst/layer0_N21_inst/data_out_reg[63]_i_3_n_0
+    SLICE_X127Y174                                                    r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_rep_i_1/I1
+    SLICE_X127Y174       LUT6 (Prop_E6LUT_SLICEM_I1_O)
+                                                      0.091     1.389 r  pblock_tight         layer0_inst/layer0_N21_inst/data_out[63]_rep_i_1/O
+                         net (fo=1, routed)           0.613     2.002                         layer1_reg/data_out_reg[63]_rep_1
+    SLICE_X128Y128       FDRE                                         r  pblock_tight         layer1_reg/data_out_reg[63]_rep/D
+  -------------------------------------------------------------------    ----------------------------------------
+
+                         (clock clk rise edge)        1.500     1.500 r                       
+                                                      0.000     1.500 r                       clk (IN)
+                         net (fo=1657, unset)         0.020     1.520                         layer1_reg/clk
+    SLICE_X128Y128       FDRE                                         r  pblock_tight         layer1_reg/data_out_reg[63]_rep/C
+                         clock pessimism              0.000     1.520                           
+                         clock uncertainty           -0.035     1.485                           
+    SLICE_X128Y128       FDRE (Setup_EFF_SLICEL_C_D)
+                                                      0.025     1.510    pblock_tight           layer1_reg/data_out_reg[63]_rep
+  -------------------------------------------------------------------
+                         required time                          1.510                           
+                         arrival time                          -2.002                           
+  -------------------------------------------------------------------
+                         slack                                 -0.493                           
+
+
+
+

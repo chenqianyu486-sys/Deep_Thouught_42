@@ -323,6 +323,39 @@ table.transitions tr:hover { background: #12122a; }
     </div>
   </div>
 
+  <!-- WNS Trajectory Panel -->
+  <div class="panel full-width">
+    <h2>WNS Trajectory (per iteration)</h2>
+    <div class="table-scroll">
+      <table class="transitions">
+        <thead><tr><th>Iter</th><th>WNS Before</th><th>WNS After</th><th>Delta</th><th>Strategy</th><th>Outcome</th><th>Model</th><th>Tools</th></tr></thead>
+        <tbody id="trajectoryWnsBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Flow Control Log Panel -->
+  <div class="panel full-width">
+    <h2>Flow Control Log</h2>
+    <div class="table-scroll">
+      <table class="transitions">
+        <thead><tr><th>Time</th><th>Iter</th><th>Round</th><th>Signal</th><th>WNS</th><th>Reason</th></tr></thead>
+        <tbody id="trajectoryFlowBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Phase History Panel -->
+  <div class="panel full-width">
+    <h2>Phase History (last 30)</h2>
+    <div class="table-scroll">
+      <table class="transitions">
+        <thead><tr><th>Time</th><th>Iter</th><th>Round</th><th>Phase</th><th>Strategy</th><th>WNS at Entry</th></tr></thead>
+        <tbody id="trajectoryPhaseBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Transition History Panel -->
   <div class="panel full-width">
     <h2>Transition History</h2>
@@ -375,6 +408,7 @@ function updateDashboard(d) {
   if (d.transitions) updateTransitions(d.transitions);
   if (d.context) updateLLMLog(d);
   updateToolTrace(d);
+  updateTrajectory(d);
   updateClock();
 }
 
@@ -655,6 +689,70 @@ function updateToolTrace(d) {
   // Auto-scroll to bottom
   var scroll = body.parentElement.parentElement;
   scroll.scrollTop = scroll.scrollHeight;
+}
+
+function updateTrajectory(d) {
+  // WNS Trajectory (per-iteration narratives)
+  var narratives = d.iteration && d.iteration.narratives;
+  if (narratives && narratives.length) {
+    var body = $('trajectoryWnsBody');
+    body.innerHTML = narratives.map(function(n) {
+      var delta = n.wns_delta != null ? (Number(n.wns_delta) >= 0 ? '+' : '') + formatNum(n.wns_delta) : '--';
+      var deltaColor = n.wns_delta != null ? (Number(n.wns_delta) >= 0 ? 'positive' : 'negative') : '';
+      var tools = n.tools_used || [];
+      return '<tr>' +
+        '<td>' + (n.iteration != null ? n.iteration : '--') + '</td>' +
+        '<td>' + (n.wns_before != null ? formatNum(n.wns_before) + 'ns' : '--') + '</td>' +
+        '<td>' + (n.wns_after != null ? formatNum(n.wns_after) + 'ns' : '--') + '</td>' +
+        '<td class="' + deltaColor + '">' + delta + '</td>' +
+        '<td><span class="tag strategy">' + esc(n.strategy_label || '') + '</span></td>' +
+        '<td>' + esc(n.outcome || '') + '</td>' +
+        '<td>' + esc((n.model_used || '').substring(0, 24)) + '</td>' +
+        '<td>' + esc(tools.join(', ').substring(0, 80)) + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // Flow Control Log
+  var flowLog;
+  if (d.context && d.context.flow_control_log) {
+    flowLog = d.context.flow_control_log;
+  }
+  if (flowLog && flowLog.length) {
+    var body = $('trajectoryFlowBody');
+    var recent = flowLog.slice(-50);
+    body.innerHTML = recent.map(function(f) {
+      var ts = f.timestamp ? new Date(f.timestamp * 1000).toLocaleTimeString() : '--';
+      var wns = f.wns_at_decision != null ? formatNum(f.wns_at_decision) + 'ns' : '--';
+      return '<tr>' +
+        '<td>' + ts + '</td>' +
+        '<td>' + (f.iteration != null ? f.iteration : '--') + '</td>' +
+        '<td>' + (f.tool_round != null ? f.tool_round : '--') + '</td>' +
+        '<td><span class="tag strategy">' + esc(f.signal || '') + '</span></td>' +
+        '<td>' + wns + '</td>' +
+        '<td>' + esc(f.done_reason || '') + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  // Phase History
+  var phaseHistory = d.strategy && d.strategy.phase_history;
+  if (phaseHistory && phaseHistory.length) {
+    var body = $('trajectoryPhaseBody');
+    var recent = phaseHistory.slice(-30);
+    body.innerHTML = recent.map(function(p) {
+      var ts = p.timestamp ? new Date(p.timestamp * 1000).toLocaleTimeString() : '--';
+      var wns = p.wns_at_entry != null ? formatNum(p.wns_at_entry) + 'ns' : '--';
+      return '<tr>' +
+        '<td>' + ts + '</td>' +
+        '<td>' + (p.iteration != null ? p.iteration : '--') + '</td>' +
+        '<td>' + (p.tool_round != null ? p.tool_round : '--') + '</td>' +
+        '<td><span class="phase-tag ' + esc(p.phase || '') + '">' + esc(p.phase || '') + '</span></td>' +
+        '<td><span class="tag strategy">' + esc(p.strategy || '') + '</span></td>' +
+        '<td>' + wns + '</td>' +
+        '</tr>';
+    }).join('');
+  }
 }
 
 function updateClock() {

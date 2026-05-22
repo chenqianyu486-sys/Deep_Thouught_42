@@ -16,6 +16,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
 from ..pure.timing import parse_hold_timing
+from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,10 @@ async def save_output_node(
         f"  best_wns={best}ns, latest_wns={latest}ns\n"
         f"  cost=${state.cost.total_cost:.4f}, llm_calls={state.model.llm_call_count}, elapsed={elapsed:.1f}s"
     ))
+
+    # Print detailed optimization trajectory before summary
+    trajectory = format_trajectory_summary(state)
+    print(trajectory["console_text"])
 
     # Print summary to stdout for user visibility (logger goes to stderr/JSON)
     elapsed_min = elapsed / 60

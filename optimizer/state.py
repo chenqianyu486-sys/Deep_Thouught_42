@@ -164,6 +164,17 @@ class ToolCallRecord:
 
 
 @dataclass
+class FlowControlRecord:
+    """Single flow control decision trace entry for trajectory tracking."""
+    signal: str = ""          # DONE | SWITCH_STRATEGY | NEXT_ITERATION | EXHAUSTED
+    iteration: int = 0
+    tool_round: int = 0
+    done_reason: str = ""     # wns_target_met | switch_strategy | strategies_exhausted | iteration_success
+    wns_at_decision: Optional[float] = None
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -177,6 +188,9 @@ class ContextState:
     tool_call_trace_max: int = 100
     # Consecutive rounds where report_step_state was missing
     step_state_misses: int = 0
+    # Flow control decision log for trajectory tracking (bounded FIFO)
+    flow_control_log: list[FlowControlRecord] = field(default_factory=list)
+    flow_control_log_max: int = 100
 
 
 @dataclass

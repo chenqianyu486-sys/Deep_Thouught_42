@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import time
-from ...state import OptimizerState
+from ...state import OptimizerState, FlowControlRecord
 from ...deps import NodeDeps
 from ...edges import NodeName
 from ...pure.timing import parse_timing_summary, is_valid_wns
@@ -795,6 +795,18 @@ def _handle_flow_signal(
         logger.info(yellow("[llm_tool_loop] LLM signaled EXHAUSTED — all strategies exhausted"))
         state.control.is_done = True
         state.control.done_reason = "strategies_exhausted"
+
+    # Record flow control decision for trajectory tracking
+    record = FlowControlRecord(
+        signal=flow_signal,
+        iteration=state.iteration.current,
+        tool_round=state.iteration.tool_round,
+        done_reason=state.control.done_reason or "",
+        wns_at_decision=state.timing.latest_wns,
+    )
+    state.context.flow_control_log.append(record)
+    if len(state.context.flow_control_log) > state.context.flow_control_log_max:
+        state.context.flow_control_log = state.context.flow_control_log[-state.context.flow_control_log_max:]
 
 
 def _inject_reflection(state: OptimizerState, deps: NodeDeps, tool_round: int) -> None:

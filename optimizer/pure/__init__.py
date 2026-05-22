@@ -61,6 +61,9 @@ from .tool_router import (
 from .step_state import (
     extract_step_state,
 )
+from .trajectory import (
+    format_trajectory_summary,
+)
 
 __all__ = [
     # timing
@@ -88,4 +91,6 @@ __all__ = [
     "call_tool", "is_routing_failure",
     # step_state
     "extract_step_state",
+    # trajectory
+    "format_trajectory_summary",
 ]

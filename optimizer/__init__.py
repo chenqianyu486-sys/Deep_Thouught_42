@@ -26,6 +26,7 @@ from .state import (
     StepState,
     WnsMilestone,
     PhaseEntry,
+    FlowControlRecord,
 )
 from .deps import NodeDeps
 from .graph import NodeGraph
@@ -93,6 +94,7 @@ __all__ = [
     "StepState",
     "WnsMilestone",
     "PhaseEntry",
+    "FlowControlRecord",
     "NodeDeps",
     "NodeGraph",
     "NodeName",

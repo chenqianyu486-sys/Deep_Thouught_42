@@ -913,7 +913,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽/失败，系统强制执行迭代切换，注入分析引导 + skill推荐 + 强制下一轮先分析再选策略
 - `flow_control: NEXT_ITERATION` = 本轮取得显著改善，当前策略边际收益已趋零，进入下一轮迭代（新上下文 + 模型重评估 + 更新的 critical path 数据）。不记录失败。
 - `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换
-- 真正退出条件 = WNS >= 0
+- 真正退出条件 = WNS >= 0 **且** DCP 逻辑等效已验证通过（所有优化操作在优化过程中不得改变逻辑功能）
 
 **行为矩阵**:
 | 场景 | 行为 |
@@ -1207,13 +1207,36 @@ V2:
 | `switch_strategy` | LLM返回SWITCH_STRATEGY，系统强制执行迭代切换，下一轮分析后选新策略 |
 | `iteration_success` | LLM返回NEXT_ITERATION，本轮成功改善，进入下一轮继续优化（不记录失败） |
 
-## 11. DCP验证
+## 11. DCP验证（硬约束）
+
+**逻辑等价性是优化过程的硬约束**，所有优化操作（包括 retiming、replication、pin swapping、LUT cascade flattening 等）必须保证不改变设计的逻辑功能。
 
 ```
-每5次迭代: 中间checkpoint验证（500向量）
-完成时: 完整验证（Phase1+Phase2, 10000向量）
-触发条件: validation_enabled AND intermediate_dcp存在 AND 非完成态 AND iteration%5==0
+验证策略:
+├── 每5次迭代: 中间 checkpoint 验证（500 向量）
+├── 完成时: 完整验证（Phase1 + Phase2, 10000 向量）
+├── 触发条件: validation_enabled AND intermediate_dcp存在 AND 非完成态 AND iteration%5==0
+└── 输出 DCP 必须通过验证方可作为最终结果
 ```
+
+两阶段验证（`validate_dcps.py`）：
+
+**Phase 1 — 结构对比（RapidWright）**：
+- 比较 golden DCP 和 revised DCP 的 EDIF 网表结构
+- 检查 cell 类型、端口连接、层次结构的一致性
+- 识别结构性差异（missing cells, extra cells, 端口不匹配等）
+- 部分差异（如综合命名变化）标记为 INFO，不阻断验证
+
+**Phase 2 — 功能仿真（Vivado xsim）**：
+- 从 golden 和 revised DCP 分别导出 Verilog 仿真模型
+- 生成 LFSR 驱动的随机测试激励（默认 10000 向量）
+- 在相同输入下逐周期比较所有输出端口
+- 处理含加密 IP 的设计（自动跳过仿真，仅保留结构验证）
+
+**安全约束**：
+- 禁止使用 `phys_opt_design` 的 retiming 指令（`AlternateFlowWithRetiming`、`AddRetime`）— 已知会导致含 LUT 链的神经网络设计功能错误（200 向量中 9 个不匹配）
+- RegisterRetiming skill 使用的局部 FF 插入比全局 retiming 更安全
+- pin swapping 和 net swapping 仅交换等效引脚，不改变逻辑函数
 
 ## 10. 心跳日志系统
 

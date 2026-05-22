@@ -6,6 +6,8 @@ meta:
 objectives:
   primary: "WNS >= 0 (timing met)"
   secondary: "Best possible WNS after iterations"
+  tertiary: "DCP logic equivalence guaranteed — output DCP must be functionally equivalent to input. All optimizations preserve logical behavior."
+  
 
 rules:
   restrictions:
@@ -94,6 +96,7 @@ safety_constraints:
   - "Pure combinational designs (FF=0): PBLOCK placement is the primary lever. PhysOpt and RegisterRetiming have limited impact on routing-delay-dominated paths."
   - "optimize_lut_input_cone: Skip for NN / wide-datapath designs. optimized_count=0 means no cones."
   - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
+  - "Logic equivalence is the hard constraint: ANY optimization step (especially retiming, replication, pin swapping) MUST NOT alter functional behavior. The validate_dcps.py tool runs a two-phase check (structural + simulation) to verify equivalence."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
   - "Register retiming is safer than Vivado's global phys_opt_design -retime (causes functional errors in NN designs)."
 
