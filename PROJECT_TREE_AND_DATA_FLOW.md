@@ -25,7 +25,6 @@ fpl26_optimization_contest/
 │   │   └── subgraphs/
 │   │       ├── llm_tool_loop.py          # 4阶段状态机调度器（ANALYZE→SELECT_STRATEGY→EXECUTE→EVALUATE）
 │   │       ├── phase_handoff.py          # 阶段间结构化交接（PhaseHandoff dataclass + transition_phase）
-│   │       ├── phase_context.py          # 4个阶段的针对性上下文构建器
 │   │       ├── phase_analyze.py          # ANALYZE阶段：多维度时序/拥塞/扇出分析（仅分析工具，最多12轮）
 │   │       ├── phase_select_strategy.py  # SELECT_STRATEGY阶段：选择优化策略（极简4工具）
 │   │       ├── phase_execute.py          # EXECUTE阶段：执行策略工具（全工具，链式动作+事后评估）
@@ -38,7 +37,7 @@ fpl26_optimization_contest/
 │   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
-│   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot/inject_context_snapshot_at_end（数据dashboard）
+│   │   ├── context_snapshot.py   # build_context_snapshot(phase感知区块过滤)/inject_merged_dashboard(handoff+dashboard合并注入)/PHASE_DASHBOARD_SECTIONS
 │   │   ├── handoff.py            # build_handoff_prompt/build_status_signal（精简handoff：trajectory+failed_strategies+exit_reason，WNS/critical paths仅在Dashboard）
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
@@ -235,9 +234,10 @@ llm_tool_loop_node (状态机调度器)
 
 阶段间消息隔离（方案B）:
   - 每个阶段独立消息列表
-  - 阶段切换时: 当前阶段消息→HistoricalMemory(压缩存档)
-  - 下一阶段: system + phase_context(含PhaseHandoff摘要) + 新对话
-  - 交接摘要: source_phase / llm_summary / wns / tns / key_findings / tools_called
+  - 阶段切换时: 当前阶段消息→HistoricalMemory(压缩存档)，仅保留system
+  - 每次LLM调用前: 注入合并的 [Handoff摘要 + 阶段感知Dashboard] 作为最后一条user消息
+  - Handoff摘要存储在 state.strategy.last_handoff_text，Dashboard按LLM Phase筛选区块
+  - 合并消息结构: [PHASE — Context & Dashboard] → ## Previous Phase Summary → 各数据区块 → --- End Dashboard ---
 ```
 
 ### 关键设计

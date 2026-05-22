@@ -30,7 +30,7 @@ other tool calls, call report_step_state alone.
 The report_step_state tool takes these parameters:
   - step_id (integer): incrementing per message in current strategy
   - result_status (string): SUCCESS | PARTIAL | FAIL
-  - flow_control (string): CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
+  - flow_control (string): ANALYZE_DONE | EXEC_DONE | CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
   - strategy_phase (string, optional): ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
   - strategy_name (string, optional): PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade |
     CellReplication | CongestionSpreading | RegisterRetiming | NetSwap
@@ -69,8 +69,8 @@ async def prepare_context_node(
         2. Inject FORMAT_GUARD (once, first iteration)
         3. Inject handoff prompt if not yet injected
 
-    Note: Dashboard is injected per-LLM-call in the tool loop
-    (via _inject_dashboard_at_end), not here.
+    Note: Dashboard is injected per-LLM-call in each phase's
+    _call_phase_llm() via inject_merged_dashboard(), not here.
     Node return values are not used for routing — graph edges decide.
 
     Returns:

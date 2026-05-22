@@ -48,6 +48,8 @@ from .context_snapshot import (
     build_context_snapshot,
     inject_context_snapshot,
     inject_context_snapshot_at_end,
+    inject_merged_dashboard,
+    PHASE_DASHBOARD_SECTIONS,
 )
 from .handoff import (
     build_handoff_prompt,

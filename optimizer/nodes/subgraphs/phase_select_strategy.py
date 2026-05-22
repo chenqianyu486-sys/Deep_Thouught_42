@@ -18,6 +18,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.step_state import extract_step_state
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
+from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         },
         message_count=tool_round,
     )
+    state.strategy.last_handoff_text = handoff.to_phase_context_string()
     await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff)
     return LoopPhase.EXECUTE
 
@@ -162,6 +164,9 @@ async def _call_phase_llm(state, deps, phase_tools):
         api_messages = deps.compat.get_formatted_for_api()
     except Exception:
         return None
+
+    # Inject merged handoff + dashboard as last user message
+    inject_merged_dashboard(api_messages, state, LoopPhase.SELECT_STRATEGY)
 
     model = state.model.current_model
     state.model.llm_call_count += 1

@@ -224,6 +224,7 @@ class StrategyState:
     strategy_rationale: str = ""             # why the current strategy was chosen
     evaluation_wns_delta: float = 0.0        # WNS change after execution
     evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
+    last_handoff_text: str = ""              # PhaseHandoff formatted text for merged dashboard injection
 
 
 # ── Composite state ─────────────────────────────────────────────

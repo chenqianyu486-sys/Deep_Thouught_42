@@ -36,6 +36,36 @@ class PhaseHandoff:
     tools_called: list[str] = field(default_factory=list)
     message_count: int = 0
 
+    def to_phase_context_string(self) -> str:
+        """Format handoff as injectable context string.
+
+        Produces a compact summary for the merged phase context + dashboard message.
+        Returns empty string if handoff is empty (e.g. first phase in iteration).
+        """
+        if not self.llm_summary and self.wns is None and not self.key_findings:
+            return ""
+        parts = ["## Previous Phase Summary"]
+        parts.append(f"Source: {self.source_phase}")
+        if self.wns is not None:
+            parts.append(f"WNS: {self.wns:.3f}ns")
+        if self.tns is not None:
+            parts.append(f"TNS: {self.tns:.3f}ns")
+        if self.failing_endpoints is not None:
+            parts.append(f"Failing Endpoints: {self.failing_endpoints}")
+        if self.llm_summary:
+            # Trim very long summaries
+            summary = self.llm_summary[:600]
+            parts.append(f"Summary: {summary}")
+        if self.tools_called:
+            tools_str = ", ".join(self.tools_called[-6:])
+            parts.append(f"Tools: {tools_str}")
+        if self.key_findings:
+            items = [f"{k}={v}" for k, v in self.key_findings.items()
+                     if not isinstance(v, (list, dict)) or len(str(v)) < 100]
+            if items:
+                parts.append(f"Findings: {', '.join(items[:5])}")
+        return "\n".join(parts)
+
 
 def build_phase_handoff(
     source_phase: LoopPhase,
@@ -109,15 +139,10 @@ async def transition_phase(
         if system_msg is not None:
             deps.memory_manager._working_store.add(system_msg)
 
-        # 5. Inject phase context as first user message for the new phase
-        from optimizer.nodes.subgraphs.phase_context import build_phase_context
-        phase_context = build_phase_context(to_phase, handoff)
-        deps.compat.add_message("user", phase_context)
-
         logger.info(
-            "[phase_handoff] %s -> %s: %d messages archived, handoff injected (%d chars)",
+            "[phase_handoff] %s -> %s: %d messages archived",
             from_phase.value, to_phase.value,
-            current_count, len(phase_context),
+            current_count,
         )
 
     except Exception as e:
