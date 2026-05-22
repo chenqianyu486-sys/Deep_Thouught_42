@@ -203,7 +203,7 @@ def _compute_design_signals(
     if resource_utilization:
         for k, v in resource_utilization.items():
             if isinstance(v, (int, float)):
-                signals[k] = round(v, 1)
+                signals[k] = int(v)  # Resource counts are always integers
         # Infer design type from resource utilization
         ff_count = resource_utilization.get("FF", resource_utilization.get("ff", None))
         if ff_count is not None and ff_count == 0:

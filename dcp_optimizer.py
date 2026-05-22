@@ -7966,6 +7966,23 @@ async def optimize_v2(
                                 "EXHAUSTED: all strategies tried, no further improvement possible"
                             ),
                         },
+                        "strategy_phase": {
+                            "type": "string",
+                            "enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"],
+                            "description": (
+                                "Current phase in the 4-phase strategy lifecycle: "
+                                "ANALYZE (gather timing data), "
+                                "SELECT_STRATEGY (choose optimization strategy), "
+                                "EXECUTE_STRATEGY (run strategy tools), "
+                                "EVALUATE (check WNS delta, assess outcome)"
+                            ),
+                        },
+                        "strategy_name": {
+                            "type": "string",
+                            "enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade",
+                                     "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"],
+                            "description": "The strategy being executed in this step",
+                        },
                     },
                     "required": ["step_id", "result_status", "flow_control"],
                 },

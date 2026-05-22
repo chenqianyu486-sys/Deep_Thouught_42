@@ -91,16 +91,21 @@ def _estimate_tokens_from_messages(messages) -> int:
 
 
 def _infer_model_tier(model_name: str | None, state_model=None) -> str:
-    """Infer model tier from model name."""
+    """Infer model tier from model name.
+
+    Priority: exact match against state_model.planner_model first,
+    then fallback to heuristic string matching.
+    """
     if not model_name:
         return "worker"
-    name = model_name.lower()
-    if any(k in name for k in ("pro", "plus")):
-        return "planner"
-    # Compare against configured planner model
+    # Exact match against configured planner model (most reliable)
     if state_model and hasattr(state_model, 'planner_model'):
         if model_name == state_model.planner_model:
             return "planner"
+    # Heuristic fallback for models not in state_model
+    name = model_name.lower()
+    if any(k in name for k in ("pro", "plus")):
+        return "planner"
     return "worker"
 
 

@@ -87,7 +87,8 @@ class NodeGraph:
             # Validate the resolved next node exists (unless 'end')
             if current != "end" and current not in self._nodes:
                 raise ValueError(
-                    f"Edge from '{current}' resolved to unknown node '{next_node}'"
+                    f"Edge resolved to unknown node '{current}' "
+                    f"(node function returned '{next_node}')"
                 )
 
         return state

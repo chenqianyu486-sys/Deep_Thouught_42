@@ -56,6 +56,9 @@ async def llm_tool_loop_node(
         - User exit requested
         - WNS target met
 
+    Note: Node return values are not used for routing — graph edges decide.
+    The static edge from llm_tool_loop always routes to iteration_end.
+
     Returns:
         Next node name (deterministic: iteration_end).
     """
@@ -631,7 +634,13 @@ async def _execute_chain_actions(
                 deps.rapidwright_session, deps.vivado_session,
             )
             # Produce summary and inject into context
-            summary = summarize_tool_result(target_tool, raw_result, state)
+            summary = summarize_tool_result(
+                target_tool, raw_result,
+                latest_wns=state.timing.latest_wns,
+                latest_tns=state.timing.latest_tns,
+                latest_failing_endpoints=state.timing.latest_failing_endpoints,
+                prev_best_wns=state.timing.prev_best_wns,
+            )
             if deps.compat is not None:
                 deps.compat.add_message("user",
                     f"[AUTO-CHAIN] After {tool_name}: {target_tool} completed — {summary[:400]}")

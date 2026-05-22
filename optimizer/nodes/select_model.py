@@ -28,6 +28,9 @@ async def select_model_node(
         2. Otherwise, compute scores and select via pure function
         3. Set state.model.current_model
 
+    Note: Node return values are not used for routing — graph edges decide.
+    The static edge from select_model always routes to prepare_context.
+
     Returns:
         Next node name (deterministic: prepare_context).
     """
@@ -37,11 +40,26 @@ async def select_model_node(
         state.model.next_iteration_model = None  # Clear after use
         logger.info(f"[select_model] Using pre-decided model: {selected}")
     else:
+        # Get real context metrics from memory manager
+        msg_count = 0
+        token_est = 0
+        if deps.memory_manager is not None:
+            try:
+                messages = deps.memory_manager.get_context()
+                msg_count = len(messages)
+                total_chars = sum(
+                    len(m.content) if hasattr(m, 'content') and isinstance(m.content, str) else 0
+                    for m in messages
+                )
+                token_est = total_chars // 4
+            except Exception:
+                pass
+
         # Estimate context complexity
         context_complexity = estimate_context_complexity(
             task_type=state.model.current_task_type,
-            msg_count=0,  # Will be filled from compat in prepare_context
-            token_est=0,
+            msg_count=msg_count,
+            token_est=token_est,
             iteration=state.iteration.current,
             failed_strategy_count=len(state.iteration.tool_errors),
             task_type_stats=state.model.task_type_stats,
@@ -49,11 +67,11 @@ async def select_model_node(
 
         # Compute scores
         planner_score, worker_score = compute_model_scores(
-            state, context_complexity, current_tokens=0,
+            state, context_complexity, current_tokens=token_est,
         )
 
         # Select model
-        selected = select_model(planner_score, worker_score, state, current_tokens=0)
+        selected = select_model(planner_score, worker_score, state, current_tokens=token_est)
         logger.info(
             f"[select_model] Scores: planner={planner_score}, worker={worker_score} "
             f"-> {selected}"

@@ -506,14 +506,12 @@ WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
 - 推理token追踪: CostState.total_reasoning_tokens 累计推理token用量，LLM日志中 reasoning>0 时显示
 ```
 
-### 2.5.1 模型选择维度（`_select_model()`）
+### 2.5.1 模型选择维度（`compute_model_scores()`）
 
-评分系统（8维度变量，前2个已注释，当前6个生效，加权得分高的模型胜出，margin=1防止震荡（代码实现 planner_score > worker_score + 1））：
+评分系统（7个生效维度，编号3-9，前2个已移除。加权得分高的模型胜出，margin=1防止震荡——代码实现 `planner_score > worker_score + 1`）：
 
 | 维度 | 条件 | Planner得分 | Worker得分 |
 |------|------|-----------|-----------|
-| 1. 工具映射 | - | - | - (已注释) |
-| 2. 任务类别 | - | - | - (已注释) |
 | 3. 上下文复杂度 | >=6 | +2 | +1 (<3) |
 | 4. 历史能力 | >=70%成功率 | - | +2 |
 | 5. 历史能力 | <30%成功率 | +2 | - |
@@ -522,6 +520,8 @@ WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
 | 8. 全局无改善 | >=2.5次 | - | +1 |
 | 9. 上下文容量 | >=60% worker限制 | +2 | - |
 | 10. WNS状态 | 严重倒退(>-2.0ns) | +3 | - |
+| 11. 预算感知 | 费用>80%上限 | - | +3 |
+| 12. 预算感知 | 费用>60%上限 | - | +1 |
 
 
 ### 2.6 Skill 机制
@@ -620,8 +620,8 @@ Skill 超时映射（三层）:
 │   ├── analyze_net_swapping: SLICE内LUT对 → 识别可交换网络候选（READ-ONLY）
 │   └── execute_net_swapping: 交换BEL引脚网络+write_checkpoint (LLM自行调Vivado工具串)
 
-Skill 推荐机制 (`_build_skill_recommendation()`, 7 条件按优先级排列, 注意 stagnation 条件含隐含的 best_wns < 0 检查):
-├── stagnation (global_no_improvement>=1 AND best_wns<0) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
+Skill 推荐机制 (`_build_skill_recommendation()`, 5 主条件按优先级排列, 注意 stagnation 条件含隐含的 best_wns < 0 检查):
+├── stagnation (global_no_improvement>=2 AND best_wns<0) + PBLOCK not failed → rapidwright_analyze_pblock_region [诊断]
 ├── stagnation + Fanout not failed                    → rapidwright_execute_fanout_strategy [诊断]
 ├── stagnation + CongestionSpreading not failed        → rapidwright_analyze_congestion_spreading [诊断]
 ├── stagnation + 都失败                                → rapidwright_analyze_net_detour [诊断]

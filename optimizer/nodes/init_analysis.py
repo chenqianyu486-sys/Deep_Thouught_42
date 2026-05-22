@@ -39,6 +39,10 @@ async def init_analysis_node(
         8. Get device topology
         9. Extract critical path cells and analyze spread
 
+    Note: Node return values are not used for routing — graph edges decide.
+    The after_init edge function reads state.timing.initial_wns to route
+    to SAVE_OUTPUT (if timing already met) or ITERATION_START.
+
     Returns:
         Next node name (edge after_init decides based on WNS).
     """
@@ -266,5 +270,6 @@ async def init_analysis_node(
         f"best_wns={state.timing.best_wns:.3f}"
     )
 
-    # The edge function after_init will decide the next node
+    # The edge function after_init decides the next node (not this return value).
+    # Return value is only used in error messages by graph.run().
     return NodeName.ITERATION_START

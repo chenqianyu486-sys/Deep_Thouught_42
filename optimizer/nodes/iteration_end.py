@@ -42,6 +42,9 @@ async def iteration_end_node(
         4. Pre-decide next iteration's model
         5. Generate handoff prompt
 
+    Note: Node return values are not used for routing — graph edges decide.
+    The static edge from iteration_end always routes to check_exit.
+
     Returns:
         Next node name (deterministic: check_exit).
     """
@@ -113,8 +116,13 @@ async def iteration_end_node(
         if len(state.iteration.strategy_sequence) > 10:
             state.iteration.strategy_sequence.pop(0)
 
-        # Record failure if iteration didn't improve and we have a known strategy
-        if not wns_improved and deps.compat is not None:
+        # Record failure if iteration didn't improve and we have a known strategy.
+        # Skip when LLM explicitly signaled success (NEXT_ITERATION) — the
+        # iteration may be a preparation step that doesn't directly improve WNS.
+        # Recording failure here would poison the strategy in future context.
+        if (not wns_improved
+                and deps.compat is not None
+                and state.control.done_reason != "iteration_success"):
             reason = _determine_failure_reason(state, strategy_label)
             deps.compat.record_failure(
                 strategy=strategy_label,
@@ -125,16 +133,29 @@ async def iteration_end_node(
             logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
 
     # Pre-decide next iteration's model
+    msg_count = 0
+    token_est = 0
+    if deps.memory_manager is not None:
+        try:
+            messages = deps.memory_manager.get_context()
+            msg_count = len(messages)
+            total_chars = sum(
+                len(m.content) if hasattr(m, 'content') and isinstance(m.content, str) else 0
+                for m in messages
+            )
+            token_est = total_chars // 4
+        except Exception:
+            pass
     context_complexity = estimate_context_complexity(
         task_type=state.model.current_task_type,
-        msg_count=0,
-        token_est=0,
+        msg_count=msg_count,
+        token_est=token_est,
         iteration=state.iteration.current,
         failed_strategy_count=len(state.iteration.tool_errors),
         task_type_stats=state.model.task_type_stats,
     )
-    planner_score, worker_score = compute_model_scores(state, context_complexity, 0)
-    next_model = select_model_fn(planner_score, worker_score, state, 0)
+    planner_score, worker_score = compute_model_scores(state, context_complexity, token_est)
+    next_model = select_model_fn(planner_score, worker_score, state, token_est)
     state.model.next_iteration_model = next_model
     logger.info(f"[iteration_end] Next iteration model: {next_model}")
 

@@ -119,7 +119,7 @@ def update_critical_paths(
 
     logger.info(
         f"[critical_path] Updated: {len(state.timing.critical_paths)} paths, "
-        f"longest={sorted_paths[0] if sorted_paths else 0} cells, "
+        f"longest={len(sorted_paths[0]['cells']) if sorted_paths else 0} cells, "
         f"iteration={iteration}"
     )
 

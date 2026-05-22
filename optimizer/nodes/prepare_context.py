@@ -71,6 +71,7 @@ async def prepare_context_node(
 
     Note: Dashboard is injected per-LLM-call in the tool loop
     (via _inject_dashboard_at_end), not here.
+    Node return values are not used for routing — graph edges decide.
 
     Returns:
         Next node name (deterministic: llm_tool_loop).

@@ -105,8 +105,9 @@ def compute_model_scores(
     context_complexity: int,
     current_tokens: int,
 ) -> tuple[int, int]:
-    """Compute (planner_score, worker_score) from 8 dimensions.
+    """Compute (planner_score, worker_score) from 7 active dimensions (3-9).
 
+    Dimensions 1-2 (tool-based and cost-based scoring) were removed.
     Reads from state.model, state.timing, state.iteration, state.cost.
     """
     planner_score = 0

@@ -26,9 +26,11 @@ def update_iteration_counters(
 
     Mutates state.iteration and state.model in-place.
     """
+    from .model_select import classify_task as _classify_task
+
     # Use last tool name for task classification (current_task_type is always "")
     last_tool = state.iteration.tools_used[-1] if state.iteration.tools_used else ""
-    is_optimization = classify_task(last_tool) == TaskCategory.OPTIMIZATION
+    is_optimization = _classify_task(last_tool) == TaskCategory.OPTIMIZATION
 
     if wns_improved:
         state.model.worker_consecutive_failures = 0
@@ -40,12 +42,6 @@ def update_iteration_counters(
         if model_used == state.model.worker_model and is_optimization:
             state.model.worker_consecutive_failures += 1
         state.iteration.global_no_improvement += 1
-
-
-def classify_task(tool_name: str, arguments: dict | None = None) -> str:
-    """Classify tool as INFORMATION / OPTIMIZATION / UNKNOWN."""
-    from .model_select import classify_task as _classify
-    return _classify(tool_name, arguments)
 
 
 def infer_strategy_from_tools(tools: list[str]) -> str:

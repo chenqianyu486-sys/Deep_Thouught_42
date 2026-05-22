@@ -30,6 +30,10 @@ async def check_exit_node(
         2. Global no-improvement limit reached
         3. Cost hard limit reached
 
+    Note: This node sets state.control.is_done; the after_check_exit edge
+    function reads it to route to SAVE_OUTPUT or ITERATION_START.
+    Node return values are not used for routing (graph edges decide).
+
     Returns:
         Next node name (edge after_check_exit resolves final destination).
     """

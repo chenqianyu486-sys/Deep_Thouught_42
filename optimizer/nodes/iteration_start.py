@@ -30,6 +30,10 @@ async def iteration_start_node(
         3. Check exit conditions (user quit, wall-clock, max iterations)
         4. Snapshot WNS state for rollback
 
+    Note: Node return values are not used for routing — graph edges decide.
+    The static edge from iteration_start always routes to select_model.
+    Early-exit flags (is_done) are picked up by check_exit on the next pass.
+
     Returns:
         Next node name (deterministic: select_model).
     """
