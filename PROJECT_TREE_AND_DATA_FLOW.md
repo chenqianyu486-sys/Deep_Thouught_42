@@ -23,11 +23,18 @@ fpl26_optimization_contest/
 │   │   ├── check_exit.py         # 退出检查节点（WNS达标/无改善/超时/超成本）
 │   │   ├── save_output.py        # 保存输出节点（写DCP、打印摘要、导出tracing）
 │   │   └── subgraphs/
-│   │       └── llm_tool_loop.py  # LLM工具循环节点（内部while循环：调LLM→解析→执行工具→跟踪WNS）
+│   │       ├── llm_tool_loop.py          # 4阶段状态机调度器（ANALYZE→SELECT_STRATEGY→EXECUTE→EVALUATE）
+│   │       ├── phase_handoff.py          # 阶段间结构化交接（PhaseHandoff dataclass + transition_phase）
+│   │       ├── phase_context.py          # 4个阶段的针对性上下文构建器
+│   │       ├── phase_analyze.py          # ANALYZE阶段：多维度时序/拥塞/扇出分析（仅分析工具，最多12轮）
+│   │       ├── phase_select_strategy.py  # SELECT_STRATEGY阶段：选择优化策略（极简4工具）
+│   │       ├── phase_execute.py          # EXECUTE阶段：执行策略工具（全工具，链式动作+事后评估）
+│   │       └── phase_evaluate.py         # EVALUATE阶段：对比WNS决定下一步（评估工具）
 │   ├── pure/                     # 从DCPOptimizer提取的无状态纯函数（可独立单测）
 │   │   ├── __init__.py
 │   │   ├── timing.py             # parse_timing_summary/parse_high_fanout_nets/parse_resource_utilization/is_valid_wns/compute_timing_hash
 │   │   ├── constants.py          # TaskCategory/ModelTier/TOOL_MODEL_MAPPING/SKILL_TOOL_MAP/阈值常量
+│   │   ├── tool_filter.py        # 按LoopPhase过滤工具列表（PHASE_TOOLS/PHASE_MAX_ROUNDS/filter_tools_for_phase）
 │   │   ├── model_select.py       # classify_task/compute_model_scores/select_model/estimate_context_complexity
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
@@ -187,21 +194,50 @@ init_analysis → [条件: timing met?]
 ```
 
 ### 子图: llm_tool_loop
+
+重构为4阶段状态机，每个阶段拥有独立的上下文和精简工具列表：
+
 ```
-llm_call → evaluate_flow → [条件: flow_control?]
-  ├─ CONTINUE → execute_tools → post_eval_hook → update_wns → update_critical_paths → llm_call (循环)
-  ├─ DONE/SWITCH_STRATEGY → 退出子图
-  └─ RETRY/ROLLBACK → 重试/回滚
+llm_tool_loop_node (状态机调度器)
+  │  while True:
+  │    phase = PHASE_RUNNERS[phase](state, deps)
+  │    if phase==EVALUATE && done_reason: exit
+  │
+  ├── phase=ANALYZE ─────────→ phase=SELECT_STRATEGY
+  │  仅分析工具(~18个)          极简工具(~4个)
+  │  最多12轮                   最多6轮
+  │  LLM输出ANALYZE_DONE        LLM填写strategy_name
+  │       │                          │
+  │       └── PhaseHandoff ──────────┘
+  │            (分析摘要→策略上下文)
+  │
+  ├── phase=SELECT_STRATEGY ─→ phase=EXECUTE
+  │  策略说明+执行计划            全工具(~25个)
+  │                               最多30轮
+  │                               LLM输出EXEC_DONE
+  │       │                          │
+  │       └── PhaseHandoff ──────────┘
+  │            (策略rationale→执行上下文)
+  │
+  ├── phase=EXECUTE ─────────→ phase=EVALUATE
+  │  执行策略工具                 评估工具(~8个)
+  │  链式动作(SKILL_CHAIN)        最多8轮
+  │  事后评估(POST_EVAL)          LLM决定下一步
+  │       │                          │
+  │       └── PhaseHandoff ──────────┘
+  │            (前后WNS→评估上下文)
+  │
+  └── phase=EVALUATE ─────────→ (exit) 或 ANALYZE
+      DONE/WNS>=0 → ITERATION_END
+      NEXT_ITERATION → ITERATION_END
+      SWITCH_STRATEGY → ITERATION_END
+      CONTINUE → 回到ANALYZE
 
-关键路径追踪:
-  - execute_tools 后: 若 tool=vivado_extract_critical_path_cells → 解析JSON缓存到 state.timing.critical_paths
-  - execute_tools 后: 若 tool=vivado_phys_opt_design/vivado_route_design → 标记 critical_paths_stale=True
-  - 循环末尾: 若 critical_paths_stale → 自动调用 vivado_extract_critical_path_cells(num_paths=10) 刷新
-
-Post-eval hook（POST_EVAL_TOOLS = {vivado_route_design, rapidwright_execute_fanout_strategy}）:
-  - 工具执行后自动调用 vivado_report_timing_summary
-  - 解析 WNS，计算 delta，注入 [EVAL] 通知到上下文
-  - 确保 LLM 在 flow_control 决策前有具体 WNS 数据
+阶段间消息隔离（方案B）:
+  - 每个阶段独立消息列表
+  - 阶段切换时: 当前阶段消息→HistoricalMemory(压缩存档)
+  - 下一阶段: system + phase_context(含PhaseHandoff摘要) + 新对话
+  - 交接摘要: source_phase / llm_summary / wns / tns / key_findings / tools_called
 ```
 
 ### 关键设计
@@ -918,11 +954,14 @@ WNS回归处理: WNS<0且差于best时自动回滚
 **行为矩阵**:
 | 场景 | 行为 |
 |------|------|
+| `flow_control: ANALYZE_DONE` (ANALYZE阶段) | 切换到 SELECT_STRATEGY 阶段 |
+| `flow_control: EXEC_DONE` (EXECUTE阶段) | 切换到 EVALUATE 阶段 |
 | `flow_control: DONE`，WNS=-0.538 | 进入下一迭代 |
 | `flow_control: DONE`，WNS>=0 | 退出优化 |
 | 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理） |
-| `flow_control: SWITCH_STRATEGY` | 强制结束迭代 + 记录策略失败 + 注入分析引导 + skill推荐 + 下一轮先分析再行动 |
-| `flow_control: NEXT_ITERATION` | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
+| `flow_control: SWITCH_STRATEGY` (EVALUATE) | 强制结束迭代 + 记录策略失败 + 下一轮从ANALYZE开始 |
+| `flow_control: NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
+| `flow_control: CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段，重新分析设计 |
 | 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
 ### 5.4 DONE 优化补丁
@@ -967,7 +1006,7 @@ LLM response arrives
 class StepState:
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
+    flow_control: Optional[str] = None         # ANALYZE_DONE | EXEC_DONE | CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
     strategy_phase: Optional[str] = None       # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
@@ -1078,7 +1117,7 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
     "parameters": {
         "step_id": {"type": "integer"},
         "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
-        "flow_control": {"enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"]},
+        "flow_control": {"enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"]},
         "strategy_phase": {"enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"]},
         "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]}
     },
@@ -1086,13 +1125,16 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
 }
 ```
 
-**4阶段策略生命周期**（每次迭代内 LLM 按 ANALYZE→SELECT_STRATEGY→EXECUTE_STRATEGY→EVALUATE 循环）：
-| 阶段 | LLM行为 | report_step_state参数 |
-|------|---------|----------------------|
-| ANALYZE | 收集时序数据，识别主要障碍 | strategy_phase=ANALYZE |
-| SELECT_STRATEGY | 基于分析选择优化策略 | strategy_phase=SELECT_STRATEGY, strategy_name=<策略名> |
-| EXECUTE_STRATEGY | 执行选定的策略工具 | strategy_phase=EXECUTE_STRATEGY |
-| EVALUATE | 检查WNS变化，判断策略效果 | strategy_phase=EVALUATE, 结合result_status |
+**4阶段状态机流程**（llm_tool_loop 内部状态机，方案B：阶段隔离+结构化交接）：
+| 阶段 | 可用工具 | LLM行为 | 状态转移信号 |
+|------|---------|---------|------------|
+| ANALYZE | 分析工具(~18个) | 收集时序/拥塞/扇出/布局数据，识别瓶颈 | ANALYZE_DONE |
+| SELECT_STRATEGY | 极简(~4个) | 基于分析摘要选择策略 | strategy_name 非空 |
+| EXECUTE | 全工具(~25个) | 执行策略工具，链式动作自动处理 | EXEC_DONE |
+| EVALUATE | 评估工具(~8个) | 对比WNS变化，决定下一步 | DONE/NEXT/SWITCH/CONTINUE |
+
+阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
+每个阶段内保留完整消息历史，聚焦当前任务，"一次LLM调用只做好一件事"。
 
 `strategy_phase` 和 `strategy_name` 为可选参数（向后兼容）。阶段转换自动记录到 `StrategyState.phase_history`，Dashboard 实时展示阶段指示器。迭代结束时系统自动判定 `evaluation_result`（IMPROVED/REGRESSION/UNCHANGED）。
 

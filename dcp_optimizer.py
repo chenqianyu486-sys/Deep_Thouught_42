@@ -3604,9 +3604,11 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
+                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
                             "description": (
-                                "CONTINUE: next step in current strategy; "
+                                "ANALYZE_DONE: analysis phase complete, move to strategy selection; "
+                                "EXEC_DONE: execution phase complete, move to evaluation; "
+                                "CONTINUE: continue in current phase; "
                                 "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
                                 "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
@@ -7955,9 +7957,11 @@ async def optimize_v2(
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
+                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
                             "description": (
-                                "CONTINUE: next step in current strategy; "
+                                "ANALYZE_DONE: analysis phase complete, move to strategy selection; "
+                                "EXEC_DONE: execution phase complete, move to evaluation; "
+                                "CONTINUE: continue in current phase; "
                                 "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
                                 "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
