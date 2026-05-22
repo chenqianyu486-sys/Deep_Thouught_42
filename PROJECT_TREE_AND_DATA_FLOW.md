@@ -7,7 +7,7 @@ fpl26_optimization_contest/
 ├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发、_build_skill_recommendation()、optimize_v2()入口
 ├── optimizer/                    # 状态机驱动Agent框架（LangGraph风格）
 │   ├── __init__.py               # build_optimizer_graph() 图构建入口，注册8个节点+条件边
-│   ├── state.py                  # 状态dataclass: OptimizerState/TimingState/IterationState/ModelState/CostState/ControlState/ContextState
+│   ├── state.py                  # 状态dataclass: OptimizerState/TimingState/IterationState/ModelState/CostState/ControlState/ContextState/StrategyState/StepState/PhaseEntry
 │   ├── deps.py                   # NodeDeps: 外部依赖容器（MCP会话、MemoryManager、OpenAI客户端）
 │   ├── graph.py                  # NodeGraph: 图执行引擎（节点注册、边注册、run循环）
 │   ├── edges.py                  # 条件边函数: after_init/after_check_exit + NodeName枚举
@@ -32,7 +32,7 @@ fpl26_optimization_contest/
 │   │   ├── tool_summary.py       # summarize_tool_result/filter_tool_result
 │   │   ├── iteration_logic.py    # update_iteration_counters/infer_strategy_from_tools/build_iteration_narrative
 │   │   ├── context_snapshot.py   # build_context_snapshot/inject_context_snapshot/inject_context_snapshot_at_end（数据dashboard）
-│   │   ├── handoff.py            # build_handoff_prompt/build_situation_summary/build_status_signal
+│   │   ├── handoff.py            # build_handoff_prompt/build_status_signal（精简handoff：trajectory+failed_strategies+exit_reason，WNS/critical paths仅在Dashboard）
 │   │   ├── tool_router.py        # call_tool（MCP路由）/is_routing_failure
 │   │   ├── step_state.py         # extract_step_state（仅原生tool call，无XML/YAML回退）
 │   │   ├── compress.py           # compress_context（CompressionContext构建+阈值检查+同步调用_compress）
@@ -157,7 +157,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
                               Browser（自包含 HTML/CSS/JS 前端）
 ```
 
-**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response）、Transition History
+**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response）、Transition History
 
 **依赖**: `aiohttp>=3.9.0`（通过 `requirements.txt`，`make setup` 自动安装）
 
@@ -170,8 +170,9 @@ OptimizerState (可变dataclass)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
 ├── ModelState     — 模型选择/fallback/交接提示词/format_guard_injected
 ├── CostState      — token用量/成本追踪
-├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)
-└── ControlState   — 退出条件/路径/step_state
+├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)/step_state_misses(连续未调用report_step_state计数)
+├── ControlState   — 退出条件/路径/step_state
+└── StrategyState  — 4阶段策略生命周期追踪（current_phase/current_strategy/phase_history/evaluation_result）
 ```
 
 ### 图拓扑
@@ -386,7 +387,10 @@ build_context_snapshot() 构建纯数据 Dashboard（参数来源：state 直接
     active_tools:
       - rapidwright_report_timing
 
-    next_action: Call report_step_state(step_id, result_status, flow_control) alongside your optimization/analysis tools. Text body = chain-of-thought analysis.
+    strategy_lifecycle:
+      current_phase: EXECUTE_STRATEGY
+      current_strategy: PBLOCK
+
     --- End Dashboard ---
     ↓
 inject_context_snapshot_at_end(api_messages):
@@ -408,7 +412,7 @@ inject_context_snapshot_at_end(api_messages):
 **设计要点**：
 - **纯数据 Dashboard**：只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签，让 LLM 自主推理
 - **trajectory**：工作轨迹，记录每轮迭代策略名、前后 WNS、delta
-- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）。静态资源字段（LUT/FF/DSP/BRAM/URAM）不标注新鲜度（设计资源在优化过程中不变）。动态字段未刷新时标注 `(initial, not refreshed)`
+- **design_signals**：从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）。静态资源字段（LUT/DSP/BRAM/URAM）不标注新鲜度（设计资源在优化过程中不变）。注意：FF 不在此列——RegisterRetiming 会插入 pipeline FF，改变 FF 计数。动态字段未刷新时标注 `(initial, not refreshed)`
 - **design_type**：当 FF=0 时自动添加 `design_type: combinational_only`，帮助 LLM 判断策略适用性（如跳过 RegisterRetiming）
 - **design_type_note**：当 `design_type == "combinational_only"` 时注入策略优先级提示："PBLOCK placement is the primary lever for reducing routing delay. PhysOpt and RegisterRetiming have limited effect on routing-delay-dominated paths."
 - **Dashboard 新鲜度机制**：`DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注。新增工具只需在 MAP 中添加映射。当前映射：`vivado_report_utilization_for_pblock`→resource_utilization, `vivado_get_critical_high_fanout_nets`→high_fanout_nets, `rapidwright_analyze_critical_path_spread`/`vivado_extract_critical_path_pins`→critical_path_spread
@@ -957,7 +961,7 @@ LLM response arrives
 3. DONE/SWITCH_STRATEGY/NEXT_ITERATION 时跳过工具执行
 ```
 
-**StepState 数据结构**（纯控制信令，无分析字段）：
+**StepState 数据结构**（控制信令 + 策略生命周期追踪）：
 ```python
 @dataclass
 class StepState:
@@ -966,6 +970,21 @@ class StepState:
     flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
+    strategy_phase: Optional[str] = None       # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    strategy_name: Optional[str] = None        # PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade | CellReplication | CongestionSpreading | RegisterRetiming | NetSwap
+```
+
+**StrategyState 数据结构**（4阶段策略生命周期）：
+```python
+@dataclass
+class StrategyState:
+    current_phase: str = ""                  # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    current_strategy: str = ""               # PBLOCK, PhysOpt, Fanout, etc.
+    phase_history: list[PhaseEntry] = []     # 阶段转换记录（上限100条）
+    analysis_summary: str = ""               # 当前分析发现
+    strategy_rationale: str = ""             # 策略选择理由
+    evaluation_wns_delta: float = 0.0        # 执行后WNS变化
+    evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
 ```
 
 ### 5.6 失败策略追踪（分级格式）
@@ -1052,18 +1071,30 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
 
 **格式约束**: response 中必须调用 `report_step_state` tool（在结构化 function/tool calls 中，不在文本中）。允许在 tool call 之外输出自然语言思维链推理。
 
-**`report_step_state` Tool 定义**（纯控制信令，分析在文本中）：
+**`report_step_state` Tool 定义**（控制信令 + 策略生命周期，分析在文本中）：
 ```python
 {
     "name": "report_step_state",
     "parameters": {
         "step_id": {"type": "integer"},
         "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
-        "flow_control": {"enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"]}
+        "flow_control": {"enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"]},
+        "strategy_phase": {"enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"]},
+        "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]}
     },
     "required": ["step_id", "result_status", "flow_control"]
 }
 ```
+
+**4阶段策略生命周期**（每次迭代内 LLM 按 ANALYZE→SELECT_STRATEGY→EXECUTE_STRATEGY→EVALUATE 循环）：
+| 阶段 | LLM行为 | report_step_state参数 |
+|------|---------|----------------------|
+| ANALYZE | 收集时序数据，识别主要障碍 | strategy_phase=ANALYZE |
+| SELECT_STRATEGY | 基于分析选择优化策略 | strategy_phase=SELECT_STRATEGY, strategy_name=<策略名> |
+| EXECUTE_STRATEGY | 执行选定的策略工具 | strategy_phase=EXECUTE_STRATEGY |
+| EVALUATE | 检查WNS变化，判断策略效果 | strategy_phase=EVALUATE, 结合result_status |
+
+`strategy_phase` 和 `strategy_name` 为可选参数（向后兼容）。阶段转换自动记录到 `StrategyState.phase_history`，Dashboard 实时展示阶段指示器。迭代结束时系统自动判定 `evaluation_result`（IMPROVED/REGRESSION/UNCHANGED）。
 
 ### 5.8 工具重复检测器
 

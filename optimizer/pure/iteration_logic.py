@@ -84,8 +84,15 @@ def build_iteration_narrative(
     wns_after: float | None,
     tools_used: list[str],
     result_status: str | None,
+    declared_strategy: str | None = None,
 ) -> dict:
-    """Build structured narrative entry for iteration."""
+    """Build structured narrative entry for iteration.
+
+    Args:
+        declared_strategy: Strategy name explicitly declared by LLM via
+            report_step_state(strategy_name=...). Preferred over tool-name
+            inference. If None, falls back to infer_strategy_from_tools().
+    """
     if wns_before is not None and wns_after is not None:
         wns_delta = wns_after - wns_before
     else:
@@ -100,6 +107,9 @@ def build_iteration_narrative(
     else:
         outcome = "unchanged"
 
+    # Prefer LLM's declared strategy; fall back to tool-name inference
+    strategy_label = declared_strategy or infer_strategy_from_tools(tools_used)
+
     return {
         "iteration": iteration,
         "model": model_used or "unknown",
@@ -108,7 +118,7 @@ def build_iteration_narrative(
         "wns_after": wns_after,
         "wns_delta": wns_delta,
         "tool_count": len(tools_used),
-        "strategy_label": infer_strategy_from_tools(tools_used),
+        "strategy_label": strategy_label,
         "outcome": outcome,
         "result_status": result_status,
     }

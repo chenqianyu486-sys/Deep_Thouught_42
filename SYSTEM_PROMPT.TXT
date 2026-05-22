@@ -62,10 +62,15 @@ scenarios:
 
 strategies:
   available:
-    pblock: "PBLOCK-Based Re-placement (physical constraint)"
-    physopt: "Physical Optimization (1-2 paths with spread)"
-    fanout: "High Fanout Net Optimization (fanout nets, no spread)"
-    register_retiming: "Register Retiming — Targeted Pipeline Insertion (deep combinational chains)"
+    pblock: "PBLOCK-Based Re-placement (distributed logic, avg_distance > 70)"
+    physopt: "Physical Optimization (1-2 paths with spread, WNS > -2.0)"
+    fanout: "High Fanout Net Optimization (fanout > 100, no spread)"
+    pin_swap: "Pin Swapping (WNS stuck ~-0.3ns, LUT input pin delay variance)"
+    lut_cascade: "LUT Cascade Flattening (>3 LUT levels in series)"
+    cell_replication: "Critical Path Cell Replication (fanout > 10 or delay > 0.3ns)"
+    congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH, PBLOCK/PhysOpt ineffective)"
+    register_retiming: "Register Retiming (deep combinational chains >2 LUTs, requires FF>0)"
+    net_swap: "Net Swapping (intra-SLICE routing congestion)"
 
   skill_workflow:
     - "DIAGNOSE — Call analyze_net_detour to identify placement problems on critical paths"
@@ -73,6 +78,15 @@ strategies:
     - "CONTAIN — Call smart_region_search + strategy skills for geographic clustering"
 
   selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region (RapidWright), then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools. Strategy skills encapsulate the full workflow, validate preconditions, and return structured plans. Fall back to individual tools only if a strategy skill fails."
+
+strategy_lifecycle:
+  rule: "Follow the 4-phase cycle for each strategy attempt."
+  phases:
+    - "Phase 1 ANALYZE: Gather timing data, identify dominant obstacles via report_timing_summary, extract_critical_path_cells, analyze_congestion, etc. Report strategy_phase=ANALYZE."
+    - "Phase 2 SELECT_STRATEGY: Based on analysis findings, choose a specific strategy. Report strategy_phase=SELECT_STRATEGY and strategy_name=<chosen strategy>."
+    - "Phase 3 EXECUTE_STRATEGY: Execute the chosen strategy via tool calls. Report strategy_phase=EXECUTE_STRATEGY."
+    - "Phase 4 EVALUATE: After execution completes, check WNS delta and determine if the strategy helped. Report strategy_phase=EVALUATE with result_status."
+  note: "Process control goes in the report_step_state tool call. Analysis and reasoning go in your text response."
 
 safety_constraints:
   - "PBLOCK MUST be applied BEFORE fanout on distributed designs (avg_distance > 70). Running fanout without PBLOCK causes WNS regression of 0.5ns+."

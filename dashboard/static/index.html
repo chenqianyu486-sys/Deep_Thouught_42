@@ -66,6 +66,22 @@ table.transitions tr:hover { background: #12122a; }
 .args-preview:hover { white-space: normal; word-break: break-all; }
 .summary-preview { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .summary-preview:hover { white-space: normal; word-break: break-word; }
+
+.phase-indicator { display: flex; gap: 3px; margin-top: 8px; }
+.phase-step { flex: 1; padding: 6px 2px; text-align: center; font-size: 10px; border-radius: 4px; background: #12122a; color: #555; transition: all 0.3s; letter-spacing: 0.3px; }
+.phase-step.active { background: #2a2a5a; color: #7c8aff; font-weight: 700; }
+.phase-step.done { background: #1a2a1a; color: #44ff88; }
+.phase-history { max-height: 150px; overflow-y: auto; margin-top: 8px; }
+.phase-entry { display: flex; justify-content: space-between; padding: 3px 6px; font-size: 12px; border-bottom: 1px solid #12122a; }
+.phase-entry .phase-tag { padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+.phase-tag.ANALYZE { background: #1e2a4a; color: #66aaff; }
+.phase-tag.SELECT_STRATEGY { background: #2a1e4a; color: #aa88ff; }
+.phase-tag.EXECUTE_STRATEGY { background: #3a1e1e; color: #ff8844; }
+.phase-tag.EVALUATE { background: #1a3a1a; color: #44ff88; }
+.eval-result { font-weight: 600; }
+.eval-result.IMPROVED { color: #44ff88; }
+.eval-result.REGRESSION { color: #ff6666; }
+.eval-result.UNCHANGED { color: #ffaa44; }
 </style>
 </head>
 <body>
@@ -146,6 +162,31 @@ table.transitions tr:hover { background: #12122a; }
       <div class="stat wide">
         <div class="label">Tools Used (this iter)</div>
         <div id="toolsUsed" style="margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Strategy Lifecycle Panel -->
+  <div class="panel">
+    <h2>Strategy Lifecycle</h2>
+    <div class="phase-indicator" id="phaseIndicator">
+      <div class="phase-step" id="phaseAnalyze">ANALYZE</div>
+      <div class="phase-step" id="phaseSelect">SELECT</div>
+      <div class="phase-step" id="phaseExecute">EXECUTE</div>
+      <div class="phase-step" id="phaseEvaluate">EVALUATE</div>
+    </div>
+    <div class="stat-grid" style="margin-top:8px">
+      <div class="stat wide">
+        <div class="label">Current Strategy</div>
+        <div class="value" style="font-size:14px" id="currentStrategy">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Current Phase</div>
+        <div class="value" style="font-size:13px" id="currentPhase">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Evaluation</div>
+        <div class="value" style="font-size:13px" id="evaluationResult">--</div>
       </div>
     </div>
   </div>
@@ -330,6 +371,7 @@ function updateDashboard(d) {
   if (d.cost) updateCost(d.cost);
   if (d.context) updateContext(d.context);
   if (d.control) updateControl(d.control);
+  if (d.strategy) updateStrategy(d.strategy);
   if (d.transitions) updateTransitions(d.transitions);
   if (d.context) updateLLMLog(d);
   updateToolTrace(d);
@@ -469,6 +511,35 @@ function updateIteration(it) {
   $('toolsUsed').innerHTML = Object.entries(counts).map(([t,c]) =>
     `<span class="tag tool">${esc(t)}${c>1?' x'+c:''}</span>`
   ).join('') || '<span style="color:#666">none</span>';
+}
+
+function updateStrategy(s) {
+  // Update current strategy name
+  $('currentStrategy').textContent = s.current_strategy || '--';
+
+  // Update current phase
+  var phase = s.current_phase || '--';
+  $('currentPhase').textContent = phase;
+
+  // Update evaluation result
+  var evalResult = s.evaluation_result || 'PENDING';
+  $('evaluationResult').textContent = evalResult;
+  $('evaluationResult').className = 'value eval-result ' + evalResult;
+
+  // Update phase indicator: highlight active phase, mark past phases as done
+  var phases = ['ANALYZE', 'SELECT_STRATEGY', 'EXECUTE_STRATEGY', 'EVALUATE'];
+  var phaseIds = ['phaseAnalyze', 'phaseSelect', 'phaseExecute', 'phaseEvaluate'];
+  var activeIdx = s.current_phase ? phases.indexOf(s.current_phase) : -1;
+  for (var i = 0; i < phases.length; i++) {
+    var el = $(phaseIds[i]);
+    if (!el) continue;
+    el.classList.remove('active', 'done');
+    if (i === activeIdx) {
+      el.classList.add('active');
+    } else if (activeIdx >= 0 && i < activeIdx) {
+      el.classList.add('done');
+    }
+  }
 }
 
 function updateModel(m) {

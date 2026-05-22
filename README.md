@@ -36,18 +36,18 @@ init_analysis -> [条件: WNS >= 0?]
 |---|------|--------|
 | 1 | 强制但不阻塞 | 代码级检测 `report_step_state` 缺失，自动合成 CONTINUE，不因 LLM 疏忽死锁 |
 | 2 | 事实而非判断 | Dashboard 只含原始测量值，注入为末条 user message（最大注意力权重） |
-| 3 | 去除冗余 | Handoff 简化为纯事实结构，策略选择交还 system prompt |
+| 3 | 去除冗余 | Dashboard 是唯一实时数据源；Handoff 仅传递迭代间记忆（trajectory + failed_strategies + exit_reason），不重复 Dashboard 已有的 WNS/critical paths |
 | 4 | 显式优于隐式 | 8 节点状态机 + 条件边，`StateTracer` 记录 JSON 轨迹 |
 | 5 | 关注点分离 | Worker（250K，执行）/ Planner（1M，规划），不同压缩策略 |
 | 6 | 单一调用路径 | V2 仅原生 function call，移除 XML/YAML 文本回退 |
 | 7 | 单一事实来源 | 运行时数据写入 `OptimizerState`，消除 `MemoryManager` shadow 副本 |
-| 8 | 领域知识编码 | 9 个策略 + 触发条件，系统匹配推荐，LLM 在推荐范围内选择 |
+| 8 | 领域知识编码 | 9 个策略 + 触发条件，系统呈现可用选项，LLM 自主选择 |
 | 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
 
 ## flow_control Tool 设计
 
-LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_control)` 工具，通过 `flow_control` 字段控制迭代行为。系统在工具执行前检查该信号，决定是继续执行还是退出循环。
+LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_control, strategy_phase, strategy_name)` 工具，通过 `flow_control` 字段控制迭代行为，通过 `strategy_phase` / `strategy_name` 追踪 4 阶段策略生命周期。系统在工具执行前检查该信号，决定是继续执行还是退出循环。
 
 **信号语义**:
 
@@ -112,6 +112,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 |------|---------|
 | **Timing** | WNS / TNS / Failing Endpoints 实时值，WNS 历史折线图（含零线标注），Critical Paths 列表 |
 | **Iteration** | 当前迭代数、无改善计数、工具轮次、错误数、策略序列、本轮工具使用情况 |
+| **Strategy Lifecycle** | 4阶段指示器（ANALYZE→SELECT→EXECUTE→EVALUATE）、当前策略名称、当前阶段、评估结果（IMPROVED/REGRESSION/UNCHANGED） |
 | **Model** | 当前模型名称、Worker / Planner 模型、LLM 调用次数、连续成功 / 失败计数 |
 | **Cost** | 总费用（带进度条）、Token 统计（prompt / completion / reasoning） |
 | **Control** | 运行状态（Running / DONE）、已耗时、超时阈值、压缩次数、输入 / 输出 DCP 路径 |

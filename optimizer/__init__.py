@@ -22,8 +22,10 @@ from .state import (
     CostState,
     ContextState,
     ControlState,
+    StrategyState,
     StepState,
     WnsMilestone,
+    PhaseEntry,
 )
 from .deps import NodeDeps
 from .graph import NodeGraph
@@ -87,8 +89,10 @@ __all__ = [
     "CostState",
     "ContextState",
     "ControlState",
+    "StrategyState",
     "StepState",
     "WnsMilestone",
+    "PhaseEntry",
     "NodeDeps",
     "NodeGraph",
     "NodeName",

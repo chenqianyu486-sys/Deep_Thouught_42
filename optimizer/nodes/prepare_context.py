@@ -30,7 +30,22 @@ other tool calls, call report_step_state alone.
 The report_step_state tool takes these parameters:
   - step_id (integer): incrementing per message in current strategy
   - result_status (string): SUCCESS | PARTIAL | FAIL
-  - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
+  - flow_control (string): CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
+  - strategy_phase (string, optional): ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+  - strategy_name (string, optional): PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade |
+    CellReplication | CongestionSpreading | RegisterRetiming | NetSwap
+
+Strategy Lifecycle (4-Phase Cycle):
+  Phase 1 ANALYZE: Gather timing data, identify dominant obstacles via
+    report_timing_summary, extract_critical_path_cells, analyze_congestion, etc.
+    Report strategy_phase=ANALYZE.
+  Phase 2 SELECT_STRATEGY: Based on analysis findings, choose a specific strategy.
+    Report strategy_phase=SELECT_STRATEGY and strategy_name=<chosen strategy>.
+  Phase 3 EXECUTE_STRATEGY: Execute the chosen strategy via tool calls.
+    Report strategy_phase=EXECUTE_STRATEGY.
+  Phase 4 EVALUATE: After execution completes, check WNS delta and determine if the
+    strategy helped. Report strategy_phase=EVALUATE with evaluation (IMPROVED,
+    REGRESSION, or UNCHANGED).
 
 Your text response MUST contain your analysis (hypothesis, strategy_rationale,
 observed signals) as free-form chain-of-thought reasoning.

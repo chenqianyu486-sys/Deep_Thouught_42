@@ -149,7 +149,7 @@ class StepState:
     """
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None         # CONTINUE | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK
+    flow_control: Optional[str] = None         # CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False               # Whether native tool_calls were also present
     raw_content: str = ""                      # Raw content for logging/debugging
 
@@ -2941,10 +2941,10 @@ class DCPOptimizer(DCPOptimizerBase):
     # ---- Skill Recommendation ----
 
     def _build_skill_recommendation(self) -> str:
-        """Analyze current state and recommend a strategy skill tool.
+        """Analyze current state and suggest strategy skill tools.
 
-        Returns a string like 'Recommended skill: rapidwright_analyze_pblock_region'
-        or empty string if no clear recommendation.
+        Returns a string like 'Available skill matching signals: rapidwright_analyze_pblock_region'
+        or empty string if no match. Presented as options, not directives.
 
         Uses tiered failure filtering:
         - reason="strategy_ineffective" → permanently excluded
@@ -2972,28 +2972,24 @@ class DCPOptimizer(DCPOptimizerBase):
 
         # [META-COGNITION] Stagnation: recommend diagnosis instead of optimization
         best_wns = self.best_wns if self.best_wns > float('-inf') else None
-        if self.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
+        if self.global_no_improvement >= 2 and (best_wns is None or best_wns < 0):
             if not _strategy_blocked("PBLOCK"):
-                return ("Recommended skill: rapidwright_analyze_pblock_region "
-                        "[DIAGNOSTIC - triggered by stagnation]. "
-                        "Analyze FPGA fabric to understand timing obstacles before selecting strategy.")
+                return ("Available skill matching signals: rapidwright_analyze_pblock_region "
+                        "(diagnostic — analyze FPGA fabric to understand timing obstacles).")
             if not _strategy_blocked("Fanout"):
-                return ("Recommended skill: rapidwright_execute_fanout_strategy "
-                        "[DIAGNOSTIC - triggered by stagnation]. "
-                        "Check high-fanout nets as potential hidden obstacle.")
+                return ("Available skill matching signals: rapidwright_execute_fanout_strategy "
+                        "(diagnostic — check high-fanout nets as potential obstacle).")
             if not _strategy_blocked("CongestionSpreading"):
-                return ("Recommended skill: rapidwright_analyze_congestion_spreading "
-                        "[DIAGNOSTIC - triggered by stagnation]. "
-                        "Check routing congestion as potential timing obstacle.")
-            return ("Recommended skill: rapidwright_analyze_net_detour "
-                    "[DIAGNOSTIC - triggered by stagnation]. "
-                    "Analyze placement detour issues on critical paths.")
+                return ("Available skill matching signals: rapidwright_analyze_congestion_spreading "
+                        "(diagnostic — check routing congestion as potential timing obstacle).")
+            return ("Available skill matching signals: rapidwright_analyze_net_detour "
+                    "(diagnostic — analyze placement detour issues on critical paths).")
 
         # Check spread data for distributed scenario
         if not _strategy_blocked("PBLOCK") and hasattr(self, 'critical_path_spread') and self.critical_path_spread:
             avg_dist = self.critical_path_spread.get('avg_distance', 0)
             if avg_dist and avg_dist > 70:
-                return (f"Recommended skill: rapidwright_analyze_pblock_region (matches distributed scenario, avg_distance={avg_dist:.1f} > 70). "
+                return (f"Available skill matching signals: rapidwright_analyze_pblock_region (distributed scenario, avg_distance={avg_dist:.1f} > 70). "
                         f"Prerequisite: First call vivado_report_utilization_for_pblock to get current LUT/FF/DSP/BRAM counts, "
                         f"then call the skill with target_lut_count and target_ff_count set to those values. "
                         f"The tool returns pblock_ranges — you must then call vivado_create_and_apply_pblock, "
@@ -3004,8 +3000,8 @@ class DCPOptimizer(DCPOptimizerBase):
             max_fanout = max(n[1] for n in self.high_fanout_nets[:5]) if self.high_fanout_nets else 0
             if max_fanout > 100:
                 return (
-                    "Recommended skill: rapidwright_execute_fanout_strategy "
-                    f"(matches high_fanout scenario, max_fanout={max_fanout}). "
+                    "Available skill matching signals: rapidwright_execute_fanout_strategy "
+                    f"(high_fanout scenario, max_fanout={max_fanout}). "
                     "Prerequisite: First call vivado_get_critical_high_fanout_nets "
                     "to get the list of high fanout nets with fanout counts, "
                     "then call the skill with nets set to that list. "
@@ -3018,14 +3014,14 @@ class DCPOptimizer(DCPOptimizerBase):
         if self.global_no_improvement >= 2 and self._iteration_narratives:
             recent_labels = [e.get('strategy_label', '') for e in self._iteration_narratives[-3:]]
             if any('physopt' in s.lower() for s in recent_labels):
-                return "Recommended skill: rapidwright_analyze_net_detour (multiple phys_opt iterations without improvement, check for placement detour issues on critical paths)"
+                return "Available skill matching signals: rapidwright_analyze_net_detour (multiple phys_opt iterations without improvement — check for placement detour issues on critical paths)"
 
         # Default: moderate WNS suggests physopt
         if not _strategy_blocked("PhysOpt"):
             current_wns = self._get_current_wns()
             if current_wns is not None and current_wns > -2.0:
                 skill_name = STRATEGY_SKILL_MAP.get("PhysOpt", "physopt_strategy")
-                return f"Recommended skill: rapidwright_execute_{skill_name} (moderate WNS={current_wns:.3f}, suitable for physical optimization)"
+                return f"Available skill matching signals: rapidwright_execute_{skill_name} (moderate WNS={current_wns:.3f}, suitable for physical optimization)"
 
         return ""
 
@@ -3126,18 +3122,14 @@ class DCPOptimizer(DCPOptimizerBase):
             else:
                 goal = continuation_prefix + "Severe violation. Consider aggressive strategies."
 
-        # [META-COGNITION] Stagnation override: replace goal with re-diagnosis instruction
-        if self.global_no_improvement >= 1 and (best_wns is None or best_wns < 0):
+        # [META-COGNITION] Stagnation: factual signal, not prescriptive
+        if self.global_no_improvement >= 2 and (best_wns is None or best_wns < 0):
             current_wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
             goal = (
-                f"⚠ STAGNATION DETECTED: {self.global_no_improvement} consecutive iterations without improvement. "
-                f"Current WNS={current_wns_str}. Your current approach is NOT WORKING.\n"
-                f"STOP executing optimization strategies. You MUST initiate a fresh diagnosis cycle:\n"
-                f"1. Gather current timing data (report_timing_summary, extract_critical_path_cells)\n"
-                f"2. Analyze what has changed and why prior strategies failed\n"
-                f"3. Form a new hypothesis about the dominant timing obstacle\n"
-                f"4. Select a strategy that has NOT been tried yet\n"
-                f"Do NOT repeat the same pattern."
+                f"No improvement in {self.global_no_improvement} consecutive iterations. "
+                f"Current WNS={current_wns_str}. "
+                f"Consider: re-assess timing data, analyze what changed, "
+                f"and form a new hypothesis about the dominant timing obstacle."
             )
 
         # Append skill recommendation if available
@@ -3612,13 +3604,15 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"],
+                            "enum": ["CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
                             "description": (
                                 "CONTINUE: next step in current strategy; "
+                                "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
                                 "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
                                 "RETRY: modify params and retry (max 3); "
-                                "ROLLBACK: revert to best checkpoint"
+                                "ROLLBACK: revert to best checkpoint; "
+                                "EXHAUSTED: all strategies tried, no further improvement possible"
                             )
                         }
                     },
@@ -5241,7 +5235,7 @@ other tool calls, call report_step_state alone.
 The report_step_state tool takes these parameters:
   - step_id (integer): incrementing per message in current strategy
   - result_status (string): SUCCESS | PARTIAL | FAIL
-  - flow_control (string): CONTINUE | RETRY | ROLLBACK | SWITCH_STRATEGY | DONE
+  - flow_control (string): CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
 
 Your text response MUST contain your analysis (hypothesis, strategy_rationale,
 observed signals) as free-form chain-of-thought reasoning.
@@ -7961,13 +7955,15 @@ async def optimize_v2(
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["CONTINUE", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK"],
+                            "enum": ["CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
                             "description": (
                                 "CONTINUE: next step in current strategy; "
+                                "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
                                 "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
                                 "RETRY: modify params and retry (max 3); "
-                                "ROLLBACK: revert to best checkpoint"
+                                "ROLLBACK: revert to best checkpoint; "
+                                "EXHAUSTED: all strategies tried, no further improvement possible"
                             ),
                         },
                     },

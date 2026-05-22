@@ -40,6 +40,9 @@ def build_context_snapshot(
     refreshed_fields: set[str] | None = None,
     input_dcp: str | None = None,
     output_dcp: str | None = None,
+    strategy_phase: str = "",
+    current_strategy: str = "",
+    evaluation_result: str = "",
 ) -> str:
     """Build factual data dashboard for the current optimization state.
 
@@ -56,7 +59,13 @@ def build_context_snapshot(
     # -- Core timing metrics --
     lines.append(f"clock_period: {clock_period:.3f}" if clock_period else "clock_period: N/A")
     lines.append(f"wns_current: {current_wns:.3f}" if current_wns is not None else "wns_current: N/A")
-    lines.append(f"wns_best: {best_wns:.3f}" if best_wns is not None and best_wns > float('-inf') else "wns_best: N/A")
+    # best_wns: show current value as first measurement if no best yet
+    if best_wns is not None and best_wns > float('-inf'):
+        lines.append(f"wns_best: {best_wns:.3f}")
+    elif current_wns is not None:
+        lines.append(f"wns_best: {current_wns:.3f} (first measurement)")
+    else:
+        lines.append("wns_best: N/A")
     lines.append(f"wns_best_iter: {best_wns_iteration}" if best_wns_iteration is not None else "wns_best_iter: N/A")
     lines.append(f"tns: {tns:.3f}" if tns is not None else "tns: N/A")
     lines.append(f"failing_endpoints: {failing_endpoints}" if failing_endpoints is not None else "failing_endpoints: N/A")
@@ -137,17 +146,27 @@ def build_context_snapshot(
         lines.append("")
         lines.append("active_tools: []")
 
+    # -- Strategy Lifecycle --
+    if strategy_phase or current_strategy:
+        lines.append("")
+        lines.append("strategy_lifecycle:")
+        if strategy_phase:
+            lines.append(f"  current_phase: {strategy_phase}")
+        if current_strategy:
+            lines.append(f"  current_strategy: {current_strategy}")
+        if evaluation_result and evaluation_result != "PENDING":
+            lines.append(f"  evaluation: {evaluation_result}")
+
     lines.append("")
-    lines.append("next_action: Call report_step_state(step_id, result_status, flow_control) alongside your optimization/analysis tools. Text body = chain-of-thought analysis.")
     lines.append("--- End Dashboard ---")
     return "\n".join(lines)
 
 
 def _stale_annotation(signal_key: str, refreshed_fields: set[str]) -> str:
     """Map a derived signal key back to its source field and check freshness."""
-    # Static resource fields: design resources don't change during optimization,
-    # so stale annotations are misleading.
-    _STATIC_RESOURCE_KEYS = frozenset({"lut", "ff", "dsp", "bram", "uram", "design_type"})
+    # Static resource fields: design resources that typically don't change during
+    # optimization. Note: "ff" is NOT static — RegisterRetiming can add pipeline FFs.
+    _STATIC_RESOURCE_KEYS = frozenset({"lut", "dsp", "bram", "uram", "design_type"})
     if signal_key.lower() in _STATIC_RESOURCE_KEYS:
         return ""
     # Signal keys are derived from source fields:

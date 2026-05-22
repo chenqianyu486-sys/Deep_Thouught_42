@@ -167,15 +167,40 @@ async def llm_tool_loop_node(
         state.control.step_state = step_state
 
         if step_state:
+            state.context.step_state_misses = 0  # Reset miss counter
             logger.info(
                 f"[llm_tool_loop] STEP_STATE: step_id={step_state.step_id}, "
                 f"result_status={step_state.result_status}, "
                 f"flow_control={step_state.flow_control}"
             )
             flow_signal = step_state.flow_control
+
+            # Track strategy phase transition if LLM reported it
+            if step_state.strategy_phase:
+                if step_state.strategy_phase != state.strategy.current_phase:
+                    from optimizer.state import PhaseEntry
+                    phase_entry = PhaseEntry(
+                        phase=step_state.strategy_phase,
+                        strategy=step_state.strategy_name or state.strategy.current_strategy,
+                        iteration=state.iteration.current,
+                        tool_round=state.iteration.tool_round,
+                        wns_at_entry=state.timing.latest_wns,
+                    )
+                    state.strategy.phase_history.append(phase_entry)
+                    if len(state.strategy.phase_history) > 100:
+                        state.strategy.phase_history = state.strategy.phase_history[-100:]
+                    state.strategy.current_phase = step_state.strategy_phase
+                    logger.info(
+                        f"[llm_tool_loop] Phase transition: -> {step_state.strategy_phase}"
+                        + (f" ({step_state.strategy_name})" if step_state.strategy_name else "")
+                    )
+
+                if step_state.strategy_name:
+                    state.strategy.current_strategy = step_state.strategy_name
         else:
             # report_step_state missing — do NOT skip tool execution.
             # Inject a short note and synthesize default CONTINUE.
+            state.context.step_state_misses += 1
             logger.warning("[llm_tool_loop] report_step_state missing, auto-CONTINUE")
             deps.compat.add_message("user", "[NOTE] report_step_state missing. Auto-CONTINUE. Include it next turn.")
             flow_signal = "CONTINUE"
@@ -382,8 +407,13 @@ def _prepare_api_messages(deps: NodeDeps, state: OptimizerState) -> list:
     except Exception:
         return []
 
-    # Prepend FORMAT stamp to system prompt for persistent attention
-    if api_messages and api_messages[0].get("role") == "system":
+    # Prepend FORMAT stamp to system prompt — only in first 3 rounds,
+    # or when the LLM has missed report_step_state for 2+ consecutive rounds.
+    should_stamp = (
+        state.iteration.tool_round <= 3
+        or state.context.step_state_misses >= 2
+    )
+    if should_stamp and api_messages and api_messages[0].get("role") == "system":
         system_content = api_messages[0].get("content", "")
         if not system_content.startswith("[FORMAT:"):
             api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
@@ -425,6 +455,9 @@ def _inject_dashboard_at_end(
         refreshed_fields=state.timing.refreshed_fields,
         input_dcp=str(state.control.input_dcp.resolve()) if state.control.input_dcp else None,
         output_dcp=str(state.control.output_dcp.resolve()) if state.control.output_dcp else None,
+        strategy_phase=state.strategy.current_phase,
+        current_strategy=state.strategy.current_strategy,
+        evaluation_result=state.strategy.evaluation_result,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)
@@ -730,19 +763,17 @@ def _handle_flow_signal(
     elif flow_signal == "SWITCH_STRATEGY":
         logger.info(yellow("[llm_tool_loop] LLM signaled SWITCH_STRATEGY"))
         state.control.done_reason = "switch_strategy"
-        # Inject analysis-forcing prompt
+        # Inject factual context — LLM decides next steps from dashboard + handoff
         if deps.compat is not None:
             current_wns = state.timing.latest_wns
             wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
-            enforced_msg = (
-                f"SYSTEM ENFORCED SWITCH: The previous model signaled SWITCH_STRATEGY while WNS={wns_str}. "
-                f"Strategy switch triggered. You MUST start this iteration with structured analysis:\n"
-                f"1. Call report_timing_summary and extract_critical_path_cells to gather current signal data\n"
-                f"2. Form a hypothesis about the dominant timing obstacle\n"
-                f"3. Select a strategy based on the hypothesis\n"
-                f"DO NOT repeat the same strategy that just failed."
+            switch_msg = (
+                f"[STRATEGY SWITCH] Previous strategy ended. WNS={wns_str}. "
+                f"New iteration starts with fresh context. "
+                f"Failed strategies are listed in the handoff. "
+                f"The dashboard shows current timing data."
             )
-            deps.compat.add_message("user", enforced_msg)
+            deps.compat.add_message("user", switch_msg)
 
     elif flow_signal == "NEXT_ITERATION":
         logger.info(green("[llm_tool_loop] LLM signaled NEXT_ITERATION — success, moving to next iteration"))

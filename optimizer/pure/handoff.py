@@ -9,8 +9,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from .critical_path import format_critical_paths_handoff, DISPLAY_LIMIT_HANDOFF_PLANNER, DISPLAY_LIMIT_HANDOFF_WORKER
-
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
@@ -114,22 +112,17 @@ def _generate_planner_handoff(
     current_wns: float | None,
     failed_strategies: list[dict] | None = None,
 ) -> str:
-    """Generate handoff for planner models (1M context)."""
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
-    best_wns_iter = state.timing.best_wns_iteration
-    clock_period = state.timing.clock_period
+    """Generate handoff for planner models (1M context).
 
-    import time as _time
-    elapsed = _time.time() - state.control.start_time if state.control.start_time else 0.0
+    Handoff carries only what the Dashboard does NOT contain:
+    - Iteration trajectory (compact WNS history across iterations)
+    - Failed strategies (excluded strategies with reasons)
+    - Status signals (no-improvement count, same-strategy streak)
+    - Exit reason from the previous iteration
 
-    situation = build_situation_summary(
-        current_wns=current_wns,
-        best_wns=best_wns,
-        best_wns_iteration=best_wns_iter,
-        global_no_improvement=state.iteration.global_no_improvement,
-        elapsed_time=elapsed,
-        remaining_time=max(0, state.control.wall_clock_timeout - elapsed),
-    )
+    WNS/TNS/FE, critical paths, and design signals are in the Dashboard
+    (injected per-LLM-call) and are NOT duplicated here.
+    """
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
     status = build_status_signal(
         state.iteration.global_no_improvement,
@@ -137,25 +130,12 @@ def _generate_planner_handoff(
     )
     status_section = f"\nSTATUS:\n{status}\n" if status else ""
 
-    wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
-    tns_str = f"{state.timing.latest_tns:.3f}ns" if state.timing.latest_tns is not None else "N/A"
-    fep_str = str(state.timing.latest_failing_endpoints) if state.timing.latest_failing_endpoints is not None else "N/A"
-
-    critical_paths_str = format_critical_paths_handoff(
-        state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_PLANNER
-    )
+    exit_reason = state.control.done_reason or ""
+    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
 
     return f"""--- Iteration {state.iteration.current + 1} Handoff ---
 
-SITUATION:
-{situation}
-
-STATE:
-WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
-
-CRITICAL PATHS (top {DISPLAY_LIMIT_HANDOFF_PLANNER}):
-{critical_paths_str}
-
+{exit_line}
 TRAJECTORY:
 {trajectory}
 {status_section}{_format_failed_strategies(failed_strategies or [])}"""
@@ -166,25 +146,26 @@ def _generate_worker_handoff(
     current_wns: float | None,
     failed_strategies: list[dict] | None = None,
 ) -> str:
-    """Generate handoff for worker models (250K context)."""
-    wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "N/A"
-    tns_str = f"{state.timing.latest_tns:.3f}ns" if state.timing.latest_tns is not None else "N/A"
-    fep_str = str(state.timing.latest_failing_endpoints) if state.timing.latest_failing_endpoints is not None else "N/A"
+    """Generate handoff for worker models (250K context).
 
-    critical_paths_str = format_critical_paths_handoff(
-        state.timing.critical_paths, limit=DISPLAY_LIMIT_HANDOFF_WORKER
-    )
-
+    Compact version: trajectory (last 5) + status + failed strategies.
+    WNS/TNS/FE and critical paths are in the Dashboard.
+    """
+    trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=5)
     status = build_status_signal(
         state.iteration.global_no_improvement,
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
     )
     status_section = f"\n{status}" if status else ""
 
+    exit_reason = state.control.done_reason or ""
+    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
+
     return f"""--- Iteration {state.iteration.current + 1} ---
 
-WNS={wns_str} TNS={tns_str} FailingEP={fep_str}
-{critical_paths_str}
+{exit_line}
+TRAJECTORY:
+{trajectory}
 {status_section}{_format_failed_strategies(failed_strategies or [])}"""
 
 

@@ -22,6 +22,19 @@ class StepState:
     flow_control: Optional[str] = None    # CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
+    strategy_phase: Optional[str] = None  # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    strategy_name: Optional[str] = None   # PBLOCK | PhysOpt | Fanout | ...
+
+
+@dataclass
+class PhaseEntry:
+    """Record of a strategy phase transition with timestamp."""
+    phase: str = ""                          # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    strategy: str = ""                       # strategy name (PBLOCK, PhysOpt, etc.)
+    iteration: int = 0
+    tool_round: int = 0
+    wns_at_entry: Optional[float] = None     # WNS when entering this phase
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -162,6 +175,8 @@ class ContextState:
     # Tool call trace for dashboard (bounded FIFO)
     tool_call_trace: list[ToolCallRecord] = field(default_factory=list)
     tool_call_trace_max: int = 100
+    # Consecutive rounds where report_step_state was missing
+    step_state_misses: int = 0
 
 
 @dataclass
@@ -183,6 +198,20 @@ class ControlState:
     run_dir: Optional[Path] = None
 
 
+@dataclass
+class StrategyState:
+    """Strategy lifecycle tracking for the 4-phase decision cycle:
+    ANALYZE -> SELECT_STRATEGY -> EXECUTE_STRATEGY -> EVALUATE.
+    """
+    current_phase: str = ""                  # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
+    current_strategy: str = ""               # PBLOCK, PhysOpt, Fanout, etc.
+    phase_history: list[PhaseEntry] = field(default_factory=list)
+    analysis_summary: str = ""               # current analysis findings
+    strategy_rationale: str = ""             # why the current strategy was chosen
+    evaluation_wns_delta: float = 0.0        # WNS change after execution
+    evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
+
+
 # ── Composite state ─────────────────────────────────────────────
 
 @dataclass
@@ -194,3 +223,4 @@ class OptimizerState:
     cost: CostState = field(default_factory=CostState)
     context: ContextState = field(default_factory=ContextState)
     control: ControlState = field(default_factory=ControlState)
+    strategy: StrategyState = field(default_factory=StrategyState)
