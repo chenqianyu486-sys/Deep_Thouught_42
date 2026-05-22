@@ -2019,8 +2019,8 @@ def analyze_pblock_region(
 
 
 def execute_pblock_strategy(
-    target_lut_count: int,
-    target_ff_count: int,
+    target_lut_count: int = 0,
+    target_ff_count: int = 0,
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.2,
@@ -2032,11 +2032,15 @@ def execute_pblock_strategy(
     The system will chain: place_design -unplace, create_and_apply_pblock,
     place_design, route_design, report_timing_summary.
 
+    When target_lut_count or target_ff_count is 0 (default), the function
+    auto-detects resource counts from the loaded design. This means you can
+    call this tool directly without any prior data gathering.
+
     Args:
-        target_lut_count: Current LUT usage from Vivado
-        target_ff_count: Current FF usage from Vivado
-        target_dsp_count: Current DSP usage
-        target_bram_count: Current BRAM usage
+        target_lut_count: LUT usage (0 = auto-detect from design)
+        target_ff_count: FF usage (0 = auto-detect from design)
+        target_dsp_count: DSP usage (0 = auto-detect from design)
+        target_bram_count: BRAM usage (0 = auto-detect from design)
         resource_multiplier: Buffer multiplier (default 1.2x)
 
     Returns:
@@ -2052,6 +2056,32 @@ def execute_pblock_strategy(
     if _current_design is None:
         logger.warning("execute_pblock_strategy: No design loaded")
         return {"error": "No design loaded. Use read_checkpoint first."}
+
+    # Auto-detect resource counts from the loaded design when not specified
+    if target_lut_count == 0 or target_ff_count == 0:
+        instance_list = _current_design.getInstances()
+        auto_lut = 0
+        auto_ff = 0
+        auto_dsp = 0
+        auto_bram = 0
+        for inst in instance_list:
+            cell_type = inst.getType()
+            if cell_type.startswith("LUT"):
+                auto_lut += 1
+            elif cell_type.startswith("FD") or cell_type in ("FDPE", "FDRE", "FDSE", "FDCE"):
+                auto_ff += 1
+            elif cell_type.startswith("DSP"):
+                auto_dsp += 1
+            elif cell_type.startswith("RAMB") or cell_type.startswith("BRAM"):
+                auto_bram += 1
+        target_lut_count = auto_lut if target_lut_count == 0 else target_lut_count
+        target_ff_count = auto_ff if target_ff_count == 0 else target_ff_count
+        target_dsp_count = auto_dsp if target_dsp_count == 0 else target_dsp_count
+        target_bram_count = auto_bram if target_bram_count == 0 else target_bram_count
+        logger.info(
+            "Auto-detected resources: LUT=%d, FF=%d, DSP=%d, BRAM=%d",
+            auto_lut, auto_ff, auto_dsp, auto_bram,
+        )
 
     try:
         from skills import SkillRegistry, SkillContext

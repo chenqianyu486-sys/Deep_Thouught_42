@@ -27,6 +27,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_extract_critical_path_pins",
         "vivado_get_critical_high_fanout_nets",
         "vivado_report_utilization_for_pblock",
+        "vivado_get_resource_counts",
         "vivado_report_route_status",
         # RapidWright analysis tools
         "rapidwright_analyze_net_detour",
@@ -69,6 +70,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_route_design",
         "vivado_phys_opt_design",
         "vivado_write_checkpoint",
+        "vivado_get_resource_counts",
         "vivado_run_tcl",
         "vivado_open_checkpoint",
         # Quick-check tools during execution

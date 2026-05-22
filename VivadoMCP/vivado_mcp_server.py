@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import atexit
+import json
 import logging
 import os
 import re
@@ -833,6 +834,47 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
     return "\n".join(result_lines)
 
 
+def get_resource_counts(timeout: float = 300.0) -> str:
+    """Get structured resource counts as JSON.
+
+    Parses report_utilization output and returns clean JSON with
+    LUT, FF, DSP, and BRAM used counts.
+
+    Returns:
+        JSON string: {"lut": 30839, "ff": 1660, "dsp": 0, "bram": 0}
+    """
+    cmd = "report_utilization -return_string"
+    try:
+        report = run_tcl_command(cmd, timeout=timeout)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+    resources = {"lut": 0, "ff": 0, "dsp": 0, "bram": 0}
+    lines = report.split('\n')
+    for line in lines:
+        parts = line.split('|')
+        if len(parts) >= 3:
+            raw = parts[2].strip()
+            val_str = raw.split()[0] if raw else "0"
+            try:
+                val = int(val_str)
+            except ValueError:
+                continue
+
+            stripped = line.strip()
+            if 'Slice LUTs' in stripped or stripped.startswith('|LUT as Logic') or stripped == '| LUT as Logic':
+                resources["lut"] = val
+            elif 'Register as Flip Flop' in stripped or 'Slice Registers' in stripped:
+                resources["ff"] = val
+            elif stripped.startswith('| DSPs') or stripped.startswith('|DSPs'):
+                if 'Block RAM' not in stripped:
+                    resources["dsp"] = val
+            elif 'Block RAM Tile' in stripped:
+                resources["bram"] = val
+
+    return json.dumps(resources)
+
+
 def validate_pblock_resources(pblock_name: str) -> Dict[str, Any]:
     """
     Validate that a pblock has sufficient resources for the design primitives assigned to it.
@@ -1408,6 +1450,25 @@ async def list_tools():
             }
         ),
         Tool(
+            name="get_resource_counts",
+            description="""Get structured resource counts (LUT, FF, DSP, BRAM) as JSON.
+
+            Efficiently parses report_utilization output server-side and returns clean JSON:
+            {\"lut\": 30839, \"ff\": 1660, \"dsp\": 0, \"bram\": 0}
+
+            Use this instead of running raw Tcl (foreach/get_cells) for resource queries.
+            Returns only the used count — use report_utilization_for_pblock for full utilization details.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 300)"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="extract_critical_path_pins",
             description="""Extract pin-level paths from critical timing paths for net detour analysis.
 
@@ -1823,6 +1884,11 @@ async def call_tool(name: str, arguments: dict):
         elif name == "report_utilization_for_pblock":
             timeout = arguments.get("timeout", 300)
             output = report_utilization_for_pblock(timeout)
+            return [TextContent(type="text", text=output)]
+
+        elif name == "get_resource_counts":
+            timeout = arguments.get("timeout", 300)
+            output = get_resource_counts(timeout)
             return [TextContent(type="text", text=output)]
         
         elif name == "create_and_apply_pblock":

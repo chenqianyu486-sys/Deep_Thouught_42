@@ -572,13 +572,15 @@ async def list_tools() -> list[Tool]:
             name="execute_pblock_strategy",
             description="""Execute complete PBLOCK workflow: analyze FPGA fabric and prepare for automated Vivado chaining.
 
-            Calls the execute_pblock_strategy skill which finds the optimal contiguous
-            fabric region fitting the design's resource needs. After this tool succeeds,
-            the system will AUTOMATICALLY chain the following Vivado tools in order:
+            This is the PREFERRED tool for PBLOCK strategy — do NOT use vivado_run_tcl for this workflow.
+            After this tool succeeds, the system will AUTOMATICALLY chain the following Vivado tools:
               1. vivado_place_design -unplace
               2. vivado_create_and_apply_pblock (with returned pblock_ranges)
               3. vivado_place_design (re-place within constraint)
               4. vivado_route_design
+
+            SELF-CONTAINED: Resource counts (LUT/FF) are auto-detected from the loaded design
+            when not explicitly provided. You can call this tool directly with no arguments.
 
             MUTATING (via chained Vivado tools). The returned checkpoint preserves
             pre-pblock state for rollback.
@@ -587,8 +589,6 @@ async def list_tools() -> list[Tool]:
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
 
-            Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts.
-            Input: target_lut_count, target_ff_count from utilization report.
             Output: pblock_ranges, pblock_name, region, capacity_ok.
 
             NOTE: resource_multiplier defaults to 1.2x (tighter than analyze_pblock_region's 1.5x).
@@ -598,20 +598,20 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "target_lut_count": {
                         "type": "integer",
-                        "description": "Current LUT usage from Vivado report_utilization_for_pblock"
+                        "description": "LUT usage (0 or omit = auto-detect from loaded design)"
                     },
                     "target_ff_count": {
                         "type": "integer",
-                        "description": "Current FF usage from Vivado report_utilization_for_pblock"
+                        "description": "FF usage (0 or omit = auto-detect from loaded design)"
                     },
                     "target_dsp_count": {
                         "type": "integer",
-                        "description": "Current DSP usage",
+                        "description": "DSP usage (0 or omit = auto-detect from loaded design)",
                         "default": 0
                     },
                     "target_bram_count": {
                         "type": "integer",
-                        "description": "Current BRAM usage",
+                        "description": "BRAM usage (0 or omit = auto-detect from loaded design)",
                         "default": 0
                     },
                     "resource_multiplier": {
@@ -619,8 +619,7 @@ async def list_tools() -> list[Tool]:
                         "description": "Buffer multiplier for resource targets (default: 1.2 for tighter regions)",
                         "default": 1.2
                     }
-                },
-                "required": ["target_lut_count", "target_ff_count"]
+                }
             }
         ),
         Tool(
