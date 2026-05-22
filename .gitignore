@@ -10,6 +10,7 @@ dcp_optimizer_run-*/
 fpl26_contest_benchmarks_v1.0.0/
 wsl.localhostUbuntuhomeqianyufpl26_optimization_contestdashboardstatic/
 .codeartsdoer/
+.arts/
 
 # DCP validation temporary directories
 dcp_validation_*/
