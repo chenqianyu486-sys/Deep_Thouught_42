@@ -590,7 +590,7 @@ class V2TestMode:
          "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
         {"name": "smart_retiming", "tool": "rapidwright_smart_retiming",
          "skill_name": "smart_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_smart_retiming", "auto_rollback": False},
-         "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
+         "needs": "critical_paths"},
     ]
 
     async def _prepare_skill_test_data(self, init_data: dict) -> dict:

@@ -351,12 +351,19 @@ class SmartRetimingSkill(Skill):
         logger.info("[smart_retiming] Phase 2: ANALYZE & SCORE")
         from skills.register_retiming_strategy import analyze_register_retiming
 
-        analysis = analyze_register_retiming(
-            design,
-            critical_paths=critical_paths,
-            delay_threshold=0.5,
-            min_chain_depth=min_chain_depth,
-        )
+        try:
+            analysis = analyze_register_retiming(
+                design,
+                critical_paths=critical_paths,
+                delay_threshold=0.5,
+                min_chain_depth=min_chain_depth,
+            )
+        except Exception as e:
+            return SkillResult(
+                success=False,
+                error=f"analyze_register_retiming failed: {e}",
+                error_code=SkillErrorCode.INVALID_PARAMETER,
+            )
         if isinstance(analysis, dict) and "error" in analysis:
             return SkillResult(success=False,
                                error=f"Analysis failed: {analysis['error']}",
