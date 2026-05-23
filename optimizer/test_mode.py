@@ -588,6 +588,9 @@ class V2TestMode:
          "dep": "analyze_net_swapping", "dep_key": "candidates"},
         {"name": "flatten_lut_cascade", "tool": "rapidwright_flatten_lut_cascade",
          "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
+        {"name": "smart_retiming", "tool": "rapidwright_smart_retiming",
+         "skill_name": "smart_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_smart_retiming", "auto_rollback": False},
+         "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
     ]
 
     async def _prepare_skill_test_data(self, init_data: dict) -> dict:
@@ -791,7 +794,7 @@ class V2TestMode:
         try:
             # Init analysis
             init_data = await self.run_init_analysis(input_dcp)
-            if not init_data.get("wns"):
+            if init_data.get("wns") is None:
                 print("[TEST] Init analysis failed (no WNS)")
                 return False
 

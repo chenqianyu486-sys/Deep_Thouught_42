@@ -245,7 +245,9 @@ def _find_nets_for_cell(design, cell_name: str, hint_fanout: int) -> list[dict]:
         try:
             for net in design.getNets():
                 net_name = str(net.getName())
-                if cell_name in net_name:
+                import re
+                pattern = re.compile(re.escape(cell_name) + r'(?:_|$)')
+                if pattern.search(net_name):
                     fanout = net.getFanOut()
                     if fanout > 1:
                         results.append({

@@ -190,6 +190,7 @@ def _find_contiguous_region_sliding_window(
     required_brams: int,
     reference_col: int,
     exclude_delay_heavy: bool = True,
+    distance_weight_factor: float = 0.3,
 ) -> dict | None:
     """Sliding-window O(N) search for minimal-width column interval satisfying
     required slice / DSP / BRAM counts.
@@ -209,12 +210,14 @@ def _find_contiguous_region_sliding_window(
     """
     N = len(columns)
 
-    # Score function for tie-breaking: prefer narrower windows closer to reference
+    # Score function: minimize width + weighted distance from reference point.
+    # distance_weight_factor balances between tightly packed regions and
+    # proximity to critical path cells (0.3 default).
     def _score(left: int, right: int) -> float:
         width = right - left + 1
         center_col = (columns[left]["col_idx"] + columns[right]["col_idx"]) / 2.0
         dist = abs(center_col - reference_col)
-        return float(width) + dist * 0.001  # width dominates, dist breaks ties
+        return float(width) + dist * distance_weight_factor
 
     best_window = None
     best_score = float('inf')
@@ -536,6 +539,52 @@ def _compute_center_of_mass(design) -> tuple[int, int]:
     return sum(placed_cols) // len(placed_cols), sum(placed_rows) // len(placed_rows)
 
 
+def _compute_critical_path_center_from_cells(
+    design, cell_names: list[str]
+) -> tuple[int, int] | None:
+    """Compute center-of-mass using critical path cell names from optimizer state.
+
+    Args:
+        design: RapidWright Design object
+        cell_names: List of critical path cell names from state.timing.critical_paths
+
+    Returns:
+        (col, row) center, or None if no cells matched.
+
+    Logs match rate to help diagnose cell name format mismatches between
+    optimizer and RapidWright API.
+    """
+    cols, rows = [], []
+    matched_count = 0
+    for cell_name in cell_names:
+        try:
+            cell = design.getCell(cell_name)
+            if cell and cell.isPlaced():
+                site = cell.getSite()
+                if site and site.getTile():
+                    cols.append(site.getTile().getColumn())
+                    rows.append(site.getTile().getRow())
+                    matched_count += 1
+        except Exception:
+            continue
+    if matched_count == 0:
+        logger.warning(
+            f"[PBLOCK] Failed to match any critical path cells "
+            f"({len(cell_names)} provided). Falling back to global center-of-mass."
+        )
+        return None
+    if matched_count < len(cell_names) * 0.5:
+        logger.warning(
+            f"[PBLOCK] Low cell match rate: {matched_count}/{len(cell_names)}. "
+            f"Center calculation may be inaccurate."
+        )
+    logger.info(
+        f"[PBLOCK] Critical path center: matched {matched_count}/{len(cell_names)} cells, "
+        f"center=({sum(cols) // len(cols)}, {sum(rows) // len(rows)})"
+    )
+    return sum(cols) // len(cols), sum(rows) // len(rows)
+
+
 # ---------------------------------------------------------------------------
 # Main search function
 # ---------------------------------------------------------------------------
@@ -548,6 +597,8 @@ def smart_region_search(
     target_bram_count: int = 0,
     reference_col: Optional[int] = None,
     reference_row: Optional[int] = None,
+    critical_path_cells: Optional[list[str]] = None,
+    distance_weight_factor: float = 0.3,
 ) -> RegionSearchResult:
     """Find optimal contiguous region for pblock using sliding-window search.
 
@@ -597,7 +648,11 @@ def smart_region_search(
     # Build/retrieve cached index
     index = _build_device_slice_index(device)
 
-    # Reference point
+    # Reference point: critical path cells > explicit coords > global center-of-mass
+    if critical_path_cells:
+        cp_center = _compute_critical_path_center_from_cells(design, critical_path_cells)
+        if cp_center is not None:
+            reference_col, reference_row = cp_center
     if reference_col is None or reference_row is None:
         reference_col, reference_row = _compute_center_of_mass(design)
     if reference_col is None:
@@ -617,6 +672,7 @@ def smart_region_search(
     window = _find_contiguous_region_sliding_window(
         columns, required_slices, target_dsp_count, target_bram_count,
         reference_col=reference_col, exclude_delay_heavy=True,
+        distance_weight_factor=distance_weight_factor,
     )
 
     if window is None:
@@ -624,6 +680,7 @@ def smart_region_search(
         window = _find_contiguous_region_sliding_window(
             columns, required_slices, target_dsp_count, target_bram_count,
             reference_col=reference_col, exclude_delay_heavy=False,
+            distance_weight_factor=distance_weight_factor,
         )
 
     if window is not None:

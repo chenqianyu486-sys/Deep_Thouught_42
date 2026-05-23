@@ -462,6 +462,13 @@ class SmartRetimingSkill(Skill):
                             # via the global _current_design in rapidwright_tools
                             import RapidWrightMCP.rapidwright_tools as rwt
                             rwt._current_design = restored
+                            # Also try to update context.design for consistency
+                            try:
+                                object.__setattr__(context, 'design', restored)
+                            except Exception:
+                                pass  # context.design will be stale, but rwt._current_design is canonical
+                            # Also update the local design reference used below
+                            design = restored
                             # Also update context.design (mutate the ref)
                             # context is a frozen dataclass, so we work via
                             # rwt._current_design which is the real singleton

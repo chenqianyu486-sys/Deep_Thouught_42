@@ -87,7 +87,7 @@ STRATEGIES = {
         "sequence": [
             {"step": "optimize_pin_swapping", "platform": "RapidWright",
              "params": {"critical_paths": "from Vivado extract_critical_path_pins"}},
-            {"step": "write_checkpoint", "platform": "VapidWright",
+            {"step": "write_checkpoint", "platform": "RapidWright",
              "params": {"overwrite": True, "directory": "temp"}},
             {"step": "open_checkpoint", "platform": "Vivado", "params": None},
             {"step": "route_design", "platform": "Vivado", "params": None},

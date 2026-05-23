@@ -482,6 +482,7 @@ def test_all_expected_skills_registered():
         "analyze_net_swapping", "execute_net_swapping",
         "lut_cascade_flattening",
         "execute_pblock_strategy",
+        "smart_retiming",
     }
     registered = {m.name for m in SkillRegistry.list_all()}
     missing = EXPECTED_SKILLS - registered

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 POST_EVAL_TOOLS = frozenset({
     "vivado_route_design",
     "rapidwright_execute_fanout_strategy",
+    "rapidwright_execute_pblock_strategy",
 })
 
 
@@ -139,6 +140,24 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 except json.JSONDecodeError:
                     tool_args = {}
 
+                # Auto-inject critical_path_cells for pblock tools
+                if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
+                    if not tool_args.get("critical_path_cells") and state.timing.critical_paths:
+                        cells = []
+                        seen = set()
+                        for cp in state.timing.critical_paths[:10]:
+                            for cell_name in cp.cells:
+                                if cell_name not in seen:
+                                    seen.add(cell_name)
+                                    cells.append(cell_name)
+                                    if len(cells) >= 50:
+                                        break
+                            if len(cells) >= 50:
+                                break
+                        if cells:
+                            tool_args["critical_path_cells"] = cells
+                            logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
+
                 tool_start = time.time()
                 logger.info(f"[EXECUTE] Calling {tool_name}")
                 result = await call_tool_fn(
@@ -220,8 +239,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 if tool_name in SKILL_CHAIN_ACTIONS:
                     try:
                         skill_data = json.loads(result) if result else {}
-                        await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
-                        reached_callback = True
+                        if isinstance(skill_data, dict) and "error" in skill_data:
+                            logger.warning(f"[EXECUTE] Skill {tool_name} returned error, skipping chain: {skill_data['error']}")
+                        else:
+                            await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
+                            reached_callback = True
                     except Exception as e:
                         logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
 
@@ -555,9 +577,20 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 latest_failing_endpoints=state.timing.latest_failing_endpoints,
                 prev_best_wns=state.timing.prev_best_wns,
             )
+            # Determine chain step status from raw_result (JSON error check)
+            step_failed = False
+            try:
+                parsed = json.loads(raw_result) if isinstance(raw_result, str) else {}
+                if isinstance(parsed, dict) and "error" in parsed:
+                    step_failed = True
+            except (json.JSONDecodeError, TypeError):
+                pass
+            status_label = "failed" if step_failed else "completed"
             if deps.compat is not None:
                 deps.compat.add_message("user",
-                    f"[AUTO-CHAIN] After {tool_name}: {target_tool} completed — {summary[:400]}")
+                    f"[AUTO-CHAIN] After {tool_name}: {target_tool} {status_label} — {summary[:400]}")
+            if step_failed:
+                raise RuntimeError(f"{target_tool} reported error in result: {summary[:200]}")
             _track_wns_from_result(state, target_tool, raw_result)
 
             # Mark critical paths stale after placement-affecting chain tools
@@ -577,6 +610,22 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                         deps.rapidwright_session, deps.vivado_session,
                     )
                     state.control.current_dcp_path = Path(pre_chain_path).resolve()
+                    # Refresh WNS after restore so state matches Vivado
+                    try:
+                        restore_result = await call_tool_fn(
+                            "vivado_report_timing_summary", {},
+                            deps.rapidwright_session, deps.vivado_session,
+                        )
+                        restore_wns = parse_timing_summary(restore_result)
+                        if restore_wns is not None:
+                            state.timing.latest_wns = restore_wns
+                            logger.info(f"[chain] Post-restore WNS: {restore_wns:.3f}")
+                        else:
+                            state.timing.latest_wns = None
+                            logger.warning("[chain] Could not parse timing after restore")
+                    except Exception as timing_err:
+                        state.timing.latest_wns = None
+                        logger.warning(f"[chain] Timing report after restore failed: {timing_err}")
                 except Exception as restore_err:
                     logger.error(f"[chain] Pre-chain restore also failed: {restore_err}")
             if deps.compat is not None:
@@ -595,6 +644,6 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
     cell_paths = parse_critical_path_cells(result)
     if cell_paths:
         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
-        logger.info(f"[EXECUTE] Auto-refreshed {len(cell_paths)} critical paths")
-    else:
         state.timing.critical_paths_stale = False
+        logger.info(f"[EXECUTE] Auto-refreshed {len(cell_paths)} critical paths")
+    # cell_paths 为空时不修改 stale 标志 — 下次触发时重试

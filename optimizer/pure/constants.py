@@ -6,6 +6,12 @@ Extracted from dcp_optimizer.py: L90-122, L135-159, L296-315, L865-868.
 from __future__ import annotations
 
 
+# ── PBLOCK strategy parameters ────────────────────────────────
+PBLOCK_DISTANCE_WEIGHT_DEFAULT = 0.3
+PBLOCK_CRITICAL_PATHS_TOP_N = 10
+PBLOCK_CRITICAL_CELLS_MAX = 50
+
+
 # ── Task classification ──────────────────────────────────────────
 
 class TaskCategory:
@@ -114,7 +120,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_create_and_apply_pblock",
          "args_from_skill": {
              "pblock_name": "pblock_name",
-             "pblock_ranges": "pblock_ranges",
+             "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
          }},
         {"tool": "vivado_place_design", "args": {}},

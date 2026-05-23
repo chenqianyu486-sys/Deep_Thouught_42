@@ -145,69 +145,59 @@ async def call_tool(
     app_timeout = max(request_timeout * 1.5, 300)
 
     try:
-        result = await asyncio.wait_for(
-            session.call_tool(actual_name, arguments),
-            timeout=app_timeout,
-        )
-        heartbeat_done.set()
-        heartbeat_task.cancel()
         try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        elapsed = time.time() - start_time
+            result = await asyncio.wait_for(
+                session.call_tool(actual_name, arguments),
+                timeout=app_timeout,
+            )
+            elapsed = time.time() - start_time
 
-        if result and hasattr(result, 'content') and result.content:
-            text_parts = []
-            for block in result.content:
-                if hasattr(block, 'text'):
-                    text_parts.append(block.text)
-            result_text = "\n".join(text_parts) if text_parts else "(no output)"
-            result_size = sum(len(p) for p in text_parts) if text_parts else 0
+            if result and hasattr(result, 'content') and result.content:
+                text_parts = []
+                for block in result.content:
+                    if hasattr(block, 'text'):
+                        text_parts.append(block.text)
+                result_text = "\n".join(text_parts) if text_parts else "(no output)"
+                result_size = sum(len(p) for p in text_parts) if text_parts else 0
+                logger.info(
+                    f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+                    f"result_size={result_size} chars, heartbeats={heartbeat_count}"
+                )
+                if tool_name == "vivado_open_checkpoint":
+                    dcp_path = arguments.get("dcp_path", "?")
+                    logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
+                return result_text
             logger.info(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
-                f"result_size={result_size} chars, heartbeats={heartbeat_count}"
+                f"result_size=0 chars, heartbeats={heartbeat_count}"
             )
-            if tool_name == "vivado_open_checkpoint":
-                dcp_path = arguments.get("dcp_path", "?")
-                logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
-            return result_text
-        logger.info(
-            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
-            f"result_size=0 chars, heartbeats={heartbeat_count}"
-        )
-        return "(no output)"
-    except asyncio.TimeoutError:
+            return "(no output)"
+        except asyncio.TimeoutError:
+            elapsed = time.time() - start_time
+            logger.error(
+                f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+                f"FAILED: Application-level timeout ({app_timeout:.0f}s), "
+                f"heartbeats={heartbeat_count}"
+            )
+            return json.dumps({
+                "error": f"Application-level timeout after {app_timeout:.0f}s",
+                "tool": tool_name,
+                "suggest_recovery": "restart_vivado",
+            })
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(
+                f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+                f"FAILED: {e}, heartbeats={heartbeat_count}"
+            )
+            return json.dumps({"error": str(e), "tool": tool_name})
+    finally:
         heartbeat_done.set()
         heartbeat_task.cancel()
         try:
             await heartbeat_task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):
             pass
-        elapsed = time.time() - start_time
-        logger.error(
-            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
-            f"FAILED: Application-level timeout ({app_timeout:.0f}s), "
-            f"heartbeats={heartbeat_count}"
-        )
-        return json.dumps({
-            "error": f"Application-level timeout after {app_timeout:.0f}s",
-            "tool": tool_name,
-            "suggest_recovery": "restart_vivado",
-        })
-    except Exception as e:
-        heartbeat_done.set()
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        elapsed = time.time() - start_time
-        logger.error(
-            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
-            f"FAILED: {e}, heartbeats={heartbeat_count}"
-        )
-        return json.dumps({"error": str(e), "tool": tool_name})
 
 
 def is_routing_failure(error_msg: str) -> bool:

@@ -573,6 +573,19 @@ async def list_tools() -> list[Tool]:
                         "type": "number",
                         "description": "Buffer multiplier for resource targets (default: 1.5)",
                         "default": 1.5
+                    },
+                    "critical_path_cells": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Critical path cell names for region centering. "
+                                       "Auto-injected by optimizer — optional for LLM.",
+                        "default": None
+                    },
+                    "distance_weight_factor": {
+                        "type": "number",
+                        "description": "Distance weight in region scoring (0.3 default). "
+                                       "Higher = prefer regions closer to critical path cells.",
+                        "default": 0.3
                     }
                 },
                 "required": ["target_lut_count", "target_ff_count"]
@@ -632,6 +645,19 @@ async def list_tools() -> list[Tool]:
                         "type": "number",
                         "description": "Buffer multiplier for resource targets (default: 1.2 for tighter regions)",
                         "default": 1.2
+                    },
+                    "critical_path_cells": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Critical path cell names for region centering. "
+                                       "Auto-injected by optimizer — optional for LLM.",
+                        "default": None
+                    },
+                    "distance_weight_factor": {
+                        "type": "number",
+                        "description": "Distance weight in region scoring (0.3 default). "
+                                       "Higher = prefer regions closer to critical path cells.",
+                        "default": 0.3
                     }
                 }
             }
@@ -1381,31 +1407,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     target_dsp_count=arguments.get("target_dsp_count", 0),
                     target_bram_count=arguments.get("target_bram_count", 0),
                     resource_multiplier=arguments.get("resource_multiplier", 1.5),
+                    critical_path_cells=arguments.get("critical_path_cells"),
+                    distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
                 )
 
         elif name == "execute_pblock_strategy":
-            # Validate required parameters before calling
-            missing_params = []
-            if "target_lut_count" not in arguments:
-                missing_params.append("target_lut_count")
-            if "target_ff_count" not in arguments:
-                missing_params.append("target_ff_count")
-            if missing_params:
-                result = {
-                    "error": f"Missing required parameters: {', '.join(missing_params)}. "
-                             f"Run report_utilization_for_pblock first to get current resource counts.",
-                    "missing_params": missing_params,
-                    "hint": "Run report_utilization_for_pblock first to get current LUT/FF usage, "
-                            "then retry with target_lut_count and target_ff_count set to those values.",
-                }
-            else:
-                result = rw.execute_pblock_strategy(
-                    target_lut_count=arguments["target_lut_count"],
-                    target_ff_count=arguments["target_ff_count"],
-                    target_dsp_count=arguments.get("target_dsp_count", 0),
-                    target_bram_count=arguments.get("target_bram_count", 0),
-                    resource_multiplier=arguments.get("resource_multiplier", 1.2),
-                )
+            # Optional parameters default to 0 (auto-detect in rapidwright_tools)
+            result = rw.execute_pblock_strategy(
+                target_lut_count=arguments.get("target_lut_count", 0),
+                target_ff_count=arguments.get("target_ff_count", 0),
+                target_dsp_count=arguments.get("target_dsp_count", 0),
+                target_bram_count=arguments.get("target_bram_count", 0),
+                resource_multiplier=arguments.get("resource_multiplier", 1.2),
+                critical_path_cells=arguments.get("critical_path_cells"),
+                distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
+            )
 
         elif name == "execute_physopt_strategy":
             result = rw.execute_physopt_strategy(

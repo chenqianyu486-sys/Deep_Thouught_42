@@ -25,7 +25,11 @@ from optimizer.tracing import StateTracer
 
 def run_async(coro):
     """Run an async function in a new event loop."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 # ── State tests ─────────────────────────────────────────────────
@@ -67,6 +71,12 @@ class TestEdges:
         """If initial WNS >= 0, skip to save_output."""
         state = OptimizerState()
         state.timing.initial_wns = 0.1
+        assert after_init(state) == NodeName.SAVE_OUTPUT
+
+    def test_after_init_timing_exactly_zero(self):
+        """Boundary: WNS == 0.0 should route to save_output."""
+        state = OptimizerState()
+        state.timing.initial_wns = 0.0
         assert after_init(state) == NodeName.SAVE_OUTPUT
 
     def test_after_init_timing_not_met(self):

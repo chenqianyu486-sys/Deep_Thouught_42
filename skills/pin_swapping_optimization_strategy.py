@@ -54,22 +54,6 @@ def _get_lut_init(cell) -> str:
     return ""
 
 
-def _can_swap_pins(cell, pin_a: str, pin_b: str) -> bool:
-    """Check if two input pins of a LUT can be swapped without changing logic.
-
-    For LUTs with symmetric inputs, swapping preserves the truth table.
-    For a LUT6, swapping any two inputs requires adjusting the INIT string,
-    which is complex. Instead, we look for pins that are logically equivalent
-    (e.g., both connect to the same net, or the LUT equation is symmetric
-    with respect to those inputs).
-
-    A practical approach: only swap pins carrying the critical signal,
-    and verify the INIT string transformation is valid.
-    """
-    # For now, allow swapping any two pins — the INIT string must be
-    # permuted accordingly. If that's not feasible, we skip.
-    return True
-
 
 def _permute_lut_init(init_str: str, pin_a: str, pin_b: str, cell_type: str) -> str | None:
     """Permute the LUT INIT string to reflect a pin swap.

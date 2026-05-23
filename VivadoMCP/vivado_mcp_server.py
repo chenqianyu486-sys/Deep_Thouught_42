@@ -1842,8 +1842,6 @@ async def call_tool(name: str, arguments: dict):
                 slack_match = re.search(r'Slack\s+\((?:VIOLATED|MET)\)\s*:\s*(-?\d+\.?\d*)', raw)
                 if slack_match:
                     parsed = float(slack_match.group(1))
-                    if parsed == 0.0:
-                        parsed = abs(parsed)
                     wns_value = str(parsed)
                     logger.info(f"get_wns: parsed WNS={wns_value} (from report_timing, clk_fpl26contest)")
                 else:
@@ -1864,7 +1862,10 @@ async def call_tool(name: str, arguments: dict):
 
             cmd = "place_design"
             if directive:
-                cmd += f" -directive {directive}"
+                if directive.lower() == "unplace":
+                    cmd += " -unplace"
+                else:
+                    cmd += f" -directive {directive}"
 
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Placement complete.\n\n{output}")]

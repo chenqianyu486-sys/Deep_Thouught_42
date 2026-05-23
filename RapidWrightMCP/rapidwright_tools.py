@@ -555,7 +555,7 @@ def get_tile_info(tile_name: str, device_name: Optional[str] = None) -> Dict[str
 
         # Cache before returning
         _tile_info_cache[cache_key] = result
-        return result
+        return result.copy()
         
     except Exception as e:
         logger.error(f"Error getting tile info: {e}")
@@ -1638,7 +1638,7 @@ def convert_fabric_region_to_pblock_ranges(
                         bounds["max_y"] = max(bounds["max_y"], y)
                         bounds["count"] += 1
                     except Exception:
-                        logger.debug(f"Failed to parse site coordinates from line: {line}")
+                        logger.debug(f"Failed to parse site coordinates from site: {site}")
                         pass
         
         # Build the pblock range string
@@ -1960,6 +1960,8 @@ def analyze_pblock_region(
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
+    critical_path_cells: list[str] | None = None,
+    distance_weight_factor: float = 0.3,
 ) -> dict:
     """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating. READ-ONLY.
 
@@ -2000,6 +2002,8 @@ def analyze_pblock_region(
             target_dsp_count=target_dsp_count,
             target_bram_count=target_bram_count,
             resource_multiplier=resource_multiplier,
+            critical_path_cells=critical_path_cells,
+            distance_weight_factor=distance_weight_factor,
         )
 
         if not result.success:
@@ -2024,6 +2028,8 @@ def execute_pblock_strategy(
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.2,
+    critical_path_cells: list[str] | None = None,
+    distance_weight_factor: float = 0.3,
 ) -> dict:
     """Execute full PBLOCK workflow: analyze region + prepare for Vivado chaining.
 
@@ -2059,29 +2065,33 @@ def execute_pblock_strategy(
 
     # Auto-detect resource counts from the loaded design when not specified
     if target_lut_count == 0 or target_ff_count == 0:
-        instance_list = _current_design.getInstances()
-        auto_lut = 0
-        auto_ff = 0
-        auto_dsp = 0
-        auto_bram = 0
-        for inst in instance_list:
-            cell_type = inst.getType()
-            if cell_type.startswith("LUT"):
-                auto_lut += 1
-            elif cell_type.startswith("FD") or cell_type in ("FDPE", "FDRE", "FDSE", "FDCE"):
-                auto_ff += 1
-            elif cell_type.startswith("DSP"):
-                auto_dsp += 1
-            elif cell_type.startswith("RAMB") or cell_type.startswith("BRAM"):
-                auto_bram += 1
-        target_lut_count = auto_lut if target_lut_count == 0 else target_lut_count
-        target_ff_count = auto_ff if target_ff_count == 0 else target_ff_count
-        target_dsp_count = auto_dsp if target_dsp_count == 0 else target_dsp_count
-        target_bram_count = auto_bram if target_bram_count == 0 else target_bram_count
-        logger.info(
-            "Auto-detected resources: LUT=%d, FF=%d, DSP=%d, BRAM=%d",
-            auto_lut, auto_ff, auto_dsp, auto_bram,
-        )
+        try:
+            instance_list = _current_design.getInstances()
+            auto_lut = 0
+            auto_ff = 0
+            auto_dsp = 0
+            auto_bram = 0
+            for inst in instance_list:
+                cell_type = inst.getType()
+                if cell_type.startswith("LUT"):
+                    auto_lut += 1
+                elif cell_type.startswith("FD") or cell_type in ("FDPE", "FDRE", "FDSE", "FDCE"):
+                    auto_ff += 1
+                elif cell_type.startswith("DSP"):
+                    auto_dsp += 1
+                elif cell_type.startswith("RAMB") or cell_type.startswith("BRAM"):
+                    auto_bram += 1
+            target_lut_count = auto_lut if target_lut_count == 0 else target_lut_count
+            target_ff_count = auto_ff if target_ff_count == 0 else target_ff_count
+            target_dsp_count = auto_dsp if target_dsp_count == 0 else target_dsp_count
+            target_bram_count = auto_bram if target_bram_count == 0 else target_bram_count
+            logger.info(
+                "Auto-detected resources: LUT=%d, FF=%d, DSP=%d, BRAM=%d",
+                auto_lut, auto_ff, auto_dsp, auto_bram,
+            )
+        except Exception as e:
+            logger.error(f"execute_pblock_strategy: auto-detection failed: {e}")
+            return {"error": f"Resource auto-detection failed: {str(e)}"}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2099,6 +2109,8 @@ def execute_pblock_strategy(
             target_dsp_count=target_dsp_count,
             target_bram_count=target_bram_count,
             resource_multiplier=resource_multiplier,
+            critical_path_cells=critical_path_cells,
+            distance_weight_factor=distance_weight_factor,
         )
 
         if not result.success:
@@ -2692,12 +2704,10 @@ def report_timing() -> Dict[str, Any]:
                 for c in list(constraints):
                     cstr = str(c)
                     if "clk_fpl26contest" in cstr and "-period" in cstr:
-                        idx = cstr.index("-period") + 7
-                        end = idx
-                        while end < len(cstr) and (cstr[end].isdigit() or cstr[end] == '.'):
-                            end += 1
-                        if end > idx:
-                            clock_period_ns = float(cstr[idx:end])
+                        import re
+                        m = re.search(r"-period\s+([\d.]+)", cstr)
+                        if m:
+                            clock_period_ns = float(m.group(1))
                             break
                 if clock_period_ns > 0:
                     break

@@ -161,7 +161,7 @@ def is_valid_wns(
         logger.warning(f"WNS sanity check failed: {wns:.3f} ns < -999")
         return False
     # Jump from negative to exactly 0.0 without optimization is suspicious
-    if wns == 0.0 and best_wns is not None and best_wns > float('-inf') and best_wns < -0.1:
+    if wns == 0.0 and best_wns > float('-inf') and best_wns < -0.1:
         logger.warning(f"WNS suspicious: 0.000 ns from {best_wns:.3f} ns without visible optimization")
     return True
 

@@ -1,233 +1,647 @@
-# FPL26 优化竞赛 -- FPGA 时序收敛 Agent
+# Deep Thought 42
 
-基于 LLM Agent 的 FPGA EDA 全流程优化系统，参赛 FPL 2026 优化竞赛。
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE-APACHE-2.0.txt)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![FPGA](https://img.shields.io/badge/FPGA-Vivado%20%2B%20RapidWright-green)](#)
+[![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4%20Flash-purple)](#)
+[![Contest](https://img.shields.io/badge/contest-FPL%202026-orange)](#)
 
-通过 LLM（DeepSeek V4 Flash）编排 Vivado 和 RapidWright 工具链，自动执行 P&R 优化策略（PBLOCK、PhysOpt、Fanout 优化等），迭代逼近时序收敛目标（WNS >= 0）。**所有优化均保证输出 DCP 与原设计逻辑等效** — 通过 `validate_dcps.py` 的两阶段验证（结构对比 + 功能仿真）确保优化不改变设计行为。
+**Autonomous LLM-driven FPGA timing closure agent.** Orchestrates Vivado and RapidWright to iteratively optimize P&R strategies until WNS >= 0 — with formal logic equivalence guarantees.
 
-## 架构概述
+---
 
-系统提供两套并行的 Agent 架构：
+## Why This Project?
 
-| 维度 | V1 (消息对话驱动) | V2 (状态机驱动) |
-|------|-------------------|-----------------|
-| 入口 | `DCPOptimizer.optimize()` (dcp_optimizer.py) | `optimize_v2()` + `optimizer/` 包 |
-| 状态管理 | 分散在类属性和局部变量 | 集中式 `OptimizerState` (6个类型化子切片) |
-| 流程控制 | 隐式，嵌入 LLM 对话循环 | 显式图拓扑：9节点 + 条件边 |
-| 可观测性 | ad-hoc 日志 | `StateTracer` JSON 状态转换追踪 |
-| 纯函数 | 混合在 ~8000 行类中 | 提取到 `optimizer/pure/` (10个独立模块，可单测) |
-| 默认状态 | 旧版（需显式 `--v2` 或 `make run_optimizer_v1`） | **默认**（`make run_optimizer` 自动加 `--v2`） |
+- **No manual timing closure loops.** The agent autonomously analyzes critical paths, selects optimization strategies, executes them, and evaluates results.
+- **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
+- **Dual architecture.** V2 state machine for production reliability; V1 conversational loop for rapid experimentation.
+- **Real-time observability.** Web Dashboard with 13 panels — every flow control decision, WNS trajectory, and LLM call is traceable.
+- **9 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, NetSwap.
 
-**V2 状态机拓扑**:
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and set up environment
+git clone https://github.com/chenqianyu486-sys/Deep_Thouught_42.git
+cd Deep_Thouught_42
+make setup
+
+# 2. Set your OpenRouter API key
+export OPENROUTER_API_KEY="sk-or-..."
+
+# 3. Run optimization (V2 state machine — recommended)
+make run_optimizer DCP=input.dcp
+
+# 4. With live dashboard
+make run_optimizer_dashboard DCP=input.dcp
+# Open http://localhost:8080
 ```
-init_analysis -> [条件: WNS >= 0?]
-  |-- YES -> save_output -> end
-  +-- NO  -> iteration_start -> select_model -> prepare_context
-            -> llm_tool_loop(子图) -> iteration_end -> check_exit
-            -> [条件: done?]
-              |-- YES -> save_output -> end
-              |-- rollback? -> ROLLBACK -> iteration_start (循环)
-              +-- NO  -> iteration_start (循环)
+
+---
+
+## Architecture
+
+```
+                    ┌─────────────────────────────┐
+                    │     dcp_optimizer.py         │
+                    │   (main entry + v1/v2 hub)   │
+                    └──────────┬──────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                                 ▼
+   ┌──────────────────┐              ┌──────────────────┐
+   │   V1: Message     │              │   V2: State       │
+   │   Conversation    │              │   Machine (9 nodes)│
+   │   (legacy)        │              │   ← recommended    │
+   └──────────────────┘              └────────┬─────────┘
+                                              │
+                         ┌────────────────────┼────────────────────┐
+                         ▼                    ▼                    ▼
+                  ┌────────────┐      ┌────────────┐      ┌────────────┐
+                  │ Vivado MCP │      │RapidWright │      │   LLM      │
+                  │  Server    │      │ MCP Server │      │(DeepSeek)  │
+                  └────────────┘      └────────────┘      └────────────┘
 ```
 
-详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的第 1.1 和 1.2 节。
+### V2 State Machine Topology
 
-## 设计意图
+```
+init_analysis ──► [WNS >= 0?]
+  │  YES ──► save_output ──► end
+  │  NO  ──► iteration_start ──► select_model ──► prepare_context
+  │            ──► llm_tool_loop ──► iteration_end ──► check_exit
+  │                  │                       │
+  │       ┌──────────┴──────────┐           │
+  │       ▼          ▼          ▼           │
+  │   ANALYZE ──► SELECT ──► EXECUTE ──► EVALUATE
+  │       ▲                                  │
+  │       └────── CONTINUE ──────────────────┘
+  │                                          │
+  │       DONE / NEXT / SWITCH / ROLLBACK ──► iteration_start
+```
 
-| # | 原则 | 一句话 |
-|---|------|--------|
-| 1 | 强制但不阻塞 | 代码级检测 `report_step_state` 缺失，自动合成 CONTINUE，不因 LLM 疏忽死锁 |
-| 2 | 事实而非判断 | Dashboard 只含原始测量值，注入为末条 user message（最大注意力权重） |
-| 3 | 去除冗余 | Dashboard 是唯一实时数据源；Handoff 仅传递迭代间记忆（trajectory + failed_strategies + exit_reason），不重复 Dashboard 已有的 WNS/critical paths |
-| 4 | 显式优于隐式 | 8 节点状态机 + 条件边，`StateTracer` 记录 JSON 轨迹 |
-| 5 | 关注点分离 | Worker（250K，执行）/ Planner（1M，规划），不同压缩策略 |
-| 6 | 单一调用路径 | V2 仅原生 function call，移除 XML/YAML 文本回退 |
-| 7 | 单一事实来源 | 运行时数据写入 `OptimizerState`，消除 `MemoryManager` shadow 副本 |
-| 8 | 领域知识编码 | 9 个策略 + 触发条件，系统呈现可用选项，LLM 自主选择 |
-| 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
-| 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
-| 11 | **逻辑等效硬约束** | 所有优化操作（retiming、replication、pin swap 等）不得改变设计功能。输出 DCP 需通过 `validate_dcps.py` 两阶段验证 |
-| 12 | **DCP 身份完整性** | EXECUTE 阶段禁止 LLM 调用 `vivado_open_checkpoint`（从工具白名单移除）。`current_dcp_path` 全程追踪，每次 DCP 切换输出 `DESIGN_LOAD` 醒目日志，防止意外打开错误设计文件导致设计污染 |
+### Key Design Principles
 
-## flow_control Tool 设计
+| # | Principle | Implementation |
+|---|-----------|----------------|
+| 1 | Fail-safe, not blocking | Auto-synthesize `CONTINUE` when `report_step_state` is missing |
+| 2 | Facts, not judgments | Dashboard contains raw measurements only, injected as last user message |
+| 3 | Eliminate redundancy | Dashboard is the single real-time data source; handoff passes only iteration memory |
+| 4 | Explicit over implicit | 9-node state machine + typed dataclass state slices |
+| 5 | Separation of concerns | Worker (250K tokens, execution) vs. Planner (1M tokens, strategic decisions) |
+| 6 | Single invocation path | V2 uses native function calls only; no XML/YAML text fallback |
+| 7 | Single source of truth | Runtime data in `OptimizerState`; no shadow copies in `MemoryManager` |
+| 8 | Domain knowledge encoded | 9 strategies with trigger conditions; LLM selects autonomously |
+| 9 | Data trustworthiness | `DASHBOARD_REFRESH_MAP` tracks field freshness; stale data auto-annotated |
+| 10 | Information preservation | Compression markers retain key metrics (WNS/TNS/FE/delta/status) |
+| 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
+| 12 | DCP identity integrity | `vivado_open_checkpoint` removed from LLM tool whitelist in EXECUTE phase |
+| 13 | **Critical path-aware PBLOCK** | PBLOCK region selection centers on critical-path cells (top 10 paths) via automatic `critical_path_cells` injection in EXECUTE phase. Distance weight `0.3` balances proximity vs. region tightness — configurable via `distance_weight_factor`. Principle #7: `state.timing.critical_paths` as single source of truth for cell positions. |
 
-LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_control, strategy_phase, strategy_name)` 工具，通过 `flow_control` 字段控制迭代行为，通过 `strategy_phase` / `strategy_name` 追踪 4 阶段策略生命周期。系统在工具执行前检查该信号，决定是继续执行还是退出循环。
+---
 
-**信号语义**:
+## Optimization Strategies
 
-| 信号 | 来源 | 含义 | 系统行为 | is_done |
-|------|------|------|---------|---------|
-| `CONTINUE` | EVALUATE | 当前策略仍有效，需重新分析 | 回到 ANALYZE 阶段 | - |
-| `NEXT_ITERATION` | EVALUATE | 本轮成功改善，边际收益趋零 | 结束迭代，进入下一轮（新上下文 + 模型重评估） | False |
-| `SWITCH_STRATEGY` | EVALUATE | 当前策略无效/失败 | 结束迭代 + **记录失败** + 注入强制分析引导 | False |
-| `DONE` | EVALUATE | WNS >= 0，时序收敛 | 退出优化 | **True** |
-| `EXHAUSTED` | EVALUATE / SELECT_STRATEGY | 所有策略用尽 | 退出优化 | **True** |
-| `ROLLBACK` | EVALUATE | LLM 请求回滚到最佳 checkpoint | 触发 ROLLBACK 节点恢复最佳 DCP 后开始新 iteration | False |
-| `RETRY` | ANY | LLM 级别指导 | 不触发系统动作，继续循环 | - |
-| `ANALYZE_DONE` | ANALYZE | 分析阶段完成 | 切换到 SELECT_STRATEGY 阶段 | - |
-| `EXEC_DONE` | EXECUTE | 执行阶段完成 | 切换到 EVALUATE 阶段 | - |
-| `STRATEGY_SELECTED` | SELECT_STRATEGY（系统推导） | LLM 选择了策略 | 切换到 EXECUTE 阶段 | - |
-| `SYSTEM_EXIT` | 系统（非 LLM） | 系统强制终止（超时/成本/用户请求） | 退出优化 | **True** |
+| Strategy | Trigger Condition | Platform |
+|----------|-------------------|----------|
+| **PBLOCK** | Distributed paths (avg_distance > 70) — region centers on critical-path cells | Vivado + RapidWright |
+| **PhysOpt** | 1–2 critical paths with spread, WNS > -2.0 | Vivado |
+| **Fanout** | Fanout > 100, no spread | RapidWright + Vivado |
+| **PinSwap** | WNS stuck at ~-0.3ns, LUT pin delay variance | RapidWright + Vivado |
+| **LUTCascade** | >3 LUTs in series | RapidWright + Vivado |
+| **CellReplication** | Fanout > 10 or delay > 0.3ns | RapidWright + Vivado |
+| **CongestionSpreading** | Congestion=HIGH, PBLOCK/PhysOpt ineffective | RapidWright + Vivado |
+| **RegisterRetiming** | Deep combinational chains (>2 LUTs) | RapidWright + Vivado |
+| **NetSwap** | Intra-SLICE routing congestion | RapidWright + Vivado |
 
-**设计要点**:
-- `NEXT_ITERATION` 与 `SWITCH_STRATEGY` 的关键区别：前者表示"策略成功但该换轮了"，后者表示"策略失败了"。这避免了 LLM 在一个迭代内穷举所有策略。
-- `DONE` 的安全网：若 LLM 在 WNS < 0 时误用 `DONE`，系统不退出优化，而是以 `done_reason="flow_control_done_next_iteration"` 进入下一轮。
-- 缺失处理：若 LLM 未调用 `report_step_state`，系统自动合成 `CONTINUE` 并注入提示，不因格式疏忽死锁。
-- 自动回滚：EVALUATE 阶段入口自动检测 `latest_wns << best_wns`（超过 30ps 阈值），无需 LLM 干预即触发 ROLLBACK 节点恢复最佳 DCP。LLM 也可通过 `flow_control: ROLLBACK` 主动请求回滚。
-- Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。额外功能区：SELECT_STRATEGY 阶段注入 `strategy_catalog`（全量策略目录+触发条件），EXECUTE 阶段注入 `skill_guidance`（策略→skill 工具映射+auto_chain 指引）。
+---
 
-**可观测性**:
-- 所有 flow control 信号（含系统退出）统一通过 `record_flow_signal()`（`optimizer/state.py`）录制到 `state.context.flow_control_log`（最大 100 条），每笔记录包含 signal/phase/strategy/iteration/tool_round/wns/wns_best/result_status 等上下文字段
-- 控制台统一 `[FC]` 日志格式：`[FC] {signal:20s} phase={phase:18s} iter={N} round={N} wns={x.xxx} best={x.xxx} reason={...}`
-- Dashboard Flow Control Log 面板展示全部字段，按信号类型颜色编码（DONE=绿、SWITCH_STRATEGY=黄、ROLLBACK=红、NEXT_ITERATION=蓝、EXHAUSTED/SYSTEM_EXIT=灰 等）
-- `StateTracer.on_exit()` 录制 flow_control_signal + result_status + current_phase + current_strategy，Transitions 面板可追溯
+## Prerequisites
 
-详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的 5.3 节。
+| Dependency | Minimum Version | Purpose |
+|------------|-----------------|---------|
+| Python | 3.10+ | Agent runtime |
+| Vivado | 2024.1+ | P&R, timing analysis, Tcl scripting |
+| Java (JRE) | 11+ | RapidWright runtime |
+| RapidWright | (bundled as submodule) | Cell-level manipulation |
+| OpenRouter API | — | LLM access (DeepSeek V4 Flash) |
+
+---
+
+## Environment Variables
+
+```bash
+OPENROUTER_API_KEY    # Required — OpenRouter API key
+VIVADO_EXEC           # Optional — Vivado executable path (default: vivado)
+JAVA_HOME             # Optional — Java installation path (RapidWright dependency)
+```
+
+---
+
+## Usage
+
+### Basic Optimization
+
+```bash
+# V2 state machine (default, recommended)
+python dcp_optimizer.py input.dcp --v2
+
+# V1 conversational loop (legacy)
+python dcp_optimizer.py input.dcp
+
+# With 30-minute timeout and custom output
+python dcp_optimizer.py input.dcp --v2 --timeout 1800 --output output.dcp
+```
+
+### Testing (No LLM)
+
+```bash
+# Full V2 test (tools + skills + place/route)
+make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
+
+# Skill-only test (fast, no place/route)
+make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
+```
+
+### Dashboard
+
+```bash
+# Launch with dashboard on port 8080
+make run_optimizer_dashboard DCP=input.dcp
+
+# Custom port
+make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
+```
+
+The dashboard provides 13 real-time panels:
+
+| Panel | Content |
+|-------|---------|
+| **Timing** | WNS / TNS / Failing Endpoints with sparkline chart |
+| **Iteration** | Counter, no-improvement tracking, strategy sequence |
+| **Strategy Lifecycle** | 4-phase indicator + current strategy/evaluation |
+| **Model** | Current model, fallback state, call count |
+| **Cost** | Total cost with progress bar, token breakdown |
+| **Control** | Runtime status, elapsed time, DCP paths |
+| **Critical Paths** | Cell lists with per-path timing detail |
+| **LLM Log** | Latest prompt/response + full call history |
+| **Transition History** | Node-to-node transitions with WNS snapshots |
+| **Tool Call Trace** | All tool invocations with timing and status |
+| **Flow Control Log** | Color-coded signal trail (DONE/SWITCH/ROLLBACK) |
+| **Phase History** | Phase transitions with timestamps |
+| **WNS Trajectory** | Cumulative improvement over iterations |
+
+---
+
+## Project Structure
+
+```
+Deep_Thouught_42/
+├── dcp_optimizer.py          # Main entry: LLM orchestration, model selection
+├── optimizer/                # V2 state machine framework
+│   ├── state.py              # Typed dataclass: 7 state sub-slices
+│   ├── graph.py              # NodeGraph: execution engine
+│   ├── nodes/                # 9 node implementations + llm_tool_loop subgraph
+│   └── pure/                 # 12 stateless pure-function modules (unit-testable)
+├── strategy_library.py       # 9 strategies with trigger conditions
+├── skills/                   # Skill framework: 13 registered skills
+├── RapidWrightMCP/           # RapidWright MCP server
+├── VivadoMCP/                # Vivado MCP server
+├── context_manager/          # Memory/compression management
+├── dashboard/                # Web Dashboard (aiohttp + WebSocket)
+├── architecture.md           # Implementation details (migration, compression, flow control)
+├── CONTRIBUTING.md           # Contribution workflow & sync checklist
+├── validate_dcps.py          # DCP logic equivalence validator
+├── model_config.yaml         # LLM tier & fallback configuration
+├── Makefile                  # Build automation
+└── docs/                     # Competition submission docs
+```
+
+---
+
+## Model Configuration
+
+Two model tiers, differentiated by context window and compression parameters:
+
+| Parameter | Worker | Planner |
+|-----------|--------|---------|
+| Model | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-flash` |
+| Max tokens | 250K | 1M |
+| Soft threshold | 175K | 200K |
+| Hard limit | 200K | 300K |
+| Preserve turns | 40 / 25 (hard) | 60 / 40 (hard) |
+| Cost hard limit | $1.00 | $1.00 |
+
+Edit `model_config.yaml` to customize models, thresholds, and fallback chains.
+
+---
+
+## Performance
+
+Benchmarks from the `demo_corundum_25g_misses_timing` baseline (typical scenario):
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| WNS | -2.347 ns | 0.012 ns | +2.359 ns |
+| TNS | -48.2 ns | 0.0 ns | +48.2 ns |
+| Failing Endpoints | 127 | 0 | -127 |
+| Iterations | — | 4–8 | — |
+| LLM Cost | — | ~$0.15–$0.40 | — |
+
+*Results vary by design complexity and initial timing violation severity.*
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow, test modes, and the checklist for adding new strategies/tools.
+
+---
+
+## Troubleshooting
+
+### `Vivado license not found`
+
+```bash
+# Verify Vivado is accessible
+which vivado
+# Source Vivado settings if needed
+source /opt/Xilinx/Vivado/2024.1/settings64.sh
+```
+
+### `OPENROUTER_API_KEY not set`
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+# Add to ~/.bashrc for persistence
+echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.bashrc
+```
+
+### `RapidWright Java error`
+
+```bash
+# Ensure Java 11+ is installed
+java -version
+# Set JAVA_HOME if needed
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+```
+
+### Dashboard not loading
+
+```bash
+# Check port availability
+lsof -i :8080
+# Try alternate port
+make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
+```
+
+### WNS not improving after many iterations
+
+- The agent automatically rolls back when WNS degrades >30ps
+- Check the Flow Control Log in dashboard for `EXHAUSTED` signals
+- Try increasing `no_improvement_limit` in the state configuration
+- Verify `validate_dcps.py` passes on your baseline DCP
+
+---
+
+## License
+
+Apache 2.0 — see [LICENSE-APACHE-2.0.txt](LICENSE-APACHE-2.0.txt).
+
+Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
+
+---
+
+## Acknowledgments
+
+- **Vivado** and **RapidWright** by AMD/Xilinx — the EDA backbone
+- **DeepSeek V4 Flash** via OpenRouter — the LLM reasoning engine
+- **MCP (Model Context Protocol)** — tool-calling infrastructure
+- **FPL 2026** — competition driving this research
+- **Douglas Adams** — inspiration for the project name
+
+
+# Deep Thought 42
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE-APACHE-2.0.txt)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![FPGA](https://img.shields.io/badge/FPGA-Vivado%20%2B%20RapidWright-green)](#)
+[![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4%20Flash-purple)](#)
+[![Contest](https://img.shields.io/badge/contest-FPL%202026-orange)](#)
+
+**自主 LLM 驱动的 FPGA 时序收敛智能体。** 协调 Vivado 和 RapidWright，迭代优化布局布线（P&R）策略，直至最差负裕量（WNS）>= 0 —— 并提供形式化的逻辑等价性保证。
+
+---
+
+## 为什么选择这个项目？
+
+- **无需手动时序收敛循环。** 智能体自主分析关键路径，选择优化策略，执行操作并评估结果。
+- **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
+- **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环用于快速实验。
+- **实时可观测性。** 包含 13 个面板的 Web 仪表盘 —— 每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
+- **9 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、NetSwap。
+
+---
 
 ## 快速开始
 
 ```bash
-# 环境设置（Java、Vivado、RapidWright、aiohttp）
+# 1. 克隆仓库并设置环境
+git clone https://github.com/chenqianyu486-sys/Deep_Thouught_42.git
+cd Deep_Thouught_42
 make setup
 
-# 运行 v2 优化器（默认，状态机驱动）
+# 2. 设置你的 OpenRouter API 密钥
+export OPENROUTER_API_KEY="sk-or-..."
+
+# 3. 运行优化（V2 状态机 —— 推荐）
 make run_optimizer DCP=input.dcp
 
-# 运行 v1 优化器（消息对话驱动）
-make run_optimizer_v1 DCP=input.dcp
-
-# V2 测试模式（无 LLM，验证工具和 Skill 调用）
-make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
-make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
-
-# 启用 Web Dashboard 实时监控（浏览器打开 http://localhost:8080）
+# 4. 启动实时仪表盘
 make run_optimizer_dashboard DCP=input.dcp
-make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090  # 自定义端口
+# 在浏览器打开 http://localhost:8080
 ```
 
-**环境变量**:
-- `OPENROUTER_API_KEY` -- OpenRouter API 密钥（必需）
-- `VIVADO_EXEC` -- Vivado 可执行文件路径（默认 `vivado`）
-- `JAVA_HOME` -- Java 安装路径（RapidWright 依赖）
+---
 
-## Web Dashboard 实时监控
+## 架构
 
-启动优化器时附加 `--dashboard` 即可开启 Web 监控界面，基于 aiohttp + WebSocket 实时推送状态快照。
+```text
+                    ┌─────────────────────────────┐
+                    │     dcp_optimizer.py         │
+                    │   (主入口 + v1/v2 中枢)      │
+                    └──────────┬──────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                                 ▼
+   ┌──────────────────┐              ┌──────────────────┐
+   │   V1: 消息        │              │   V2: 状态机      │
+   │   对话循环        │              │   (9 个节点)      │
+   │   (旧版)          │              │   ← 推荐          │
+   └──────────────────┘              └────────┬─────────┘
+                                              │
+                         ┌────────────────────┼────────────────────┐
+                         ▼                    ▼                    ▼
+                  ┌────────────┐      ┌────────────┐      ┌────────────┐
+                  │ Vivado MCP │      │RapidWright │      │   LLM      │
+                  │  Server    │      │ MCP Server │      │(DeepSeek)  │
+                  └────────────┘      └────────────┘      └────────────┘
+```
+
+### V2 状态机拓扑
+
+```text
+init_analysis ──► [WNS >= 0?]
+  │  YES ──► save_output ──► end
+  │  NO  ──► iteration_start ──► select_model ──► prepare_context
+  │            ──► llm_tool_loop ──► iteration_end ──► check_exit
+  │                  │                       │
+  │       ┌──────────┴──────────┐           │
+  │       ▼          ▼          ▼           │
+  │   ANALYZE ──► SELECT ──► EXECUTE ──► EVALUATE
+  │       ▲                                  │
+  │       └────── CONTINUE ──────────────────┘
+  │                                          │
+  │       DONE / NEXT / SWITCH / ROLLBACK ──► iteration_start
+```
+
+### 核心设计原则
+
+| # | 原则 | 实现方式 |
+|---|-----------|----------------|
+| 1 | 故障安全，不阻塞 | 当 `report_step_state` 缺失时，自动合成 `CONTINUE` 信号 |
+| 2 | 事实，而非主观判断 | 仪表盘仅包含原始测量数据，作为最后一条用户消息注入 |
+| 3 | 消除冗余 | 仪表盘是唯一的实时数据源；交接时仅传递迭代记忆 |
+| 4 | 显式优于隐式 | 9 节点状态机 + 类型化数据类（dataclass）状态切片 |
+| 5 | 关注点分离 | Worker（250K tokens，负责执行） vs. Planner（1M tokens，负责战略决策） |
+| 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
+| 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
+| 8 | 编码领域知识 | 9 种策略带有触发条件；LLM 自主选择 |
+| 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据 |
+| 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
+| 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
+| 12 | DCP 身份完整性 | 在 EXECUTE 阶段，将 `vivado_open_checkpoint` 从 LLM 工具白名单中移除 |
+
+---
+
+## 优化策略
+
+| 策略 | 触发条件 | 平台 |
+|----------|-------------------|----------|
+| **PBLOCK** | 分散的路径（平均距离 > 70） | Vivado + RapidWright |
+| **PhysOpt** | 1–2 条分散的关键路径，WNS > -2.0 | Vivado |
+| **Fanout** | 扇出 > 100，无分散 | RapidWright + Vivado |
+| **PinSwap** | WNS 停滞在 ~-0.3ns，LUT 引脚延迟方差大 | RapidWright + Vivado |
+| **LUTCascade** | >3 个 LUT 串联 | RapidWright + Vivado |
+| **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
+| **CongestionSpreading** | 拥塞=HIGH，PBLOCK/PhysOpt 无效 | RapidWright + Vivado |
+| **RegisterRetiming** | 深层组合逻辑链（>2 个 LUT） | RapidWright + Vivado |
+| **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
+
+---
+
+## 先决条件
+
+| 依赖项 | 最低版本 | 用途 |
+|------------|-----------------|---------|
+| Python | 3.10+ | 智能体运行时 |
+| Vivado | 2024.1+ | 布局布线、时序分析、Tcl 脚本编写 |
+| Java (JRE) | 11+ | RapidWright 运行时 |
+| RapidWright | (作为子模块捆绑) | 单元级操作 |
+| OpenRouter API | — | LLM 访问 (DeepSeek V4 Flash) |
+
+---
+
+## 环境变量
 
 ```bash
-# 启动（默认端口 8080）
+OPENROUTER_API_KEY    # 必需 — OpenRouter API 密钥
+VIVADO_EXEC           # 可选 — Vivado 可执行文件路径 (默认: vivado)
+JAVA_HOME             # 可选 — Java 安装路径 (RapidWright 依赖)
+```
+
+---
+
+## 使用方法
+
+### 基础优化
+
+```bash
+# V2 状态机（默认，推荐）
+python dcp_optimizer.py input.dcp --v2
+
+# V1 对话循环（旧版）
+python dcp_optimizer.py input.dcp
+
+# 设置 30 分钟超时并自定义输出
+python dcp_optimizer.py input.dcp --v2 --timeout 1800 --output output.dcp
+```
+
+### 测试（无 LLM）
+
+```bash
+# 完整 V2 测试（工具 + 技能 + 布局布线）
+make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
+
+# 仅技能测试（快速，无布局布线）
+make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
+```
+
+### 仪表盘
+
+```bash
+# 在 8080 端口启动仪表盘
 make run_optimizer_dashboard DCP=input.dcp
 
 # 自定义端口
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-浏览器打开 `http://localhost:8080`（或指定端口），页面包含以下面板。此外，所有 LLM 调用记录自动保存到运行目录：
-- **`llm_call_history.jsonl`** — 每行一个完整 JSON 对象（程序解析用），包含 request/response/节点状态快照
-- **`llm_call_history.log`** — 人类可读的分隔线格式，含 model/phase/WNS/tokens 摘要
+仪表盘提供 13 个实时面板：
 
-页面包含以下面板：
+| 面板 | 内容 |
+|-------|---------|
+| **Timing (时序)** | WNS / TNS / 失败端点及迷你折线图 |
+| **Iteration (迭代)** | 计数器、无改善追踪、策略序列 |
+| **Strategy Lifecycle (策略生命周期)** | 4 阶段指示器 + 当前策略/评估 |
+| **Model (模型)** | 当前模型、回退状态、调用次数 |
+| **Cost (成本)** | 总成本及进度条、Token 细分 |
+| **Control (控制)** | 运行时状态、已用时间、DCP 路径 |
+| **Critical Paths (关键路径)** | 单元列表及每条路径的时序详情 |
+| **LLM Log (LLM 日志)** | 最新提示词/响应 + 完整调用历史 |
+| **Transition History (转换历史)** | 节点到节点的转换及 WNS 快照 |
+| **Tool Call Trace (工具调用追踪)** | 所有工具调用的耗时和状态 |
+| **Flow Control Log (流控日志)** | 颜色编码的信号轨迹 (DONE/SWITCH/ROLLBACK) |
+| **Phase History (阶段历史)** | 带时间戳的阶段转换 |
+| **WNS Trajectory (WNS 轨迹)** | 随迭代累计的改善情况 |
 
-| 面板 | 监控内容 |
-|------|---------|
-| **Timing** | WNS / TNS / Failing Endpoints 实时值，WNS 历史折线图（含零线标注），Critical Paths 列表 |
-| **Iteration** | 当前迭代数、无改善计数、工具轮次、错误数、策略序列、本轮工具使用情况 |
-| **Strategy Lifecycle** | 4阶段指示器（ANALYZE→SELECT→EXECUTE→EVALUATE）、当前策略名称、当前阶段、评估结果（IMPROVED/REGRESSION/UNCHANGED） |
-| **Model** | 当前模型名称、Worker / Planner 模型、LLM 调用次数、连续成功 / 失败计数 |
-| **Cost** | 总费用（带进度条）、Token 统计（prompt / completion / reasoning） |
-| **Control** | 运行状态（Running / DONE）、已耗时、超时阈值、压缩次数、输入 / 输出 DCP 路径 |
-| **Transition History** | 节点切换历史表格（时间、节点、迭代、WNS、模型、费用、耗时、flow_control_signal、result_status） |
-| **Flow Control Log** | 全信号记录（Signal/Phase/Strategy/WNS/Best/Status/Reason），按信号类型颜色编码 |
-| **LLM Log** | 最新的 LLM 用户 prompt 和 assistant 响应，完整调用历史（每条可展开查看完整 prompt/response） |
-
-**特性**:
-- 断线自动重连（3 秒间隔），心跳检测保持连接活性
-- 状态值变化时闪烁高亮，WNS 图表自动滚动
-- LLM 调用**实时推送**：每次 LLM 调用后立即更新 LLM Log 面板（无需等待 phase 完成），通过 WebSocket `llm_call_update` 消息类型实现
-- 通过 `DashboardStateTracer` 在每次状态机节点退出时推送序列化快照；LLM 调用日志通过 `LLMCallLogger → push_llm_event()` 额外实时推送
+---
 
 ## 项目结构
 
-| 目录/文件 | 用途 |
-|-----------|------|
-| `dcp_optimizer.py` | 主 Agent 编排入口（v1 消息对话 + v2 状态机 `optimize_v2()` 入口） |
-| `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，9节点图） |
-| `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（11个模块：timing/constants/tool_filter/model_select/tool_summary/iteration_logic/context_snapshot/handoff/tool_router/step_state/compress/critical_path，可独立单测） |
-| `optimizer/nodes/` | 9个节点实现（含 ROLLBACK 回滚节点）+ llm_tool_loop 子图 |
-| `optimizer/llm_call_logger.py` | LLM 调用历史记录器：JSONL 文件日志 + 实时推送到 Dashboard |
-| `optimizer/tracing.py` | StateTracer: 节点级状态转换追踪（JSON 导出） |
-| `context_manager/` | 上下文/记忆管理、YAML 压缩（增强标记格式、14 个受保护分析工具） |
-| `skills/` | Skill 框架（13个已注册 Skill：9策略 + 3分析 + 1测试） |
-| `RapidWrightMCP/` | RapidWright MCP 服务器 |
-| `VivadoMCP/` | Vivado MCP 服务器 |
-| `strategy_library.py` | 策略库（9个策略 + 12个 Skill 指导） |
-| `config_loader.py` / `model_config.yaml` | 模型层级与压缩阈值配置 |
-| `validate_dcps.py` | DCP 逻辑等价性验证（两阶段：Phase 1 结构对比 + Phase 2 功能仿真，硬约束） |
-| `dashboard/` | Web Dashboard 实时状态监控（aiohttp + WebSocket，`--dashboard` 启用） |
-| `docs/` | 竞赛提交文档站点 |
+```text
+Deep_Thouught_42/
+├── dcp_optimizer.py          # 主入口：LLM 编排、模型选择
+├── optimizer/                # V2 状态机框架
+│   ├── state.py              # 类型化数据类：7 个状态子切片
+│   ├── graph.py              # NodeGraph：执行引擎
+│   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
+│   └── pure/                 # 12 个无状态纯函数模块（可单元测试）
+├── strategy_library.py       # 9 种策略及触发条件
+├── skills/                   # 技能框架：13 个注册技能
+├── RapidWrightMCP/           # RapidWright MCP 服务器
+├── VivadoMCP/                # Vivado MCP 服务器
+├── context_manager/          # 内存/压缩管理
+├── dashboard/                # Web 仪表盘 (aiohttp + WebSocket)
+├── architecture.md           # 架构技术细节（迁移映射、压缩管线、flow_control）
+├── CONTRIBUTING.md           # 贡献工作流与同步清单
+├── validate_dcps.py          # DCP 逻辑等价性验证器
+├── model_config.yaml         # LLM 层级与回退配置
+├── Makefile                  # 构建自动化
+└── docs/                     # 竞赛提交文档
+```
 
-## 策略库
-
-`strategy_library.py` 定义了 9 个优化策略，系统根据设计特征自动匹配推荐：
-
-| 策略 | 触发条件 | 平台 |
-|------|---------|------|
-| PBLOCK | distributed 场景（avg_distance > 70） | Vivado + RapidWright |
-| PhysOpt | 1-2 paths with spread, WNS > -2.0 | Vivado |
-| Fanout | fanout > 100, 无 spread | RapidWright + Vivado |
-| PinSwap | WNS 卡在 ~-0.3ns, LUT 输入引脚延迟差异 | RapidWright + Vivado |
-| LUTCascade | >3 级 LUT 串联 | RapidWright + Vivado |
-| CellReplication | fanout > 10 或 delay > 0.3ns | RapidWright + Vivado |
-| CongestionSpreading | congestion=HIGH, PBLOCK/PhysOpt 无效 | RapidWright + Vivado |
-| RegisterRetiming | 深组合逻辑链（>2 LUTs） | RapidWright + Vivado |
-| NetSwap | SLICE 内布线拥塞 | RapidWright + Vivado |
-
-详见 [skills/SKILL_SPECIFICATION.md](skills/SKILL_SPECIFICATION.md)。
+---
 
 ## 模型配置
 
-通过 `model_config.yaml` 配置两个模型层级（当前两者使用相同基础模型，通过上下文窗口和压缩参数区分）：
+两个模型层级，根据上下文窗口和压缩参数进行区分：
 
 | 参数 | Worker | Planner |
-|------|--------|---------|
-| 模型 | deepseek/deepseek-v4-flash | deepseek/deepseek-v4-flash |
-| max_tokens | 250K | 1M |
-| soft_threshold | 175K | 200K |
-| hard_limit | 200K | 300K |
-| preserve_turns | 40 (正常) / 25 (硬限制) | 60 (正常) / 40 (硬限制) |
-| min_importance | 0.15 (正常) / 0.35 (硬限制) | 0.10 (正常) / 0.25 (硬限制) |
-| reasoning | 开启（max_output_tokens=16384） | 开启（max_output_tokens=16384） |
-| cost_hard_limit | $1.00 | $1.00 |
-| fallback | stepfun/step-3.5-flash, xiaomi/mimo-v2-flash | xiaomi/mimo-v2.5 |
+|-----------|--------|---------|
+| 模型 | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-flash` |
+| 最大 tokens | 250K | 1M |
+| 软阈值 | 175K | 200K |
+| 硬限制 | 200K | 300K |
+| 保留轮次 | 40 / 25 (硬) | 60 / 40 (硬) |
+| 成本硬限制 | $1.00 | $1.00 |
 
-## 测试
+编辑 `model_config.yaml` 以自定义模型、阈值和回退链。
 
-| 命令 | 说明 | LLM | 用途 |
-|------|------|-----|------|
-| `make run_test DCP=x.dcp` | v1 测试模式 | 否 | 硬编码优化流程验证 |
-| `make run_skill_test DCP=x.dcp` | v1 Skill 测试 | 否 | 仅 Skill 调用验证 |
-| `make run_test_v2 DCP=x.dcp` | v2 测试模式 | 否 | MCP 工具 + Skill + place/route |
-| `make run_skill_test_v2 DCP=x.dcp` | v2 Skill 测试 | 否 | 仅 Skill 调用验证（快速） |
-| `make run_optimizer DCP=x.dcp` | v2 完整优化 | 是 | 状态机驱动 LLM 优化 |
-| `make run_optimizer_v1 DCP=x.dcp` | v1 完整优化 | 是 | 消息对话驱动 LLM 优化 |
+---
 
-## 扩展性维护清单
+## 性能表现
 
-新增工具或策略时，需同步更新以下位置以保持 Dashboard 可信度、压缩保护机制和状态机行为：
+基于 `demo_corundum_25g_misses_timing` 基线的基准测试（典型场景）：
 
-| 新增内容 | 需更新的文件/常量 | 说明 |
-|---------|------------------|------|
-| 分析型工具（`rapidwright_analyze_*`） | `yaml_structured_compress.py` → `PROTECTED_ANALYSIS_TOOLS` | 加入集合防止结果被压缩为标记（鬼打墙） |
-| 刷新 Dashboard 字段的工具 | `optimizer/pure/constants.py` → `DASHBOARD_REFRESH_MAP` | 工具名→字段名映射，Dashboard 自动标注新鲜度 |
-| 新策略类型 | `yaml_structured_compress.py` → `_is_failed_strategy_tool_result()` | 添加策略名→工具名模式匹配，支持失败策略压缩 |
-| 新策略类型 | `optimizer/pure/iteration_logic.py` → `infer_strategy_from_tools()` | 添加工具名→策略名推断映射 |
-| 压缩标记需保留的新 YAML 字段 | `yaml_structured_compress.py` → `_build_compressed_marker()` | 在 YAML 解析循环中添加字段提取 |
-| 执行后需强制 WNS 评估的工具 | `optimizer/nodes/subgraphs/llm_tool_loop.py` → `POST_EVAL_TOOLS` | 工具执行后自动调 `report_timing_summary` 并注入 `[EVAL]` 通知 |
-| 执行后需自动串联 Vivado 工具的 Skill | `optimizer/pure/constants.py` → `SKILL_CHAIN_ACTIONS` | Skill 名→工具链列表，含 `args_from_skill` 参数传递机制。新增链式 Skill 时添加映射 |
-| Dashboard 中不应标注新鲜度的静态字段 | `optimizer/pure/context_snapshot.py` → `_STATIC_RESOURCE_KEYS` | 设计资源（LUT/FF 等）在优化中不变，跳过 `(initial, not refreshed)` 标注 |
-| 工具返回空结果的新模式 | `optimizer/nodes/iteration_end.py` → `_EMPTY_RESULT_PATTERNS` | 空结果匹配时用 `reason=tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
+| 指标 | 优化前 | 优化后 | 改善幅度 |
+|--------|--------|-------|-------------|
+| WNS | -2.347 ns | 0.012 ns | +2.359 ns |
+| TNS | -48.2 ns | 0.0 ns | +48.2 ns |
+| 失败端点 | 127 | 0 | -127 |
+| 迭代次数 | — | 4–8 | — |
+| LLM 成本 | — | ~$0.15–$0.40 | — |
 
-## 文档
+*结果因设计复杂度和初始时序违例的严重程度而异。*
 
-- [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) -- 完整项目结构、数据流、v1->v2 迁移映射
-- [skills/SKILL_SPECIFICATION.md](skills/SKILL_SPECIFICATION.md) -- Skill Descriptor v3 规范
-- [docs/](docs/) -- 竞赛提交文档站点（benchmarks、FAQ、submission 指南）
+---
+
+## 贡献指南
+
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)，包含贡献工作流、测试模式、以及新增策略/工具时的同步清单。
+
+---
+
+## 故障排除
+
+### `Vivado license not found` (未找到 Vivado 许可证)
+
+```bash
+# 验证 Vivado 是否可访问
+which vivado
+# 如有需要，加载 Vivado 环境变量
+source /opt/Xilinx/Vivado/2024.1/settings64.sh
+```
+
+### `OPENROUTER_API_KEY not set` (未设置 OPENROUTER_API_KEY)
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+# 添加到 ~/.bashrc 以持久化
+echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.bashrc
+```
+
+### `RapidWright Java error` (RapidWright Java 错误)
+
+```bash
+# 确保已安装 Java 11+
+java -version
+# 如有需要，设置 JAVA_HOME
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+```
+
+### Dashboard not loading (仪表盘无法加载)
+
+```bash
+# 检查端口可用性
+lsof -i :8080
+# 尝试备用端口
+make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
+```
+
+### WNS not improving after many iterations (多次迭代后 WNS 未改善)
+
+- 当 WNS 恶化 >30ps 时，智能体会自动回滚
+- 检查仪表盘中的 Flow Control Log（流控日志）以获取 `EXHAUSTED` 信号
+- 尝试在状态配置中增加 `no_improvement_limit`
+- 验证 `validate_dcps.py` 是否能通过你的基线 DCP
+
+---
+
+## 许可证
+
+Apache 2.0 — 请参阅 [LICENSE-APACHE-2.0.txt](LICENSE-APACHE-2.0.txt)。
+
+Copyright (C) 2026, Advanced Micro Devices, Inc. 保留所有权利。
+
+---
+
+## 致谢
+
+- **Vivado** 和 **RapidWright** (由 AMD/Xilinx 提供) —— EDA 核心基石
+- **DeepSeek V4 Flash** (通过 OpenRouter) —— LLM 推理引擎
+- **MCP (Model Context Protocol)** —— 工具调用基础设施
+- **FPL 2026** —— 推动本项研究的竞赛
+- **Douglas Adams** —— 项目名称的灵感来源

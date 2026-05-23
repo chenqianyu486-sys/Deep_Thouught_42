@@ -110,6 +110,8 @@ def generate_pblock_plan(
     target_dsp_count: int = 0,
     target_bram_count: int = 0,
     resource_multiplier: float = 1.5,
+    critical_path_cells: list[str] | None = None,
+    distance_weight_factor: float = 0.3,
 ) -> dict:
     """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating.
 
@@ -176,6 +178,8 @@ def generate_pblock_plan(
             target_ff_count=required_ff,
             target_dsp_count=required_dsp,
             target_bram_count=required_bram,
+            critical_path_cells=critical_path_cells,
+            distance_weight_factor=distance_weight_factor,
         )
     except Exception as e:
         region_error = str(e)
@@ -439,6 +443,12 @@ def _validate_pblock_inputs(**kwargs) -> tuple[bool, str]:
                       "Current BRAM usage", default=0),
         ParameterSpec("resource_multiplier", float,
                       "Buffer multiplier for resource targets", default=1.5),
+        ParameterSpec("critical_path_cells", list,
+                      "Critical path cell names for region centering (from Dashboard critical_paths)",
+                      default=None),
+        ParameterSpec("distance_weight_factor", float,
+                      "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
+                      default=0.3),
     ],
     required_context=["design"],
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
@@ -458,13 +468,17 @@ class PblockStrategySkill(Skill):
     def execute(self, context: SkillContext,
                 target_lut_count: int, target_ff_count: int,
                 target_dsp_count: int = 0, target_bram_count: int = 0,
-                resource_multiplier: float = 1.5) -> SkillResult:
+                resource_multiplier: float = 1.5,
+                critical_path_cells: list[str] | None = None,
+                distance_weight_factor: float = 0.3) -> SkillResult:
         try:
             result = generate_pblock_plan(
                 context.design,
                 target_lut_count, target_ff_count,
                 target_dsp_count, target_bram_count,
                 resource_multiplier,
+                critical_path_cells=critical_path_cells,
+                distance_weight_factor=distance_weight_factor,
             )
             is_error = result.get("status") == "error"
             error_msg = result.get("message") if is_error else None
@@ -507,6 +521,12 @@ class PblockStrategySkill(Skill):
                       "Current BRAM usage", default=0),
         ParameterSpec("resource_multiplier", float,
                       "Buffer multiplier for resource targets. Default 1.2x for tighter regions.", default=1.2),
+        ParameterSpec("critical_path_cells", list,
+                      "Critical path cell names for region centering (from Dashboard critical_paths)",
+                      default=None),
+        ParameterSpec("distance_weight_factor", float,
+                      "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
+                      default=0.3),
     ],
     required_context=["design"],
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
@@ -528,13 +548,17 @@ class ExecutePblockStrategySkill(Skill):
     def execute(self, context: SkillContext,
                 target_lut_count: int, target_ff_count: int,
                 target_dsp_count: int = 0, target_bram_count: int = 0,
-                resource_multiplier: float = 1.2) -> SkillResult:
+                resource_multiplier: float = 1.2,
+                critical_path_cells: list[str] | None = None,
+                distance_weight_factor: float = 0.3) -> SkillResult:
         try:
             result = generate_pblock_plan(
                 context.design,
                 target_lut_count, target_ff_count,
                 target_dsp_count, target_bram_count,
                 resource_multiplier,
+                critical_path_cells=critical_path_cells,
+                distance_weight_factor=distance_weight_factor,
             )
             if result.get("status") == "error":
                 return SkillResult(success=False, data=result,

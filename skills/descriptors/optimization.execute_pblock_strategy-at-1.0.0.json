@@ -42,11 +42,21 @@
         "type": "number",
         "description": "Buffer multiplier for resource targets. Default 1.2x for tighter regions.",
         "default": 1.2
+      },
+      "critical_path_cells": {
+        "type": "array",
+        "description": "Critical path cell names for region centering (from Dashboard critical_paths)"
+      },
+      "distance_weight_factor": {
+        "type": "number",
+        "description": "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
+        "default": 0.3
       }
     },
     "required": [
       "target_lut_count",
-      "target_ff_count"
+      "target_ff_count",
+      "critical_path_cells"
     ]
   },
   "returns": {
