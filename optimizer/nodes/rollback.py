@@ -47,6 +47,7 @@ async def rollback_node(
         if "error" in result.lower():
             logger.error(f"[ROLLBACK] Failed to open checkpoint: {result[:200]}")
             return NodeName.ITERATION_START
+        state.control.current_dcp_path = ckpt.resolve()
 
         # Verify WNS after restore
         wns_result = await call_tool_fn(

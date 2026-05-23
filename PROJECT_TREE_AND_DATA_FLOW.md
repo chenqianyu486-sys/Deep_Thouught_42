@@ -28,7 +28,7 @@ fpl26_optimization_contest/
 │   │       ├── phase_handoff.py          # 阶段间结构化交接（PhaseHandoff dataclass + transition_phase）
 │   │       ├── phase_analyze.py          # ANALYZE阶段：多维度时序/拥塞/扇出分析（仅分析工具，最多12轮）
 │   │       ├── phase_select_strategy.py  # SELECT_STRATEGY阶段：选择优化策略（极简4工具）
-│   │       ├── phase_execute.py          # EXECUTE阶段：执行策略工具（全工具，链式动作+事后评估）
+│   │       ├── phase_execute.py          # EXECUTE阶段：执行策略工具（不含vivado_open_checkpoint，链式动作+事后评估+DCP身份保护）
 │   │       └── phase_evaluate.py         # EVALUATE阶段：对比WNS决定下一步（评估工具）
 │   ├── pure/                     # 从DCPOptimizer提取的无状态纯函数（可独立单测）
 │   │   ├── __init__.py
@@ -178,7 +178,7 @@ OptimizerState (可变dataclass)
 ├── ModelState     — 模型选择/fallback/交接提示词/format_guard_injected
 ├── CostState      — token用量/成本追踪
 ├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)/step_state_misses(连续未调用report_step_state计数)
-├── ControlState   — 退出条件/路径/step_state
+├── ControlState   — 退出条件/路径/step_state/current_dcp_path(当前Vivado中打开的DCP路径)
 └── StrategyState  — 4阶段策略生命周期追踪（current_phase/current_strategy/phase_history/evaluation_result）
 ```
 
@@ -221,9 +221,12 @@ llm_tool_loop_node (状态机调度器)
   │            (策略rationale→执行上下文)
   │
   ├── phase=EXECUTE ─────────→ phase=EVALUATE
-  │  执行策略工具                 评估工具(~8个)
-  │  链式动作(SKILL_CHAIN)        最多8轮
-  │  事后评估(POST_EVAL)          LLM决定下一步
+  │  执行策略工具(不含vivado_open_checkpoint)  评估工具(~8个)
+  │  链式动作(SKILL_CHAIN)                   最多8轮
+  │  事后评估(POST_EVAL)                     LLM决定下一步
+  │  DCP身份保护: vivado_open_checkpoint已从白名单移除,
+  │  防止LLM意外打开错误设计; current_dcp_path全程追踪;
+  │  每次DCP切换在日志中输出DESIGN_LOAD醒目标记
   │       │                          │
   │       └── PhaseHandoff ──────────┘
   │            (前后WNS→评估上下文)
@@ -253,6 +256,7 @@ llm_tool_loop_node (状态机调度器)
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，构建 `CompressionContext` + 阈值检查 + 同步调用 `MemoryManager._compress()`
 - **V2 上下文数据流**: `compress_context()` 从 `OptimizerState`（canonical）读取 `iteration`/`best_wns`/`current_wns`/`clock_period`/`initial_wns`，而非从 `MemoryManager`（shadow）。`failed_strategies` 仍从 `deps.compat` 读取（由 `iteration_end_node` 调用 `record_failure()` 填充）。Dashboard 的 `tools_used` 从 `state.iteration.tools_used` 读取（tool loop 中每次工具执行后 append），不再依赖 `deps.compat.tool_call_details`（V2 中始终为空）。
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`。`_sync_state_to_memory_manager()` 已删除（原实现访问不存在的 `_state` 属性，始终为空操作）。
+- **DCP 身份完整性**: `state.control.current_dcp_path` 在全流程中追踪 Vivado 打开的 DCP 文件。EXECUTE 阶段从 LLM 工具白名单中移除 `vivado_open_checkpoint`，防止 LLM 意外打开错误设计。每次 DCP 切换在日志中输出 `━━━ [DESIGN_LOAD] ... ━━━` 醒目标记。详见设计意图 #12。
 
 ### 1.2 V1→V2 迁移映射
 
@@ -1144,7 +1148,7 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
 |------|---------|---------|------------|
 | ANALYZE | 分析工具(~18个) | 收集时序/拥塞/扇出/布局数据，识别瓶颈 | ANALYZE_DONE |
 | SELECT_STRATEGY | 极简(~4个) | 基于分析摘要选择策略 | strategy_name 非空 |
-| EXECUTE | 全工具(~25个) | 执行策略工具，链式动作自动处理 | EXEC_DONE |
+| EXECUTE | 全工具(~24个，不含vivado_open_checkpoint) | 执行策略工具，链式动作自动处理 | EXEC_DONE |
 | EVALUATE | 评估工具(~8个) | 对比WNS变化，决定下一步 | DONE/NEXT/SWITCH/CONTINUE |
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。

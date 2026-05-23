@@ -11,6 +11,8 @@ import json
 import logging
 import time
 
+from pathlib import Path
+
 from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
@@ -559,6 +561,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                         "vivado_open_checkpoint", {"dcp_path": pre_chain_path},
                         deps.rapidwright_session, deps.vivado_session,
                     )
+                    state.control.current_dcp_path = Path(pre_chain_path).resolve()
                 except Exception as restore_err:
                     logger.error(f"[chain] Pre-chain restore also failed: {restore_err}")
             if deps.compat is not None:

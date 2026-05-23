@@ -46,6 +46,7 @@ init_analysis -> [条件: WNS >= 0?]
 | 9 | 数据可信 | Dashboard 字段新鲜度追踪（`DASHBOARD_REFRESH_MAP`），过时数据自动标注 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status），LLM 可决策无需重调工具 |
 | 11 | **逻辑等效硬约束** | 所有优化操作（retiming、replication、pin swap 等）不得改变设计功能。输出 DCP 需通过 `validate_dcps.py` 两阶段验证 |
+| 12 | **DCP 身份完整性** | EXECUTE 阶段禁止 LLM 调用 `vivado_open_checkpoint`（从工具白名单移除）。`current_dcp_path` 全程追踪，每次 DCP 切换输出 `DESIGN_LOAD` 醒目日志，防止意外打开错误设计文件导致设计污染 |
 
 ## flow_control Tool 设计
 
@@ -134,7 +135,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 |-----------|------|
 | `dcp_optimizer.py` | 主 Agent 编排入口（v1 消息对话 + v2 状态机 `optimize_v2()` 入口） |
 | `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，9节点图） |
-| `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（10个模块，可独立单测） |
+| `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（11个模块：timing/constants/tool_filter/model_select/tool_summary/iteration_logic/context_snapshot/handoff/tool_router/step_state/compress/critical_path，可独立单测） |
 | `optimizer/nodes/` | 9个节点实现（含 ROLLBACK 回滚节点）+ llm_tool_loop 子图 |
 | `context_manager/` | 上下文/记忆管理、YAML 压缩（增强标记格式、14 个受保护分析工具） |
 | `skills/` | Skill 框架（13个已注册 Skill：9策略 + 3分析 + 1测试） |

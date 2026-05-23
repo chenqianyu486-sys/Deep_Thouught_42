@@ -74,6 +74,7 @@ async def init_analysis_node(
         )
         if "error" in result.lower() and "opened successfully" not in result.lower():
             raise RuntimeError(f"Failed to open checkpoint: {result}")
+        state.control.current_dcp_path = input_dcp.resolve()
 
         # Step 3: Report timing summary
         timing_report = await call_tool_fn(

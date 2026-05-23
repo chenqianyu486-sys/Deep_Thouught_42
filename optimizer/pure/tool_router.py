@@ -139,8 +139,16 @@ async def call_tool(
 
     heartbeat_task = asyncio.create_task(_heartbeat())
 
+    # Application-level timeout: give the MCP server its requested timeout plus margin,
+    # so hung servers don't block the optimizer indefinitely.
+    request_timeout = arguments.get("timeout", 300)
+    app_timeout = max(request_timeout * 1.5, 300)
+
     try:
-        result = await session.call_tool(actual_name, arguments)
+        result = await asyncio.wait_for(
+            session.call_tool(actual_name, arguments),
+            timeout=app_timeout,
+        )
         heartbeat_done.set()
         heartbeat_task.cancel()
         try:
@@ -160,12 +168,33 @@ async def call_tool(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                 f"result_size={result_size} chars, heartbeats={heartbeat_count}"
             )
+            if tool_name == "vivado_open_checkpoint":
+                dcp_path = arguments.get("dcp_path", "?")
+                logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
             return result_text
         logger.info(
             f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
             f"result_size=0 chars, heartbeats={heartbeat_count}"
         )
         return "(no output)"
+    except asyncio.TimeoutError:
+        heartbeat_done.set()
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        elapsed = time.time() - start_time
+        logger.error(
+            f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
+            f"FAILED: Application-level timeout ({app_timeout:.0f}s), "
+            f"heartbeats={heartbeat_count}"
+        )
+        return json.dumps({
+            "error": f"Application-level timeout after {app_timeout:.0f}s",
+            "tool": tool_name,
+            "suggest_recovery": "restart_vivado",
+        })
     except Exception as e:
         heartbeat_done.set()
         heartbeat_task.cancel()

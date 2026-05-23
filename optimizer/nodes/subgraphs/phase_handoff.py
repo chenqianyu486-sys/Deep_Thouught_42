@@ -130,7 +130,7 @@ async def transition_phase(
         # 3. Get the system message (first message) to preserve
         system_msg = None
         for m in current_messages:
-            if hasattr(m, 'role') and str(m.role) == "system":
+            if hasattr(m, 'role') and m.role.value == "system":
                 system_msg = m
                 break
 

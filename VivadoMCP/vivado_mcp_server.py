@@ -178,7 +178,7 @@ def wait_for_prompt(proc: pexpect.spawn, timeout: float) -> str:
     return proc.before
 
 
-def sync_after_timeout(proc: pexpect.spawn) -> str:
+def sync_after_timeout(proc: pexpect.spawn, timeout: float = 300) -> str:
     """
     After a timeout, wait for the previous command to complete.
     Returns the output from the command that was running.
@@ -187,16 +187,15 @@ def sync_after_timeout(proc: pexpect.spawn) -> str:
     if not _command_pending:
         return ""
     
-    # Wait indefinitely for the prompt (command to complete)
-    # Use a very long timeout (1 hour) as a safety
+    wait_timeout = max(timeout, 300)
     try:
-        output = wait_for_prompt(proc, timeout=3600)
+        output = wait_for_prompt(proc, timeout=wait_timeout)
         _command_pending = False
         return f"[Previous command completed]\n{output}"
     except pexpect.TIMEOUT:
-        # Still stuck after 1 hour - Vivado is truly hung
+        # Still stuck — Vivado is truly hung, flag for restart
         _command_pending = True
-        raise RuntimeError("Vivado appears to be hung. Use restart_vivado to recover.")
+        raise RuntimeError(f"Vivado appears to be hung (waited {wait_timeout:.0f}s). Use restart_vivado to recover.")
 
 
 def _run_single_tcl(proc, command: str, timeout: float) -> str:
@@ -239,12 +238,11 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     global _command_pending
 
     proc = ensure_vivado()
+    effective_timeout = timeout if timeout is not None else 300
 
     # If a previous command timed out, wait for it to complete first
     if _command_pending:
-        sync_output = sync_after_timeout(proc)
-
-    effective_timeout = timeout if timeout is not None else 300
+        sync_output = sync_after_timeout(proc, timeout=effective_timeout)
 
     # Split multi-line commands and execute sequentially
     cmd_lines = [line.strip() for line in command.split("\n") if line.strip()]

@@ -72,7 +72,6 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_write_checkpoint",
         "vivado_get_resource_counts",
         "vivado_run_tcl",
-        "vivado_open_checkpoint",
         # Quick-check tools during execution
         "vivado_report_timing_summary",
         "vivado_get_wns",
