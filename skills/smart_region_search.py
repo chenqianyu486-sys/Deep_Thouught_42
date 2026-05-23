@@ -301,6 +301,11 @@ def _suggest_multi_region_split(
     """When single contiguous region is insufficient, suggest splitting target
     across 2-3 independent column groups.
 
+    Uses density-aware partitioning: finds the column where cumulative slice
+    count reaches ~50% of total, producing balanced groups. This is more
+    accurate than a simple midpoint split when resource density varies across
+    the device.
+
     Strategy: partition available columns into groups, assign proportional
     portion of target to each. Returns list of region suggestions.
     """
@@ -315,10 +320,17 @@ def _suggest_multi_region_split(
     if total_slices < required_slices * 0.5:
         return []  # Not enough even with split
 
-    # Partition into 2 roughly equal groups
-    mid = len(usable) // 2
-    group_a = usable[:mid]
-    group_b = usable[mid:]
+    # Density-aware split: find column where cumulative slices reach ~50%
+    cumulative = 0
+    half_slices = total_slices / 2.0
+    split_idx = len(usable) - 1  # default: last element
+    for i, col in enumerate(usable):
+        cumulative += col["slice_sites"]
+        if cumulative >= half_slices:
+            split_idx = i
+            break
+    group_a = usable[:split_idx + 1]
+    group_b = usable[split_idx + 1:]
 
     suggestions = []
     for idx, group in enumerate([group_a, group_b]):

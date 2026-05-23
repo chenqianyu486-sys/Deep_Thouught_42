@@ -115,7 +115,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {
              "pblock_name": "pblock_name",
              "pblock_ranges": "pblock_ranges",
-             "is_soft": False,
+             "is_soft": "is_soft_recommended",
          }},
         {"tool": "vivado_place_design", "args": {}},
         {"tool": "vivado_route_design", "args": {}},

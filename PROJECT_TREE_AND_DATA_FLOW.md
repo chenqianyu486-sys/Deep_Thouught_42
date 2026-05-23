@@ -500,7 +500,7 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
   → llm_tool_loop._update_critical_paths_from_tool() 解析结果
   → pure/critical_path.update_critical_paths() 存入 state.timing.critical_paths
 
-触发2（主动）: phys_opt_design / route_design 执行后
+触发2（主动）: phys_opt_design / route_design / place_design / create_and_apply_pblock 执行后
   → state.timing.critical_paths_stale = True
   → 工具循环末尾 auto-refresh:
     → _auto_refresh_critical_paths() 调用 vivado_extract_critical_path_cells(num_paths=10)
@@ -712,7 +712,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {
              "pblock_name": "pblock_name",
              "pblock_ranges": "pblock_ranges",
-             "is_soft": False,
+             "is_soft": "is_soft_recommended",
          }},
         {"tool": "vivado_place_design", "args": {}},
         {"tool": "vivado_route_design", "args": {}},
@@ -738,8 +738,9 @@ llm_tool_loop._execute_chain_actions()
 
 **关键设计**：
 - **`args_from_skill`**：参数从 Skill 返回值中动态提取，如 `pblock_ranges`、`pblock_name`
-- **`is_soft` = False**：硬约束 PBLOCK（非软约束），强制 Vivado 在指定区域内布局
-- **错误容错**：单步失败不中断链式执行，错误注入为 `[AUTO-CHAIN ERROR]` 消息
+- **`is_soft`**：从 skill 结果动态读取 `is_soft_recommended`。`pblock_strategy` skill 分析利用率密度，当 >80% 时推荐 IS_SOFT=1（软约束），否则 IS_SOFT=0
+- **错误恢复**：链式动作开始前保存 `/tmp/pre_chain_pblock.dcp` 快照。单步失败时自动恢复快照并 break（不继续剩余步骤），避免设计处于未布局的中间状态
+- **Critical path stale 标记**：`vivado_place_design` 和 `vivado_create_and_apply_pblock` 执行后自动标记 `critical_paths_stale = True`，触发下一轮 auto-refresh 关键路径数据
 - **WNS 追踪**：每步执行后解析时序结果，更新 `state.timing.latest_wns`
 - **新增 Skill**：`optimization.execute_pblock_strategy@1.0.0`（`skills/pblock_strategy.py`），默认 `resource_multiplier=1.2x`（比旧 `analyze_pblock_region` 的 1.5x 更紧凑）
 

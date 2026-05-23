@@ -520,18 +520,28 @@ async def list_tools() -> list[Tool]:
             name="analyze_pblock_region",
             description="""Analyze FPGA fabric to find the optimal PBLOCK region for re-placement.
 
-            READ-ONLY analysis. Uses smart_region_search to find the optimal
+            READ-ONLY analysis. Uses sliding-window column search to find the optimal
             contiguous fabric region that fits the design's resource needs (with buffer
-            multiplier). Returns region coordinates, pblock_ranges string, estimated
-            resources, and suggested next steps for Vivado execution.
+            multiplier). Returns region coordinates, pblock_ranges, estimated resources,
+            resource deficit per type (LUT/FF/DSP/BRAM), IS_SOFT recommendation, and
+            suggested next_steps for Vivado execution.
+
+            KEY OUTPUT FIELDS:
+            - capacity_ok (bool): True = region has enough resources. Only proceed if true.
+            - deficit (dict): Shortfall per resource type when capacity_ok=false.
+            - is_soft_recommended (bool): True when utilization density > 80%.
+            - next_steps (list): Vivado commands to execute (only present when capacity_ok=true).
 
             Prerequisite: call vivado_report_utilization_for_pblock first to get
             current LUT/FF/DSP/BRAM counts.
             Input: resource counts from Vivado utilization report.
             Output: region coordinates, pblock_ranges string, estimated resources,
-                    and next_steps (Vivado tools you must call yourself).
+                    deficit, is_soft_recommended, and next_steps (Vivado tools you must call yourself).
+
             Priority: Use when avg_distance > 70 (distributed scenario) or
                       recommendation == 'PBLOCK'.
+            For the full automatic workflow (analysis + auto-chained Vivado tools),
+            use execute_pblock_strategy instead.
 
             NOTE on resource_multiplier:
             - Default 1.5x provides 50%% headroom. For already-congested designs, this may
@@ -575,7 +585,7 @@ async def list_tools() -> list[Tool]:
             This is the PREFERRED tool for PBLOCK strategy — do NOT use vivado_run_tcl for this workflow.
             After this tool succeeds, the system will AUTOMATICALLY chain the following Vivado tools:
               1. vivado_place_design -unplace
-              2. vivado_create_and_apply_pblock (with returned pblock_ranges)
+              2. vivado_create_and_apply_pblock (with returned pblock_ranges, is_soft from recommendation)
               3. vivado_place_design (re-place within constraint)
               4. vivado_route_design
 
@@ -583,13 +593,17 @@ async def list_tools() -> list[Tool]:
             when not explicitly provided. You can call this tool directly with no arguments.
 
             MUTATING (via chained Vivado tools). The returned checkpoint preserves
-            pre-pblock state for rollback.
+            pre-pblock state for rollback. On chain failure, design auto-restores to pre-chain state.
+
+            OUTPUT includes:
+            - capacity_ok: only proceed if true
+            - deficit: per-type resource shortfall (LUT/FF/DSP/BRAM)
+            - is_soft_recommended: auto-set based on utilization density (>80% = soft constraint)
+            - pblock_ranges, pblock_name, region: ready for Vivado tool chain
 
             ORDERING: For distributed designs (avg_distance > 70), run this BEFORE
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
-
-            Output: pblock_ranges, pblock_name, region, capacity_ok.
 
             NOTE: resource_multiplier defaults to 1.2x (tighter than analyze_pblock_region's 1.5x).
             Reduce to 1.0x for already-dense designs.""",

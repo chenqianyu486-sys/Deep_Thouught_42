@@ -53,7 +53,7 @@ STRATEGIES = {
              "note": "READ-ONLY: finds optimal pblock region, returns pblock_ranges"},
             {"step": "place_design -unplace", "platform": "Vivado", "params": None},
             {"step": "create_and_apply_pblock", "platform": "Vivado",
-             "params": {"ranges": "from analyze_pblock_region output", "is_soft": False}},
+             "params": {"ranges": "from analyze_pblock_region output", "is_soft": "auto (from skill IS_SOFT recommendation)"}},
             {"step": "place_design", "platform": "Vivado", "params": None},
             {"step": "route_design", "platform": "Vivado", "params": None},
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
@@ -240,12 +240,13 @@ SKILL_GUIDANCE = {
     },
     "analyze_pblock_region": {
        "category": "ANALYSIS",
-       "input": "target_lut_count, target_ff_count from vivado_report_utilization_for_pblock",
-       "output": "region coordinates, pblock_ranges string, estimated resources, next_steps list",
-       "advantage": "Finds optimal pblock region in one call; avoids delay-heavy columns. Returns pblock_ranges ready for vivado_create_and_apply_pblock.",
+       "input": "target_lut_count, target_ff_count, target_dsp_count, target_bram_count from vivado_report_utilization_for_pblock",
+       "output": "region coordinates, pblock_ranges string, estimated resources, deficit (LUT/FF/DSP/BRAM), next_steps list, is_soft_recommended",
+       "advantage": "Finds optimal pblock region in one call; avoids delay-heavy columns. Returns pblock_ranges ready for vivado_create_and_apply_pblock. "
+                   "DSP/BRAM deficits now reported. IS_SOFT auto-recommended based on utilization density (>80% → soft constraint).",
        "condition": "avg_distance > 70 (distributed scenario) or recommendation == 'PBLOCK'",
-       "prerequisite": "Call vivado_report_utilization_for_pblock first to get LUT/FF counts",
-       "post_actions": "After this analysis, YOU must call: vivado_place_design -unplace, vivado_create_and_apply_pblock, vivado_place_design, vivado_route_design, vivado_report_timing_summary",
+       "prerequisite": "Call vivado_report_utilization_for_pblock first to get LUT/FF/DSP/BRAM counts",
+       "post_actions": "After this analysis, YOU must call: vivado_place_design -unplace, vivado_create_and_apply_pblock (is_soft from skill result), vivado_place_design, vivado_route_design, vivado_report_timing_summary",
     },
     "optimize_pin_swapping": {
         "category": "OPTIMIZATION",

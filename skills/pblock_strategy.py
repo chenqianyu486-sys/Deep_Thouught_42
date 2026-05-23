@@ -18,13 +18,17 @@ from skills.skill_decorator import skill
 logger = logging.getLogger(__name__)
 
 
-def _build_deficit(estimated: dict, required_lut: int, required_ff: int) -> dict:
-    """Compute resource deficit (positive = shortfall)."""
+def _build_deficit(estimated: dict, required_lut: int, required_ff: int,
+                   required_dsp: int = 0, required_bram: int = 0) -> dict:
+    """Compute resource deficit per type (positive = shortfall).
+
+    Now also computes DSP and BRAM deficits (not just LUT/FF).
+    """
     return {
         "luts": max(0, required_lut - estimated.get("luts", 0)),
         "ffs": max(0, required_ff - estimated.get("ffs", 0)),
-        "dsps": max(0, 0),  # DSP/BRAM not primary gating
-        "brams": max(0, 0),
+        "dsps": max(0, required_dsp - estimated.get("dsps", 0)),
+        "brams": max(0, required_bram - estimated.get("brams", 0)),
     }
 
 
@@ -32,7 +36,11 @@ def _build_advice_insufficient(deficit: dict, full_device: dict,
                                 required_lut: int, required_ff: int,
                                 resource_multiplier: float,
                                 multi_region: list | None = None) -> list[str]:
-    """Build advice array for insufficient capacity scenario."""
+    """Build advice array for insufficient capacity scenario.
+
+    Covers LUT/FF and DSP/BRAM deficits, resource_multiplier adjustment,
+    full-device capacity check, and multi-region split guidance.
+    """
     advice = []
     lut_def = deficit.get("luts", 0)
     ff_def = deficit.get("ffs", 0)
@@ -47,6 +55,16 @@ def _build_advice_insufficient(deficit: dict, full_device: dict,
         advice.append(
             f"Target resource exceeds region capacity by LUTs={lut_def:,}, FFs={ff_def:,}. "
             f"Consider reducing target_lut_count / target_ff_count to match available resources."
+        )
+
+    dsp_def = deficit.get("dsps", 0)
+    bram_def = deficit.get("brams", 0)
+    if dsp_def > 0 or bram_def > 0:
+        advice.append(
+            f"Target resources exceed region capacity by DSPs={dsp_def:,}, "
+            f"BRAMs={bram_def:,}. "
+            f"Consider reducing target_dsp_count / target_bram_count or selecting "
+            f"a region with more DSP/BRAM columns."
         )
 
     full_luts = full_device.get("luts", 0)
@@ -105,8 +123,10 @@ def generate_pblock_plan(
 
     Returns:
         Dict with status, region, pblock_ranges, estimated_resources,
-        target_resources, capacity_ok, deficit, advice, multi_region_suggestions,
-        next_steps. next_steps is non-null ONLY when capacity_ok == true.
+        target_resources, capacity_ok, deficit (LUT/FF/DSP/BRAM),
+        advice (including IS_SOFT recommendation), multi_region_suggestions,
+        is_soft_recommended, next_steps. next_steps is non-null ONLY
+        when capacity_ok == true.
     """
     if design is None:
         logger.warning("generate_pblock_plan: design is None")
@@ -281,7 +301,7 @@ def generate_pblock_plan(
             logger.warning("Fallback expansion failed: %s", e)
 
     # Step 4: Compute deficit, get full device resources
-    deficit = _build_deficit(estimated, required_lut, required_ff) if not capacity_ok else None
+    deficit = _build_deficit(estimated, required_lut, required_ff, required_dsp, required_bram) if not capacity_ok else None
 
     full_device = {}
     try:
@@ -291,8 +311,16 @@ def generate_pblock_plan(
         pass
 
     # Step 5: Build advice (use smart_region_search's advice as base, augment with our own)
+    is_soft_recommended = False
     if capacity_ok:
+        est_luts = estimated.get("luts", 1)
+        utilization_density = required_lut / max(est_luts, 1)
+        is_soft_recommended = utilization_density > 0.8
         advice = _build_advice_sufficient()
+        advice.append(
+            f"IS_SOFT={'1' if is_soft_recommended else '0'} recommended "
+            f"(utilization density: {utilization_density:.1%})."
+        )
     else:
         advice = _build_advice_insufficient(
             deficit or {}, full_device, required_lut, required_ff,
@@ -302,10 +330,11 @@ def generate_pblock_plan(
     # Step 6: Build next_steps — ONLY if capacity is sufficient
     next_steps = None
     if capacity_ok:
+        soft_str = "true" if is_soft_recommended else "false"
         next_steps = [
             "vivado: place_design -unplace",
-            "vivado: create_and_apply_pblock with pblock_ranges above, "
-            "pblock_name=pblock_tight, is_soft=false",
+            f"vivado: create_and_apply_pblock with pblock_ranges above, "
+            f"pblock_name=pblock_tight, is_soft={soft_str}",
             "vivado: place_design (re-place cells within pblock constraint)",
             "vivado: route_design",
             "vivado: report_timing_summary (verify WNS improvement after PBLOCK re-placement)",
@@ -359,7 +388,27 @@ def generate_pblock_plan(
         "advice": advice,
         "multi_region_suggestions": multi_region,
         "next_steps": next_steps,
+        "is_soft_recommended": is_soft_recommended,
     }
+
+
+def _validate_pblock_inputs(**kwargs) -> tuple[bool, str]:
+    """Validate pblock skill inputs: target_lut_count and target_ff_count must be positive ints.
+
+    Shared between PblockStrategySkill and ExecutePblockStrategySkill
+    to avoid code duplication.
+    """
+    if "target_lut_count" not in kwargs:
+        return False, "target_lut_count is required"
+    if "target_ff_count" not in kwargs:
+        return False, "target_ff_count is required"
+    lut = kwargs["target_lut_count"]
+    ff = kwargs["target_ff_count"]
+    if not isinstance(lut, int) or lut <= 0:
+        return False, "target_lut_count must be a positive integer"
+    if not isinstance(ff, int) or ff <= 0:
+        return False, "target_ff_count must be a positive integer"
+    return True, ""
 
 
 @skill(
@@ -395,7 +444,16 @@ def generate_pblock_plan(
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class PblockStrategySkill(Skill):
-    """Skill for PBLOCK region analysis. Returns region data, not a StrategyPlan."""
+    """READ-ONLY pblock region analysis skill.
+
+    Analyzes FPGA fabric to find the optimal pblock region for re-placement.
+    Returns region coordinates, pblock_ranges, estimated resources,
+    capacity validation, deficit (LUT/FF/DSP/BRAM), IS_SOFT recommendation,
+    and next_steps (only when capacity_ok).
+
+    Does NOT modify the design. Use ExecutePblockStrategySkill for the full
+    workflow (analysis + auto-chained Vivado tools).
+    """
 
     def execute(self, context: SkillContext,
                 target_lut_count: int, target_ff_count: int,
@@ -415,17 +473,7 @@ class PblockStrategySkill(Skill):
             return SkillResult(success=False, data=None, error=str(e))
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
-        if "target_lut_count" not in kwargs:
-            return False, "target_lut_count is required"
-        if "target_ff_count" not in kwargs:
-            return False, "target_ff_count is required"
-        lut = kwargs["target_lut_count"]
-        ff = kwargs["target_ff_count"]
-        if not isinstance(lut, int) or lut<= 0:
-            return False, "target_lut_count must be a positive integer"
-        if not isinstance(ff, int) or ff <= 0:
-            return False, "target_ff_count must be a positive integer"
-        return True, ""
+        return _validate_pblock_inputs(**kwargs)
 
 
 @skill(
@@ -464,7 +512,18 @@ class PblockStrategySkill(Skill):
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
 class ExecutePblockStrategySkill(Skill):
-    """Skill for full PBLOCK execution: analyze + prepare for automatic Vivado chaining."""
+    """Full PBLOCK execution workflow: analyze + auto-chained Vivado tools.
+
+    Same analysis as PblockStrategySkill, but designed for automatic Vivado
+    tool chaining. The optimizer's SKILL_CHAIN_ACTIONS will auto-execute:
+        vivado_place_design(-unplace) →
+        vivado_create_and_apply_pblock(is_soft from recommendation) →
+        vivado_place_design →
+        vivado_route_design
+
+    If any chain step fails, the design is restored from a pre-chain checkpoint.
+    Critical paths are auto-refreshed after placement-affecting chain tools.
+    """
 
     def execute(self, context: SkillContext,
                 target_lut_count: int, target_ff_count: int,
@@ -488,14 +547,4 @@ class ExecutePblockStrategySkill(Skill):
             return SkillResult(success=False, data=None, error=str(e))
 
     def validate_inputs(self, **kwargs) -> tuple[bool, str]:
-        if "target_lut_count" not in kwargs:
-            return False, "target_lut_count is required"
-        if "target_ff_count" not in kwargs:
-            return False, "target_ff_count is required"
-        lut = kwargs["target_lut_count"]
-        ff = kwargs["target_ff_count"]
-        if not isinstance(lut, int) or lut <= 0:
-            return False, "target_lut_count must be a positive integer"
-        if not isinstance(ff, int) or ff <= 0:
-            return False, "target_ff_count must be a positive integer"
-        return True, ""
+        return _validate_pblock_inputs(**kwargs)

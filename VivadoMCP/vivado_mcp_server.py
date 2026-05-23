@@ -1436,9 +1436,18 @@ async def list_tools():
         Tool(
             name="report_utilization_for_pblock",
             description="""Get design resource utilization for pblock sizing.
-            
-            Returns counts of LUTs, FFs, DSPs, BRAMs, URAMs with both actual usage and 
-            1.5x multiplied values for pblock size calculation.""",
+
+            PREREQUISITE for all pblock analysis tools.
+            Returns counts of LUTs, FFs, DSPs, BRAMs, URAMs with both actual usage and
+            1.5x multiplied values for pblock size calculation.
+
+            OUTPUT format (JSON):
+            {"lut": 30839, "ff": 1660, "dsp": 0, "bram": 0, "uram": 0,
+             "lut_multiplied": 46258, "ff_multiplied": 2490}
+
+            Pass the returned LUT, FF (and optional DSP, BRAM) counts to
+            analyze_pblock_region or execute_pblock_strategy as target_* parameters.
+            Use get_resource_counts for a simpler JSON-only version.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1499,16 +1508,34 @@ async def list_tools():
         Tool(
             name="create_and_apply_pblock",
             description="""Create a pblock (area constraint) and apply it to the design.
-            
-            A pblock restricts placement to a specific region of the FPGA. This can improve timing
-            by reducing routing distances for spread-out designs. After applying a pblock, you must
-            run place_design and route_design to implement the constraint.
-            
+
+            A pblock restricts placement to a specific region of the FPGA. This improves timing
+            by reducing routing distances for spread-out designs. After applying a pblock,
+            you must run place_design and route_design to implement the constraint.
+
+            RESOURCE VALIDATION:
+            Automatically validates resources (UTLZ-1, UTLZ-2 DRC) and auto-expands the pblock
+            range up to 3 times if resource validation fails. If expansion fails after all
+            attempts, the pblock is still created but with a warning.
+
+            IS_SOFT DECISION:
+            - is_soft=false (hard constraint): Preferred for timing optimization. Forces Vivado
+              to place all cells INSIDE the specified region. Use when pblock has sufficient
+              capacity (capacity_ok=true from analysis).
+            - is_soft=true (soft constraint): Allows Vivado to place cells outside the region
+              if needed. Use when utilization density is high (>80%) or for congested designs
+              where hard constraints may cause place_design failures.
+            - The execute_pblock_strategy skill auto-sets is_soft based on utilization density.
+
             Range format examples:
-            - SLICE_X0Y0:SLICE_X100Y200 (specific slice ranges)
-            - CLOCKREGION_X0Y0:CLOCKREGION_X2Y3 (clock region ranges)
-            
-            Set is_soft=False for hard constraints that must be met.""",
+            - SLICE_X0Y0:SLICE_X100Y200 (specific slice ranges, preferred for optimization)
+            - CLOCKREGION_X0Y0:CLOCKREGION_X2Y3 (clock region ranges, DO NOT use — too coarse)
+
+            RESULT INTERPRETATION:
+            - "Cells in pblock: N / Total cells in design: M" — use N/M ratio to verify compliance.
+              If N < M, some cells are outside the pblock (partial application).
+            - On expansion retries, each attempt is logged with timestamps.
+            - If all expansion attempts fail, the pblock is created at max expanded range.""",
             inputSchema={
                 "type": "object",
                 "properties": {

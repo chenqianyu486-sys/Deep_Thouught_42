@@ -193,7 +193,8 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
 
                 # Mark critical paths stale after layout changes
-                if tool_name in ("vivado_phys_opt_design", "vivado_route_design"):
+                if tool_name in ("vivado_phys_opt_design", "vivado_route_design",
+                                 "vivado_place_design", "vivado_create_and_apply_pblock"):
                     state.timing.critical_paths_stale = True
 
                 # Dashboard freshness
@@ -486,10 +487,34 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
 
 
 async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tools_called):
-    """Auto-execute chained tools after skills with chain actions."""
+    """Auto-execute chained MCP tools after a skill completes.
+
+    Workflow:
+      1. Save pre-chain checkpoint to /tmp/pre_chain_pblock.dcp for rollback
+      2. Iterate through SKILL_CHAIN_ACTIONS[tool_name] steps:
+         - Resolve args_from_skill from skill_result_data
+         - Call each MCP tool via call_tool_fn
+         - Track WNS changes via _track_wns_from_result
+         - Mark critical_paths_stale = True for placement-affecting tools
+      3. On any step failure:
+         - Restore from pre-chain checkpoint
+         - Break (do not continue with remaining steps)
+         - Inject [AUTO-CHAIN ERROR] notification into LLM context
+    """
     chain = SKILL_CHAIN_ACTIONS.get(tool_name)
     if not chain:
         return
+
+    # Save pre-chain state for rollback on failure
+    pre_chain_path = None
+    try:
+        pre_ckpt_result = await call_tool_fn(
+            "vivado_write_checkpoint", {"dcp_path": "/tmp/pre_chain_pblock.dcp", "force": True},
+            deps.rapidwright_session, deps.vivado_session,
+        )
+        pre_chain_path = "/tmp/pre_chain_pblock.dcp"
+    except Exception as e:
+        logger.warning(f"[chain] Could not save pre-chain checkpoint: {e}")
 
     for step in chain:
         target_tool = step["tool"]
@@ -517,14 +542,29 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 deps.compat.add_message("user",
                     f"[AUTO-CHAIN] After {tool_name}: {target_tool} completed — {summary[:400]}")
             _track_wns_from_result(state, target_tool, raw_result)
+
+            # Mark critical paths stale after placement-affecting chain tools
+            if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):
+                state.timing.critical_paths_stale = True
+
             await _try_save_best_checkpoint(state, deps)
             state.iteration.tools_used.append(target_tool)
             tools_called.append(target_tool)
         except Exception as e:
-            logger.warning(f"[chain] Tool {target_tool} failed: {e}")
+            logger.error(f"[chain] Tool {target_tool} failed: {e}")
+            if pre_chain_path:
+                try:
+                    logger.warning(f"[chain] Restoring from pre-chain checkpoint: {pre_chain_path}")
+                    await call_tool_fn(
+                        "vivado_open_checkpoint", {"dcp_path": pre_chain_path},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+                except Exception as restore_err:
+                    logger.error(f"[chain] Pre-chain restore also failed: {restore_err}")
             if deps.compat is not None:
                 deps.compat.add_message("user",
-                    f"[AUTO-CHAIN ERROR] {target_tool} failed: {str(e)[:300]}")
+                    f"[AUTO-CHAIN ERROR] {target_tool} failed, design restored to pre-chain state.")
+            break
 
 
 async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) -> None:

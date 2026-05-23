@@ -1,0 +1,148 @@
+/*
+
+AMD Vivado v2025.1 (64-bit) [Major: 2025, Minor: 1]
+SW Build: 6140274 on Wed May 21 22:58:25 MDT 2025
+IP Build: 6138677 on Thu May 22 03:10:11 MDT 2025
+IP Build: 6138677 on Thu May 22 03:10:11 MDT 2025
+
+Process ID (PID): 788071
+License: Customer
+Mode: GUI Mode
+
+Current time: 	Sat May 23 11:37:34 CST 2026
+Time zone: 	China Standard Time (Asia/Shanghai)
+
+OS: Ubuntu
+OS Version: 6.6.87.2-microsoft-standard-WSL2
+OS Architecture: amd64
+Available processors (cores): 16
+LSB Release Description: Ubuntu 24.04.4 LTS
+
+Display: 0
+Screen size: 3072x1920
+Local screen bounds: x = 0, y = 0, width = 3072, height = 1920
+Screen resolution (DPI): 100
+Available screens: 1
+Default font: family=Dialog,name=Dialog,style=plain,size=12
+Scale size: 12
+OS font scaling: 100%
+Anti-Alias Enabled: true
+
+Java version: 	21.0.1 64-bit
+
+Java home: 	/home/qianyu/2025.1/tps/lnx64/jre21.0.1_12
+Java executable: 	/home/qianyu/2025.1/tps/lnx64/jre21.0.1_12/bin/java
+Java arguments: 	[-Dsun.java2d.pmoffscreen=false, -Dhttps.protocols=TLSv1,TLSv1.1,TLSv1.2, -Dsun.java2d.xrender=false, -Dsun.java2d.uiScale.enabled=false, -Dswing.aatext=true, -XX:-UsePerfData, -Djdk.map.althashing.threshold=512, -XX:StringTableSize=4072, -XX:+UseStringDeduplication, -XX:MaxGCPauseMillis=200, -XX:ParallelGCThreads=4, -XX:+ParallelRefProcEnabled, --add-opens=java.desktop/javax.swing.plaf.synth=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.desktop/sun.swing=ALL-UNNAMED, --add-opens=java.desktop/javax.swing=ALL-UNNAMED, --add-opens=java.desktop/javax.swing.tree=ALL-UNNAMED, --add-opens=java.desktop/javax.swing.plaf.basic=ALL-UNNAMED, --add-opens=java.desktop/javax.swing.plaf.synth=ALL-UNNAMED, --add-opens=java.desktop/javax.swing.plaf.basic=ALL-UNNAMED, --add-opens=java.desktop/javax.swing=ALL-UNNAMED, --add-opens=java.desktop/javax.swing.tree=ALL-UNNAMED, --add-opens=java.desktop/java.awt.event=ALL-UNNAMED, --add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED, --add-exports=java.desktop/javax.swing.plaf.synth=ALL-UNNAMED, --add-exports=java.base/java.nio=ALL-UNNAMED, --add-exports=java.desktop/sun.swing=ALL-UNNAMED, --add-exports=java.desktop/javax.swing=ALL-UNNAMED, --add-exports=java.desktop/javax.swing.tree=ALL-UNNAMED, --add-exports=java.desktop/javax.swing.plaf.basic=ALL-UNNAMED, --add-exports=java.desktop/sun.swing=ALL-UNNAMED, --add-exports=java.desktop/sun.swing.table=ALL-UNNAMED, --add-exports=java.desktop/sun.swing.plaf.synth=ALL-UNNAMED, --add-exports=java.desktop/sun.awt.shell=ALL-UNNAMED, --add-exports=java.base/sun.security.action=ALL-UNNAMED, --add-exports=java.desktop/sun.font=ALL-UNNAMED, --add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED, -XX:NewSize=80m, -XX:MaxNewSize=80m, -Xms812m, -Xmx6144m, -Xss10m, -Xrs]
+Java initial memory (-Xms): 	812 MB
+Java maximum memory (-Xmx):	 6 GB
+
+User name: 	qianyu
+User home directory: /home/qianyu
+User working directory: /home/qianyu/fpl26_optimization_contest
+User country: 	US
+User language: 	en
+User locale: 	en_US
+
+RDI_BASEROOT: /home/qianyu/2025.1
+HDI_APPROOT: /home/qianyu/2025.1/Vivado
+RDI_DATADIR: /home/qianyu/2025.1/data
+RDI_BINDIR: /home/qianyu/2025.1/Vivado/bin
+
+Vivado preferences file: /home/qianyu/.Xilinx/Vivado/2025.1/vivado.xml
+Vivado preferences directory: /home/qianyu/.Xilinx/Vivado/2025.1/
+Vivado layouts directory: /home/qianyu/.Xilinx/Vivado/2025.1/data/layouts
+PlanAhead jar file: 	/home/qianyu/2025.1/Vivado/lib/classes/planAhead.jar
+Vivado log file: 	/home/qianyu/fpl26_optimization_contest/vivado.log
+Vivado journal file: 	/home/qianyu/fpl26_optimization_contest/vivado.jou
+Engine tmp dir: 	./.Xil/Vivado-788071-Refrain
+Non-Default Parameters:	[]
+
+Xilinx & AMD Environment Variables
+--------------------------------------------------------------------------------------------
+JAVA_HOME: /usr/lib/jvm/java-1.17.0-openjdk-amd64
+RDI_APPROOT: /home/qianyu/2025.1/Vivado
+RDI_BASEROOT: /home/qianyu/2025.1
+RDI_BINROOT: /home/qianyu/2025.1/Vivado/bin
+RDI_BUILD: yes
+RDI_DATADIR: /home/qianyu/2025.1/Vivado/data
+RDI_INSTALLROOT: /home/qianyu
+RDI_INSTALLVER: Vivado
+RDI_JAVA_PLATFORM: 
+RDI_JAVA_VERSION: 21.0.1_12
+RDI_LIBDIR: /home/qianyu/2025.1/Vivado/lib/lnx64.o/Ubuntu/24:/home/qianyu/2025.1/Vivado/lib/lnx64.o/Ubuntu:/home/qianyu/2025.1/Vivado/lib/lnx64.o
+RDI_OPT_EXT: .o
+RDI_PATCHROOT: 
+RDI_PLATFORM: lnx64
+RDI_PREPEND_PATH: /home/qianyu/2025.1/Vitis/bin
+RDI_PROG: /home/qianyu/2025.1/Vivado/bin/unwrapped/lnx64.o/vivado
+RDI_SESSION_INFO: /home/qianyu/fpl26_optimization_contest:Refrain_1779507441_787982
+RDI_SHARED_DATA: /home/qianyu/SharedData/Vivado/data
+RDI_TPS_ROOT: /home/qianyu/2025.1/Vivado/tps/lnx64
+RDI_USE_JDK21: True
+SHELL: /bin/bash
+XILINXD_LICENSE_FILE: /home/qianyu/.Xilinx/Vivado_license_2037.lic
+XILINX_DSP: 
+XILINX_HLS: /home/qianyu/2025.1/Vitis
+XILINX_PLANAHEAD: /home/qianyu/2025.1/Vivado
+XILINX_SDK: /home/qianyu/2025.1/Vitis
+XILINX_VITIS: /home/qianyu/2025.1/Vitis
+XILINX_VIVADO: /home/qianyu/2025.1/Vivado
+
+
+GUI allocated memory:	812 MB
+GUI max memory:		6,144 MB
+Engine allocated memory: 1,849 MB
+
+Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+Copyright 2022-2025 Advanced Micro Devices, Inc. All Rights Reserved.
+
+*/
+
+// TclEventType: START_GUI
+// Tcl Message: start_gui 
+// HMemoryUtils.trashcanNow. Engine heap size: 1,863 MB. GUI used memory: 65 MB. Current time: 5/23/26, 11:37:35 AM CST
+selectButton(PAResourceEtoH.GettingStartedView_OPEN_PROJECT, "Open Project"); // t (PAResourceEtoH.GettingStartedView_OPEN_PROJECT)
+// Run Command: PAResourceCommand.PACommandNames_OPEN_PROJECT
+// Elapsed time: 14 seconds
+dismissFileChooser();
+selectMenu(PAResourceItoN.MainMenuMgr_FILE, "File"); // ah (PAResourceItoN.MainMenuMgr_FILE, File)
+selectMenu(PAResourceItoN.MainMenuMgr_PROJECT, "Project"); // am (PAResourceItoN.MainMenuMgr_PROJECT, Project)
+selectMenu(PAResourceItoN.MainMenuMgr_CHECKPOINT, "Checkpoint"); // am (PAResourceItoN.MainMenuMgr_CHECKPOINT, Checkpoint)
+selectMenuItem(PAResourceCommand.PACommandNames_OPEN_CHECKPOINT, "Open..."); // ap (PAResourceCommand.PACommandNames_OPEN_CHECKPOINT, open_checkpoint_menu)
+dismissMenu(PAResourceItoN.MainMenuMgr_FILE, "File"); // ah (PAResourceItoN.MainMenuMgr_FILE, File)
+// Run Command: PAResourceCommand.PACommandNames_OPEN_CHECKPOINT
+// HMemoryUtils.trashcanNow. Engine heap size: 1,872 MB. GUI used memory: 73 MB. Current time: 5/23/26, 11:38:19 AM CST
+setFileChooser("/home/qianyu/fpl26_optimization_contest/logicnets_jscl_optimized-20260523_111844.dcp");
+// TclEventType: DEBUG_PROBE_SET_CHANGE
+// TclEventType: FLOW_ADDED
+// TclEventType: FILE_SET_NEW
+// TclEventType: RUN_ADD
+// TclEventType: RUN_CURRENT
+// TclEventType: PROJECT_DASHBOARD_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_DASHBOARD_GADGET_NEW
+// TclEventType: PROJECT_DASHBOARD_GADGET_CHANGE
+// TclEventType: PROJECT_NEW
+// Tcl Message: open_checkpoint /home/qianyu/fpl26_optimization_contest/logicnets_jscl_optimized-20260523_111844.dcp 
+// Tcl Message: Command: open_checkpoint /home/qianyu/fpl26_optimization_contest/logicnets_jscl_optimized-20260523_111844.dcp  Starting open_checkpoint Task  Time (s): cpu = 00:00:00.03 ; elapsed = 00:00:00.01 . Memory (MB): peak = 9790.969 ; gain = 0.000 ; free physical = 12916 ; free virtual = 17741 
+// TclEventType: PROJECT_NEW
+// [GUI Memory]: 134 MB (+138483kb) [00:01:01]
+// [Engine Memory]: 1,918 MB (+1859578kb) [00:01:01]
+// Tcl Message: INFO: [IP_Flow 19-234] Refreshing IP repositories INFO: [IP_Flow 19-1704] No user IP repositories specified INFO: [IP_Flow 19-2313] Loaded Vivado IP repository '/home/qianyu/2025.1/Vivado/data/ip'. 
+// TclEventType: FILE_SET_OPTIONS_CHANGE
+// HMemoryUtils.trashcanNow. Engine heap size: 3,165 MB. GUI used memory: 73 MB. Current time: 5/23/26, 11:38:34 AM CST
+// TclEventType: PHY_BLOCK_NEW
+// TclEventType: SDC_CONSTRAINT_ADD
+// TclEventType: POWER_CNS_STALE
+// TclEventType: PHY_BLOCK_ADD_INST
+// TclEventType: PHY_BLOCK_MODIFY
+// TclEventType: FLOORPLAN_MODIFY

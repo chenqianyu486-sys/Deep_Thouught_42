@@ -560,6 +560,8 @@ class V2TestMode:
          "skill_name": "smart_region", "args": {"target_lut_count": 50000, "target_ff_count": 50000}},
         {"name": "analyze_pblock_region", "tool": "rapidwright_analyze_pblock_region",
          "skill_name": "pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": 1.5}},
+        {"name": "execute_pblock_strategy", "tool": "rapidwright_execute_pblock_strategy",
+         "skill_name": "execute_pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": 1.2}},
         {"name": "analyze_register_retiming", "tool": "rapidwright_analyze_register_retiming",
          "skill_name": "analyze_register_retiming", "args": {}, "needs": "critical_paths"},
         {"name": "analyze_net_swapping", "tool": "rapidwright_analyze_net_swapping",
