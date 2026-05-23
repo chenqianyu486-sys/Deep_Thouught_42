@@ -16,6 +16,9 @@ temp/
 # DCP validation temporary directories
 dcp_validation_*/
 
+# tiktoken encoding cache (auto-generated, should not be versioned)
+data-gym-cache/
+
 # Legacy workspace directory (now uses dcp_optimizer_run-*/)
 workspace/
 
