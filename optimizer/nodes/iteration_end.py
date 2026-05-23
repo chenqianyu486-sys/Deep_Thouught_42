@@ -215,6 +215,8 @@ _EMPTY_RESULT_PATTERNS = (
     "no actionable results",
     "total_candidates\": 0",
     "no high fanout",
+    '"optimized_count": 0',
+    '"cascades_found": 0',
 )
 
 

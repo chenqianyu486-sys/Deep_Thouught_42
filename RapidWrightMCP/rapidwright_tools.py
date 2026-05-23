@@ -2066,13 +2066,13 @@ def execute_pblock_strategy(
     # Auto-detect resource counts from the loaded design when not specified
     if target_lut_count == 0 or target_ff_count == 0:
         try:
-            instance_list = _current_design.getInstances()
+            cell_iterator = _current_design.getCells()
             auto_lut = 0
             auto_ff = 0
             auto_dsp = 0
             auto_bram = 0
-            for inst in instance_list:
-                cell_type = inst.getType()
+            for cell in cell_iterator:
+                cell_type = str(cell.getType())
                 if cell_type.startswith("LUT"):
                     auto_lut += 1
                 elif cell_type.startswith("FD") or cell_type in ("FDPE", "FDRE", "FDSE", "FDCE"):

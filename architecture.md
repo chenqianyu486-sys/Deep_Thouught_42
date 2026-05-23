@@ -277,6 +277,7 @@ inject_context_snapshot_at_end(api_messages):
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**: 来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`
 - **`strategy_catalog`**（SELECT_STRATEGY 阶段独占）：当 `show_strategy_catalog=True` 时，在 dashboard 首部注入策略名称+触发条件
+- **`strategy_catalog` 排除机制**：已记录在 `state.context.failed_strategies` 中的策略（不限 reason 类型）自动从 catalog 中排除，避免 LLM 重复选择已知无效的策略。排除逻辑在 `inject_merged_dashboard()` → `format_state_space_for_llm(exclude_strategies=...)` → `get_strategy_catalog(exclude_strategies=...)` 链路中实现（`context_snapshot.py:392-402` → `state_space.py:266` → `strategy_library.py:412`）。与 `phase_select_strategy.py:254` 的 `_get_permanently_blocked_strategies()` 后验检查形成双重保护。
 - **`skill_guidance`**（EXECUTE 阶段）：当 `current_strategy` 非空时注入 primary skill 工具名 + SKILL_CHAIN_ACTIONS + 执行序列
 
 ### 3.5 动态 Critical Path 管理
@@ -652,6 +653,12 @@ class StrategyState:
 | Fanout后评估缺失 | Fanout | `execution_failure` | Fanout优化后缺少post-eval |
 | 路由失败 | PlaceRoute | `execution_failure` | `route_design`/`place_design` 失败 |
 | 策略中断检测 | PBLOCK/Fanout | `execution_failure` | `_detect_unfinished_strategy()` |
+| 工具返回空结果 | 工具所属策略 | `tool_error` | 工具输出匹配 `_EMPTY_RESULT_PATTERNS` |
+
+**`_EMPTY_RESULT_PATTERNS` 空结果模式匹配**（`iteration_end.py:210-220`）：当 LLM 调用 `SWITCH_STRATEGY` 且工具输出包含以下模式时，归类为 `tool_error`（冷却后可重试）而非 `strategy_ineffective`（永久排除）：
+- `"0 candidates"` / `"no candidates"` — 无候选优化对象
+- `"no deep combinational"` / `"no high fanout"` — 无符合条件的目标
+- `"optimized_count": 0` / `"cascades_found": 0` — LUTCascade 找到 cascade 但无法优化（如 NN 宽输入锥超出 6-input LUT 物理极限）
 
 **分级格式**:
 ```python

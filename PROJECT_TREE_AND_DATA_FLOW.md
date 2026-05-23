@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 12 个无状态纯函数模块（可独立单测）
+│   └── pure/                     # 13 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -37,8 +37,8 @@ fpl26_optimization_contest/
 ├── VivadoMCP/                    # Vivado MCP 服务器
 ├── dashboard/                    # Web Dashboard（aiohttp + WebSocket）
 │   ├── server.py                 # aiohttp 服务器 + DashboardStateTracer
-│   ├── serializer.py             # OptimizerState → JSON
-│   └── static/index.html         # 自包含前端（暗色主题，13 面板）
+│   ├── serializer.py             # OptimizerState → JSON（含 state_space 键）
+│   └── static/index.html         # 自包含前端（暗色主题，19 面板：6 模块 StateSpace + 13 旧版详情）
 ├── context_manager/              # 内存/压缩管理
 │   ├── manager.py                # MemoryManager 中心编排
 │   ├── estimator.py              # ContextEstimator（tiktoken cl100k_base，全局统一token估算基准）
@@ -62,13 +62,14 @@ fpl26_optimization_contest/
 
 ```
 OptimizerState (可变 dataclass，7 个子切片)
-├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪
+├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
 ├── ContextState    — 压缩计数/原始工具输出缓冲/LLM 消息日志/FC 决策轨迹/失败策略记录
 ├── ControlState    — 退出条件/DCP 路径/step_state
 └── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
++ 6 模块仪表盘容器 (纯输出 dataclass，由 state_space.py 构建): StateSpace → DashboardGlobalState / DashboardTimingClusters / DashboardPhysicalCongestion / DashboardNetlistQuality / DashboardConstraints / DashboardDynamicGradient
 ```
 
 > 完整字段定义见 [optimizer/state.py](optimizer/state.py)。
@@ -156,24 +157,54 @@ _prepare_api_messages():
 
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §3.1-§3.2](architecture.md)。
 
-### 3.2 Agent 上下文 Dashboard
+### 3.2 Agent 上下文 Dashboard (6 模块 StateSpace)
 
-每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）：
+每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）。数据由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化的 6 模块 YAML：
 
+```yaml
+[ANALYZE — Context & Dashboard]
+
+# Module 1: Global State & Targets
+global_state:
+  current_stage: PLACEMENT
+  iteration_count: 5
+  target_frequency: 300.0
+  wns_setup: -0.523
+  tns_setup: -12.340
+  whs_hold: 0.045
+  lut_utilization: 49.16%
+  ff_utilization: 19.66%
+
+# Module 2: Timing Path Clusters (Top 20)
+timing_clusters:
+  top_paths:
+    - endpoint: u_core/u_alu/reg_0
+      slack: -0.523
+      logic_delay_pct: 0.45
+      route_delay_pct: 0.55
+      logic_levels: 12
+      path_group: clk_fpl26contest
+
+# Module 3: Physical & Congestion Metrics
+physical_congestion:
+  global_congestion_score: 0.65
+  avg_wirelength: N/A
+  hotspots: [...]
+
+# Module 4: Netlist Quality Profiler
+# Module 5: Constraints Environment
+# Module 6: Dynamic Gradient (Delta)
+dynamic_gradient:
+  delta_wns: +0.0770
+  last_action_taken: PhysOpt
+  action_status: Success
 ```
---- Optimization Dashboard ---
-clock_period / wns_current / wns_best / tns / failing_endpoints
-trajectory: [iter{N} strategy wns_before→wns_after delta]
-design_signals: max_fanout / high_fanout_count / cp_spread / 资源利用率
-critical_paths: [top 8 paths, 6 cells/path]
-strategy_lifecycle: current_phase / current_strategy
-skill_guidance: primary_tool / auto_chain / avoid
---- End Dashboard ---
-```
+
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看全 5 模块，EXECUTE 阶段只看 global_state + dynamic_gradient。
 
 - 纯数据，无判断标签 → LLM 自主推理
-- 每次重建，不进入 MessageStore
-- `do_not_repeat` 自动推导（>3次调用 + delta < 0.01ns）
+- 每次通过 `build_state_space()` 重建，不进入 MessageStore
+- 同时作为 Web 前端 `data.state_space` 通过 WebSocket 推送
 
 > 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §3.4-§3.5](architecture.md)。
 
@@ -190,6 +221,8 @@ skill_guidance: primary_tool / auto_chain / avoid
 | 工具重复检测 | `_recent_tools` 滑动窗口，>=3次+delta<0.05ns → REPETITION DETECTED |
 | 周期反思 | 每 8 tool_round 注入 REFLECTION CHECKPOINT |
 | DCP 身份 | EXECUTE 阶段从白名单移除 `vivado_open_checkpoint`；`current_dcp_path` 全程追踪 |
+| 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |
+| 空结果模式匹配 | 工具返回 `optimized_count: 0` / `cascades_found: 0` 等空结果时归类为 `tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
 
 ### 3.4 模型选择
 

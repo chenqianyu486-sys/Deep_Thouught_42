@@ -378,35 +378,32 @@ def inject_merged_dashboard(
 ) -> None:
     """Build and inject merged handoff + dashboard as the last user message.
 
+    Uses the canonical 6-module StateSpace representation via
+    build_state_space() + format_state_space_for_llm().
+
     Called by each phase's _call_phase_llm() before every LLM call.
     The handoff summary (from previous phase) is merged into the same message
     so it gets maximum attention weight at the end of the conversation.
     """
-    current_wns = state.timing.latest_wns
-    best_wns = state.timing.best_wns if state.timing.best_wns > float('-inf') else None
+    from .state_space import build_state_space, format_state_space_for_llm
 
-    snapshot = build_context_snapshot(
-        clock_period=state.timing.clock_period,
-        current_wns=current_wns,
-        best_wns=best_wns,
-        best_wns_iteration=state.timing.best_wns_iteration,
-        tns=state.timing.latest_tns,
-        failing_endpoints=state.timing.latest_failing_endpoints,
-        high_fanout_nets=state.timing.high_fanout_nets or [],
-        critical_path_spread=state.timing.critical_path_spread,
-        resource_utilization=state.timing.resource_utilization,
-        iteration_narratives=state.iteration.narratives,
-        tools_used=state.iteration.tools_used,
-        critical_paths=state.timing.critical_paths,
-        refreshed_fields=state.timing.refreshed_fields,
-        input_dcp=str(state.control.input_dcp.resolve()) if state.control.input_dcp else None,
-        output_dcp=str(state.control.output_dcp.resolve()) if state.control.output_dcp else None,
-        strategy_phase=state.strategy.current_phase,
-        current_strategy=state.strategy.current_strategy,
-        evaluation_result=state.strategy.evaluation_result,
+    space = build_state_space(state)
+
+    # Exclude previously failed strategies from the catalog
+    _failed_strategies = [
+        fs.strategy for fs in state.context.failed_strategies
+    ] if state.context.failed_strategies else None
+
+    snapshot = format_state_space_for_llm(
+        space=space,
         phase=phase,
         handoff_summary=state.strategy.last_handoff_text,
         show_strategy_catalog=(phase == LoopPhase.SELECT_STRATEGY),
+        exclude_strategies=_failed_strategies,
+        iteration_narratives=state.iteration.narratives,
+        tools_used=state.iteration.tools_used,
+        current_strategy=state.strategy.current_strategy,
+        evaluation_result=state.strategy.evaluation_result,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)

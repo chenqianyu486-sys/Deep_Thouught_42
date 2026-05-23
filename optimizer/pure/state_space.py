@@ -1,0 +1,560 @@
+"""StateSpace builder: transforms OptimizerState into the canonical 6-module
+dashboard representation consumed by both the web UI (via serializer) and
+the LLM context (via context_snapshot).
+
+All functions are pure: they read OptimizerState, produce StateSpace.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..state import OptimizerState
+
+from ..state import (
+    DashboardGlobalState,
+    DashboardTimingPath,
+    DashboardTimingClusters,
+    DashboardCongestionHotspot,
+    DashboardPhysicalCongestion,
+    DashboardHighFanoutNet,
+    DashboardNetlistQuality,
+    DashboardConstraints,
+    DashboardDynamicGradient,
+    StateSpace,
+)
+from .critical_path import DISPLAY_LIMIT_SNAPSHOT
+from .tool_filter import LoopPhase
+
+logger = logging.getLogger(__name__)
+
+# Maximum violating paths in StateSpace (user spec says Top 20)
+MAX_VIOLATING_PATHS = 20
+
+# Phase-aware module filters for LLM context injection.
+PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
+    LoopPhase.ANALYZE: frozenset({
+        "global_state", "timing_clusters", "physical_congestion",
+        "netlist_quality", "dynamic_gradient",
+    }),
+    LoopPhase.SELECT_STRATEGY: frozenset({
+        "global_state", "timing_clusters", "physical_congestion",
+        "netlist_quality", "constraints_env", "dynamic_gradient",
+    }),
+    LoopPhase.EXECUTE: frozenset({
+        "global_state", "dynamic_gradient",
+    }),
+    LoopPhase.EVALUATE: frozenset({
+        "global_state", "dynamic_gradient",
+    }),
+}
+
+
+# ── Public API ──────────────────────────────────────────────────────
+
+def build_state_space(state: OptimizerState) -> StateSpace:
+    """Build the canonical 6-module StateSpace from raw OptimizerState.
+
+    This is the single entry point used by both the dashboard serializer
+    and the LLM context injector.
+    """
+    return StateSpace(
+        global_state=_build_global_state(state),
+        timing_clusters=_build_timing_clusters(state),
+        physical_congestion=_build_physical_congestion(state),
+        netlist_quality=_build_netlist_quality(state),
+        constraints_env=_build_constraints_env(state),
+        dynamic_gradient=_build_dynamic_gradient(state),
+    )
+
+
+# ── Module 1: Global State & Targets ─────────────────────────────────
+
+def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
+    """Build Module 1: global state, timing margins, and utilization."""
+    timing = state.timing
+
+    # Derive current stage from phase + tool context
+    current_stage = _infer_current_stage(state)
+
+    # Target frequency from clock period (MHz)
+    target_freq = 0.0
+    if timing.clock_period and timing.clock_period > 0:
+        target_freq = 1000.0 / timing.clock_period
+
+    # Utilization percentages from raw counts / device capacity
+    lu = _compute_utilization(timing.resource_utilization, timing.device_capacity, "LUT")
+    fu = _compute_utilization(timing.resource_utilization, timing.device_capacity, "FF")
+    bu = _compute_utilization(timing.resource_utilization, timing.device_capacity, "BRAM")
+    du = _compute_utilization(timing.resource_utilization, timing.device_capacity, "DSP")
+
+    return DashboardGlobalState(
+        current_stage=current_stage,
+        iteration_count=state.iteration.current,
+        target_frequency=round(target_freq, 1),
+        wns_setup=timing.latest_wns,
+        tns_setup=timing.latest_tns,
+        whs_hold=timing.hold_wns,
+        ths_hold=timing.hold_tns,
+        lut_utilization=lu,
+        ff_utilization=fu,
+        bram_utilization=bu,
+        dsp_utilization=du,
+    )
+
+
+# ── Module 2: Timing Path Clusters ───────────────────────────────────
+
+def _build_timing_clusters(state: OptimizerState) -> DashboardTimingClusters:
+    """Build Module 2: Top-N violating timing path endpoints."""
+    paths: list[DashboardTimingPath] = []
+    for entry in state.timing.critical_paths[:MAX_VIOLATING_PATHS]:
+        dp = _convert_critical_path(entry)
+        paths.append(dp)
+    return DashboardTimingClusters(top_violating_paths=paths)
+
+
+# ── Module 3: Physical & Congestion Metrics ──────────────────────────
+
+def _build_physical_congestion(state: OptimizerState) -> DashboardPhysicalCongestion:
+    """Build Module 3: physical congestion and hotspot data."""
+    cd = state.timing.congestion_data or {}
+
+    hotspots: list[DashboardCongestionHotspot] = []
+    raw_hotspots = cd.get("hotspots", [])
+    if isinstance(raw_hotspots, list):
+        for h in raw_hotspots:
+            hotspots.append(DashboardCongestionHotspot(
+                x1=h.get("x1", 0), y1=h.get("y1", 0),
+                x2=h.get("x2", 0), y2=h.get("y2", 0),
+                severity=h.get("severity", 0.0),
+                dominant_module=h.get("dominant_module", ""),
+            ))
+
+    return DashboardPhysicalCongestion(
+        global_congestion_score=cd.get("global_score"),
+        avg_wirelength=None,   # TODO: parse from Vivado report_route_status
+        long_route_nets_count=0,  # TODO: parse from Vivado report_route_status
+        congestion_hotspots=hotspots,
+        pblock_overflow_count=cd.get("pblock_overflow_count", 0),
+    )
+
+
+# ── Module 4: Netlist Quality Profiler ───────────────────────────────
+
+def _build_netlist_quality(state: OptimizerState) -> DashboardNetlistQuality:
+    """Build Module 4: netlist architecture quality metrics."""
+    nets: list[DashboardHighFanoutNet] = []
+    for item in state.timing.high_fanout_nets:
+        if isinstance(item, dict):
+            nets.append(DashboardHighFanoutNet(
+                net_name=item.get("net_name", item.get("net", "")),
+                fanout_count=item.get("fanout", item.get("fanout_count", 0)),
+                is_replicated=item.get("is_replicated", False),
+            ))
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            nets.append(DashboardHighFanoutNet(
+                net_name=str(item[0]),
+                fanout_count=int(item[1]),
+                is_replicated=False,
+            ))
+
+    # TODO: cross_domain_paths_count — count paths where source_clock != dest_clock
+    # from timing report CDC analysis. Requires Vivado report_timing -cross_clock parsing.
+
+    return DashboardNetlistQuality(
+        total_control_sets=0,        # TODO: Vivado report_control_sets
+        avg_control_sets_per_slice=None,  # TODO: Vivado report_control_sets
+        high_fanout_nets=nets,
+        failed_inferences=[],        # TODO: synthesis log parsing (not available post-synth)
+        cross_domain_paths_count=0,  # TODO: CDC analysis from timing report
+    )
+
+
+# ── Module 5: Constraints Environment ───────────────────────────────
+
+def _build_constraints_env(state: OptimizerState) -> DashboardConstraints:
+    """Build Module 5: timing constraints environment."""
+    clock_defs: dict[str, float] = {}
+    cp = state.timing.clock_period
+    if cp and cp > 0:
+        clock_defs["clk_fpl26contest"] = round(1000.0 / cp, 1)
+
+    # TODO: false_paths_count — Vivado get_false_paths
+    # TODO: multicycle_paths_count — Vivado get_multicycle_paths
+    # TODO: io_delay_defined_pct — analyze all I/O ports for set_input_delay/set_output_delay
+    # TODO: pvt_corner — extract from report_timing header or Vivado report_pvt
+
+    return DashboardConstraints(
+        clock_definitions=clock_defs,
+        false_paths_count=0,
+        multicycle_paths_count=0,
+        io_delay_defined_pct=None,
+        pvt_corner="slow_0p95v_85c",  # UltraScale+ standard slow corner
+    )
+
+
+# ── Module 6: Dynamic Gradient (Delta) ──────────────────────────────
+
+def _build_dynamic_gradient(state: OptimizerState) -> DashboardDynamicGradient:
+    """Build Module 6: iteration-over-iteration delta data."""
+    # Delta WNS from strategy evaluation
+    delta_wns = state.strategy.evaluation_wns_delta
+
+    # Compute delta TNS from last two narratives
+    delta_tns = _compute_delta_tns(state)
+
+    # Delta congestion: needs before/after snapshots — not yet implemented
+    delta_congestion = None  # TODO: store previous congestion score for comparison
+
+    # Last action from strategy state
+    last_action = state.strategy.current_strategy
+
+    # Action status from evaluation result
+    eval_result = state.strategy.evaluation_result
+    if eval_result == "IMPROVED":
+        action_status = "Success"
+    elif eval_result == "REGRESSION":
+        action_status = "Failed"
+    elif eval_result == "UNCHANGED":
+        action_status = "Success"  # No regression = success
+    else:
+        action_status = ""  # PENDING or not yet evaluated
+
+    return DashboardDynamicGradient(
+        delta_wns=delta_wns if delta_wns != 0.0 else None,
+        delta_tns=delta_tns,
+        delta_congestion=delta_congestion,
+        last_action_taken=last_action,
+        action_status=action_status,
+    )
+
+
+# ── LLM Context Formatting ───────────────────────────────────────────
+
+def format_state_space_for_llm(
+    *,
+    space: StateSpace,
+    phase: LoopPhase | None = None,
+    handoff_summary: str = "",
+    show_strategy_catalog: bool = False,
+    exclude_strategies: list[str] | None = None,
+    iteration_narratives: list[dict] | None = None,
+    tools_used: list[str] | None = None,
+    current_strategy: str = "",
+    evaluation_result: str = "",
+) -> str:
+    """Format the 6-module StateSpace as YAML for LLM context injection.
+
+    Phase-aware: only modules enabled in PHASE_STATESPACE_MODULES are shown.
+    Appended as the last user message for maximum attention weight.
+    """
+    enabled = PHASE_STATESPACE_MODULES.get(phase) if phase else None
+    lines: list[str] = []
+
+    # ── Header ────────────────────────────────────────────────────
+    phase_label = phase.value.upper() if phase else "OPTIMIZATION"
+    lines.append(f"[{phase_label} — Context & Dashboard]")
+    lines.append("")
+
+    # ── Strategy catalog (SELECT_STRATEGY phase only) ──────────────
+    if show_strategy_catalog:
+        try:
+            from strategy_library import get_strategy_catalog as _get_catalog
+            catalog = _get_catalog(exclude_strategies=exclude_strategies)
+            if catalog:
+                lines.append("strategy_catalog:")
+                for line in catalog.strip().split("\n"):
+                    lines.append(f"  {line}")
+                lines.append("")
+        except Exception:
+            pass
+
+    # ── Handoff summary (from previous phase) ──────────────────────
+    if handoff_summary:
+        lines.append(handoff_summary)
+        lines.append("")
+
+    # ── Module 1: Global State & Targets ───────────────────────────
+    if enabled is None or "global_state" in enabled:
+        gs = space.global_state
+        lines.append("# Module 1: Global State & Targets")
+        lines.append("global_state:")
+        lines.append(f"  current_stage: {gs.current_stage or 'UNKNOWN'}")
+        lines.append(f"  iteration_count: {gs.iteration_count}")
+        lines.append(f"  target_frequency: {gs.target_frequency}")
+        lines.append(f"  wns_setup: {gs.wns_setup:.3f}" if gs.wns_setup is not None else "  wns_setup: N/A")
+        lines.append(f"  tns_setup: {gs.tns_setup:.3f}" if gs.tns_setup is not None else "  tns_setup: N/A")
+        if gs.whs_hold is not None:
+            lines.append(f"  whs_hold: {gs.whs_hold:.3f}")
+        if gs.ths_hold is not None:
+            lines.append(f"  ths_hold: {gs.ths_hold:.3f}")
+        if gs.lut_utilization is not None:
+            lines.append(f"  lut_utilization: {gs.lut_utilization:.2%}")
+        if gs.ff_utilization is not None:
+            lines.append(f"  ff_utilization: {gs.ff_utilization:.2%}")
+        if gs.bram_utilization is not None:
+            lines.append(f"  bram_utilization: {gs.bram_utilization:.2%}")
+        if gs.dsp_utilization is not None:
+            lines.append(f"  dsp_utilization: {gs.dsp_utilization:.2%}")
+        lines.append("")
+
+    # ── Module 2: Timing Path Clusters ─────────────────────────────
+    if enabled is None or "timing_clusters" in enabled:
+        tc = space.timing_clusters
+        lines.append("# Module 2: Timing Path Clusters (Top Violating Endpoints)")
+        lines.append("timing_clusters:")
+        if tc.top_violating_paths:
+            lines.append(f"  top_paths:  # {len(tc.top_violating_paths)} paths")
+            for i, p in enumerate(tc.top_violating_paths):
+                lines.append(f"    - endpoint: {p.endpoint_name}")
+                if p.source_clock or p.dest_clock:
+                    lines.append(f"      source_clock: {p.source_clock or '?'}")
+                    lines.append(f"      dest_clock: {p.dest_clock or '?'}")
+                lines.append(f"      slack: {p.slack:.3f}" if p.slack is not None else "      slack: ?")
+                if p.logic_delay_pct is not None:
+                    lines.append(f"      logic_delay_pct: {p.logic_delay_pct:.2f}")
+                if p.route_delay_pct is not None:
+                    lines.append(f"      route_delay_pct: {p.route_delay_pct:.2f}")
+                if p.logic_levels is not None:
+                    lines.append(f"      logic_levels: {p.logic_levels}")
+                if p.path_group:
+                    lines.append(f"      path_group: {p.path_group}")
+        else:
+            lines.append("  top_paths: []")
+        lines.append("")
+
+    # ── Module 3: Physical & Congestion Metrics ────────────────────
+    if enabled is None or "physical_congestion" in enabled:
+        pc = space.physical_congestion
+        lines.append("# Module 3: Physical & Congestion Metrics")
+        lines.append("physical_congestion:")
+        lines.append(f"  global_congestion_score: {pc.global_congestion_score:.2f}" if pc.global_congestion_score is not None else "  global_congestion_score: N/A")
+        lines.append(f"  avg_wirelength: {pc.avg_wirelength:.1f}" if pc.avg_wirelength is not None else "  avg_wirelength: N/A")
+        lines.append(f"  long_route_nets_count: {pc.long_route_nets_count}")
+        lines.append(f"  pblock_overflow_count: {pc.pblock_overflow_count}")
+        if pc.congestion_hotspots:
+            lines.append(f"  hotspots:  # {len(pc.congestion_hotspots)} regions")
+            for h in pc.congestion_hotspots[:5]:
+                lines.append(f"    - bbox: [{h.x1},{h.y1}]-[{h.x2},{h.y2}]")
+                lines.append(f"      severity: {h.severity:.2f}")
+                lines.append(f"      module: {h.dominant_module}")
+        else:
+            lines.append("  hotspots: []")
+        lines.append("")
+
+    # ── Module 4: Netlist Quality Profiler ─────────────────────────
+    if enabled is None or "netlist_quality" in enabled:
+        nq = space.netlist_quality
+        lines.append("# Module 4: Netlist Quality Profiler")
+        lines.append("netlist_quality:")
+        lines.append(f"  total_control_sets: {nq.total_control_sets}")
+        lines.append(f"  avg_control_sets_per_slice: {nq.avg_control_sets_per_slice:.2f}" if nq.avg_control_sets_per_slice is not None else "  avg_control_sets_per_slice: N/A")
+        lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}")
+        if nq.high_fanout_nets:
+            lines.append(f"  high_fanout_nets:  # {len(nq.high_fanout_nets)} nets")
+            for net in nq.high_fanout_nets[:10]:
+                rep = " (replicated)" if net.is_replicated else ""
+                lines.append(f"    - {net.net_name}: fanout={net.fanout_count}{rep}")
+        else:
+            lines.append("  high_fanout_nets: []")
+        if nq.failed_inferences:
+            lines.append(f"  failed_inferences:  # {len(nq.failed_inferences)}")
+            for fi in nq.failed_inferences[:5]:
+                lines.append(f"    - {fi}")
+        else:
+            lines.append("  failed_inferences: []")
+        lines.append("")
+
+    # ── Module 5: Constraints Environment ──────────────────────────
+    if enabled is None or "constraints_env" in enabled:
+        ce = space.constraints_env
+        lines.append("# Module 5: Constraints Environment")
+        lines.append("constraints_env:")
+        if ce.clock_definitions:
+            lines.append("  clock_definitions:")
+            for clk_name, freq in ce.clock_definitions.items():
+                lines.append(f"    {clk_name}: {freq:.1f} MHz")
+        else:
+            lines.append("  clock_definitions: {}")
+        lines.append(f"  false_paths_count: {ce.false_paths_count}")
+        lines.append(f"  multicycle_paths_count: {ce.multicycle_paths_count}")
+        lines.append(f"  io_delay_defined_pct: {ce.io_delay_defined_pct:.2%}" if ce.io_delay_defined_pct is not None else "  io_delay_defined_pct: N/A")
+        lines.append(f"  pvt_corner: {ce.pvt_corner}")
+        lines.append("")
+
+    # ── Module 6: Dynamic Gradient Data ────────────────────────────
+    if enabled is None or "dynamic_gradient" in enabled:
+        dg = space.dynamic_gradient
+        lines.append("# Module 6: Dynamic Gradient (Delta)")
+        lines.append("dynamic_gradient:")
+        lines.append(f"  delta_wns: {dg.delta_wns:+.4f}" if dg.delta_wns is not None else "  delta_wns: N/A")
+        lines.append(f"  delta_tns: {dg.delta_tns:+.4f}" if dg.delta_tns is not None else "  delta_tns: N/A")
+        lines.append(f"  delta_congestion: {dg.delta_congestion:+.4f}" if dg.delta_congestion is not None else "  delta_congestion: N/A")
+        lines.append(f"  last_action_taken: {dg.last_action_taken or 'none'}")
+        lines.append(f"  action_status: {dg.action_status or 'PENDING'}")
+        lines.append("")
+
+    # ── Trajectory (if enabled in phase) ──────────────────────────
+    if phase and "trajectory" not in PHASE_STATESPACE_MODULES.get(phase, frozenset()):
+        pass  # trajectory now embedded in dynamic_gradient; skip separate section
+
+    # ── Strategy lifecycle (brief, always shown) ──────────────────
+    if current_strategy or evaluation_result:
+        lines.append("strategy_lifecycle:")
+        if current_strategy:
+            lines.append(f"  current_strategy: {current_strategy}")
+        if evaluation_result and evaluation_result != "PENDING":
+            lines.append(f"  evaluation: {evaluation_result}")
+        lines.append("")
+
+    # ── Skill guidance (EXECUTE phase) ─────────────────────────────
+    if phase == LoopPhase.EXECUTE and current_strategy:
+        _append_skill_guidance(lines, current_strategy)
+
+    lines.append("--- End Dashboard ---")
+    return "\n".join(lines)
+
+
+# ── Helpers ──────────────────────────────────────────────────────────
+
+def _infer_current_stage(state: OptimizerState) -> str:
+    """Infer current design stage from strategy phase and state context.
+
+    Heuristic based on tool calls available at each stage:
+    - SYNTHESIS: initial analysis not yet complete (no DCP loaded)
+    - PLACEMENT: place_design available, routing not yet done
+    - ROUTING: route_design available or in progress
+    - POST_ROUTE: routing complete, phys_opt or evaluation ongoing
+    """
+    timing = state.timing
+    # If we have a best_wns iteration > 0, we're past init (placement or later)
+    if timing.best_wns_iteration is not None and timing.best_wns_iteration > 0:
+        # Check if route_design has been called
+        tools = state.iteration.tools_used
+        if any("route" in t.lower() for t in tools):
+            return "ROUTING"
+        if any("phys_opt" in t.lower() for t in tools):
+            return "POST_ROUTE"
+        return "PLACEMENT"
+    return "PLACEMENT"  # Default to placement (post-synthesis DCP)
+
+
+def _compute_utilization(
+    resource_utilization: dict | None,
+    device_capacity: dict | None,
+    resource_key: str,
+) -> float | None:
+    """Compute utilization percentage for a resource type."""
+    if not resource_utilization or not device_capacity:
+        return None
+    raw = resource_utilization.get(resource_key, resource_utilization.get(resource_key.lower()))
+    cap = device_capacity.get(resource_key, device_capacity.get(resource_key.lower()))
+    if raw is not None and cap and cap > 0:
+        util = raw / cap
+        return round(util, 4) if 0.0 <= util <= 1.0 else round(util, 4)
+    return None
+
+
+def _convert_critical_path(entry) -> DashboardTimingPath:
+    """Convert a CriticalPathEntry to a DashboardTimingPath."""
+    from ..state import CriticalPathEntry
+
+    endpoint = ""
+    source_clock = ""
+    dest_clock = ""
+    path_group = ""
+
+    # Extract endpoint from last cell name (convention: cell names encode hierarchy)
+    if isinstance(entry, CriticalPathEntry) and entry.cells:
+        last_cell = entry.cells[-1] if entry.cells else ""
+        endpoint = last_cell
+
+        # Try to extract clock domain from cell path (e.g., "clk_fpl26contest" prefix)
+        clk_keywords = ["clk_fpl26contest", "clk", "CLK"]
+        for ck in clk_keywords:
+            if ck.lower() in last_cell.lower():
+                dest_clock = ck if ck == "clk_fpl26contest" else "clk_fpl26contest"
+                path_group = "clk_fpl26contest"
+                break
+        if not dest_clock:
+            dest_clock = "clk_fpl26contest"
+            path_group = "clk_fpl26contest"
+        if not source_clock:
+            source_clock = "clk_fpl26contest"
+
+    # Compute delay percentages
+    logic_delay_pct = None
+    route_delay_pct = None
+    if isinstance(entry, CriticalPathEntry):
+        ld = entry.logic_delay
+        nd = entry.net_delay
+        if ld is not None and nd is not None and (ld + nd) > 0:
+            total = ld + nd
+            logic_delay_pct = round(ld / total, 4)
+            route_delay_pct = round(nd / total, 4)
+
+    return DashboardTimingPath(
+        endpoint_name=endpoint,
+        source_clock=source_clock,
+        dest_clock=dest_clock,
+        slack=entry.slack if isinstance(entry, CriticalPathEntry) else None,
+        logic_delay_pct=logic_delay_pct,
+        route_delay_pct=route_delay_pct,
+        logic_levels=entry.levels if isinstance(entry, CriticalPathEntry) else None,
+        path_group=path_group,
+    )
+
+
+def _compute_delta_tns(state: OptimizerState) -> float | None:
+    """Compute TNS delta from the last two iteration narratives."""
+    narratives = state.iteration.narratives
+    if len(narratives) >= 2:
+        prev_tns = narratives[-2].get("tns")
+        curr_tns = narratives[-1].get("tns")
+        if prev_tns is not None and curr_tns is not None:
+            return round(curr_tns - prev_tns, 4)
+    return None
+
+
+def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
+    """Append skill guidance section for EXECUTE phase."""
+    try:
+        from strategy_library import STRATEGIES as _STRATEGIES
+        from .constants import SKILL_CHAIN_ACTIONS as _CHAIN_ACTIONS
+        from .context_snapshot import STRATEGY_TO_PRIMARY_TOOL
+
+        tool = STRATEGY_TO_PRIMARY_TOOL.get(current_strategy)
+        if tool:
+            lines.append("skill_guidance:")
+            lines.append(f"  tool: {tool}")
+
+            chain = _CHAIN_ACTIONS.get(tool)
+            if chain:
+                chain_steps = []
+                for a in chain:
+                    args = a.get("args", {})
+                    args_from = a.get("args_from_skill", {})
+                    step = a["tool"]
+                    if args:
+                        arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
+                        step += f"({arg_str})"
+                    if args_from:
+                        step += f"<{', '.join(args_from.keys())}>"
+                    chain_steps.append(step)
+                lines.append(f"  auto_chain: {' -> '.join(chain_steps)}")
+
+            strat = _STRATEGIES.get(current_strategy)
+            if strat and "sequence" in strat:
+                seq_steps = []
+                for s in strat["sequence"]:
+                    step = s["step"]
+                    platform = s.get("platform", "")
+                    seq_steps.append(f"{step}({platform})" if platform else step)
+                lines.append(f"  sequence: {' -> '.join(seq_steps)}")
+
+            lines.append("  avoid: vivado_run_tcl — use the tool above instead.")
+    except Exception:
+        pass

@@ -101,6 +101,37 @@ table.transitions tr:hover { background: #12122a; }
 .eval-result.IMPROVED { color: #44ff88; }
 .eval-result.REGRESSION { color: #ff6666; }
 .eval-result.UNCHANGED { color: #ffaa44; }
+
+/* ── 6-Module StateSpace panels ──────────────────────────────── */
+.module-section { border-left: 3px solid #7c8aff; padding-left: 10px; margin-bottom: 10px; }
+.module-section h2 { border-bottom: none; margin-bottom: 4px; }
+.module-section .module-label { font-size: 10px; color: #7c8aff; text-transform: uppercase; letter-spacing: 2px; }
+.util-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+.util-bar .util-label { width: 40px; color: #888; text-align: right; }
+.util-bar .util-track { flex: 1; height: 8px; background: #12122a; border-radius: 4px; overflow: hidden; }
+.util-bar .util-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+.util-bar .util-fill.low { background: #44ff88; }
+.util-bar .util-fill.med { background: #ffaa44; }
+.util-bar .util-fill.high { background: #ff6666; }
+.util-bar .util-pct { width: 50px; font-size: 12px; color: #ccc; text-align: right; }
+.stage-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }
+.stage-badge.PLACEMENT { background: #1e2a4a; color: #66aaff; }
+.stage-badge.ROUTING { background: #3a1e1e; color: #ff8844; }
+.stage-badge.POST_ROUTE { background: #1a3a1a; color: #44ff88; }
+.stage-badge.SYNTHESIS { background: #2a1e4a; color: #aa88ff; }
+.delta-pos { color: #44ff88; }
+.delta-neg { color: #ff6666; }
+.delta-zero { color: #888; }
+.hotspot-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; border-bottom: 1px solid #12122a; }
+.hotspot-sev { padding: 1px 6px; border-radius: 3px; font-size: 10px; }
+.hotspot-sev.HIGH { background: #4a1e1e; color: #ff6666; }
+.hotspot-sev.MODERATE { background: #4a3a1a; color: #ffaa44; }
+.hotspot-sev.LOW { background: #1a3a1a; color: #44ff88; }
+.clock-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.clock-table td { padding: 3px 8px; border-bottom: 1px solid #12122a; }
+.clock-table td:first-child { color: #66aaff; font-family: monospace; }
+.clock-table td:last-child { text-align: right; color: #ccc; }
+.empty-state { color: #555; font-size: 12px; font-style: italic; padding: 8px 0; }
 </style>
 </head>
 <body>
@@ -115,6 +146,175 @@ table.transitions tr:hover { background: #12122a; }
 </div>
 
 <div class="grid">
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- 6-Module StateSpace Dashboard (Agent Data Input Layer)      -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+
+  <!-- Module 1: Global State & Targets -->
+  <div class="panel module-section">
+    <div class="module-label">Module 1</div>
+    <h2>Global State & Targets</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Stage</div>
+        <div class="value" style="font-size:14px"><span class="stage-badge" id="ssStage">--</span></div>
+      </div>
+      <div class="stat">
+        <div class="label">Iteration</div>
+        <div class="value" id="ssIter">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Target Freq</div>
+        <div class="value" id="ssTargetFreq">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">WNS Setup</div>
+        <div class="value" id="ssWnsSetup">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">TNS Setup</div>
+        <div class="value" id="ssTnsSetup">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">WHS Hold</div>
+        <div class="value" id="ssWhsHold">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">THS Hold</div>
+        <div class="value" id="ssThsHold">--</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Utilization</div>
+        <div id="ssUtilization" style="margin-top:4px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Module 2: Timing Path Clusters -->
+  <div class="panel module-section">
+    <div class="module-label">Module 2</div>
+    <h2>Timing Path Clusters <span style="font-size:11px;color:#888;font-weight:normal" id="ssPathCount"></span></h2>
+    <div class="list" id="ssTimingPaths" style="max-height:300px"><div class="empty-state">No critical paths loaded</div></div>
+  </div>
+
+  <!-- Module 6: Dynamic Gradient (placed top-right for quick scanning) -->
+  <div class="panel module-section">
+    <div class="module-label">Module 6</div>
+    <h2>Dynamic Gradient (Delta)</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Delta WNS</div>
+        <div class="value" id="ssDeltaWns">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Delta TNS</div>
+        <div class="value" id="ssDeltaTns">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Delta Congestion</div>
+        <div class="value" id="ssDeltaCongestion">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Last Action</div>
+        <div class="value" style="font-size:13px" id="ssLastAction">--</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Action Status</div>
+        <div class="value" style="font-size:13px" id="ssActionStatus">--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Module 3: Physical & Congestion Metrics -->
+  <div class="panel module-section">
+    <div class="module-label">Module 3</div>
+    <h2>Physical & Congestion</h2>
+    <div class="stat-grid">
+      <div class="stat wide">
+        <div class="label">Global Congestion Score</div>
+        <div class="value" id="ssCongestionScore">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Avg Wirelength</div>
+        <div class="value" id="ssAvgWirelength">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Long Route Nets</div>
+        <div class="value" id="ssLongRouteNets">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Pblock Overflows</div>
+        <div class="value" id="ssPblockOverflow">0</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Congestion Hotspots</div>
+        <div id="ssHotspots" style="margin-top:4px;max-height:150px;overflow-y:auto"><div class="empty-state">No congestion data</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Module 4: Netlist Quality Profiler -->
+  <div class="panel module-section">
+    <div class="module-label">Module 4</div>
+    <h2>Netlist Quality</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Control Sets</div>
+        <div class="value" id="ssControlSets">0</div>
+        <div class="sub">TODO: Vivado report_control_sets</div>
+      </div>
+      <div class="stat">
+        <div class="label">Avg Sets/Slice</div>
+        <div class="value" id="ssAvgSetsPerSlice">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Cross-Domain Paths</div>
+        <div class="value" id="ssCrossDomain">0</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">High Fanout Nets</div>
+        <div id="ssFanoutNets" style="margin-top:4px;max-height:150px;overflow-y:auto"><div class="empty-state">No high fanout nets</div></div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Failed Inferences</div>
+        <div id="ssFailedInferences" style="margin-top:2px"><div class="empty-state">None</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Module 5: Constraints Environment -->
+  <div class="panel module-section">
+    <div class="module-label">Module 5</div>
+    <h2>Constraints Environment</h2>
+    <div class="stat-grid">
+      <div class="stat wide">
+        <div class="label">Clock Definitions</div>
+        <div id="ssClocks" style="margin-top:4px"><div class="empty-state">No clock data</div></div>
+      </div>
+      <div class="stat">
+        <div class="label">False Paths</div>
+        <div class="value" id="ssFalsePaths">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Multicycle Paths</div>
+        <div class="value" id="ssMulticyclePaths">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">IO Delay Defined</div>
+        <div class="value" id="ssIoDelayPct">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">PVT Corner</div>
+        <div class="value" style="font-size:12px" id="ssPvtCorner">slow_0p95v_85c</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════════ -->
+  <!-- Legacy detail panels (unchanged)                            -->
+  <!-- ═══════════════════════════════════════════════════════════ -->
+
   <!-- Timing Panel -->
   <div class="panel" id="timingPanel">
     <h2>Timing</h2>
@@ -420,11 +620,13 @@ function updateDashboard(d) {
   }
   if (d.type === 'tool_trace_update') {
     updateToolTrace(d);
-    // Also update iteration/timing from lightweight push
     if (d.iteration) updateIterationLight(d.iteration);
     if (d.timing) updateTimingLight(d.timing);
     return;
   }
+  // 6-Module StateSpace (canonical dashboard representation)
+  if (d.state_space) updateStateSpace(d.state_space);
+  // Legacy panels (unchanged)
   if (d.timing) updateTiming(d.timing);
   if (d.iteration) updateIteration(d.iteration);
   if (d.model) updateModel(d.model);
@@ -461,6 +663,167 @@ function flashIfChanged(el, newVal) {
 function formatNum(n, decimals=3) {
   if (n == null || n === '--') return '--';
   return Number(n).toFixed(decimals);
+}
+
+// ── 6-Module StateSpace update ──────────────────────────────────
+function updateStateSpace(ss) {
+  if (!ss) return;
+
+  // Module 1: Global State & Targets
+  const gs = ss.global_state;
+  if (gs) {
+    const stage = gs.current_stage || 'UNKNOWN';
+    const stageEl = $('ssStage');
+    stageEl.textContent = stage;
+    stageEl.className = 'stage-badge ' + stage;
+
+    $('ssIter').textContent = gs.iteration_count ?? 0;
+    $('ssTargetFreq').textContent = gs.target_frequency ? gs.target_frequency.toFixed(1) + ' MHz' : '--';
+    $('ssWnsSetup').textContent = gs.wns_setup != null ? formatNum(gs.wns_setup) + 'ns' : '--';
+    $('ssWnsSetup').className = 'value ' + (gs.wns_setup != null ? (gs.wns_setup >= 0 ? 'positive' : 'negative') : '');
+    $('ssTnsSetup').textContent = gs.tns_setup != null ? formatNum(gs.tns_setup, 2) + 'ns' : '--';
+    $('ssWhsHold').textContent = gs.whs_hold != null ? formatNum(gs.whs_hold) + 'ns' : '--';
+    $('ssWhsHold').className = 'value ' + (gs.whs_hold != null ? (gs.whs_hold >= 0 ? 'positive' : 'negative') : '');
+    $('ssThsHold').textContent = gs.ths_hold != null ? formatNum(gs.ths_hold, 2) + 'ns' : '--';
+
+    // Utilization bars
+    const utils = [
+      {key:'LUT', val:gs.lut_utilization},
+      {key:'FF', val:gs.ff_utilization},
+      {key:'DSP', val:gs.dsp_utilization},
+      {key:'BRAM', val:gs.bram_utilization}
+    ];
+    let utilHtml = '';
+    for (const u of utils) {
+      if (u.val != null) {
+        const pct = (u.val * 100).toFixed(1);
+        const cls = u.val < 0.5 ? 'low' : (u.val < 0.8 ? 'med' : 'high');
+        utilHtml += '<div class="util-bar">'
+          + '<span class="util-label">' + u.key + '</span>'
+          + '<div class="util-track"><div class="util-fill ' + cls + '" style="width:' + pct + '%"></div></div>'
+          + '<span class="util-pct">' + pct + '%</span>'
+          + '</div>';
+      }
+    }
+    $('ssUtilization').innerHTML = utilHtml || '<div class="empty-state">No resource data</div>';
+  }
+
+  // Module 2: Timing Path Clusters
+  const tc = ss.timing_clusters;
+  if (tc && tc.top_violating_paths) {
+    const paths = tc.top_violating_paths;
+    $('ssPathCount').textContent = '(' + paths.length + ' paths)';
+    if (paths.length === 0) {
+      $('ssTimingPaths').innerHTML = '<div class="empty-state">No violating paths</div>';
+    } else {
+      let html = '';
+      for (const p of paths) {
+        const slackCls = p.slack != null ? (p.slack >= 0 ? 'positive' : 'negative') : '';
+        html += '<div class="list-item">'
+          + '<span style="color:#888">' + (p.endpoint_name || '?').substring(0, 40) + '</span>'
+          + ' <span class="' + slackCls + '">slack=' + formatNum(p.slack) + 'ns</span>';
+        if (p.logic_levels != null) html += ' <span style="color:#888">Lv=' + p.logic_levels + '</span>';
+        if (p.logic_delay_pct != null) html += ' <span style="color:#66aaff">L=' + (p.logic_delay_pct*100).toFixed(0) + '%</span>';
+        if (p.route_delay_pct != null) html += ' <span style="color:#ffaa44">R=' + (p.route_delay_pct*100).toFixed(0) + '%</span>';
+        if (p.path_group) html += ' <span class="tag" style="font-size:10px">' + p.path_group + '</span>';
+        html += '</div>';
+      }
+      $('ssTimingPaths').innerHTML = html;
+    }
+  }
+
+  // Module 3: Physical & Congestion Metrics
+  const pc = ss.physical_congestion;
+  if (pc) {
+    $('ssCongestionScore').textContent = pc.global_congestion_score != null ? pc.global_congestion_score.toFixed(2) : '--';
+    const cs = pc.global_congestion_score;
+    $('ssCongestionScore').className = 'value ' + (cs != null ? (cs > 0.85 ? 'negative' : (cs > 0.6 ? 'warn' : 'positive')) : '');
+    $('ssAvgWirelength').textContent = pc.avg_wirelength != null ? pc.avg_wirelength.toFixed(1) + ' units' : '--';
+    $('ssLongRouteNets').textContent = pc.long_route_nets_count ?? 0;
+    $('ssPblockOverflow').textContent = pc.pblock_overflow_count ?? 0;
+
+    // Hotspots
+    if (pc.congestion_hotspots && pc.congestion_hotspots.length > 0) {
+      let hh = '';
+      for (const h of pc.congestion_hotspots) {
+        const sev = h.severity >= 0.7 ? 'HIGH' : (h.severity >= 0.4 ? 'MODERATE' : 'LOW');
+        hh += '<div class="hotspot-row">'
+          + '<span>[' + h.x1 + ',' + h.y1 + ']-[' + h.x2 + ',' + h.y2 + '] ' + (h.dominant_module || '') + '</span>'
+          + '<span class="hotspot-sev ' + sev + '">' + sev + ' (' + (h.severity*100).toFixed(0) + '%)</span>'
+          + '</div>';
+      }
+      $('ssHotspots').innerHTML = hh;
+    } else {
+      $('ssHotspots').innerHTML = '<div class="empty-state">No congestion data</div>';
+    }
+  }
+
+  // Module 4: Netlist Quality Profiler
+  const nq = ss.netlist_quality;
+  if (nq) {
+    $('ssControlSets').textContent = nq.total_control_sets ?? 0;
+    $('ssAvgSetsPerSlice').textContent = nq.avg_control_sets_per_slice != null ? nq.avg_control_sets_per_slice.toFixed(2) : '--';
+    $('ssCrossDomain').textContent = nq.cross_domain_paths_count ?? 0;
+
+    // High fanout nets
+    if (nq.high_fanout_nets && nq.high_fanout_nets.length > 0) {
+      let fn = '';
+      for (const net of nq.high_fanout_nets.slice(0, 10)) {
+        fn += '<div class="list-item">'
+          + '<span style="color:#66aaff;font-family:monospace">' + (net.net_name || '?').substring(0, 35) + '</span>'
+          + ' fanout=<b>' + net.fanout_count + '</b>'
+          + (net.is_replicated ? ' <span class="tag" style="font-size:10px">replicated</span>' : '')
+          + '</div>';
+      }
+      if (nq.high_fanout_nets.length > 10) fn += '<div class="list-item" style="color:#555">... +' + (nq.high_fanout_nets.length - 10) + ' more</div>';
+      $('ssFanoutNets').innerHTML = fn;
+    } else {
+      $('ssFanoutNets').innerHTML = '<div class="empty-state">No high fanout nets</div>';
+    }
+
+    // Failed inferences
+    if (nq.failed_inferences && nq.failed_inferences.length > 0) {
+      $('ssFailedInferences').innerHTML = nq.failed_inferences.map(f => '<div class="list-item" style="color:#ffaa44">' + f + '</div>').join('');
+    } else {
+      $('ssFailedInferences').innerHTML = '<div class="empty-state">None</div>';
+    }
+  }
+
+  // Module 5: Constraints Environment
+  const ce = ss.constraints_env;
+  if (ce) {
+    // Clock definitions
+    if (ce.clock_definitions && Object.keys(ce.clock_definitions).length > 0) {
+      let ct = '<table class="clock-table">';
+      for (const [name, freq] of Object.entries(ce.clock_definitions)) {
+        ct += '<tr><td>' + name + '</td><td>' + freq.toFixed(1) + ' MHz</td></tr>';
+      }
+      ct += '</table>';
+      $('ssClocks').innerHTML = ct;
+    } else {
+      $('ssClocks').innerHTML = '<div class="empty-state">No clock data</div>';
+    }
+    $('ssFalsePaths').textContent = ce.false_paths_count ?? 0;
+    $('ssMulticyclePaths').textContent = ce.multicycle_paths_count ?? 0;
+    $('ssIoDelayPct').textContent = ce.io_delay_defined_pct != null ? (ce.io_delay_defined_pct * 100).toFixed(0) + '%' : '--';
+    $('ssPvtCorner').textContent = ce.pvt_corner || '--';
+  }
+
+  // Module 6: Dynamic Gradient (Delta)
+  const dg = ss.dynamic_gradient;
+  if (dg) {
+    const dw = dg.delta_wns;
+    $('ssDeltaWns').textContent = dw != null ? (dw >= 0 ? '+' : '') + formatNum(dw, 4) + 'ns' : '--';
+    $('ssDeltaWns').className = 'value ' + (dw != null ? (dw > 0 ? 'positive' : (dw < 0 ? 'negative' : '')) : '');
+    const dt = dg.delta_tns;
+    $('ssDeltaTns').textContent = dt != null ? (dt >= 0 ? '+' : '') + formatNum(dt, 4) + 'ns' : '--';
+    $('ssDeltaTns').className = 'value ' + (dt != null ? (dt > 0 ? 'positive' : (dt < 0 ? 'negative' : '')) : '');
+    $('ssDeltaCongestion').textContent = dg.delta_congestion != null ? (dg.delta_congestion >= 0 ? '+' : '') + formatNum(dg.delta_congestion, 4) : '--';
+    $('ssLastAction').textContent = dg.last_action_taken || '--';
+    const status = dg.action_status;
+    $('ssActionStatus').textContent = status || 'PENDING';
+    $('ssActionStatus').className = 'value ' + (status === 'Success' ? 'positive' : (status === 'Failed' ? 'negative' : ''));
+  }
 }
 
 function updateTiming(t) {

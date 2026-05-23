@@ -170,6 +170,9 @@ async def init_analysis_node(
             )
             hold = parse_hold_timing(hold_report)
             if hold.get("hold_wns") is not None:
+                state.timing.hold_wns = hold["hold_wns"]
+                state.timing.hold_tns = hold.get("hold_tns")
+                state.timing.hold_failing = hold.get("hold_failing")
                 if hold["hold_wns"] < 0:
                     logger.warning(
                         f"[init_analysis] HOLD VIOLATED: WNS={hold['hold_wns']:.3f}ns, "
@@ -214,6 +217,27 @@ async def init_analysis_node(
             topo_data = json.loads(topo_result)
             if topo_data.get("status") == "success":
                 logger.info(f"[init_analysis] Device: {topo_data.get('device')}")
+                # Extract device capacity for utilization percentage computation.
+                # SLICEL/SLICEM each have 8 LUTs + 16 FFs. DSP48E2 = 1 DSP.
+                # RAMB36E2 = 1 BRAM, RAMB18E2 = 0.5 BRAM. URAM288 = 1 URAM.
+                site_dist = topo_data.get("site_type_distribution", [])
+                capacity: dict[str, int] = {"LUT": 0, "FF": 0, "DSP": 0, "BRAM": 0, "URAM": 0}
+                for entry in site_dist:
+                    stype = entry.get("type", "")
+                    count = entry.get("count", 0)
+                    if "SLICE" in stype.upper():
+                        capacity["LUT"] += count * 8
+                        capacity["FF"] += count * 16
+                    elif "DSP" in stype.upper():
+                        capacity["DSP"] += count
+                    elif stype.upper().startswith("RAMB36"):
+                        capacity["BRAM"] += count
+                    elif stype.upper().startswith("RAMB18"):
+                        capacity["BRAM"] += count // 2
+                    elif "URAM" in stype.upper():
+                        capacity["URAM"] += count
+                state.timing.device_capacity = capacity
+                logger.info(f"[init_analysis] Device capacity: {capacity}")
         except Exception as e:
             logger.warning(f"[init_analysis] Could not get device topology: {e}")
 

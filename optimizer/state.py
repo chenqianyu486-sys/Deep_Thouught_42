@@ -96,6 +96,14 @@ class TimingState:
     refreshed_fields: set[str] = field(default_factory=set)
     # Tracks which dashboard fields have been refreshed since init.
     # Values are field names from DASHBOARD_REFRESH_MAP values.
+    # Hold timing (parsed from init_analysis, stored for dashboard Module 1)
+    hold_wns: Optional[float] = None
+    hold_tns: Optional[float] = None
+    hold_failing: Optional[int] = None
+    # Device capacity for utilization percentage calculation
+    device_capacity: Optional[dict] = None  # {"LUT": N, "FF": N, "DSP": N, "BRAM": N, "URAM": N}
+    # Congestion analysis result (populated when analyze_congestion tool runs)
+    congestion_data: Optional[dict] = None
 
 
 @dataclass
@@ -349,3 +357,113 @@ class OptimizerState:
     context: ContextState = field(default_factory=ContextState)
     control: ControlState = field(default_factory=ControlState)
     strategy: StrategyState = field(default_factory=StrategyState)
+
+
+# ── Dashboard StateSpace (6-module canonical representation) ────────
+# These are OUTPUT-ONLY dataclasses built by optimizer/pure/state_space.py
+# from OptimizerState. They are consumed by dashboard/serializer.py (Web UI)
+# and optimizer/pure/context_snapshot.py (LLM context injection).
+
+@dataclass
+class DashboardGlobalState:
+    """Module 1: Global state and optimization targets."""
+    current_stage: str = ""            # SYNTHESIS|PLACEMENT|ROUTING|POST_ROUTE
+    iteration_count: int = 0
+    target_frequency: float = 0.0      # MHz
+    wns_setup: Optional[float] = None
+    tns_setup: Optional[float] = None
+    whs_hold: Optional[float] = None
+    ths_hold: Optional[float] = None
+    lut_utilization: Optional[float] = None    # 0.0~1.0
+    ff_utilization: Optional[float] = None
+    bram_utilization: Optional[float] = None
+    dsp_utilization: Optional[float] = None
+
+
+@dataclass
+class DashboardTimingPath:
+    """Module 2: Single violating timing path endpoint entry."""
+    endpoint_name: str = ""
+    source_clock: str = ""
+    dest_clock: str = ""
+    slack: Optional[float] = None
+    logic_delay_pct: Optional[float] = None   # 0.0~1.0
+    route_delay_pct: Optional[float] = None   # 0.0~1.0
+    logic_levels: Optional[int] = None
+    path_group: str = ""                       # clock domain group label
+
+
+@dataclass
+class DashboardTimingClusters:
+    """Module 2 container: Top-N violating path endpoints."""
+    top_violating_paths: list[DashboardTimingPath] = field(default_factory=list)
+
+
+@dataclass
+class DashboardCongestionHotspot:
+    """Module 3: A congestion hotspot bounding box."""
+    x1: int = 0
+    y1: int = 0
+    x2: int = 0
+    y2: int = 0
+    severity: float = 0.0              # 0.0~1.0
+    dominant_module: str = ""
+
+
+@dataclass
+class DashboardPhysicalCongestion:
+    """Module 3: Physical and congestion metrics."""
+    global_congestion_score: Optional[float] = None   # 0.0~1.0, >0.85 critical
+    avg_wirelength: Optional[float] = None
+    long_route_nets_count: int = 0
+    congestion_hotspots: list[DashboardCongestionHotspot] = field(default_factory=list)
+    pblock_overflow_count: int = 0
+
+
+@dataclass
+class DashboardHighFanoutNet:
+    """Module 4: A single high-fanout net entry."""
+    net_name: str = ""
+    fanout_count: int = 0
+    is_replicated: bool = False
+
+
+@dataclass
+class DashboardNetlistQuality:
+    """Module 4: Netlist architecture quality metrics."""
+    total_control_sets: int = 0
+    avg_control_sets_per_slice: Optional[float] = None
+    high_fanout_nets: list[DashboardHighFanoutNet] = field(default_factory=list)
+    failed_inferences: list[str] = field(default_factory=list)
+    cross_domain_paths_count: int = 0
+
+
+@dataclass
+class DashboardConstraints:
+    """Module 5: Timing constraints environment."""
+    clock_definitions: dict[str, float] = field(default_factory=dict)  # name -> freq_mhz
+    false_paths_count: int = 0
+    multicycle_paths_count: int = 0
+    io_delay_defined_pct: Optional[float] = None   # 0.0~1.0
+    pvt_corner: str = "slow_0p95v_85c"
+
+
+@dataclass
+class DashboardDynamicGradient:
+    """Module 6: Iteration-over-iteration delta data."""
+    delta_wns: Optional[float] = None
+    delta_tns: Optional[float] = None
+    delta_congestion: Optional[float] = None
+    last_action_taken: str = ""
+    action_status: str = ""            # Success|Failed|Timeout
+
+
+@dataclass
+class StateSpace:
+    """Canonical 6-module dashboard state, built from OptimizerState."""
+    global_state: DashboardGlobalState = field(default_factory=DashboardGlobalState)
+    timing_clusters: DashboardTimingClusters = field(default_factory=DashboardTimingClusters)
+    physical_congestion: DashboardPhysicalCongestion = field(default_factory=DashboardPhysicalCongestion)
+    netlist_quality: DashboardNetlistQuality = field(default_factory=DashboardNetlistQuality)
+    constraints_env: DashboardConstraints = field(default_factory=DashboardConstraints)
+    dynamic_gradient: DashboardDynamicGradient = field(default_factory=DashboardDynamicGradient)

@@ -453,6 +453,32 @@ def get_critical_high_fanout_nets(
     if not sorted_nets:
         return f"No high fanout nets (fanout >= {min_fanout}) found in the {num_paths} most critical paths."
     
+    # Fallback: direct TCL cell counting when table parsing yields nothing
+    if resources["LUT"] == 0 and resources["FF"] == 0:
+        try:
+            fallback_cmd = (
+                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
+                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
+                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
+                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]";'
+                'puts "URAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"URAM*\\"}]]"'
+            )
+            fb = run_tcl_command(fallback_cmd, timeout=timeout)
+            for fline in fb.split('\n'):
+                fline = fline.strip()
+                if fline.startswith('LUT:'):
+                    resources["LUT"] = int(fline.split(':')[1])
+                elif fline.startswith('FF:'):
+                    resources["FF"] = int(fline.split(':')[1])
+                elif fline.startswith('DSP:'):
+                    resources["DSP"] = int(fline.split(':')[1])
+                elif fline.startswith('BRAM:'):
+                    resources["BRAM"] = int(fline.split(':')[1])
+                elif fline.startswith('URAM:'):
+                    resources["URAM"] = int(fline.split(':')[1])
+        except Exception:
+            pass
+
     # Format output
     result_lines = [
         f"=== High Fanout Nets in Critical Paths (Parent Net Names) ===",
@@ -774,7 +800,8 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
                     logger.debug(f"Failed to parse LUT from line: {line}")
                     pass
         
-        if '| Register as Flip Flop' in line or '| Slice Registers' in line:
+        stripped = line.strip()
+        if 'Register as Flip Flop' in stripped or 'Slice Registers' in stripped:
             parts = line.split('|')
             if len(parts) >= 3:
                 try:
@@ -810,6 +837,32 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
                     logger.debug(f"Failed to parse URAM from line: {line}")
                     pass
     
+    # Fallback: direct TCL cell counting when table parsing yields nothing
+    if resources["LUT"] == 0 and resources["FF"] == 0:
+        try:
+            fallback_cmd = (
+                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
+                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
+                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
+                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]";'
+                'puts "URAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"URAM*\\"}]]"'
+            )
+            fb = run_tcl_command(fallback_cmd, timeout=timeout)
+            for fline in fb.split('\n'):
+                fline = fline.strip()
+                if fline.startswith('LUT:'):
+                    resources["LUT"] = int(fline.split(':')[1])
+                elif fline.startswith('FF:'):
+                    resources["FF"] = int(fline.split(':')[1])
+                elif fline.startswith('DSP:'):
+                    resources["DSP"] = int(fline.split(':')[1])
+                elif fline.startswith('BRAM:'):
+                    resources["BRAM"] = int(fline.split(':')[1])
+                elif fline.startswith('URAM:'):
+                    resources["URAM"] = int(fline.split(':')[1])
+        except Exception:
+            pass
+
     # Format output
     result_lines = [
         "=== Design Resource Utilization ===",

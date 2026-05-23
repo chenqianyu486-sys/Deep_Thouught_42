@@ -15,7 +15,7 @@
 - **No manual timing closure loops.** The agent autonomously analyzes critical paths, selects optimization strategies, executes them, and evaluates results.
 - **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
 - **Dual architecture.** V2 state machine for production reliability; V1 conversational loop for rapid experimentation.
-- **Real-time observability.** Web Dashboard with 13 panels — every flow control decision, WNS trajectory, and LLM call is traceable.
+- **Real-time observability.** Web Dashboard with 19 panels — 6-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
 - **9 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, NetSwap.
 
 ---
@@ -175,7 +175,20 @@ make run_optimizer_dashboard DCP=input.dcp
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-The dashboard provides 13 real-time panels:
+The dashboard provides 19 real-time panels (6-module StateSpace + 13 legacy detail panels):
+
+**6-Module StateSpace (Agent Data Input Layer):**
+
+| Module | Panel | Content |
+|--------|-------|---------|
+| **M1** | **Global State & Targets** | Stage badge, WNS/TNS/WHS/THS margins, LUT/FF/DSP/BRAM utilization bars |
+| **M2** | **Timing Path Clusters** | Top-20 violating endpoints with clock groups, logic/route delay ratio, logic levels |
+| **M3** | **Physical & Congestion** | Global congestion score, hotspots (bbox + severity + module), pblock overflows |
+| **M4** | **Netlist Quality** | High fanout nets (with replication status), control sets, cross-domain paths, failed inferences |
+| **M5** | **Constraints Environment** | Clock table (name→frequency), false/multicycle path counts, IO delay coverage, PVT corner |
+| **M6** | **Dynamic Gradient (Delta)** | delta_WNS, delta_TNS, delta_congestion, last action + action status (Success/Failed/Timeout) |
+
+**Legacy Detail Panels:**
 
 | Panel | Content |
 |-------|---------|
@@ -204,7 +217,7 @@ Deep_Thouught_42/
 │   ├── state.py              # Typed dataclass: 7 state sub-slices
 │   ├── graph.py              # NodeGraph: execution engine
 │   ├── nodes/                # 9 node implementations + llm_tool_loop subgraph
-│   └── pure/                 # 12 stateless pure-function modules (unit-testable)
+│   └── pure/                 # 13 stateless pure-function modules (unit-testable), incl. state_space.py (6-module StateSpace)
 ├── strategy_library.py       # 9 strategies with trigger conditions
 ├── skills/                   # Skill framework: 13 registered skills
 ├── RapidWrightMCP/           # RapidWright MCP server
@@ -340,7 +353,7 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 - **无需手动时序收敛循环。** 智能体自主分析关键路径，选择优化策略，执行操作并评估结果。
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
 - **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环用于快速实验。
-- **实时可观测性。** 包含 13 个面板的 Web 仪表盘 —— 每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
+- **实时可观测性。** 包含 19 个面板的 Web 仪表盘 —— 6 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
 - **9 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、NetSwap。
 
 ---
@@ -499,7 +512,20 @@ make run_optimizer_dashboard DCP=input.dcp
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-仪表盘提供 13 个实时面板：
+仪表盘提供 19 个实时面板（6 模块 StateSpace + 13 个旧版详情面板）：
+
+**6 模块 StateSpace（Agent 数据输入层）：**
+
+| 模块 | 面板 | 内容 |
+|--------|-------|---------|
+| **M1** | **Global State & Targets** | 阶段标签、WNS/TNS/WHS/THS 裕量、LUT/FF/DSP/BRAM 利用率进度条 |
+| **M2** | **Timing Path Clusters** | Top-20 违例端点，含时钟组、逻辑/布线延迟占比、逻辑级数 |
+| **M3** | **Physical & Congestion** | 全局拥塞评分、热点区域（bbox + 严重度 + 模块）、Pblock 溢出数 |
+| **M4** | **Netlist Quality** | 高扇出网络（含复制状态）、控制集、跨时钟域路径、推理失败列表 |
+| **M5** | **Constraints Environment** | 时钟表（名称→频率）、伪/多周期路径数、IO 延迟覆盖率、PVT corner |
+| **M6** | **Dynamic Gradient (Delta)** | delta_WNS、delta_TNS、delta_congestion、上一步动作 + 动作状态 |
+
+**旧版详情面板：**
 
 | 面板 | 内容 |
 |-------|---------|
@@ -528,7 +554,7 @@ Deep_Thouught_42/
 │   ├── state.py              # 类型化数据类：7 个状态子切片
 │   ├── graph.py              # NodeGraph：执行引擎
 │   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
-│   └── pure/                 # 12 个无状态纯函数模块（可单元测试）
+│   └── pure/                 # 13 个无状态纯函数模块（可单元测试），含 state_space.py（6 模块 StateSpace）
 ├── strategy_library.py       # 9 种策略及触发条件
 ├── skills/                   # 技能框架：13 个注册技能
 ├── RapidWrightMCP/           # RapidWright MCP 服务器

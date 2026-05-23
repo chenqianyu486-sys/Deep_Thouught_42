@@ -33,6 +33,19 @@ def serialize_state(state) -> dict:
     """Convert OptimizerState to a JSON-serializable dict.
 
     Handles float('-inf'), set, Path, tuple keys, etc.
+    Produces both the legacy flat dict (for backward-compatible panels)
+    and a nested 'state_space' key (for the new 6-module panels).
     """
     raw = dataclasses.asdict(state)
-    return _make_json_safe(raw)
+    legacy = _make_json_safe(raw)
+
+    # Add 6-module state space (canonical dashboard representation)
+    try:
+        from optimizer.pure.state_space import build_state_space
+        space = build_state_space(state)
+        legacy["state_space"] = _make_json_safe(dataclasses.asdict(space))
+    except Exception:
+        # If state_space build fails, dashboard still works with legacy data
+        legacy["state_space"] = None
+
+    return legacy
