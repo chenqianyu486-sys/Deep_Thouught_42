@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from aiohttp import web
@@ -88,6 +89,38 @@ class DashboardStateTracer:
                 self._queue.put_nowait(snapshot)
         except Exception as e:
             logger.debug(f"[dashboard] Tool event push failed: {e}")
+
+    def push_llm_event(self, state, *, phase, model, iteration,
+                       user_prompt, assistant_response, latest_wns, total_cost, call_id) -> None:
+        """Push lightweight LLM call update to dashboard queue."""
+        try:
+            snapshot = {
+                "type": "llm_call_update",
+                "call": {
+                    "timestamp": time.time(),
+                    "call_id": call_id,
+                    "phase": phase,
+                    "model": model,
+                    "iteration": iteration,
+                    "user_prompt": (user_prompt or "")[:2000],
+                    "assistant_response": (assistant_response or "")[:2000],
+                    "latest_wns": latest_wns,
+                    "total_cost": total_cost,
+                    "best_wns": state.timing.best_wns,
+                    "current_strategy": state.strategy.current_strategy,
+                    "current_phase": state.strategy.current_phase,
+                },
+            }
+            try:
+                self._queue.put_nowait(snapshot)
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self._queue.put_nowait(snapshot)
+        except Exception as e:
+            logger.debug(f"[dashboard] LLM event push failed: {e}")
 
 
 async def _websocket_handler(request: web.Request) -> web.WebSocketResponse:

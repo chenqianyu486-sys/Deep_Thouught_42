@@ -13,6 +13,7 @@ fpl26_optimization_contest/
 │   ├── edges.py                  # 条件边函数: after_init/after_check_exit + NodeName枚举
 │   ├── color.py                  # ANSI颜色工具：green/yellow/red着色函数（TTY自动检测）
 │   ├── tracing.py                # StateTracer: 状态转换日志（JSON导出）
+│   ├── llm_call_logger.py        # LLMCallLogger: 每次LLM调用的完整记录（JSONL+可读日志+实时Dashboard推送）
 │   ├── nodes/                    # 节点实现（全部完成）
 │   │   ├── __init__.py
 │   │   ├── init_analysis.py      # 初始化分析节点（MCP: 初始化RW/Vivado、解析WNS/TNS、run_tcl查询clk_fpl26contest周期、高扇出网线/资源利用率）
@@ -62,7 +63,7 @@ fpl26_optimization_contest/
 │   ├── server.py                 # aiohttp 服务器 + DashboardStateTracer（继承 StateTracer）
 │   ├── serializer.py             # OptimizerState → JSON dict 序列化
 │   └── static/
-│       └── index.html            # 自包含 HTML/CSS/JS 前端（暗色主题，7面板+LLM日志+转换历史）
+│       └── index.html            # 自包含 HTML/CSS/JS 前端（暗色主题，13面板：Timing/Iteration/Strategy Lifecycle/Model/Cost/Control/Critical Paths/LLM Log/Transition History/Tool Call Trace/WNS Trajectory/Flow Control Log/Phase History）
 ├── context_manager/              # 内存管理模块
 │   ├── __init__.py
 │   ├── manager.py                # MemoryManager - 中心编排，单次_compress()触发
@@ -158,17 +159,28 @@ fpl26_optimization_contest/
 NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer）
                                     │
                               serialize_state() → asyncio.Queue(maxsize=10)
-                                    │
-                              aiohttp WebSocket handler
-                                    │
-                              Browser（自包含 HTML/CSS/JS 前端）
+                                    │                              LLMCallLogger.log_call()
+                                    │                                    │
+                              aiohttp WebSocket handler       push_llm_event()（轻量）
+                                    │                              asyncio.Queue
+                                    │                                    │
+                                    └──────────┬─────────────────────────┘
+                                               │
+                                    Browser（自包含 HTML/CSS/JS 前端）
 ```
 
-**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response）、Transition History
+两种推送路径:
+1. **全状态快照**（`on_exit`）：每次 graph 节点退出时推送完整 `OptimizerState`（含所有面板数据）
+2. **LLM 调用实时推送**（`push_llm_event`）：每次 LLM 调用后立即推送仅 LLM 调用数据（`type: "llm_call_update"`），无需等待 phase 完成
+
+**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response + 完整调用历史）、Transition History、Tool Call Trace、Flow Control Log、Phase History
 
 **依赖**: `aiohttp>=3.9.0`（通过 `requirements.txt`，`make setup` 自动安装）
 
-**LLM 消息记录**: `ContextState.latest_user_prompt` / `latest_assistant_response` 在 `llm_tool_loop.py` 每次 LLM 调用后更新（截取 2000 字符），Dashboard 实时展示。
+**LLM 消息记录**:
+- `ContextState.latest_user_prompt` / `latest_assistant_response` 在 4 个 phase 文件中每次 LLM 调用后更新（截取 2000 字符），Dashboard 通过全状态快照展示
+- `LLMCallLogger`（`optimizer/llm_call_logger.py`）在每次调用后写入 `llm_call_history.jsonl`（JSON Lines，程序解析）和 `llm_call_history.log`（人类可读），并通过 `push_llm_event()` 实时推送到 Dashboard
+- `llm_call_update` WebSocket 消息包含 phase / model / iteration / 截取的 prompt/response / WNS / cost / best_wns / strategy 等信息，前端 `updateLLMCall()` 即时更新 LLM Log 面板（prepend 到 history 列表，上限 100 条）
 
 ### 状态模型
 ```

@@ -111,7 +111,11 @@ make run_optimizer_dashboard DCP=input.dcp
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-浏览器打开 `http://localhost:8080`（或指定端口），页面包含以下面板：
+浏览器打开 `http://localhost:8080`（或指定端口），页面包含以下面板。此外，所有 LLM 调用记录自动保存到运行目录：
+- **`llm_call_history.jsonl`** — 每行一个完整 JSON 对象（程序解析用），包含 request/response/节点状态快照
+- **`llm_call_history.log`** — 人类可读的分隔线格式，含 model/phase/WNS/tokens 摘要
+
+页面包含以下面板：
 
 | 面板 | 监控内容 |
 |------|---------|
@@ -122,12 +126,13 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 | **Cost** | 总费用（带进度条）、Token 统计（prompt / completion / reasoning） |
 | **Control** | 运行状态（Running / DONE）、已耗时、超时阈值、压缩次数、输入 / 输出 DCP 路径 |
 | **Transition History** | 节点切换历史表格（时间、节点、迭代、WNS、模型、费用、耗时） |
-| **LLM Log** | 最新的 LLM 用户 prompt 和 assistant 响应 |
+| **LLM Log** | 最新的 LLM 用户 prompt 和 assistant 响应，完整调用历史（每条可展开查看完整 prompt/response） |
 
 **特性**:
 - 断线自动重连（3 秒间隔），心跳检测保持连接活性
 - 状态值变化时闪烁高亮，WNS 图表自动滚动
-- 通过 `DashboardStateTracer` 在每次状态机节点退出时推送序列化快照
+- LLM 调用**实时推送**：每次 LLM 调用后立即更新 LLM Log 面板（无需等待 phase 完成），通过 WebSocket `llm_call_update` 消息类型实现
+- 通过 `DashboardStateTracer` 在每次状态机节点退出时推送序列化快照；LLM 调用日志通过 `LLMCallLogger → push_llm_event()` 额外实时推送
 
 ## 项目结构
 
@@ -137,6 +142,8 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 | `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，9节点图） |
 | `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（11个模块：timing/constants/tool_filter/model_select/tool_summary/iteration_logic/context_snapshot/handoff/tool_router/step_state/compress/critical_path，可独立单测） |
 | `optimizer/nodes/` | 9个节点实现（含 ROLLBACK 回滚节点）+ llm_tool_loop 子图 |
+| `optimizer/llm_call_logger.py` | LLM 调用历史记录器：JSONL 文件日志 + 实时推送到 Dashboard |
+| `optimizer/tracing.py` | StateTracer: 节点级状态转换追踪（JSON 导出） |
 | `context_manager/` | 上下文/记忆管理、YAML 压缩（增强标记格式、14 个受保护分析工具） |
 | `skills/` | Skill 框架（13个已注册 Skill：9策略 + 3分析 + 1测试） |
 | `RapidWrightMCP/` | RapidWright MCP 服务器 |

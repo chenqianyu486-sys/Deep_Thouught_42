@@ -395,6 +395,10 @@ function connect() {
 }
 
 function updateDashboard(d) {
+  if (d.type === 'llm_call_update') {
+    updateLLMCall(d.call);
+    return;
+  }
   if (d.type === 'tool_trace_update') {
     updateToolTrace(d);
     // Also update iteration/timing from lightweight push
@@ -680,6 +684,38 @@ function updateLLMCallHistory(d) {
       '<details><summary style="cursor:pointer;color:#888;font-size:12px;">Response</summary><pre style="margin-top:4px;max-height:150px;overflow-y:auto;">' + esc(rec.assistant_response || '') + '</pre></details>' +
     '</div>';
   }).join('');
+}
+
+function updateLLMCall(call) {
+  if (!call) return;
+  // Update latest prompt/response
+  if (call.user_prompt) $('llmPrompt').textContent = call.user_prompt;
+  if (call.assistant_response) $('llmResponse').textContent = call.assistant_response;
+  // Append to call history
+  var container = $('llmCallHistory');
+  var ts = new Date(call.timestamp * 1000).toLocaleTimeString();
+  var model = (call.model || '').split('/').pop() || '--';
+  var wns = call.latest_wns != null ? Number(call.latest_wns).toFixed(3) + 'ns' : '--';
+  var cost = call.total_cost != null ? '$' + Number(call.total_cost).toFixed(3) : '--';
+  var entry = document.createElement('div');
+  entry.style.borderBottom = '1px solid #2a2a4a';
+  entry.style.padding = '6px 0';
+  entry.innerHTML =
+    '<div style="display:flex;gap:10px;color:#7c8aff;margin-bottom:4px;font-size:11px;">' +
+      '<span>' + esc(call.phase) + '</span>' +
+      '<span>' + esc(model) + '</span>' +
+      '<span>iter ' + (call.iteration ?? 0) + '</span>' +
+      '<span>WNS ' + wns + '</span>' +
+      '<span>' + cost + '</span>' +
+      '<span>' + ts + '</span>' +
+    '</div>' +
+    '<details><summary style="cursor:pointer;color:#888;font-size:12px;">Prompt</summary><pre style="margin-top:4px;max-height:150px;overflow-y:auto;">' + esc(call.user_prompt || '') + '</pre></details>' +
+    '<details><summary style="cursor:pointer;color:#888;font-size:12px;">Response</summary><pre style="margin-top:4px;max-height:150px;overflow-y:auto;">' + esc(call.assistant_response || '') + '</pre></details>';
+  container.prepend(entry);
+  // Keep history bounded at 100 entries
+  while (container.children.length > 100) {
+    container.removeChild(container.lastChild);
+  }
 }
 
 function updateToolTrace(d) {

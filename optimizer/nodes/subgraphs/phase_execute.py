@@ -336,7 +336,14 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
             state.context.latest_user_prompt = (
                 api_messages[-1].get("content", "") if api_messages else ""
             )[:2000]
-            return await deps.openai_client.chat.completions.create(**kwargs)
+            response = await deps.openai_client.chat.completions.create(**kwargs)
+            # Log LLM call with state snapshot
+            if deps.llm_call_logger:
+                deps.llm_call_logger.log_call(
+                    state, model=model, messages=api_messages, tools=phase_tools,
+                    response=response, phase="EXECUTE",
+                )
+            return response
         except Exception as e:
             last_exception = e
             if "429" in str(e):

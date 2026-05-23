@@ -21,6 +21,7 @@ class NodeDeps:
     tools: list = field(default_factory=list)  # Tool definitions for LLM
     event_bus: Any = None                  # EventBus
     prompt_logger: Any = None              # PromptLogger
+    llm_call_logger: Any = None            # LLMCallLogger
     system_prompt: str = ""                # Formatted system prompt
     # Configuration
     model_planner: str = ""

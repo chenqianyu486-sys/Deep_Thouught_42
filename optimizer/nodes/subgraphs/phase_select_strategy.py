@@ -217,7 +217,14 @@ async def _call_phase_llm(state, deps, phase_tools):
         state.context.latest_user_prompt = (
             api_messages[-1].get("content", "") if api_messages else ""
         )[:2000]
-        return await deps.openai_client.chat.completions.create(**kwargs)
+        response = await deps.openai_client.chat.completions.create(**kwargs)
+        # Log LLM call with state snapshot
+        if deps.llm_call_logger:
+            deps.llm_call_logger.log_call(
+                state, model=model, messages=api_messages, tools=phase_tools,
+                response=response, phase="SELECT_STRATEGY",
+            )
+        return response
     except Exception as e:
         logger.error(f"[SELECT_STRATEGY] LLM call failed: {e}")
         return None

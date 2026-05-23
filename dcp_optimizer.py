@@ -8023,6 +8023,11 @@ async def optimize_v2(
         prompt_logger = PromptLogger.get_instance()
         prompt_logger.setup(str(run_dir))
 
+        # Initialize LLMCallLogger for full call history with state snapshots
+        from optimizer.llm_call_logger import LLMCallLogger
+        llm_call_logger = LLMCallLogger()
+        llm_call_logger.setup(str(run_dir))
+
         deps = NodeDeps(
             openai_client=openai_client,
             memory_manager=memory_manager,
@@ -8032,6 +8037,7 @@ async def optimize_v2(
             tools=tools,
             event_bus=event_bus,
             prompt_logger=prompt_logger,
+            llm_call_logger=llm_call_logger,
             system_prompt=system_prompt,
             model_planner=model_planner,
             model_worker=model_worker,
@@ -8058,6 +8064,8 @@ async def optimize_v2(
         else:
             tracer = StateTracer()
         deps.tracer = tracer
+        # Wire tracer to LLMCallLogger for real-time dashboard updates
+        llm_call_logger.set_tracer(tracer)
         graph = build_optimizer_graph(tracer=tracer)
 
         # Start stdin listener for graceful quit
