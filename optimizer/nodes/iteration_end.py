@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from ..state import OptimizerState, record_flow_signal
+from ..state import OptimizerState, record_flow_signal, record_strategy_failure
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.iteration_logic import (
@@ -139,10 +139,10 @@ async def iteration_end_node(
             # iteration may be a preparation step that doesn't directly improve WNS.
             # Recording failure here would poison the strategy in future context.
             if (not wns_improved
-                    and deps.compat is not None
                     and state.control.done_reason != "iteration_success"):
                 reason = _determine_failure_reason(state, strategy_label)
-                deps.compat.record_failure(
+                record_strategy_failure(
+                    state,
                     strategy=strategy_label,
                     reason=reason,
                     tool=", ".join(tools_this_iter[:3]),
@@ -155,13 +155,10 @@ async def iteration_end_node(
     token_est = 0
     if deps.memory_manager is not None:
         try:
+            from context_manager.estimator import ContextEstimator
             messages = deps.memory_manager.get_context()
             msg_count = len(messages)
-            total_chars = sum(
-                len(m.content) if hasattr(m, 'content') and isinstance(m.content, str) else 0
-                for m in messages
-            )
-            token_est = total_chars // 4
+            token_est = ContextEstimator.estimate_from_messages(messages)
         except Exception:
             pass
     context_complexity = estimate_context_complexity(
@@ -179,7 +176,12 @@ async def iteration_end_node(
 
     # Generate handoff prompt
     current_wns = state.timing.latest_wns
-    failed_strategies = deps.compat.failed_strategies if deps.compat else []
+    # Read failed_strategies from OptimizerState (canonical source)
+    failed_strategies = [
+        {"strategy": f.strategy, "reason": f.reason, "tool": f.tool,
+         "iteration": f.iteration, "detail": f.detail}
+        for f in state.context.failed_strategies
+    ]
     handoff = build_handoff_prompt(
         state=state,
         tier="planner" if next_model == state.model.planner_model else "worker",
@@ -190,12 +192,8 @@ async def iteration_end_node(
     state.model.iteration_handoff_prompt = handoff
     state.model.iteration_handoff_injected = False
 
-    # Advance MemoryManager's iteration counter (syncs with state.iteration.current)
-    if deps.compat is not None:
-        try:
-            deps.compat.advance_iteration()
-        except Exception as e:
-            logger.warning(f"[iteration_end] advance_iteration failed: {e}")
+    # No compat.advance_iteration() needed: V2 iteration counter
+    # is managed by update_iteration_counters() writing state.iteration.current.
 
     logger.info(green(
         f"[iteration_end] Iteration {state.iteration.current} complete: "

@@ -62,7 +62,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **状态追踪**: StateTracer 在每个节点边界记录快照，JSON 导出
 - **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
 - **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`
-- **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数
+- **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，token 估算统一使用 `ContextEstimator`（tiktoken cl100k_base）
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`
 - **DCP 身份完整性**: `state.control.current_dcp_path` 在全流程中追踪 Vivado 打开的 DCP 文件。EXECUTE 阶段从 LLM 工具白名单中移除 `vivado_open_checkpoint`
 
@@ -82,7 +82,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 | `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、状态摘要、状态信号 |
 | `call_tool()` | `pure/tool_router.py` | MCP工具路由（含 phys_opt 安全守卫） |
 | `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析 |
-| `_compress_context()` | `pure/compress.py` | CompressionContext构建 + 阈值检查 + 同步调用 |
+| `_compress_context()` | `pure/compress.py` | ContextEstimator(tiktoken)精确token计数 + CompressionContext构建 + 阈值检查 + 同步调用 |
 | 散布的常量/枚举 | `pure/constants.py` | TaskCategory/ModelTier/阈值常量 |
 | `vivado_extract_critical_path_cells` 结果解析 | `pure/critical_path.py` | Critical path 解析/更新/格式化（V2新增） |
 
@@ -124,7 +124,7 @@ add_message(role, content)
          ↓
 WorkingMemory.add_message()  # 无自动压缩
          ↓
-DCPOptimizer._compress_context()  ← token阈值触发（软/硬阈值）
+DCPOptimizer._compress_context()  ← ContextEstimator(tiktoken)精确token计数 → 软/硬阈值触发
          ↓
 MemoryManager._compress("yaml_structured", context, model_tier)
          ↓

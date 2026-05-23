@@ -653,7 +653,7 @@ class YAMLStructuredCompressor(CompressionStrategy):
             raise
         _dump_duration_ms = (time.perf_counter() - _dump_start) * 1000
         # Estimate tokens from yaml_str directly (summary_msg not yet created)
-        yaml_tokens_est = len(yaml_str) // 4  # Approximate for logging
+        yaml_tokens_est = ContextEstimator.estimate_tokens(yaml_str)
         logger.debug(
             "[COMPRESS_DUMP] YAML serialization: %d chars (~%d tokens) in %.2fms",
             len(yaml_str), yaml_tokens_est, _dump_duration_ms,

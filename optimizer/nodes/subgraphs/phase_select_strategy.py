@@ -85,7 +85,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
             # Strategy selected: check for strategy_name
             if step_state.strategy_name:
                 # Guard: reject permanently-failed strategies
-                blocked = _get_permanently_blocked_strategies(deps)
+                blocked = _get_permanently_blocked_strategies(state)
                 chosen_key = step_state.strategy_name
                 if chosen_key in blocked or (hasattr(deps, 'compat') and deps.compat and chosen_key in blocked):
                     logger.warning(yellow(
@@ -251,16 +251,16 @@ async def _call_phase_llm(state, deps, phase_tools):
         return None
 
 
-def _get_permanently_blocked_strategies(deps: NodeDeps) -> set[str]:
+def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
     """Return strategy keys that are permanently blocked (strategy_ineffective).
 
     Only strategies with reason='strategy_ineffective' are excluded.
     Strategies with reason='tool_error' remain selectable (retriable).
+
+    Reads from state.context.failed_strategies (canonical V2 source).
     """
     blocked: set[str] = set()
-    if deps.compat is None:
-        return blocked
-    for entry in deps.compat.failed_strategies:
-        if entry.get("reason") == "strategy_ineffective":
-            blocked.add(entry.get("strategy", ""))
+    for entry in state.context.failed_strategies:
+        if entry.reason == "strategy_ineffective":
+            blocked.add(entry.strategy)
     return blocked

@@ -596,7 +596,7 @@ def log_yaml_unsupported_feature(
 |------|------|---------|---------|
 | `[YAML_DUMP]` | DEBUG | dump()成功完成 | `yaml_dump_duration_ms`, `yaml_input_type`, `yaml_output_length`, `yaml_node_count` |
 | `[YAML_DUMP_ERROR]` | ERROR | dump()遇到不支持的数据类型 | `yaml_dump_error_type`, `yaml_input_type`, `trace_id` (含完整堆栈) |
-| `[COMPRESS_DUMP]` | DEBUG | 压缩流程中的dump()完成 | `compress_dump_duration_ms`, `compress_dump_output_length` |
+| `[COMPRESS_DUMP]` | DEBUG | 压缩流程中的dump()完成 | `compress_dump_duration_ms`, `compress_dump_output_length`, `compress_dump_output_tokens_est`（tiktoken精确值） |
 | `[COMPRESS_DUMP_ERROR]` | ERROR | 压缩流程中dump()失败 | 含yaml_data_keys和完整堆栈 |
 | `[COMPRESS_ROUNDTRIP]` | DEBUG | 可选回环验证通过 | `compress_roundtrip_valid: true` |
 | `[COMPRESS_ROUNDTRIP_FAIL]` | ERROR | 可选回环验证失败 | `compress_roundtrip_valid: false`（不阻断流程） |

@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from config_loader import get_model_config_loader
+from context_manager.estimator import ContextEstimator
 from context_manager.interfaces import CompressionContext, ModelContextConfig
 
 if TYPE_CHECKING:
@@ -73,21 +74,11 @@ def _get_model_config(tier: str) -> ModelContextConfig:
 
 
 def _estimate_tokens_from_messages(messages) -> int:
-    """Rough token estimate from messages (char-based, ~4 chars/token).
+    """Accurate token estimate using ContextEstimator (tiktoken cl100k_base).
 
     Accepts both Message objects and plain dicts.
     """
-    total_chars = 0
-    for m in messages:
-        # Support both Message objects and dicts
-        content = m.content if hasattr(m, 'content') else m.get("content", "")
-        if isinstance(content, str):
-            total_chars += len(content)
-        # tool_calls contribute tokens too
-        tc = getattr(m, 'tool_calls', None) or (m.get("tool_calls") if isinstance(m, dict) else None)
-        if tc:
-            total_chars += len(str(tc)) // 2  # JSON is compact
-    return total_chars // 4
+    return ContextEstimator.estimate_from_messages(messages)
 
 
 def _infer_model_tier(model_name: str | None, state_model=None) -> str:
@@ -109,15 +100,36 @@ def _infer_model_tier(model_name: str | None, state_model=None) -> str:
     return "worker"
 
 
+def _failed_strategies_to_dicts(state: OptimizerState) -> list[dict]:
+    """Convert FailedStrategyRecord objects to dicts for CompressionContext.
+
+    CompressionContext.failed_strategies expects list[dict] with keys:
+    strategy, reason, tool, iteration, detail.
+    """
+    return [
+        {
+            "strategy": f.strategy,
+            "reason": f.reason,
+            "tool": f.tool,
+            "iteration": f.iteration,
+            "detail": f.detail,
+        }
+        for f in state.context.failed_strategies
+    ]
+
+
 def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
     """Check token thresholds and trigger compression if needed.
 
     Builds a CompressionContext from current state and calls
     MemoryManager._compress() synchronously.
 
+    All state reads come from OptimizerState (canonical source).
+    MemoryManager is used only as message store + compression engine.
+
     Returns True if compression was performed.
     """
-    if deps.memory_manager is None or deps.compat is None:
+    if deps.memory_manager is None:
         return False
 
     try:
@@ -145,10 +157,10 @@ def compress_context(state: OptimizerState, deps: NodeDeps) -> bool:
             )
 
         # 4. Build CompressionContext
-        #    Read from OptimizerState (canonical) instead of MemoryManager (shadow),
-        #    because V2 never populates MemoryManager's internal fields via compat layer.
-        #    Only failed_strategies still comes from compat (populated by record_failure()).
-        failed_strategies = deps.compat.failed_strategies if deps.compat else []
+        #    Read exclusively from OptimizerState (canonical source).
+        #    failed_strategies now lives in state.context.failed_strategies
+        #    instead of MemoryManager._failed_strategies.
+        failed_strategies = _failed_strategies_to_dicts(state)
         context = CompressionContext(
             current_tokens=current_tokens,
             threshold_tokens=config.soft_threshold,

@@ -193,6 +193,16 @@ class LLMCallRecord:
 
 
 @dataclass
+class FailedStrategyRecord:
+    """Record of a failed strategy attempt with reason classification."""
+    strategy: str = ""          # PBLOCK, PhysOpt, Fanout, etc.
+    reason: str = "unknown"     # tool_error | strategy_ineffective | no_improvement
+    tool: str = ""              # Tool name(s) involved
+    iteration: int = 0
+    detail: str = ""            # Human-readable detail (truncated to 200 chars)
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -211,6 +221,8 @@ class ContextState:
     # Flow control decision log for trajectory tracking (bounded FIFO)
     flow_control_log: list[FlowControlRecord] = field(default_factory=list)
     flow_control_log_max: int = 100
+    # Failed strategy tracking (canonical source in V2, replaces MemoryManager._failed_strategies)
+    failed_strategies: list[FailedStrategyRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -250,6 +262,38 @@ class StrategyState:
 
 
 # ── Flow control helpers ────────────────────────────────────────
+
+
+def record_strategy_failure(
+    state: OptimizerState,
+    strategy: str,
+    reason: str = "unknown",
+    tool: str = "",
+    detail: str = "",
+) -> None:
+    """Record a failed strategy attempt to state.context.failed_strategies.
+
+    Deduplicates by strategy name: same strategy is only recorded once.
+    Replaces MemoryManager.record_failure() / DCPOptimizerCompat.record_failure()
+    as the canonical V2 path.
+    """
+    existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
+    if existing:
+        return
+    entry = FailedStrategyRecord(
+        strategy=strategy,
+        reason=reason,
+        tool=tool,
+        iteration=state.iteration.current,
+        detail=detail[:200],
+    )
+    state.context.failed_strategies.append(entry)
+    logger.warning(
+        "[FAILED_STRATEGY] Recorded: %s (reason=%s, tool=%s, total failed: %d)",
+        strategy, reason, tool, len(state.context.failed_strategies),
+        extra={"strategy": strategy, "reason": reason, "tool": tool,
+               "failed_count": len(state.context.failed_strategies)},
+    )
 
 
 def record_flow_signal(

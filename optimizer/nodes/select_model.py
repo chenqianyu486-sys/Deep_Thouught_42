@@ -45,13 +45,10 @@ async def select_model_node(
         token_est = 0
         if deps.memory_manager is not None:
             try:
+                from context_manager.estimator import ContextEstimator
                 messages = deps.memory_manager.get_context()
                 msg_count = len(messages)
-                total_chars = sum(
-                    len(m.content) if hasattr(m, 'content') and isinstance(m.content, str) else 0
-                    for m in messages
-                )
-                token_est = total_chars // 4
+                token_est = ContextEstimator.estimate_from_messages(messages)
             except Exception:
                 pass
 

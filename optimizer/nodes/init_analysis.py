@@ -252,15 +252,8 @@ async def init_analysis_node(
         state.control.done_reason = f"init_analysis_failed: {e}"
         return NodeName.SAVE_OUTPUT
 
-    # Sync initial values to MemoryManager for compression context
-    if deps.compat is not None:
-        try:
-            if state.timing.initial_wns is not None:
-                deps.compat.set_initial_wns(state.timing.initial_wns)
-            if state.timing.clock_period is not None:
-                deps.compat.set_clock_period(state.timing.clock_period)
-        except Exception as e:
-            logger.warning(f"[init_analysis] Failed to sync initial values to MemoryManager: {e}")
+    # No compat sync needed: V2 reads state.timing.initial_wns / clock_period
+    # directly from OptimizerState (canonical source).
 
     # Load cost_hard_limit from config (shared planner+worker budget)
     state.cost.cost_hard_limit = get_worker_model_config().cost_hard_limit
