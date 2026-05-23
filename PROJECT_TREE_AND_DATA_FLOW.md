@@ -41,7 +41,7 @@ fpl26_optimization_contest/
 │   └── static/index.html         # 自包含前端（暗色主题，13 面板）
 ├── context_manager/              # 内存/压缩管理
 │   ├── manager.py                # MemoryManager 中心编排
-│   ├── estimator.py              # TokenEstimator（tiktoken）
+│   ├── estimator.py              # ContextEstimator（tiktoken cl100k_base，全局统一token估算基准）
 │   ├── events.py                 # EventBus
 │   ├── interfaces.py / compat.py / lightyaml.py
 │   ├── stores/ + memory/         # 存储层 + 内存实现
@@ -66,7 +66,7 @@ OptimizerState (可变 dataclass，7 个子切片)
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
-├── ContextState    — 压缩计数/原始工具输出缓冲/LLM 消息日志/FC 决策轨迹
+├── ContextState    — 压缩计数/原始工具输出缓冲/LLM 消息日志/FC 决策轨迹/失败策略记录
 ├── ControlState    — 退出条件/DCP 路径/step_state
 └── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
 ```
@@ -125,7 +125,7 @@ llm_tool_loop_node (调度器)
 | 4 | 显式优于隐式 | 9 节点状态机 + 类型化 dataclass 状态切片 |
 | 5 | 关注点分离 | Worker（250K）执行 vs Planner（1M）策略决策 |
 | 6 | 单一调用路径 | V2 仅原生函数调用，无 XML/YAML 回退 |
-| 7 | 单一事实来源 | 运行时数据在 OptimizerState，MemoryManager 无影子副本 |
+| 7 | 单一事实来源 | 运行时数据在 OptimizerState；MemoryManager 仅存消息+执行压缩引擎；DCPOptimizerCompat 仅 V1 使用 |
 | 8 | 领域知识编码 | 9 策略含触发条件，LLM 自主选择 |
 | 9 | 数据可信度 | DASHBOARD_REFRESH_MAP 追踪字段新鲜度 |
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
@@ -137,7 +137,7 @@ llm_tool_loop_node (调度器)
 ### 3.1 数据流总览
 
 ```
-add_message() → WorkingMemory → _compress_context() → MemoryManager._compress()
+add_message() → WorkingMemory → _compress_context() [ContextEstimator(tiktoken)精确计数] → MemoryManager._compress()
                                                             ↓
                                                   YAMLStructuredCompressor:
                                                     1. 归档→清空→YAML摘要→保留最近N条
@@ -183,7 +183,7 @@ skill_guidance: primary_tool / auto_chain / avoid
 |------|----------|
 | System 消息 | 压缩前分离，始终前置 |
 | WNS/TNS/策略状态 | 上下文 Dashboard（user message，独立于压缩系统） |
-| 失败策略 | CompressionContext 存储 + `record_failure()` 8 个检测点 |
+| 失败策略 | `state.context.failed_strategies`（FailedStrategyRecord 列表）+ `record_strategy_failure()` 去重写入 |
 | 工具调用摘要 | V2: `state.iteration.tools_used` 直接追加 |
 | 最近 N 轮消息 | `preserve_role_turns=6` 保留原始 role |
 | report_step_state 格式 | 双重提醒：① 一次性 User FORMAT_GUARD ② 每调用前 System prompt 压印 |

@@ -71,12 +71,15 @@ class MemoryManager:
         #     lambda event: self._check_compression(event)
         # )
 
-        self._failed_strategies: list[dict] = []  # {strategy, reason, tool, iteration, detail}
-        self._tool_call_details: list[dict] = []
-        self._best_wns: float = float('-inf')
-        self._initial_wns: Optional[float] = None
-        self._iteration: int = 0
-        self._clock_period: Optional[float] = None
+        # V2-only note: These shadow fields are NOT used by V2 nodes.
+        # V2 reads all state from OptimizerState directly.
+        # Only V1 (dcp_optimizer.py) uses these via DCPOptimizerCompat.
+        self._failed_strategies: list[dict] = []  # {strategy, reason, tool, iteration, detail} — V1 only
+        self._tool_call_details: list[dict] = []  # V1 only
+        self._best_wns: float = float('-inf')     # V1 only (V2: state.timing.best_wns)
+        self._initial_wns: Optional[float] = None  # V1 only (V2: state.timing.initial_wns)
+        self._iteration: int = 0                   # V1 only (V2: state.iteration.current)
+        self._clock_period: Optional[float] = None  # V1 only (V2: state.timing.clock_period)
         self._compressing: bool = False  # Explicitly initialized
 
     def add_message(self, role: MessageRole, content: str, metadata: dict = None) -> ContextSnapshot:

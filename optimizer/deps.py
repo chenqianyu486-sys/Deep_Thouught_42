@@ -14,8 +14,8 @@ from typing import Any
 class NodeDeps:
     """External dependencies injected into nodes. Not part of state."""
     openai_client: Any = None              # AsyncOpenAI instance
-    memory_manager: Any = None             # context_manager.manager.MemoryManager
-    compat: Any = None                     # context_manager.compat.DCPOptimizerCompat
+    memory_manager: Any = None             # context_manager.manager.MemoryManager (message store + compression engine)
+    compat: Any = None                     # context_manager.compat.DCPOptimizerCompat — V1 ONLY, V2 nodes must not use
     rapidwright_session: Any = None        # MCP ClientSession for RapidWright
     vivado_session: Any = None             # MCP ClientSession for Vivado
     tools: list = field(default_factory=list)  # Tool definitions for LLM
