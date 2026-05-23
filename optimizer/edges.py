@@ -19,6 +19,7 @@ class NodeName(str, Enum):
     LLM_TOOL_LOOP = "llm_tool_loop"
     ITERATION_END = "iteration_end"
     CHECK_EXIT = "check_exit"
+    ROLLBACK = "rollback"
     SAVE_OUTPUT = "save_output"
     END = "end"
 
@@ -33,11 +34,14 @@ def after_init(state: OptimizerState) -> str:
 
 
 def after_check_exit(state: OptimizerState) -> str:
-    """After check_exit: continue loop or save and exit."""
+    """After check_exit: continue loop, rollback, or save and exit."""
     if state.control.is_done:
         return NodeName.SAVE_OUTPUT
     if state.control.user_exit_requested:
         return NodeName.SAVE_OUTPUT
     if state.iteration.current >= state.iteration.max_iterations:
         return NodeName.SAVE_OUTPUT
+    if state.control.done_reason == "rollback":
+        state.control.done_reason = None
+        return NodeName.ROLLBACK
     return NodeName.ITERATION_START

@@ -18,12 +18,26 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
+
+
+def detect_rollback_needed(state: OptimizerState) -> bool:
+    """Check if current WNS has regressed significantly from best WNS.
+
+    Returns True when latest_wns is below best_wns by more than the
+    WNS_ROLLBACK_THRESHOLD and a best checkpoint exists on disk.
+    """
+    if (state.timing.latest_wns is None
+            or state.timing.best_wns == float('-inf')
+            or state.control.best_checkpoint_path is None
+            or not state.control.best_checkpoint_path.exists()):
+        return False
+    return state.timing.latest_wns < state.timing.best_wns - WNS_ROLLBACK_THRESHOLD
 
 
 async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -49,6 +63,18 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
     if len(state.strategy.phase_history) > 100:
         state.strategy.phase_history = state.strategy.phase_history[-100:]
     state.strategy.current_phase = "EVALUATE"
+
+    # ── Auto-detect WNS regression and request rollback ──
+    if detect_rollback_needed(state):
+        logger.warning(yellow(
+            f"[EVALUATE] WNS regression detected: latest={state.timing.latest_wns:.3f} "
+            f"< best={state.timing.best_wns:.3f} (threshold={WNS_ROLLBACK_THRESHOLD:.3f})"
+        ))
+        state.strategy.current_phase = ""
+        state.strategy.current_strategy = ""
+        state.control.done_reason = "rollback"
+        _record_flow_signal(state, "ROLLBACK", "rollback_auto")
+        return LoopPhase.ANALYZE
 
     while True:
         tool_round += 1
@@ -102,6 +128,14 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             elif flow_signal == "SWITCH_STRATEGY":
                 _handle_switch_strategy(state, deps, assistant_content)
                 return LoopPhase.ANALYZE  # Restart analysis for new strategy
+
+            elif flow_signal == "ROLLBACK":
+                logger.warning(yellow("[EVALUATE] LLM signaled ROLLBACK"))
+                _record_flow_signal(state, "ROLLBACK", "rollback_llm")
+                state.control.done_reason = "rollback"
+                state.strategy.current_phase = ""
+                state.strategy.current_strategy = ""
+                return LoopPhase.ANALYZE
 
             elif flow_signal == "CONTINUE":
                 logger.info("[EVALUATE] LLM chose CONTINUE — re-entering ANALYZE")

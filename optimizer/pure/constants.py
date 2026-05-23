@@ -79,6 +79,7 @@ WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
 GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
+WNS_ROLLBACK_THRESHOLD: float = 0.030  # 30ps: trigger rollback when latest_wns falls this far below best_wns
 
 # Context thresholds (derived from model config, but we use safe defaults)
 SMALL_OUTPUT_THRESHOLD = 3000      # Bypass summarization below this

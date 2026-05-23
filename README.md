@@ -12,7 +12,7 @@
 |------|-------------------|-----------------|
 | 入口 | `DCPOptimizer.optimize()` (dcp_optimizer.py) | `optimize_v2()` + `optimizer/` 包 |
 | 状态管理 | 分散在类属性和局部变量 | 集中式 `OptimizerState` (6个类型化子切片) |
-| 流程控制 | 隐式，嵌入 LLM 对话循环 | 显式图拓扑：8节点 + 条件边 |
+| 流程控制 | 隐式，嵌入 LLM 对话循环 | 显式图拓扑：9节点 + 条件边 |
 | 可观测性 | ad-hoc 日志 | `StateTracer` JSON 状态转换追踪 |
 | 纯函数 | 混合在 ~8000 行类中 | 提取到 `optimizer/pure/` (10个独立模块，可单测) |
 | 默认状态 | 旧版（需显式 `--v2` 或 `make run_optimizer_v1`） | **默认**（`make run_optimizer` 自动加 `--v2`） |
@@ -25,6 +25,7 @@ init_analysis -> [条件: WNS >= 0?]
             -> llm_tool_loop(子图) -> iteration_end -> check_exit
             -> [条件: done?]
               |-- YES -> save_output -> end
+              |-- rollback? -> ROLLBACK -> iteration_start (循环)
               +-- NO  -> iteration_start (循环)
 ```
 
@@ -59,12 +60,14 @@ LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_con
 | `SWITCH_STRATEGY` | 当前策略无效/失败 | 结束迭代 + 注入强制分析引导 | False | **是** |
 | `DONE` | WNS >= 0，时序收敛 | 退出优化 | **True** | 否 |
 | `EXHAUSTED` | 所有策略用尽 | 退出优化 | **True** | 否 |
-| `RETRY` / `ROLLBACK` | LLM 级别指导 | 不触发系统动作，继续循环 | - | - |
+| `RETRY` | LLM 级别指导 | 不触发系统动作，继续循环 | - | - |
+| `ROLLBACK` | LLM 请求回滚到最佳 checkpoint | 设 done_reason=rollback，触发 ROLLBACK 节点恢复最佳 DCP 后开始新 iteration | False | 否 |
 
 **设计要点**:
 - `NEXT_ITERATION` 与 `SWITCH_STRATEGY` 的关键区别：前者表示"策略成功但该换轮了"，后者表示"策略失败了"。这避免了 LLM 在一个迭代内穷举所有策略。
 - `DONE` 的安全网：若 LLM 在 WNS < 0 时误用 `DONE`，系统不退出优化，而是以 `done_reason="flow_control_done_next_iteration"` 进入下一轮。
 - 缺失处理：若 LLM 未调用 `report_step_state`，系统自动合成 `CONTINUE` 并注入提示，不因格式疏忽死锁。
+- 自动回滚：EVALUATE 阶段入口自动检测 `latest_wns << best_wns`（超过 30ps 阈值），无需 LLM 干预即触发 ROLLBACK 节点恢复最佳 DCP。LLM 也可通过 `flow_control: ROLLBACK` 主动请求回滚。
 - Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。额外功能区：SELECT_STRATEGY 阶段注入 `strategy_catalog`（全量策略目录+触发条件），EXECUTE 阶段注入 `skill_guidance`（策略→skill 工具映射+auto_chain 指引）。
 
 详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的 5.3 节。
@@ -130,9 +133,9 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 | 目录/文件 | 用途 |
 |-----------|------|
 | `dcp_optimizer.py` | 主 Agent 编排入口（v1 消息对话 + v2 状态机 `optimize_v2()` 入口） |
-| `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，8节点图） |
+| `optimizer/` | v2 状态机驱动 Agent 框架（LangGraph 风格，9节点图） |
 | `optimizer/pure/` | 从 DCPOptimizer 提取的无状态纯函数（10个模块，可独立单测） |
-| `optimizer/nodes/` | 8个节点实现 + llm_tool_loop 子图 |
+| `optimizer/nodes/` | 9个节点实现（含 ROLLBACK 回滚节点）+ llm_tool_loop 子图 |
 | `context_manager/` | 上下文/记忆管理、YAML 压缩（增强标记格式、14 个受保护分析工具） |
 | `skills/` | Skill 框架（13个已注册 Skill：9策略 + 3分析 + 1测试） |
 | `RapidWrightMCP/` | RapidWright MCP 服务器 |

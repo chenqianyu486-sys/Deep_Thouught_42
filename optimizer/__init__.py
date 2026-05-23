@@ -40,6 +40,7 @@ from .nodes import (
     llm_tool_loop_node,
     iteration_end_node,
     check_exit_node,
+    rollback_node,
     save_output_node,
 )
 
@@ -59,6 +60,7 @@ def build_optimizer_graph(tracer: StateTracer | None = None) -> NodeGraph:
     graph.add_node(NodeName.LLM_TOOL_LOOP, llm_tool_loop_node)
     graph.add_node(NodeName.ITERATION_END, iteration_end_node)
     graph.add_node(NodeName.CHECK_EXIT, check_exit_node)
+    graph.add_node(NodeName.ROLLBACK, rollback_node)
     graph.add_node(NodeName.SAVE_OUTPUT, save_output_node)
 
     # ── Edges ─────────────────────────────────────────────────────
@@ -76,6 +78,8 @@ def build_optimizer_graph(tracer: StateTracer | None = None) -> NodeGraph:
     graph.add_edge(NodeName.ITERATION_END, NodeName.CHECK_EXIT)
     # check_exit -> condition (after_check_exit)
     graph.add_edge(NodeName.CHECK_EXIT, after_check_exit)
+    # rollback -> iteration_start (deterministic)
+    graph.add_edge(NodeName.ROLLBACK, NodeName.ITERATION_START)
     # save_output -> end (deterministic)
     graph.add_edge(NodeName.SAVE_OUTPUT, NodeName.END)
 

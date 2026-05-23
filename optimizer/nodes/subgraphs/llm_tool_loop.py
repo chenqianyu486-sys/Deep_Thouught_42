@@ -93,7 +93,7 @@ async def llm_tool_loop_node(
                 return NodeName.ITERATION_END
 
             if state.control.done_reason in ("switch_strategy", "iteration_success",
-                                               "flow_control_done_next_iteration"):
+                                               "flow_control_done_next_iteration", "rollback"):
                 logger.info(f"[llm_tool_loop] Exiting iteration: {state.control.done_reason}")
                 return NodeName.ITERATION_END
 

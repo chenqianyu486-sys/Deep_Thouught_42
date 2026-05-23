@@ -184,6 +184,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Track WNS from timing results
                 _track_wns_from_result(state, tool_name, result)
+                await _try_save_best_checkpoint(state, deps)
 
                 # Track critical path data
                 if tool_name == "vivado_extract_critical_path_cells":
@@ -206,6 +207,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         await _post_eval_hook(state, deps, tool_name)
                     except Exception as e:
                         logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
+                await _try_save_best_checkpoint(state, deps)
 
                 # Chain actions for skills
                 if tool_name in SKILL_CHAIN_ACTIONS:
@@ -371,6 +373,34 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
             state.control.needs_save = True
 
 
+async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
+    """Save a DCP checkpoint when best_wns improves, for rollback support.
+
+    Writes to {run_dir}/best_checkpoint.dcp, overwriting previous best.
+    Does nothing if no run_dir is configured or if vivado_session is unavailable.
+    """
+    if state.control.run_dir is None:
+        return
+    try:
+        ckpt_path = state.control.run_dir / "best_checkpoint.dcp"
+        await call_tool_fn(
+            "vivado_write_checkpoint",
+            {"dcp_path": str(ckpt_path.resolve()), "force": True},
+            deps.rapidwright_session, deps.vivado_session,
+        )
+        state.control.best_checkpoint_path = ckpt_path
+        logger.info(f"Saved best checkpoint: WNS={state.timing.best_wns:.3f}ns")
+    except Exception as e:
+        logger.warning(f"Failed to save best checkpoint: {e}")
+
+
+async def _try_save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
+    """Save best checkpoint when needs_save flag is set, then clear it."""
+    if state.control.needs_save and deps.vivado_session is not None:
+        await _save_best_checkpoint(state, deps)
+        state.control.needs_save = False
+
+
 def _track_cost(state: OptimizerState, response) -> None:
     try:
         usage = getattr(response, 'usage', None)
@@ -487,6 +517,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 deps.compat.add_message("user",
                     f"[AUTO-CHAIN] After {tool_name}: {target_tool} completed — {summary[:400]}")
             _track_wns_from_result(state, target_tool, raw_result)
+            await _try_save_best_checkpoint(state, deps)
             state.iteration.tools_used.append(target_tool)
             tools_called.append(target_tool)
         except Exception as e:

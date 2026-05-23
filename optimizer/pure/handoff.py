@@ -123,15 +123,26 @@ def _generate_planner_handoff(
     WNS/TNS/FE, critical paths, and design signals are in the Dashboard
     (injected per-LLM-call) and are NOT duplicated here.
     """
+    exit_reason = state.control.done_reason or ""
+    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
+
+    if exit_reason == "rollback":
+        best_iter = state.timing.best_wns_iteration or "?"
+        best_str = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
+        return f"""--- Iteration {state.iteration.current + 1} Handoff ---
+
+{exit_line}
+DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter}.
+  WNS restored to: {best_str}ns
+TRAJECTORY:
+  (rollback entry excluded — previous best stands)"""
+
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
     status = build_status_signal(
         state.iteration.global_no_improvement,
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
     )
     status_section = f"\nSTATUS:\n{status}\n" if status else ""
-
-    exit_reason = state.control.done_reason or ""
-    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
 
     return f"""--- Iteration {state.iteration.current + 1} Handoff ---
 
@@ -151,15 +162,24 @@ def _generate_worker_handoff(
     Compact version: trajectory (last 5) + status + failed strategies.
     WNS/TNS/FE and critical paths are in the Dashboard.
     """
+    exit_reason = state.control.done_reason or ""
+    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
+
+    if exit_reason == "rollback":
+        best_iter = state.timing.best_wns_iteration or "?"
+        best_str = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
+        return f"""--- Iteration {state.iteration.current + 1} ---
+
+{exit_line}
+DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter}.
+  WNS restored to: {best_str}ns"""
+
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=5)
     status = build_status_signal(
         state.iteration.global_no_improvement,
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
     )
     status_section = f"\n{status}" if status else ""
-
-    exit_reason = state.control.done_reason or ""
-    exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
 
     return f"""--- Iteration {state.iteration.current + 1} ---
 

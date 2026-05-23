@@ -6,7 +6,7 @@
 fpl26_optimization_contest/
 ├── dcp_optimizer.py              # 主Agent: LLM编排、模型选择、压缩触发、_build_skill_recommendation()、optimize_v2()入口
 ├── optimizer/                    # 状态机驱动Agent框架（LangGraph风格）
-│   ├── __init__.py               # build_optimizer_graph() 图构建入口，注册8个节点+条件边
+│   ├── __init__.py               # build_optimizer_graph() 图构建入口，注册9个节点+条件边
 │   ├── state.py                  # 状态dataclass: OptimizerState/TimingState/IterationState/ModelState/CostState/ControlState/ContextState/StrategyState/StepState/PhaseEntry
 │   ├── deps.py                   # NodeDeps: 外部依赖容器（MCP会话、MemoryManager、OpenAI客户端）
 │   ├── graph.py                  # NodeGraph: 图执行引擎（节点注册、边注册、run循环）
@@ -21,6 +21,7 @@ fpl26_optimization_contest/
 │   │   ├── prepare_context.py    # 上下文准备节点（压缩、FORMAT_GUARD注入、注入handoff；Dashboard注入移至tool loop）
 │   │   ├── iteration_end.py      # 迭代结束节点（更新计数器、构建narrative、预选下轮模型）
 │   │   ├── check_exit.py         # 退出检查节点（WNS达标/无改善/超时/超成本）
+│   │   ├── rollback.py           # 回滚节点（退化时恢复最佳 checkpoint）
 │   │   ├── save_output.py        # 保存输出节点（写DCP、打印摘要、导出tracing）
 │   │   └── subgraphs/
 │   │       ├── llm_tool_loop.py          # 4阶段状态机调度器（ANALYZE→SELECT_STRATEGY→EXECUTE→EVALUATE）
@@ -189,6 +190,7 @@ init_analysis → [条件: timing met?]
             → llm_tool_loop(子图) → iteration_end → check_exit
             → [条件: done?]
               ├─ YES → save_output → end
+              ├─ rollback? → ROLLBACK → iteration_start (循环)
               └─ NO  → iteration_start (循环)
 ```
 
@@ -230,6 +232,7 @@ llm_tool_loop_node (状态机调度器)
       DONE/WNS>=0 → ITERATION_END
       NEXT_ITERATION → ITERATION_END
       SWITCH_STRATEGY → ITERATION_END
+      ROLLBACK → ITERATION_END（经 ROLLBACK 节点恢复后开始新 iteration）
       CONTINUE → 回到ANALYZE
 
 阶段间消息隔离（方案B）:
@@ -956,7 +959,7 @@ WNS回归处理: WNS<0且差于best时自动回滚
 - `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化（非退出信号）
 - `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽/失败，系统强制执行迭代切换，注入分析引导 + skill推荐 + 强制下一轮先分析再选策略
 - `flow_control: NEXT_ITERATION` = 本轮取得显著改善，当前策略边际收益已趋零，进入下一轮迭代（新上下文 + 模型重评估 + 更新的 critical path 数据）。不记录失败。
-- `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换
+- `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行，不作强制迭代切换。V2中 ROLLBACK 触发 complete checkpoint restore + 新 iteration（见回滚节点说明）
 - 真正退出条件 = WNS >= 0 **且** DCP 逻辑等效已验证通过（所有优化操作在优化过程中不得改变逻辑功能）
 
 **行为矩阵**:
@@ -970,6 +973,8 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | `flow_control: SWITCH_STRATEGY` (EVALUATE) | 强制结束迭代 + 记录策略失败 + 下一轮从ANALYZE开始 |
 | `flow_control: NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
 | `flow_control: CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段，重新分析设计 |
+| `detect_rollback_needed()` (EVALUATE入口) | latest_wns << best_wns 时自动设 done_reason=rollback，触发 ROLLBACK 节点恢复最佳 checkpoint |
+| `flow_control: ROLLBACK` (EVALUATE) | LLM 主动请求回滚，与自动检测共享 done_reason=rollback 机制 |
 | 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
 ### 5.4 DONE 优化补丁
@@ -1255,6 +1260,7 @@ V2:
 | `user_requested` | 用户输入quit |
 | `flow_control_done_next_iteration` | LLM返回flow_control=DONE但目标未达成，进入下一迭代 |
 | `switch_strategy` | LLM返回SWITCH_STRATEGY，系统强制执行迭代切换，下一轮分析后选新策略 |
+| `rollback` | EVALUATE 检测到 WNS 退化（或 LLM 请求 ROLLBACK），系统经 ROLLBACK 节点恢复最佳 checkpoint 后开始新 iteration |
 | `iteration_success` | LLM返回NEXT_ITERATION，本轮成功改善，进入下一轮继续优化（不记录失败） |
 
 ## 11. DCP验证（硬约束）

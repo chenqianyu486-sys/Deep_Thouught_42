@@ -7,6 +7,7 @@ from .prepare_context import prepare_context_node
 from .subgraphs.llm_tool_loop import llm_tool_loop_node
 from .iteration_end import iteration_end_node
 from .check_exit import check_exit_node
+from .rollback import rollback_node
 from .save_output import save_output_node
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "llm_tool_loop_node",
     "iteration_end_node",
     "check_exit_node",
+    "rollback_node",
     "save_output_node",
 ]

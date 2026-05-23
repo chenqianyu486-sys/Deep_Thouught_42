@@ -55,82 +55,85 @@ async def iteration_end_node(
     elif state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is None:
         wns_improved = True  # First valid WNS
 
-    # Update counters
-    update_iteration_counters(state, wns_improved, state.model.current_model)
+    is_rollback = state.control.done_reason == "rollback"
 
-    # Build narrative
+    # Update counters (skip for rollback — design will be restored)
+    if not is_rollback:
+        update_iteration_counters(state, wns_improved, state.model.current_model)
+
+    # Build narrative (skip for rollback — state is about to be restored)
     tools_this_iter = state.iteration.tools_used
-    # Prefer LLM's declared strategy; fall back to tool-name inference
     strategy_label = state.strategy.current_strategy or infer_strategy_from_tools(tools_this_iter)
 
-    narrative = build_iteration_narrative(
-        iteration=state.iteration.current,
-        model_used=state.model.current_model,
-        current_task_type=state.model.current_task_type,
-        wns_before=state.timing.prev_best_wns,
-        wns_after=state.timing.best_wns if state.timing.best_wns > float('-inf') else None,
-        tools_used=tools_this_iter,
-        result_status=(
-            state.control.step_state.result_status
-            if state.control.step_state else None
-        ),
-        declared_strategy=state.strategy.current_strategy or None,
-    )
-    state.iteration.narratives.append(narrative)
-    if len(state.iteration.narratives) > 20:
-        state.iteration.narratives.pop(0)
+    if not is_rollback:
+        narrative = build_iteration_narrative(
+            iteration=state.iteration.current,
+            model_used=state.model.current_model,
+            current_task_type=state.model.current_task_type,
+            wns_before=state.timing.prev_best_wns,
+            wns_after=state.timing.best_wns if state.timing.best_wns > float('-inf') else None,
+            tools_used=tools_this_iter,
+            result_status=(
+                state.control.step_state.result_status
+                if state.control.step_state else None
+            ),
+            declared_strategy=state.strategy.current_strategy or None,
+        )
+        state.iteration.narratives.append(narrative)
+        if len(state.iteration.narratives) > 20:
+            state.iteration.narratives.pop(0)
 
-    # Record strategy lifecycle evaluation at end of iteration
-    if state.strategy.current_strategy:
-        if wns_improved:
-            state.strategy.evaluation_result = "IMPROVED"
-            if state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
-                state.strategy.evaluation_wns_delta = state.timing.best_wns - state.timing.prev_best_wns
-        elif state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
-            delta = state.timing.best_wns - state.timing.prev_best_wns
-            if delta < -0.001:
-                state.strategy.evaluation_result = "REGRESSION"
-                state.strategy.evaluation_wns_delta = delta
-            else:
-                state.strategy.evaluation_result = "UNCHANGED"
-                state.strategy.evaluation_wns_delta = 0.0
+        # Record strategy lifecycle evaluation at end of iteration
+        if state.strategy.current_strategy:
+            if wns_improved:
+                state.strategy.evaluation_result = "IMPROVED"
+                if state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
+                    state.strategy.evaluation_wns_delta = state.timing.best_wns - state.timing.prev_best_wns
+            elif state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
+                delta = state.timing.best_wns - state.timing.prev_best_wns
+                if delta < -0.001:
+                    state.strategy.evaluation_result = "REGRESSION"
+                    state.strategy.evaluation_wns_delta = delta
+                else:
+                    state.strategy.evaluation_result = "UNCHANGED"
+                    state.strategy.evaluation_wns_delta = 0.0
 
-        # Record EVALUATE phase entry if not already the last entry
-        from optimizer.state import PhaseEntry
-        last_phase = state.strategy.phase_history[-1].phase if state.strategy.phase_history else ""
-        if last_phase != "EVALUATE":
-            phase_entry = PhaseEntry(
-                phase="EVALUATE",
-                strategy=state.strategy.current_strategy,
-                iteration=state.iteration.current,
-                tool_round=state.iteration.tool_round,
-                wns_at_entry=state.timing.latest_wns,
-            )
-            state.strategy.phase_history.append(phase_entry)
-            if len(state.strategy.phase_history) > 100:
-                state.strategy.phase_history = state.strategy.phase_history[-100:]
+            # Record EVALUATE phase entry if not already the last entry
+            from optimizer.state import PhaseEntry
+            last_phase = state.strategy.phase_history[-1].phase if state.strategy.phase_history else ""
+            if last_phase != "EVALUATE":
+                phase_entry = PhaseEntry(
+                    phase="EVALUATE",
+                    strategy=state.strategy.current_strategy,
+                    iteration=state.iteration.current,
+                    tool_round=state.iteration.tool_round,
+                    wns_at_entry=state.timing.latest_wns,
+                )
+                state.strategy.phase_history.append(phase_entry)
+                if len(state.strategy.phase_history) > 100:
+                    state.strategy.phase_history = state.strategy.phase_history[-100:]
 
-    # Track strategy sequence and record failures
-    if strategy_label and strategy_label not in ("Information", "Unknown"):
-        state.iteration.strategy_sequence.append(strategy_label)
-        if len(state.iteration.strategy_sequence) > 10:
-            state.iteration.strategy_sequence.pop(0)
+        # Track strategy sequence and record failures
+        if strategy_label and strategy_label not in ("Information", "Unknown"):
+            state.iteration.strategy_sequence.append(strategy_label)
+            if len(state.iteration.strategy_sequence) > 10:
+                state.iteration.strategy_sequence.pop(0)
 
-        # Record failure if iteration didn't improve and we have a known strategy.
-        # Skip when LLM explicitly signaled success (NEXT_ITERATION) — the
-        # iteration may be a preparation step that doesn't directly improve WNS.
-        # Recording failure here would poison the strategy in future context.
-        if (not wns_improved
-                and deps.compat is not None
-                and state.control.done_reason != "iteration_success"):
-            reason = _determine_failure_reason(state, strategy_label)
-            deps.compat.record_failure(
-                strategy=strategy_label,
-                reason=reason,
-                tool=", ".join(tools_this_iter[:3]),
-                detail=f"Iteration {state.iteration.current}: no WNS improvement",
-            )
-            logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
+            # Record failure if iteration didn't improve and we have a known strategy.
+            # Skip when LLM explicitly signaled success (NEXT_ITERATION) — the
+            # iteration may be a preparation step that doesn't directly improve WNS.
+            # Recording failure here would poison the strategy in future context.
+            if (not wns_improved
+                    and deps.compat is not None
+                    and state.control.done_reason != "iteration_success"):
+                reason = _determine_failure_reason(state, strategy_label)
+                deps.compat.record_failure(
+                    strategy=strategy_label,
+                    reason=reason,
+                    tool=", ".join(tools_this_iter[:3]),
+                    detail=f"Iteration {state.iteration.current}: no WNS improvement",
+                )
+                logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
 
     # Pre-decide next iteration's model
     msg_count = 0
