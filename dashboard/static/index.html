@@ -41,6 +41,25 @@ canvas { width: 100%; height: 100%; }
 .tag.error { background: #4a1e1e; color: #ff6666; }
 .tag.status-ok { background: #1a3a1a; color: #44ff88; }
 .tag.status-error { background: #4a1e1e; color: #ff6666; }
+/* Flow control signal color coding */
+.tag.signal-DONE { background: #1a4a1a; color: #44ff88; }
+.tag.signal-NEXT_ITERATION { background: #1a2a5a; color: #66aaff; }
+.tag.signal-SWITCH_STRATEGY { background: #4a3a1a; color: #ffcc44; }
+.tag.signal-ROLLBACK { background: #4a1a1a; color: #ff4444; }
+.tag.signal-CONTINUE { background: #2a3a4a; color: #88bbdd; }
+.tag.signal-EXHAUSTED { background: #3a3a3a; color: #cccccc; }
+.tag.signal-SYSTEM_EXIT { background: #3a3a3a; color: #cccccc; }
+.tag.signal-ANALYZE_DONE { background: #1a3a4a; color: #44dddd; }
+.tag.signal-EXEC_DONE { background: #1a3a4a; color: #44dddd; }
+.tag.signal-STRATEGY_SELECTED { background: #2a1e4a; color: #aa88ff; }
+.tag.signal-ITERATION_IMPROVED { background: #1a4a2a; color: #44ff88; }
+.tag.signal-ITERATION_SUCCESS { background: #1a3a5a; color: #66ccff; }
+.tag.signal-ITERATION_FAILED { background: #4a2a1a; color: #ff8844; }
+.tag.signal-ITERATION_COMPLETE { background: #2a3a3a; color: #aaaacc; }
+/* Flow control status tag */
+.tag.status-SUCCESS { background: #1a3a1a; color: #44ff88; }
+.tag.status-PARTIAL { background: #4a3a1a; color: #ffcc44; }
+.tag.status-FAIL { background: #4a1a1a; color: #ff4444; }
 
 .list { max-height: 200px; overflow-y: auto; }
 .list-item { padding: 4px 0; font-size: 13px; border-bottom: 1px solid #1a1a2e; font-family: 'Cascadia Code', 'Fira Code', monospace; }
@@ -340,10 +359,10 @@ table.transitions tr:hover { background: #12122a; }
 
   <!-- Flow Control Log Panel -->
   <div class="panel full-width">
-    <h2>Flow Control Log</h2>
+    <h2>Flow Control Log <span style="font-size:12px;color:#888;font-weight:normal;">(signal → next action)</span></h2>
     <div class="table-scroll">
       <table class="transitions">
-        <thead><tr><th>Time</th><th>Iter</th><th>Round</th><th>Signal</th><th>WNS</th><th>Reason</th></tr></thead>
+        <thead><tr><th>Time</th><th>Iter</th><th>Round</th><th>Signal</th><th>Phase</th><th>Strategy</th><th>WNS</th><th>Best</th><th>Status</th><th>Reason</th></tr></thead>
         <tbody id="trajectoryFlowBody"></tbody>
       </table>
     </div>
@@ -785,12 +804,23 @@ function updateTrajectory(d) {
     body.innerHTML = recent.map(function(f) {
       var ts = f.timestamp ? new Date(f.timestamp * 1000).toLocaleTimeString() : '--';
       var wns = f.wns_at_decision != null ? formatNum(f.wns_at_decision) + 'ns' : '--';
+      var best = f.wns_best != null ? formatNum(f.wns_best) + 'ns' : '--';
+      var signal = f.signal || '';
+      var signalClass = 'tag signal-' + signal;
+      var phase = f.phase || '';
+      var phaseClass = phase ? 'phase-tag ' + phase : '';
+      var status = f.result_status || '';
+      var statusClass = status ? 'tag status-' + status : '';
       return '<tr>' +
         '<td>' + ts + '</td>' +
         '<td>' + (f.iteration != null ? f.iteration : '--') + '</td>' +
         '<td>' + (f.tool_round != null ? f.tool_round : '--') + '</td>' +
-        '<td><span class="tag strategy">' + esc(f.signal || '') + '</span></td>' +
+        '<td><span class="' + signalClass + '">' + esc(signal) + '</span></td>' +
+        '<td>' + (phase ? '<span class="' + phaseClass + '">' + esc(phase) + '</span>' : '--') + '</td>' +
+        '<td>' + (f.strategy ? '<span class="tag strategy">' + esc(f.strategy) + '</span>' : '--') + '</td>' +
         '<td>' + wns + '</td>' +
+        '<td>' + best + '</td>' +
+        '<td>' + (status ? '<span class="' + statusClass + '">' + esc(status) + '</span>' : '--') + '</td>' +
         '<td>' + esc(f.done_reason || '') + '</td>' +
         '</tr>';
     }).join('');

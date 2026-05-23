@@ -173,7 +173,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 1. **全状态快照**（`on_exit`）：每次 graph 节点退出时推送完整 `OptimizerState`（含所有面板数据）
 2. **LLM 调用实时推送**（`push_llm_event`）：每次 LLM 调用后立即推送仅 LLM 调用数据（`type: "llm_call_update"`），无需等待 phase 完成
 
-**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response + 完整调用历史）、Transition History、Tool Call Trace、Flow Control Log、Phase History
+**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response + 完整调用历史）、Transition History（含 flow_control_signal/result_status）、Tool Call Trace、Flow Control Log（Signal/Phase/Strategy/WNS/Best/Status/Reason 颜色编码）、Phase History
 
 **依赖**: `aiohttp>=3.9.0`（通过 `requirements.txt`，`make setup` 自动安装）
 
@@ -189,7 +189,7 @@ OptimizerState (可变dataclass)
 ├── IterationState — 迭代计数器/no_improvement/tool_errors/narratives/tools_used(本迭代工具名列表)
 ├── ModelState     — 模型选择/fallback/交接提示词/format_guard_injected
 ├── CostState      — token用量/成本追踪
-├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)/step_state_misses(连续未调用report_step_state计数)
+├── ContextState   — compression_count/raw_tool_outputs(raw输出FIFO缓冲, max 50)/latest_user_prompt/latest_assistant_response(LLM消息日志)/step_state_misses(连续未调用report_step_state计数)/flow_control_log(FC决策轨迹100条)
 ├── ControlState   — 退出条件/路径/step_state/current_dcp_path(当前Vivado中打开的DCP路径)
 └── StrategyState  — 4阶段策略生命周期追踪（current_phase/current_strategy/phase_history/evaluation_result）
 ```
@@ -994,6 +994,14 @@ WNS回归处理: WNS<0且差于best时自动回滚
 | `flow_control: ROLLBACK` (EVALUATE) | LLM 主动请求回滚，与自动检测共享 done_reason=rollback 机制 |
 | 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
 
+**可观测性**:
+- 所有信号（含 `SYSTEM_EXIT`：超时/成本/用户退出/最大轮次）通过 `record_flow_signal(signal, reason, phase, strategy, result_status)`（`optimizer/state.py`）录制到 `state.context.flow_control_log`
+- 录制覆盖全阶段：ANALYZE（ANALYZE_DONE/DONE/EXHAUSTED/SYSTEM_EXIT）、SELECT_STRATEGY（STRATEGY_SELECTED/EXHAUSTED/SYSTEM_EXIT）、EXECUTE（EXEC_DONE/EXHAUSTED/SYSTEM_EXIT）、EVALUATE（DONE/NEXT/SWITCH/ROLLBACK/CONTINUE/EXHAUSTED）、系统级（check_exit/iteration_end 的 SYSTEM_EXIT/ITERATION_IMPROVED）
+- 每笔 `FlowControlRecord` 包含：signal, iteration, tool_round, done_reason, phase, strategy, result_status, wns_at_decision, wns_best, timestamp
+- 控制台统一 `[FC]` 日志格式：`[FC] {signal:20s} phase={phase:18s} iter={N} round={N} wns={x.xxx} best={x.xxx} reason={...}`
+- Dashboard Flow Control Log 面板显示全部字段，信号类型颜色编码
+- `StateTracer.on_exit()` 录制 flow_control_signal + result_status + current_phase + current_strategy
+
 ### 5.4 DONE 优化补丁
 
 关键修复：
@@ -1042,6 +1050,27 @@ class StepState:
     strategy_phase: Optional[str] = None       # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
     strategy_name: Optional[str] = None        # PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade | CellReplication | CongestionSpreading | RegisterRetiming | NetSwap
 ```
+
+**FlowControlRecord 数据结构**（全阶段统一录制，`state.context.flow_control_log` 存储）：
+```python
+@dataclass
+class FlowControlRecord:
+    signal: str = ""          # DONE | SWITCH_STRATEGY | NEXT_ITERATION | EXHAUSTED | ROLLBACK |
+                              # ANALYZE_DONE | EXEC_DONE | STRATEGY_SELECTED | CONTINUE | SYSTEM_EXIT |
+                              # ITERATION_IMPROVED | ITERATION_FAILED | ITERATION_COMPLETE
+    iteration: int = 0
+    tool_round: int = 0
+    done_reason: str = ""     # wns_target_met | switch_strategy | strategies_exhausted | ...
+    phase: str = ""           # 来源阶段：ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE | SYSTEM
+    strategy: str = ""        # 决策时的当前策略名
+    result_status: str = ""   # 来自 report_step_state：SUCCESS | PARTIAL | FAIL
+    wns_at_decision: float | None = None
+    wns_best: float | None = None
+    timestamp: float = field(default_factory=time.time)
+```
+
+录制入口：`record_flow_signal(state, signal, reason, *, phase, strategy, result_status)`（`optimizer/state.py`）。
+输出统一 `[FC]` 日志：`[FC] {signal:20s} phase={phase:18s} iter={N} round={N} wns={x.xxx} best={x.xxx} reason={...}`。
 
 **StrategyState 数据结构**（4阶段策略生命周期）：
 ```python

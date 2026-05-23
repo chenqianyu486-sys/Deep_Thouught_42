@@ -13,7 +13,7 @@ import time
 
 from pathlib import Path
 
-from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord
+from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
@@ -108,11 +108,15 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             if flow_signal == "EXEC_DONE":
                 llm_summary = assistant_content
                 logger.info(green(f"[EXECUTE] LLM signaled EXEC_DONE at round {tool_round}"))
+                record_flow_signal(state, "EXEC_DONE", "execution_complete",
+                                   phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
                 break
 
             # EXHAUSTED during execution
             if flow_signal == "EXHAUSTED":
                 logger.info("[EXECUTE] LLM signaled EXHAUSTED")
+                record_flow_signal(state, "EXHAUSTED", "execution_exhausted",
+                                   phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
                 break
 
         else:
@@ -268,18 +272,22 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
     if tool_round > max_rounds:
         logger.warning(f"[EXECUTE] Max rounds reached ({tool_round} > {max_rounds})")
+        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="EXECUTE_STRATEGY")
         return True
     if state.control.start_time:
         elapsed = time.time() - state.control.start_time
         if elapsed > state.control.wall_clock_timeout:
             state.control.is_done = True
             state.control.done_reason = "wall_clock_timeout"
+            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase="EXECUTE_STRATEGY")
             return True
     if state.control.user_exit_requested:
+        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="EXECUTE_STRATEGY")
         return True
     if state.cost.total_cost >= state.cost.cost_hard_limit:
         state.control.is_done = True
         state.control.done_reason = "cost_limit"
+        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase="EXECUTE_STRATEGY")
         return True
     return False
 

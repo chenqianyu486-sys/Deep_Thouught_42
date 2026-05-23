@@ -1,0 +1,97 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.smart_retiming@1.0.0",
+  "displayName": "Smart Retiming Optimizer",
+  "description": "Iteratively insert pipeline registers on deep combinational chains, verify each insertion with RapidWright timing estimation, and auto-rollback on degradation. Returns final checkpoint + post_actions for Vivado sign-off. MUTATING. Side effects: new FF cells added, net topology changed, checkpoint files written. Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs) between pipeline registers.",
+  "idempotency": "non-idempotent",
+  "sideEffects": [
+    "cell_creation",
+    "net_topology",
+    "checkpoint_file"
+  ],
+  "timeout": {
+    "defaultMs": 300000,
+    "maxMs": 600000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "critical_paths": {
+        "type": "array",
+        "description": "Critical path pin data from vivado_extract_critical_path_pins. Each dict must contain: path_index, pins (list of pin strings), slack (float). See analyze_register_retiming for expected format."
+      },
+      "max_ops": {
+        "type": "integer",
+        "description": "Maximum FF insertions to perform. Hard cap of 10 per call to limit impact scope. Default: 5.",
+        "default": 5
+      },
+      "min_chain_depth": {
+        "type": "integer",
+        "description": "Minimum LUT chain depth to consider. Chains shorter than this are skipped. Default: 2.",
+        "default": 2
+      },
+      "wns_threshold": {
+        "type": "number",
+        "description": "Only process paths with slack worse than this value (ns). Default: -0.3.",
+        "default": -0.3
+      },
+      "verify_each": {
+        "type": "boolean",
+        "description": "If True, run RapidWright report_timing after each FF insertion to estimate WNS impact (~2.5s). Default: True.",
+        "default": true
+      },
+      "auto_rollback": {
+        "type": "boolean",
+        "description": "If True and verify_each is True, restore the pre-insertion checkpoint when estimated WNS degrades >0.001ns. Default: True.",
+        "default": true
+      },
+      "temp_dir": {
+        "type": "string",
+        "description": "Directory for intermediate checkpoints. Default: 'temp'.",
+        "default": "temp",
+        "minLength": 1
+      },
+      "checkpoint_prefix": {
+        "type": "string",
+        "description": "Filename prefix for saved checkpoints. Default: 'smart_retime'.",
+        "default": "smart_retime",
+        "minLength": 1
+      },
+      "max_fanout_for_insertion": {
+        "type": "integer",
+        "description": "Skip insertion points with net fanout exceeding this value. Default: 50.",
+        "default": 50
+      }
+    },
+    "required": [
+      "critical_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "RESOURCE_NOT_FOUND",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

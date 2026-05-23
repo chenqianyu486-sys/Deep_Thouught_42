@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import time
 
-from optimizer.state import OptimizerState
+from optimizer.state import OptimizerState, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase
@@ -117,6 +117,7 @@ def _check_exit_conditions(state: OptimizerState, total_rounds: int) -> bool:
     """Check if the outer loop should exit."""
     if total_rounds > MAX_TOOL_ROUNDS:
         logger.warning(yellow(f"[llm_tool_loop] Max rounds reached ({total_rounds} > {MAX_TOOL_ROUNDS})"))
+        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase=state.strategy.current_phase)
         return True
 
     if state.control.start_time:
@@ -125,16 +126,19 @@ def _check_exit_conditions(state: OptimizerState, total_rounds: int) -> bool:
             logger.warning(f"[llm_tool_loop] Wall-clock timeout: {elapsed:.0f}s")
             state.control.is_done = True
             state.control.done_reason = "wall_clock_timeout"
+            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase=state.strategy.current_phase)
             return True
 
     if state.control.user_exit_requested:
         logger.info("[llm_tool_loop] User exit requested")
+        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase=state.strategy.current_phase)
         return True
 
     if state.cost.total_cost >= state.cost.cost_hard_limit:
         logger.warning(f"[llm_tool_loop] Cost limit reached")
         state.control.is_done = True
         state.control.done_reason = "cost_limit"
+        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase=state.strategy.current_phase)
         return True
 
     return False

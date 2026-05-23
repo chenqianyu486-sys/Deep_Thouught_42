@@ -10,6 +10,7 @@ objectives:
   
 
 rules:
+  tool_naming: "Actual MCP tool names use vivado_ and rapidwright_ prefixes. This prompt omits prefixes for brevity — always call tools with their full prefixed names."
   restrictions:
     - "DO NOT re-open/reload DCP — already open in Vivado & RapidWright"
     - "Use EXACT net names from reports"
@@ -96,9 +97,9 @@ safety_constraints:
   - "PBLOCK MUST be applied BEFORE fanout on distributed designs (avg_distance > 70). Running fanout without PBLOCK causes WNS regression of 0.5ns+."
   - "If execute_fanout_strategy runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately. Do NOT retry."
   - "Pure combinational designs (FF=0): PBLOCK placement is the primary lever. PhysOpt and RegisterRetiming have limited impact on routing-delay-dominated paths."
-  - "optimize_lut_input_cone: Skip for NN / wide-datapath designs. optimized_count=0 means no cones."
+  - "optimize_lut_input_cone / flatten_lut_cascade: Skip for NN / wide-datapath designs. optimized_count=0 means the tool correctly identified no optimizable cascades — this is a valid 'strategy inapplicable' result, NOT a tool error."
   - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
-  - "Logic equivalence is the hard constraint: ANY optimization step (especially retiming, replication, pin swapping) MUST NOT alter functional behavior. The validate_dcps.py tool runs a two-phase check (structural + simulation) to verify equivalence."
+  - "Logic equivalence is the hard constraint: ANY optimization step (especially retiming, replication, pin swapping) MUST NOT alter functional behavior. Functional correctness must be preserved through all transformations."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
   - "Register retiming is safer than Vivado's global phys_opt_design -retime (causes functional errors in NN designs)."
 

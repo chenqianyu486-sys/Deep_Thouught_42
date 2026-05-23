@@ -50,6 +50,7 @@ from skills import congestion_spreading_strategy
 from skills import pin_swapping_optimization_strategy
 from skills import critical_path_cell_replication_strategy
 from skills import register_retiming_strategy
+from skills import smart_retiming
 from skills import net_swapping_strategy
 from skills import lut_cascade_flattening_strategy
 

@@ -35,6 +35,14 @@ class StateTracer:
     def on_exit(self, node_name: str, state: OptimizerState) -> None:
         entry_time = self._entry_times.pop(node_name, time.time())
         duration = time.time() - entry_time
+
+        # Extract flow_control signal from step_state if available
+        flow_signal = None
+        result_status = None
+        if state.control.step_state:
+            flow_signal = state.control.step_state.flow_control
+            result_status = state.control.step_state.result_status
+
         entry = {
             "node": node_name,
             "timestamp": time.time(),
@@ -46,6 +54,10 @@ class StateTracer:
             "tool_round": state.iteration.tool_round,
             "is_done": state.control.is_done,
             "done_reason": state.control.done_reason,
+            "flow_control_signal": flow_signal,
+            "result_status": result_status,
+            "current_phase": state.strategy.current_phase,
+            "current_strategy": state.strategy.current_strategy,
             "duration": duration,
         }
         self.transitions.append(entry)

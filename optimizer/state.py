@@ -6,10 +6,13 @@ OptimizerState. Nodes modify state in-place (mutable pattern).
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ── Control signals ─────────────────────────────────────────────
@@ -166,11 +169,15 @@ class ToolCallRecord:
 @dataclass
 class FlowControlRecord:
     """Single flow control decision trace entry for trajectory tracking."""
-    signal: str = ""          # DONE | SWITCH_STRATEGY | NEXT_ITERATION | EXHAUSTED
+    signal: str = ""          # DONE | SWITCH_STRATEGY | NEXT_ITERATION | EXHAUSTED | ROLLBACK | ANALYZE_DONE | EXEC_DONE | STRATEGY_SELECTED | CONTINUE | SYSTEM_EXIT
     iteration: int = 0
     tool_round: int = 0
-    done_reason: str = ""     # wns_target_met | switch_strategy | strategies_exhausted | iteration_success
+    done_reason: str = ""     # wns_target_met | switch_strategy | strategies_exhausted | iteration_success | ...
+    phase: str = ""           # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE | SYSTEM
+    strategy: str = ""        # Current strategy at decision time
+    result_status: str = ""   # From StepState: SUCCESS | PARTIAL | FAIL
     wns_at_decision: Optional[float] = None
+    wns_best: Optional[float] = None
     timestamp: float = field(default_factory=time.time)
 
 
@@ -240,6 +247,50 @@ class StrategyState:
     evaluation_wns_delta: float = 0.0        # WNS change after execution
     evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
     last_handoff_text: str = ""              # PhaseHandoff formatted text for merged dashboard injection
+
+
+# ── Flow control helpers ────────────────────────────────────────
+
+
+def record_flow_signal(
+    state: OptimizerState,
+    signal: str,
+    reason: str = "",
+    *,
+    phase: str = "",
+    strategy: str = "",
+    result_status: str = "",
+) -> FlowControlRecord:
+    """Record a flow control decision to the state's flow_control_log.
+
+    Shared across all phases for consistent observability.
+    Returns the created FlowControlRecord for optional further use.
+    """
+    record = FlowControlRecord(
+        signal=signal,
+        iteration=state.iteration.current,
+        tool_round=state.iteration.tool_round,
+        done_reason=reason,
+        phase=phase or state.strategy.current_phase,
+        strategy=strategy or state.strategy.current_strategy,
+        result_status=result_status,
+        wns_at_decision=state.timing.latest_wns,
+        wns_best=state.timing.best_wns,
+    )
+    state.context.flow_control_log.append(record)
+    if len(state.context.flow_control_log) > state.context.flow_control_log_max:
+        state.context.flow_control_log = state.context.flow_control_log[-state.context.flow_control_log_max:]
+
+    # Unified console log for real-time flow control tracking
+    _phase = record.phase or ""
+    _sig = record.signal
+    _wns = f"{record.wns_at_decision:.3f}" if record.wns_at_decision is not None else "?"
+    _best = f"{record.wns_best:.3f}" if record.wns_best is not None and record.wns_best > float('-inf') else "?"
+    logger.info(
+        f"[FC] {_sig:20s} phase={_phase:18s} iter={record.iteration} "
+        f"round={record.tool_round} wns={_wns} best={_best} reason={reason}"
+    )
+    return record
 
 
 # ── Composite state ─────────────────────────────────────────────

@@ -61,6 +61,8 @@ def infer_strategy_from_tools(tools: list[str]) -> str:
         return "PinSwap"
     if any(kw in tool_str for kw in ["register_retiming", "register_retime"]):
         return "RegisterRetiming"
+    if any(kw in tool_str for kw in ["smart_retiming", "smart_retime"]):
+        return "SmartRetiming"
     if any(kw in tool_str for kw in ["congestion_spread", "execute_congestion_spreading"]):
         return "CongestionSpreading"
     if any(kw in tool_str for kw in ["net_swapping", "execute_net_swapping"]):

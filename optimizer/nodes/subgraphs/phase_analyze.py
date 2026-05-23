@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, LLMCallRecord
+from optimizer.state import OptimizerState, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
@@ -82,11 +82,15 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             if flow_signal == "ANALYZE_DONE":
                 llm_summary = assistant_content
                 logger.info(green(f"[ANALYZE] LLM signaled ANALYZE_DONE at round {tool_round}"))
+                record_flow_signal(state, "ANALYZE_DONE", "analysis_complete",
+                                   phase="ANALYZE", result_status=step_state.result_status or "")
                 break
 
             # Terminal signals: forward to outer loop
             if flow_signal in ("DONE", "EXHAUSTED"):
                 logger.info(f"[ANALYZE] Terminal signal {flow_signal}, exiting")
+                record_flow_signal(state, flow_signal, "terminal_during_analysis",
+                                   phase="ANALYZE", result_status=step_state.result_status or "")
                 state.control.done_reason = flow_signal
                 return LoopPhase.EVALUATE  # Skip to evaluate for final decision
 
@@ -167,6 +171,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         tns=state.timing.latest_tns,
         failing_endpoints=state.timing.latest_failing_endpoints,
         tools_called=tools_called,
+        key_findings=_extract_analyze_key_findings(state),
         message_count=tool_round,
     )
     state.strategy.analysis_summary = llm_summary
@@ -179,6 +184,7 @@ def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -
     """Check common exit conditions for the phase loop."""
     if tool_round > max_rounds:
         logger.warning(f"[ANALYZE] Max rounds reached ({tool_round} > {max_rounds})")
+        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="ANALYZE")
         return True
 
     if state.control.start_time:
@@ -187,16 +193,19 @@ def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -
             logger.warning(f"[ANALYZE] Wall-clock timeout: {elapsed:.0f}s")
             state.control.is_done = True
             state.control.done_reason = "wall_clock_timeout"
+            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase="ANALYZE")
             return True
 
     if state.control.user_exit_requested:
         logger.info("[ANALYZE] User exit requested")
+        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="ANALYZE")
         return True
 
     if state.cost.total_cost >= state.cost.cost_hard_limit:
         logger.warning(f"[ANALYZE] Cost limit reached")
         state.control.is_done = True
         state.control.done_reason = "cost_limit"
+        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase="ANALYZE")
         return True
 
     return False
@@ -331,3 +340,66 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
             state.model.planner_fallback_index = idx + 1
             return fallbacks[idx]
     return None
+
+
+def _extract_analyze_key_findings(state: OptimizerState) -> dict:
+    """Extract structured diagnostic findings from OptimizerState.
+
+    Called at ANALYZE phase exit to populate PhaseHandoff.key_findings,
+    so SELECT_STRATEGY sees structured data, not just 600-char llm_summary.
+    """
+    findings: dict = {}
+
+    # --- dominant_obstacle inference ---
+    obstacles: list[str] = []
+
+    # Logic depth: check critical paths for avg logic levels
+    if state.timing.critical_paths:
+        depths = [p.levels for p in state.timing.critical_paths if p.levels and p.levels > 0]
+        if depths:
+            avg_depth = sum(depths) / len(depths)
+            findings["avg_logic_depth"] = round(avg_depth, 1)
+            if avg_depth >= 5:
+                obstacles.append("logic_depth")
+
+    # Fanout: check high fanout nets
+    if state.timing.high_fanout_nets:
+        fanouts = [n.get("fanout", 0) for n in state.timing.high_fanout_nets if isinstance(n, dict)]
+        if fanouts:
+            findings["max_fanout"] = max(fanouts)
+            findings["high_fanout_count"] = len(fanouts)
+            if max(fanouts) >= 200:
+                obstacles.append("fanout")
+
+    # Placement spread: check critical path spread
+    spread = state.timing.critical_path_spread or {}
+    if isinstance(spread, dict):
+        spread_max = spread.get("max_distance") or spread.get("avg_max_distance") or 0
+        if spread_max:
+            findings["cp_spread_max_tiles"] = int(spread_max)
+            if int(spread_max) >= 70:
+                obstacles.append("placement_spread")
+
+    # Resource counts
+    res = state.timing.resource_utilization or {}
+    if res:
+        findings["resource_lut"] = int(res.get("LUT", res.get("lut", 0)))
+        findings["resource_ff"] = int(res.get("FF", res.get("ff", 0)))
+
+    # Design type
+    ff_count = findings.get("resource_ff", None)
+    if ff_count is not None and ff_count == 0:
+        findings["design_type"] = "combinational_only"
+    elif ff_count is not None and ff_count > 0:
+        findings["design_type"] = "pipelined"
+
+    # Number of failing endpoints
+    if state.timing.latest_failing_endpoints is not None:
+        findings["failing_endpoints"] = state.timing.latest_failing_endpoints
+
+    # Dominant obstacle
+    findings["dominant_obstacle"] = obstacles[0] if obstacles else "unknown"
+    if len(obstacles) > 1:
+        findings["secondary_obstacles"] = ",".join(obstacles[1:])
+
+    return findings

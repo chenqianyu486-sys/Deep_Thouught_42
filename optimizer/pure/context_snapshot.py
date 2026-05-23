@@ -41,7 +41,7 @@ PHASE_DASHBOARD_SECTIONS: dict[LoopPhase, frozenset[str]] = {
     }),
     LoopPhase.SELECT_STRATEGY: frozenset({
         "core_timing", "trajectory", "design_signals",
-        "strategy_lifecycle",
+        "critical_paths", "strategy_lifecycle",
     }),
     LoopPhase.EXECUTE: frozenset({
         "core_timing", "active_tools", "strategy_lifecycle",

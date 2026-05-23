@@ -860,15 +860,39 @@ def get_resource_counts(timeout: float = 300.0) -> str:
                 continue
 
             stripped = line.strip()
-            if 'Slice LUTs' in stripped or stripped.startswith('|LUT as Logic') or stripped == '| LUT as Logic':
+            if 'Slice LUTs' in stripped or 'LUT as Logic' in stripped:
                 resources["lut"] = val
             elif 'Register as Flip Flop' in stripped or 'Slice Registers' in stripped:
                 resources["ff"] = val
-            elif stripped.startswith('| DSPs') or stripped.startswith('|DSPs'):
+            elif 'DSPs' in stripped:
                 if 'Block RAM' not in stripped:
                     resources["dsp"] = val
             elif 'Block RAM Tile' in stripped:
                 resources["bram"] = val
+
+    # Fallback: if parsing returned all zeros (likely format mismatch),
+    # use direct TCL cell counting which is format-independent.
+    if resources["lut"] == 0 and resources["ff"] == 0:
+        try:
+            fallback_cmd = (
+                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
+                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
+                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
+                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]"'
+            )
+            fb = run_tcl_command(fallback_cmd, timeout=timeout)
+            for line in fb.split('\n'):
+                line = line.strip()
+                if line.startswith('LUT:'):
+                    resources["lut"] = int(line.split(':')[1])
+                elif line.startswith('FF:'):
+                    resources["ff"] = int(line.split(':')[1])
+                elif line.startswith('DSP:'):
+                    resources["dsp"] = int(line.split(':')[1])
+                elif line.startswith('BRAM:'):
+                    resources["bram"] = int(line.split(':')[1])
+        except Exception:
+            pass
 
     return json.dumps(resources)
 

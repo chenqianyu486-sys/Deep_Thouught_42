@@ -10,7 +10,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry, FlowControlRecord, LLMCallRecord
+from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
@@ -73,7 +73,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.strategy.current_phase = ""
         state.strategy.current_strategy = ""
         state.control.done_reason = "rollback"
-        _record_flow_signal(state, "ROLLBACK", "rollback_auto")
+        record_flow_signal(state, "ROLLBACK", "rollback_auto", phase="EVALUATE")
         return LoopPhase.ANALYZE
 
     while True:
@@ -131,7 +131,8 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
             elif flow_signal == "ROLLBACK":
                 logger.warning(yellow("[EVALUATE] LLM signaled ROLLBACK"))
-                _record_flow_signal(state, "ROLLBACK", "rollback_llm")
+                record_flow_signal(state, "ROLLBACK", "rollback_llm", phase="EVALUATE",
+                                   result_status=step_state.result_status or "")
                 state.control.done_reason = "rollback"
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
@@ -139,6 +140,8 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
             elif flow_signal == "CONTINUE":
                 logger.info("[EVALUATE] LLM chose CONTINUE — re-entering ANALYZE")
+                record_flow_signal(state, "CONTINUE", "re_analyze", phase="EVALUATE",
+                                   result_status=step_state.result_status or "")
                 # Reset phase tracking for re-analysis
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
@@ -237,14 +240,16 @@ def _handle_done(state: OptimizerState, deps, assistant_content: str) -> None:
     else:
         state.control.done_reason = "flow_control_done_next_iteration"
 
-    _record_flow_signal(state, "DONE", state.control.done_reason or "done")
+    record_flow_signal(state, "DONE", state.control.done_reason or "done", phase="EVALUATE",
+                       result_status=state.control.step_state.result_status if state.control.step_state else "")
 
 
 def _handle_next_iteration(state: OptimizerState, deps, assistant_content: str) -> None:
     """Handle NEXT_ITERATION signal — success, start fresh iteration."""
     logger.info(green("[EVALUATE] LLM signaled NEXT_ITERATION"))
     state.control.done_reason = "iteration_success"
-    _record_flow_signal(state, "NEXT_ITERATION", "iteration_success")
+    record_flow_signal(state, "NEXT_ITERATION", "iteration_success", phase="EVALUATE",
+                       result_status=state.control.step_state.result_status if state.control.step_state else "")
 
 
 def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str) -> None:
@@ -258,7 +263,8 @@ def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str)
             f"[STRATEGY SWITCH] Previous strategy ({state.strategy.current_strategy}) ended. "
             f"WNS={wns_str}. New iteration starts with fresh context. "
             f"Failed strategies are listed in the dashboard.")
-    _record_flow_signal(state, "SWITCH_STRATEGY", "switch_strategy")
+    record_flow_signal(state, "SWITCH_STRATEGY", "switch_strategy", phase="EVALUATE",
+                       result_status=state.control.step_state.result_status if state.control.step_state else "")
 
 
 def _handle_exhausted(state: OptimizerState, deps) -> None:
@@ -266,21 +272,8 @@ def _handle_exhausted(state: OptimizerState, deps) -> None:
     logger.info(yellow("[EVALUATE] LLM signaled EXHAUSTED"))
     state.control.is_done = True
     state.control.done_reason = "strategies_exhausted"
-    _record_flow_signal(state, "EXHAUSTED", "strategies_exhausted")
-
-
-def _record_flow_signal(state: OptimizerState, signal: str, reason: str) -> None:
-    """Record flow control decision for trajectory tracking."""
-    record = FlowControlRecord(
-        signal=signal,
-        iteration=state.iteration.current,
-        tool_round=state.iteration.tool_round,
-        done_reason=reason,
-        wns_at_decision=state.timing.latest_wns,
-    )
-    state.context.flow_control_log.append(record)
-    if len(state.context.flow_control_log) > state.context.flow_control_log_max:
-        state.context.flow_control_log = state.context.flow_control_log[-state.context.flow_control_log_max:]
+    record_flow_signal(state, "EXHAUSTED", "strategies_exhausted", phase="EVALUATE",
+                       result_status=state.control.step_state.result_status if state.control.step_state else "")
 
 
 def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:

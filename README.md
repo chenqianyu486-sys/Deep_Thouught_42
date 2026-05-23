@@ -54,15 +54,19 @@ LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_con
 
 **信号语义**:
 
-| 信号 | 含义 | 系统行为 | is_done | 记录失败 |
-|------|------|---------|---------|---------|
-| `CONTINUE` | 当前策略仍在推进 | 继续工具循环 | - | - |
-| `NEXT_ITERATION` | 本轮成功改善，边际收益趋零 | 结束迭代，进入下一轮（新上下文 + 模型重评估） | False | 否 |
-| `SWITCH_STRATEGY` | 当前策略无效/失败 | 结束迭代 + 注入强制分析引导 | False | **是** |
-| `DONE` | WNS >= 0，时序收敛 | 退出优化 | **True** | 否 |
-| `EXHAUSTED` | 所有策略用尽 | 退出优化 | **True** | 否 |
-| `RETRY` | LLM 级别指导 | 不触发系统动作，继续循环 | - | - |
-| `ROLLBACK` | LLM 请求回滚到最佳 checkpoint | 设 done_reason=rollback，触发 ROLLBACK 节点恢复最佳 DCP 后开始新 iteration | False | 否 |
+| 信号 | 来源 | 含义 | 系统行为 | is_done |
+|------|------|------|---------|---------|
+| `CONTINUE` | EVALUATE | 当前策略仍有效，需重新分析 | 回到 ANALYZE 阶段 | - |
+| `NEXT_ITERATION` | EVALUATE | 本轮成功改善，边际收益趋零 | 结束迭代，进入下一轮（新上下文 + 模型重评估） | False |
+| `SWITCH_STRATEGY` | EVALUATE | 当前策略无效/失败 | 结束迭代 + **记录失败** + 注入强制分析引导 | False |
+| `DONE` | EVALUATE | WNS >= 0，时序收敛 | 退出优化 | **True** |
+| `EXHAUSTED` | EVALUATE / SELECT_STRATEGY | 所有策略用尽 | 退出优化 | **True** |
+| `ROLLBACK` | EVALUATE | LLM 请求回滚到最佳 checkpoint | 触发 ROLLBACK 节点恢复最佳 DCP 后开始新 iteration | False |
+| `RETRY` | ANY | LLM 级别指导 | 不触发系统动作，继续循环 | - |
+| `ANALYZE_DONE` | ANALYZE | 分析阶段完成 | 切换到 SELECT_STRATEGY 阶段 | - |
+| `EXEC_DONE` | EXECUTE | 执行阶段完成 | 切换到 EVALUATE 阶段 | - |
+| `STRATEGY_SELECTED` | SELECT_STRATEGY（系统推导） | LLM 选择了策略 | 切换到 EXECUTE 阶段 | - |
+| `SYSTEM_EXIT` | 系统（非 LLM） | 系统强制终止（超时/成本/用户请求） | 退出优化 | **True** |
 
 **设计要点**:
 - `NEXT_ITERATION` 与 `SWITCH_STRATEGY` 的关键区别：前者表示"策略成功但该换轮了"，后者表示"策略失败了"。这避免了 LLM 在一个迭代内穷举所有策略。
@@ -70,6 +74,12 @@ LLM 每轮响应必须调用 `report_step_state(step_id, result_status, flow_con
 - 缺失处理：若 LLM 未调用 `report_step_state`，系统自动合成 `CONTINUE` 并注入提示，不因格式疏忽死锁。
 - 自动回滚：EVALUATE 阶段入口自动检测 `latest_wns << best_wns`（超过 30ps 阈值），无需 LLM 干预即触发 ROLLBACK 节点恢复最佳 DCP。LLM 也可通过 `flow_control: ROLLBACK` 主动请求回滚。
 - Dashboard 每轮注入为末条 user message，包含 per-path slack/logic_delay/net_delay/levels 等时序细节，辅助 LLM 判断何时切换信号。额外功能区：SELECT_STRATEGY 阶段注入 `strategy_catalog`（全量策略目录+触发条件），EXECUTE 阶段注入 `skill_guidance`（策略→skill 工具映射+auto_chain 指引）。
+
+**可观测性**:
+- 所有 flow control 信号（含系统退出）统一通过 `record_flow_signal()`（`optimizer/state.py`）录制到 `state.context.flow_control_log`（最大 100 条），每笔记录包含 signal/phase/strategy/iteration/tool_round/wns/wns_best/result_status 等上下文字段
+- 控制台统一 `[FC]` 日志格式：`[FC] {signal:20s} phase={phase:18s} iter={N} round={N} wns={x.xxx} best={x.xxx} reason={...}`
+- Dashboard Flow Control Log 面板展示全部字段，按信号类型颜色编码（DONE=绿、SWITCH_STRATEGY=黄、ROLLBACK=红、NEXT_ITERATION=蓝、EXHAUSTED/SYSTEM_EXIT=灰 等）
+- `StateTracer.on_exit()` 录制 flow_control_signal + result_status + current_phase + current_strategy，Transitions 面板可追溯
 
 详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) 的 5.3 节。
 
@@ -125,7 +135,8 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 | **Model** | 当前模型名称、Worker / Planner 模型、LLM 调用次数、连续成功 / 失败计数 |
 | **Cost** | 总费用（带进度条）、Token 统计（prompt / completion / reasoning） |
 | **Control** | 运行状态（Running / DONE）、已耗时、超时阈值、压缩次数、输入 / 输出 DCP 路径 |
-| **Transition History** | 节点切换历史表格（时间、节点、迭代、WNS、模型、费用、耗时） |
+| **Transition History** | 节点切换历史表格（时间、节点、迭代、WNS、模型、费用、耗时、flow_control_signal、result_status） |
+| **Flow Control Log** | 全信号记录（Signal/Phase/Strategy/WNS/Best/Status/Reason），按信号类型颜色编码 |
 | **LLM Log** | 最新的 LLM 用户 prompt 和 assistant 响应，完整调用历史（每条可展开查看完整 prompt/response） |
 
 **特性**:

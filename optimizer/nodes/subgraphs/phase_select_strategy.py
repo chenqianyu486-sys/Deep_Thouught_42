@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord
+from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
@@ -76,16 +76,35 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
             # EXHAUSTED: no more strategies to try
             if step_state.flow_control == "EXHAUSTED":
                 logger.info("[SELECT_STRATEGY] LLM signaled EXHAUSTED")
+                record_flow_signal(state, "EXHAUSTED", "strategies_exhausted",
+                                   phase="SELECT_STRATEGY", result_status=step_state.result_status or "")
                 state.control.is_done = True
                 state.control.done_reason = "strategies_exhausted"
                 return LoopPhase.EVALUATE
 
             # Strategy selected: check for strategy_name
             if step_state.strategy_name:
+                # Guard: reject permanently-failed strategies
+                blocked = _get_permanently_blocked_strategies(deps)
+                chosen_key = step_state.strategy_name
+                if chosen_key in blocked or (hasattr(deps, 'compat') and deps.compat and chosen_key in blocked):
+                    logger.warning(yellow(
+                        f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — permanently failed, "
+                        f"prompting retry"
+                    ))
+                    if deps.compat is not None:
+                        deps.compat.add_message("user",
+                            f"[BLOCKED] Strategy '{chosen_key}' is permanently ineffective for this design. "
+                            f"Please select a different strategy from the available catalog.")
+                    continue
+
                 state.strategy.current_strategy = step_state.strategy_name
                 state.strategy.strategy_rationale = assistant_content
                 llm_summary = assistant_content
                 logger.info(green(f"[SELECT_STRATEGY] Strategy selected: {step_state.strategy_name}"))
+                record_flow_signal(state, "STRATEGY_SELECTED", "strategy_selected",
+                                   phase="SELECT_STRATEGY", strategy=step_state.strategy_name,
+                                   result_status=step_state.result_status or "")
 
                 # Record phase transition
                 phase_entry = PhaseEntry(
@@ -159,8 +178,10 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
 def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
     if tool_round > max_rounds:
         logger.warning(f"[SELECT_STRATEGY] Max rounds reached ({tool_round} > {max_rounds})")
+        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="SELECT_STRATEGY")
         return True
     if state.control.user_exit_requested:
+        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="SELECT_STRATEGY")
         return True
     return False
 
@@ -228,3 +249,18 @@ async def _call_phase_llm(state, deps, phase_tools):
     except Exception as e:
         logger.error(f"[SELECT_STRATEGY] LLM call failed: {e}")
         return None
+
+
+def _get_permanently_blocked_strategies(deps: NodeDeps) -> set[str]:
+    """Return strategy keys that are permanently blocked (strategy_ineffective).
+
+    Only strategies with reason='strategy_ineffective' are excluded.
+    Strategies with reason='tool_error' remain selectable (retriable).
+    """
+    blocked: set[str] = set()
+    if deps.compat is None:
+        return blocked
+    for entry in deps.compat.failed_strategies:
+        if entry.get("reason") == "strategy_ineffective":
+            blocked.add(entry.get("strategy", ""))
+    return blocked

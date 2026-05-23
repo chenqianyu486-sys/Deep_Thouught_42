@@ -123,19 +123,24 @@ def format_trajectory_summary(state: OptimizerState) -> dict:
     flow_log = state.context.flow_control_log
     flow_records: list[dict] = []
     if flow_log:
-        lines.append(f"  {'Time':<10}  {'Iter':>4}  {'Round':>5}  {'Signal':<18}  {'WNS':>8}  {'Reason'}")
-        lines.append(f"  {'─'*10}  {'─'*4}  {'─'*5}  {'─'*18}  {'─'*8}  {'─'*30}")
+        lines.append(f"  {'Time':<10}  {'Iter':>4}  {'Round':>5}  {'Signal':<18}  {'Phase':<18}  {'Strategy':<16}  {'WNS':>8}  {'Best':>8}  {'Status':<7}  {'Reason'}")
+        lines.append(f"  {'─'*10}  {'─'*4}  {'─'*5}  {'─'*18}  {'─'*18}  {'─'*16}  {'─'*8}  {'─'*8}  {'─'*7}  {'─'*20}")
         for f in flow_log:
             ts = datetime.fromtimestamp(f.timestamp).strftime("%H:%M:%S")
             wns = _fmt_wns(f.wns_at_decision)
-            lines.append(f"  {ts:<10}  {f.iteration:>4}  {f.tool_round:>5}  {f.signal:<18}  {wns:>8}  {f.done_reason}")
+            best = _fmt_wns(f.wns_best)
+            lines.append(f"  {ts:<10}  {f.iteration:>4}  {f.tool_round:>5}  {f.signal:<18}  {f.phase:<18}  {f.strategy:<16}  {wns:>8}  {best:>8}  {f.result_status:<7}  {f.done_reason}")
             flow_records.append({
                 "timestamp": f.timestamp,
                 "time_str": ts,
                 "iteration": f.iteration,
                 "tool_round": f.tool_round,
                 "signal": f.signal,
+                "phase": f.phase,
+                "strategy": f.strategy,
+                "result_status": f.result_status,
                 "wns_at_decision": f.wns_at_decision,
+                "wns_best": f.wns_best,
                 "done_reason": f.done_reason,
             })
     else:

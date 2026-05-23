@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from ..state import OptimizerState
+from ..state import OptimizerState, record_flow_signal
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.timing import is_valid_wns
@@ -55,6 +55,7 @@ async def check_exit_node(
             green(f"[check_exit] WNS target met: "
                   f"{state.timing.latest_wns:.3f} ns >= {WNS_TARGET_THRESHOLD:.1f} ns")
         )
+        record_flow_signal(state, "DONE", "wns_target_met", phase="CHECK_EXIT")
         return NodeName.CHECK_EXIT
 
     # No-improvement limit
@@ -65,6 +66,7 @@ async def check_exit_node(
             f"[check_exit] No-improvement limit reached: "
             f"{state.iteration.global_no_improvement} >= {GLOBAL_NO_IMPROVEMENT_LIMIT}"
         )
+        record_flow_signal(state, "SYSTEM_EXIT", "max_no_improvement", phase="CHECK_EXIT")
         return NodeName.CHECK_EXIT
 
     # Cost limit
@@ -75,6 +77,7 @@ async def check_exit_node(
             yellow(f"[check_exit] Cost limit reached: "
                    f"${state.cost.total_cost:.4f} >= ${state.cost.cost_hard_limit:.2f}")
         )
+        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase="CHECK_EXIT")
         return NodeName.CHECK_EXIT
 
     logger.debug(

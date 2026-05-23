@@ -2511,6 +2511,78 @@ def execute_register_retiming(
         return {"error": str(e)}
 
 
+def smart_retiming(
+    critical_paths: list[dict],
+    max_ops: int = 5,
+    min_chain_depth: int = 2,
+    wns_threshold: float = -0.3,
+    verify_each: bool = True,
+    auto_rollback: bool = True,
+    temp_dir: str = "temp",
+    checkpoint_prefix: str = "smart_retime",
+    max_fanout_for_insertion: int = 50,
+) -> dict:
+    """Smart retiming with incremental verification and auto-rollback.
+
+    Scores and prioritizes retiming candidates, inserts FFs one at a time,
+    verifies each with RapidWright timing estimation, and auto-rolls back
+    degradations. Returns detailed per-candidate report + post_actions.
+
+    Args:
+        critical_paths: Path data from vivado_extract_critical_path_pins
+        max_ops: Maximum FF insertions (hard cap: 10). Default: 5.
+        min_chain_depth: Minimum LUT chain depth. Default: 2.
+        wns_threshold: Only target paths with slack worse than this. Default: -0.3.
+        verify_each: Run report_timing after each insertion. Default: True.
+        auto_rollback: Restore checkpoint on estimated degradation. Default: True.
+        temp_dir: Checkpoint output directory. Default: "temp".
+        checkpoint_prefix: Checkpoint filename prefix. Default: "smart_retime".
+        max_fanout_for_insertion: Skip nets with fanout exceeding this. Default: 50.
+
+    Returns:
+        dict with summary, per_candidate details, checkpoint paths, post_actions
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+    if _current_design is None:
+        return {"error": "No design loaded. Use read_checkpoint first."}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("smart_retiming")
+        if skill is None:
+            return {"error": "Skill 'smart_retiming' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            max_ops=max_ops,
+            min_chain_depth=min_chain_depth,
+            wns_threshold=wns_threshold,
+            verify_each=verify_each,
+            auto_rollback=auto_rollback,
+            temp_dir=temp_dir,
+            checkpoint_prefix=checkpoint_prefix,
+            max_fanout_for_insertion=max_fanout_for_insertion,
+        )
+
+        if not result.success:
+            return {"error": result.error or "Unknown error"}
+
+        return result.data
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error in smart retiming: {e}")
+        return {"error": str(e)}
+
+
 def route_design_rwroute(
     directive: str = "TimingDriven",
     timeout_minutes: int = 360,

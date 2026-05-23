@@ -157,6 +157,26 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "SmartRetiming": {
+        "name": "Smart Register Retiming (Verified Pipeline Insertion)",
+        "trigger": "WNS stuck, critical paths have deep combinational chains "
+                   "(>2 LUTs) between pipeline registers, FF>0 required",
+        "sequence": [
+            {"step": "extract_critical_path_pins", "platform": "Vivado",
+             "params": {"num_paths": 20},
+             "note": "Extract pin-level critical path data for analysis"},
+            {"step": "smart_retiming", "platform": "RapidWright",
+             "params": {"verify_each": True, "auto_rollback": True, "max_ops": 5},
+             "note": "Score candidates, insert FFs incrementally, verify each, "
+                     "auto-rollback degradations, writes final checkpoint"},
+            {"step": "open_checkpoint", "platform": "Vivado", "params": None},
+            {"step": "route_design", "platform": "Vivado", "params": None},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+            {"step": "compare_design_structure", "platform": "RapidWright",
+             "params": {"golden_dcp": "original DCP path", "revised_dcp": "final checkpoint"},
+             "note": "OPTIONAL: verify structural equivalence if golden DCP available"},
+        ],
+    },
     "NetSwap": {
         "name": "Net Swapping Optimization",
         "trigger": "Routing congestion within SLICE sites, LUT pairs with swappable input nets",
@@ -185,6 +205,7 @@ STRATEGY_LABEL_MAP = {
     "CongestionSpreading": "CongestionSpreading",
     "RegisterRetiming": "RegisterRetiming",
     "NetSwap": "NetSwap",
+    "SmartRetiming": "SmartRetiming",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -196,6 +217,7 @@ STRATEGY_SKILL_MAP = {
     "CellReplication": "critical_path_cell_replication",
     "CongestionSpreading": "execute_congestion_spreading",
     "RegisterRetiming": "execute_register_retiming",
+    "SmartRetiming": "smart_retiming",
     "NetSwap": "execute_net_swapping",
 }
 
@@ -373,16 +395,27 @@ def get_scenario_guide() -> str:
     return "\n".join(lines)
 
 
-def get_strategy_catalog() -> str:
-    """Compact strategy catalog for system prompt (names + purposes only)."""
+def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
+    """Compact strategy catalog for system prompt (names + purposes only).
+
+    Args:
+        exclude_strategies: Strategy keys to omit from the catalog
+            (e.g., strategies with reason='strategy_ineffective').
+    """
+    excluded = set(exclude_strategies or [])
     parts = ["Available strategies:"]
     # ordered list matching original numbering
     ordered = ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade",
-               "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]
+               "CellReplication", "CongestionSpreading", "RegisterRetiming",
+               "SmartRetiming", "NetSwap"]
     for i, key in enumerate(ordered, 1):
+        if key in excluded:
+            continue
         s = STRATEGIES.get(key)
         if s:
             parts.append(f"  strategy_{i}: {s['name']} (trigger: {s['trigger']})")
+    if not parts[1:]:
+        parts.append("  (all strategies excluded)")
     return "\n".join(parts)
 
 

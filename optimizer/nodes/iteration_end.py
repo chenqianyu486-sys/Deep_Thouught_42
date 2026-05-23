@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from ..state import OptimizerState
+from ..state import OptimizerState, record_flow_signal
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.iteration_logic import (
@@ -57,13 +57,28 @@ async def iteration_end_node(
 
     is_rollback = state.control.done_reason == "rollback"
 
+    # Compute strategy label before any usage (must precede the counters/narrative block)
+    tools_this_iter = state.iteration.tools_used
+    strategy_label = state.strategy.current_strategy or infer_strategy_from_tools(tools_this_iter)
+
     # Update counters (skip for rollback — design will be restored)
     if not is_rollback:
         update_iteration_counters(state, wns_improved, state.model.current_model)
-
-    # Build narrative (skip for rollback — state is about to be restored)
-    tools_this_iter = state.iteration.tools_used
-    strategy_label = state.strategy.current_strategy or infer_strategy_from_tools(tools_this_iter)
+        # Record iteration outcome signal
+        if wns_improved:
+            record_flow_signal(state, "ITERATION_IMPROVED",
+                               f"wns_delta={state.timing.best_wns - state.timing.prev_best_wns:.3f}" if state.timing.prev_best_wns is not None else "initial_improvement",
+                               phase="ITERATION_END",
+                               strategy=strategy_label)
+        elif state.control.done_reason == "iteration_success":
+            record_flow_signal(state, "ITERATION_SUCCESS", "llm_signaled_success",
+                               phase="ITERATION_END", strategy=strategy_label)
+        elif state.control.done_reason == "switch_strategy":
+            record_flow_signal(state, "ITERATION_FAILED", "strategy_switch",
+                               phase="ITERATION_END", strategy=strategy_label)
+        else:
+            record_flow_signal(state, "ITERATION_COMPLETE", "no_improvement",
+                               phase="ITERATION_END", strategy=strategy_label)
 
     if not is_rollback:
         narrative = build_iteration_narrative(
@@ -200,8 +215,6 @@ _EMPTY_RESULT_PATTERNS = (
     "no cells exceeded",
     "no deep combinational",
     "no actionable results",
-    "optimized_count: 0",
-    "optimized_count\": 0",
     "total_candidates\": 0",
     "no high fanout",
 )

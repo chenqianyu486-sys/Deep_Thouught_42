@@ -1098,6 +1098,74 @@ If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint."""
             }
         ),
         Tool(
+            name="smart_retiming",
+            description="""Smart register retiming with incremental verification and auto-rollback.
+
+Scores and prioritizes retiming candidates (by chain depth × |slack| / ln(fanout+1)),
+inserts pipeline FFs one at a time, verifies each with RapidWright timing estimation
+(~2.5s), and automatically rolls back degradations.
+
+MUTATING: creates new FF cells, modifies net topology, writes checkpoint files.
+After completion, post_actions include Vivado steps for final sign-off.
+
+ADVANTAGE over execute_register_retiming: verifies each insertion incrementally,
+auto-rolls back degradations, scores and deduplicates candidates.
+
+Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs)
+between pipeline registers, FF>0 required.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "List of path dicts from Vivado extract_critical_path_pins"
+                    },
+                    "max_ops": {
+                        "type": "integer",
+                        "description": "Maximum FF insertions (hard cap: 10). Default: 5.",
+                        "default": 5
+                    },
+                    "min_chain_depth": {
+                        "type": "integer",
+                        "description": "Minimum LUT chain depth to consider. Default: 2.",
+                        "default": 2
+                    },
+                    "wns_threshold": {
+                        "type": "number",
+                        "description": "Only target paths with slack worse than this (ns). Default: -0.3.",
+                        "default": -0.3
+                    },
+                    "verify_each": {
+                        "type": "boolean",
+                        "description": "Run RapidWright report_timing after each FF insertion. Default: True.",
+                        "default": True
+                    },
+                    "auto_rollback": {
+                        "type": "boolean",
+                        "description": "Restore pre-insertion checkpoint on estimated degradation. Default: True.",
+                        "default": True
+                    },
+                    "temp_dir": {
+                        "type": "string",
+                        "description": "Directory for intermediate checkpoints. Default: 'temp'.",
+                        "default": "temp"
+                    },
+                    "checkpoint_prefix": {
+                        "type": "string",
+                        "description": "Filename prefix for saved checkpoints. Default: 'smart_retime'.",
+                        "default": "smart_retime"
+                    },
+                    "max_fanout_for_insertion": {
+                        "type": "integer",
+                        "description": "Skip insertion points with net fanout exceeding this. Default: 50.",
+                        "default": 50
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
             name="analyze_net_swapping",
             description="""Identify net swap candidates within SLICE sites.
 
@@ -1435,6 +1503,22 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     max_retiming_ops=arguments.get("max_retiming_ops", 5),
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "register_retime"),
+                )
+
+        elif name == "smart_retiming":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
+            else:
+                result = rw.smart_retiming(
+                    critical_paths=arguments["critical_paths"],
+                    max_ops=arguments.get("max_ops", 5),
+                    min_chain_depth=arguments.get("min_chain_depth", 2),
+                    wns_threshold=arguments.get("wns_threshold", -0.3),
+                    verify_each=arguments.get("verify_each", True),
+                    auto_rollback=arguments.get("auto_rollback", True),
+                    temp_dir=arguments.get("temp_dir", "temp"),
+                    checkpoint_prefix=arguments.get("checkpoint_prefix", "smart_retime"),
+                    max_fanout_for_insertion=arguments.get("max_fanout_for_insertion", 50),
                 )
 
         elif name == "analyze_net_swapping":
