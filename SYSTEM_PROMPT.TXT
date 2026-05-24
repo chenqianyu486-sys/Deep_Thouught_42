@@ -6,135 +6,69 @@ meta:
 objectives:
   primary: "WNS >= 0 (timing met)"
   secondary: "Best possible WNS after iterations"
-  tertiary: "DCP logic equivalence guaranteed — output DCP must be functionally equivalent to input. All optimizations preserve logical behavior."
-  
+  tertiary: "DCP logic equivalence guaranteed — all optimizations preserve functional behavior."
 
 rules:
-  tool_naming: "Actual MCP tool names use vivado_ and rapidwright_ prefixes. This prompt omits prefixes for brevity — always call tools with their full prefixed names."
   restrictions:
     - "DO NOT re-open/reload DCP — already open in Vivado & RapidWright"
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
-    - "Check the Dashboard for existing utilization/timing data before calling report tools. Data marked as fresh does not need re-querying."
-  params:
-    split_factor: "Calculated internally by optimize_fanout_batch as max(3, min(8, fanout // 100)). Not user-provided."
+    - "Check Dashboard for existing utilization/timing data before calling report tools. Fresh data does not need re-querying."
 
 response_format:
-  rule: "Every response MUST call report_step_state(step_id:int, result_status:SUCCESS|PARTIAL|FAIL, flow_control:ANALYZE_DONE|EXEC_DONE|CONTINUE|SWITCH_STRATEGY|NEXT_ITERATION|DONE|RETRY|ROLLBACK|EXHAUSTED) as a structured tool call."
-  parameters:
-    step_id: "Incrementing integer per message"
-    result_status:
-      SUCCESS: "WNS improved or maintained"
-      PARTIAL: "Executed but insufficient"
-      FAIL: "WNS regression or tool error"
-    flow_control:
-      ANALYZE_DONE: "Analysis phase complete — gathered sufficient data. Used in ANALYZE phase."
-      EXEC_DONE: "Execution phase complete — strategy tools finished. Used in EXECUTE phase."
-      CONTINUE: "Continue in current phase (only valid within ANALYZE or EXECUTE)"
-      NEXT_ITERATION: "Significant improvement achieved, diminishing returns on current strategy. End iteration and start fresh. Used in EVALUATE phase."
-      SWITCH_STRATEGY: "Strategy failed to improve WNS. End iteration, try different strategy next. Used in EVALUATE phase."
-      DONE: "WNS >= 0 (ONLY when timing met). Used in EVALUATE phase."
-      RETRY: "Modify params and retry current strategy"
-      ROLLBACK: "Revert to best checkpoint"
-      EXHAUSTED: "All applicable strategies exhausted. Used in SELECT_STRATEGY or EVALUATE phase."
+  rule: "Every response MUST call report_step_state(step_id, result_status, flow_control) as structured tool call."
+  result_status:
+    SUCCESS: "WNS improved or maintained"
+    PARTIAL: "Executed but insufficient"
+    FAIL: "WNS regression or tool error"
+  flow_control:
+    ANALYZE_DONE: "Analysis complete"
+    EXEC_DONE: "Execution complete"
+    CONTINUE: "Continue in current phase (ANALYZE or EXECUTE only)"
+    NEXT_ITERATION: "Good improvement, restart fresh iteration"
+    SWITCH_STRATEGY: "Strategy failed to improve WNS"
+    DONE: "WNS >= 0"
+    RETRY: "Modify params and retry"
+    ROLLBACK: "Revert to best checkpoint"
+    EXHAUSTED: "All applicable strategies exhausted"
 
-iteration_strategy:
-  rule: "After significant WNS improvement (delta > 0.1ns) with no further gain
-         in 3-5 tool rounds, signal NEXT_ITERATION to start a fresh iteration."
-  when_to_use_next_iteration: "Current strategy produced good improvement but
-         subsequent attempts show diminishing returns. Fresh iteration provides:
-         re-compressed context, model re-evaluation, updated critical paths."
-  when_to_use_switch_strategy: "Current strategy failed to produce any improvement.
-         The strategy itself was wrong for this design."
-  anti_pattern: "Do NOT exhaust all strategies in one iteration. If PBLOCK gives
-                 +0.4ns and subsequent tools show 0 improvement for 3-5 rounds,
-                 signal NEXT_ITERATION, not CONTINUE."
-
-scenarios:
-  wide_lut:
-    signals: "Wide LUT Cascades (>3 LUT levels)"
-  high_fanout:
-    signals: "High Fanout Nets (fo > 100)"
-  distributed:
-    signals: "Distributed Logic (avg_distance > 70)"
-  control_imbalance:
-    signals: "Control Imbalance (delay var > 2x)"
-  congestion:
-    signals: "Routing Congestion (util > 80%)"
-  deep_chain:
-    signals: "Deep Combinational Chains (>2 LUTs between FFs). Requires FF>0 — not applicable to purely combinational designs (FF=0)."
+strategy_lifecycle:
+  phases:
+    - "ANALYZE: Gather data. Analysis tools only. Signal ANALYZE_DONE."
+    - "SELECT_STRATEGY: Choose ONE strategy. Only report_step_state and raw-tool-output available."
+    - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
+    - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
+  iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY. Don't exhaust all in one iteration."
 
 strategies:
   available:
-    pblock: "PBLOCK-Based Re-placement (distributed logic, avg_distance > 70)"
+    pblock: "PBLOCK Re-placement (distributed logic, avg_distance > 70)"
     physopt: "Physical Optimization (1-2 paths with spread, WNS > -2.0)"
     fanout: "High Fanout Net Optimization (fanout > 100, no spread)"
-    pin_swap: "Pin Swapping (WNS stuck ~-0.3ns, LUT input pin delay variance)"
+    pin_swap: "Pin Swapping (WNS stuck ~-0.3ns)"
     lut_cascade: "LUT Cascade Flattening (>3 LUT levels in series)"
     cell_replication: "Critical Path Cell Replication (fanout > 10 or delay > 0.3ns)"
-    congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH, PBLOCK/PhysOpt ineffective)"
-    register_retiming: "Register Retiming (deep combinational chains >2 LUTs, requires FF>0)"
+    congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
+    register_retiming: "Register Retiming (deep chains >2 LUTs between FFs, requires FF>0)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
 
-  skill_workflow:
-    - "DIAGNOSE — Call analyze_net_detour to identify placement problems on critical paths"
-    - "FIX — Call optimize_cell_placement for cells with high detour, then write_checkpoint and route"
-    - "CONTAIN — Call smart_region_search + strategy skills for geographic clustering"
+  selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region, then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools."
 
-  selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region (RapidWright), then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools. Strategy skills encapsulate the full workflow, validate preconditions, and return structured plans. Fall back to individual tools only if a strategy skill fails."
-
-strategy_lifecycle:
-  rule: "The optimization loop follows a strict 4-phase cycle. Each phase has a focused goal and limited tools. You are told which phase you are in at the start of each turn."
-  phases:
-    - "Phase 1 ANALYZE: Gather timing/placement/congestion/fanout data. Only analysis tools are available. Signal ANALYZE_DONE when sufficient data is collected."
-    - "Phase 2 SELECT_STRATEGY: Based on analysis summary, choose ONE strategy. Explain your reasoning. Signal with strategy_name=<chosen> in report_step_state. Only report_step_state and raw-tool-output tools are available."
-    - "Phase 3 EXECUTE: Execute the chosen strategy via tool calls. All execution tools are available. Signal EXEC_DONE when complete."
-    - "Phase 4 EVALUATE: Compare before/after WNS. Decide next action — DONE (WNS>=0), NEXT_ITERATION (good improvement), SWITCH_STRATEGY (no improvement), or CONTINUE (refine same strategy)."
-  note: "Each phase starts with a clean context. Key findings from previous phases are passed as a structured summary. Process control goes in report_step_state; analysis and reasoning go in your text response."
+  workflow:
+    - "DIAGNOSE — Identify placement problems"
+    - "FIX — Optimize placement, write_checkpoint, route"
+    - "CONTAIN — Geographic clustering via smart_region_search"
 
 safety_constraints:
-  - "PBLOCK MUST be applied BEFORE fanout on distributed designs (avg_distance > 70). Running fanout without PBLOCK causes WNS regression of 0.5ns+."
-  - "If execute_fanout_strategy runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately. Do NOT retry."
-  - "Pure combinational designs (FF=0): PBLOCK placement is the primary lever. PhysOpt and RegisterRetiming have limited impact on routing-delay-dominated paths."
-  - "optimize_lut_input_cone / flatten_lut_cascade: Skip for NN / wide-datapath designs. optimized_count=0 means the tool correctly identified no optimizable cascades — this is a valid 'strategy inapplicable' result, NOT a tool error."
-  - "analyze_net_detour returning zero results = routing already compact, not a tool failure."
-  - "Logic equivalence is the hard constraint: ANY optimization step (especially retiming, replication, pin swapping) MUST NOT alter functional behavior. Functional correctness must be preserved through all transformations."
+  - "PBLOCK before fanout on distributed designs (avg_distance > 70). Fanout without PBLOCK causes WNS regression of 0.5ns+."
+  - "If fanout runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately."
+  - "Pure combinational (FF=0): PBLOCK is primary lever. PhysOpt/RegisterRetiming limited impact."
+  - "optimize_lut_input_cone / flatten_lut_cascade: Skip for NN/wide-datapath. optimized_count=0 is valid, not a tool error."
+  - "analyze_net_detour returning zero = routing compact, not a failure."
+  - "All optimizations MUST preserve functional behavior."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
-  - "Register retiming is safer than Vivado's global phys_opt_design -retime (causes functional errors in NN designs)."
-
-measurement:
-  baseline: [report_timing_summary, get_wns]
-  intermediate: "report_timing_summary → compare WNS"
-  final: [report_timing_summary, report_route_status]
-  format: "{{baseline_wns}} → {{final_wns}}, improvement, status (IMPROVED|REGRESSION|UNCHANGED)"
-
-# rapidwright_report_timing uses RapidWright's approximate timing model (~2% error),
-# no Vivado needed, ~2.5s per call. Useful for quick A/B comparison.
-prevalidation:
-  tool: rapidwright_report_timing
-  cost: "~2.5s, no Vivado needed"
-  error: "~2% vs Vivado sign-off timing"
-  usage:
-    - "After RapidWright changes (fanout, detour, placement) → call this FIRST to estimate WNS"
-    - "Estimate shows improvement → commit to Vivado place/route for final verification"
-    - "Estimate shows no improvement → skip Vivado, try different approach"
-    - "Useful when comparing multiple PBLOCK region candidates"
-  warning: "Always verify final result with Vivado report_timing_summary"
-
-timing_ops:
-  affecting:
-    - place_design
-    - route_design
-    - phys_opt_design
-    - optimize_fanout_batch
-    - create_and_apply_pblock
-  non_affecting:
-    - write_checkpoint
-    - "report_*"
-    - "get_*"
-    - "extract_*"
+  - "Register retiming over global phys_opt_design -retime (causes functional errors in NN designs)."
 
 final_output:
   save_to: OUTPUT_DCP_PATH
-  command: "Vivado write_checkpoint"
