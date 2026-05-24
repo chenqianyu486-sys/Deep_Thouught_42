@@ -11,11 +11,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from pathlib import Path
 
 from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
+from ..pure.critical_path import parse_critical_path_cells, update_critical_paths
 from ..pure.timing import parse_timing_summary, parse_high_fanout_nets, parse_resource_utilization, parse_hold_timing
 from ..pure.tool_router import call_tool as call_tool_fn
 from config_loader import get_worker_model_config
@@ -198,6 +198,7 @@ async def init_analysis_node(
             deps.rapidwright_session, deps.vivado_session,
         )
         state.timing.resource_utilization = parse_resource_utilization(util_report)
+        logger.info(f"[init_analysis] Raw resource utilization: {state.timing.resource_utilization}")
 
         # Step 7: Load design in RapidWright
         result = await call_tool_fn(
@@ -241,20 +242,43 @@ async def init_analysis_node(
         except Exception as e:
             logger.warning(f"[init_analysis] Could not get device topology: {e}")
 
-        # Step 9: Extract critical path cells and analyze spread
+        # Step 8b: Analyze routing congestion
         try:
-            run_dir = state.control.run_dir or Path("/tmp")
-            temp_path = run_dir / "initial_critical_paths.json"
-
-            cells_json = await call_tool_fn(
-                "vivado_extract_critical_path_cells",
-                {"num_paths": 50, "output_file": str(temp_path)},
+            congestion_result = await call_tool_fn(
+                "analyze_congestion", {},
                 deps.rapidwright_session, deps.vivado_session,
             )
+            if isinstance(congestion_result, str):
+                congestion_data = json.loads(congestion_result)
+            else:
+                congestion_data = congestion_result
+            if "error" not in congestion_data:
+                state.timing.congestion_data = {
+                    "global_score": congestion_data.get("congested_ratio", 0.0),
+                    "pblock_overflow_count": 0,
+                }
+                logger.info(
+                    f"[init_analysis] Congestion: ratio={congestion_data.get('congested_ratio', 0.0):.3f}, "
+                    f"severity={congestion_data.get('severity', 'UNKNOWN')}"
+                )
+        except Exception as e:
+            logger.warning(f"[init_analysis] Could not analyze congestion: {e}")
+
+        # Step 9: Extract critical path cells and analyze spread
+        try:
+            cells_json = await call_tool_fn(
+                "vivado_extract_critical_path_cells",
+                {"num_paths": 50},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            cell_paths = parse_critical_path_cells(cells_json)
+            if cell_paths:
+                update_critical_paths(state, cell_paths, iteration=0)
+            cell_name_lists = [p["cells"] for p in cell_paths]
 
             spread_result = await call_tool_fn(
                 "rapidwright_analyze_critical_path_spread",
-                {"input_file": str(temp_path)},
+                {"critical_paths_data": cell_name_lists},
                 deps.rapidwright_session, deps.vivado_session,
             )
             spread_data = json.loads(spread_result)
