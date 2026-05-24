@@ -1336,7 +1336,7 @@ async def list_tools():
         ),
         Tool(
             name="get_wns",
-            description="Get the Worst Negative Slack (WNS) value directly. Returns just the numeric slack value in nanoseconds.",
+            description="DEPRECATED in optimization loop — WNS is shown in Dashboard Module 1 at every turn. Do NOT call this in ANALYZE/EVALUATE phases.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1508,9 +1508,9 @@ async def list_tools():
         ),
         Tool(
             name="get_resource_counts",
-            description="""Get structured resource counts (LUT, FF, DSP, BRAM) as JSON.
+            description="""DEPRECATED in optimization loop — utilization is shown in Dashboard Module 1 (lut_utilization, ff_utilization, etc.) at every turn. Do NOT call this in ANALYZE phase.
 
-            Efficiently parses report_utilization output server-side and returns clean JSON:
+            Legacy: returns structured resource counts (LUT, FF, DSP, BRAM) as JSON:
             {\"lut\": 30839, \"ff\": 1660, \"dsp\": 0, \"bram\": 0}
 
             Use this instead of running raw Tcl (foreach/get_cells) for resource queries.

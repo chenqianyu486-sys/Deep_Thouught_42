@@ -22,12 +22,10 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
         # Vivado timing/report tools
         "vivado_report_timing_summary",
-        "vivado_get_wns",
         "vivado_extract_critical_path_cells",
         "vivado_extract_critical_path_pins",
         "vivado_get_critical_high_fanout_nets",
         "vivado_report_utilization_for_pblock",
-        "vivado_get_resource_counts",
         "vivado_report_route_status",
         # RapidWright analysis tools
         "rapidwright_analyze_net_detour",
@@ -70,18 +68,18 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_route_design",
         "vivado_phys_opt_design",
         "vivado_write_checkpoint",
-        "vivado_get_resource_counts",
         "vivado_run_tcl",
         # Quick-check tools during execution
         "vivado_report_timing_summary",
         "vivado_get_wns",
+        # Cached data tools
+        "vivado_get_cached_high_fanout_nets",
         # Internal tools
         "report_step_state",
     }),
 
     LoopPhase.EVALUATE: frozenset({
         "vivado_report_timing_summary",
-        "vivado_get_wns",
         "vivado_report_route_status",
         "rapidwright_report_timing",
         "rapidwright_compare_design_structure",

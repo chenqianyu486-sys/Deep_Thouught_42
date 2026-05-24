@@ -14,7 +14,13 @@ rules:
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
-    - "Check Dashboard for existing utilization/timing data before calling report tools. Fresh data does not need re-querying."
+    - "CRITICAL: Dashboard Module 1 provides WNS, TNS, LUT/FF/BRAM/DSP utilization
+       before EVERY turn. Do NOT call get_wns or get_resource_counts — use the
+       dashboard values directly (they are the live state)."
+    - "For fanout data, ALWAYS use vivado_get_cached_high_fanout_nets (available in
+       ANALYZE, SELECT_STRATEGY, and EXECUTE phases). Do NOT run 'report_high_fanout_nets'
+       via vivado_run_tcl — the cached data is populated during initial analysis and is
+       the canonical source."
 
 response_format:
   rule: "Every response MUST call report_step_state(step_id, result_status, flow_control) as structured tool call."

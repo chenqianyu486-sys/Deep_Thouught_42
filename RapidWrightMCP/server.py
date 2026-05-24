@@ -175,7 +175,12 @@ async def list_tools() -> list[Tool]:
                     },
                     "cell_type": {
                         "type": "string",
-                        "description": "Cell type to filter by (e.g., 'LUT6', 'FDRE', optional)"
+                        "description": "Single cell type to filter by (e.g., 'LUT6', 'FDRE', optional)"
+                    },
+                    "cell_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of cell types to search for in one call (e.g., ['LUT6', 'FDRE', 'DSP48E2']). Use this instead of calling search_cells repeatedly for different types."
                     },
                     "limit": {
                         "type": "integer",
@@ -1309,6 +1314,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = rw.search_cells(
                 pattern=arguments.get("pattern"),
                 cell_type=arguments.get("cell_type"),
+                cell_types=arguments.get("cell_types"),
                 limit=arguments.get("limit", 100)
             )
         

@@ -110,10 +110,53 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_extract_critical_path_pins": frozenset({"critical_path_spread"}),
 }
 
+
+# ── Per-phase tool rate limits ────────────────────────────────────
+# Prevents LLM from repeatedly calling the same read-only tool within
+# a single phase. When exceeded, the call returns a rate-limit message
+# directing the LLM to use alternatives (dashboard data, batch params).
+PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
+    "rapidwright_search_cells": 3,
+    "vivado_run_tcl": 5,
+}
+
 # ── Skill chain actions ──────────────────────────────────────────
 # After a skill completes, auto-execute the listed MCP tools in order.
 # Each step: {"tool": str, "args": dict, "args_from_skill": {param: skill_result_key}}
 # args_from_skill extracts values from the skill's returned data dict.
+# ── LLM extra_body builder (with prompt caching) ────────────────
+
+def build_llm_extra_body(
+    reasoning_config: dict | None,
+    model: str,
+    planner_model: str,
+    worker_model: str,
+) -> dict:
+    """Build extra_body for LLM API calls with prompt caching + reasoning config.
+
+    Always enables OpenRouter prompt caching so the system prompt prefix
+    is cached across repeated calls, reducing token waste.
+    """
+    extra: dict = {"cache": {"prompt": True}}
+
+    if reasoning_config:
+        tier_key = None
+        if model == planner_model:
+            tier_key = "planner"
+        elif model == worker_model:
+            tier_key = "worker"
+        if tier_key:
+            cfg = reasoning_config.get(tier_key)
+            if cfg and cfg.get("enabled"):
+                reasoning_payload: dict[str, bool | int] = {"enabled": True}
+                max_output = cfg.get("max_output_tokens")
+                if max_output is not None:
+                    reasoning_payload["max_output_tokens"] = max_output
+                extra["reasoning"] = reasoning_payload
+
+    return extra
+
+
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
         {"tool": "vivado_place_design", "args": {"directive": "unplace"}},

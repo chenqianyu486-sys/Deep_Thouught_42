@@ -27,6 +27,7 @@ from .constants import (
     SMALL_OUTPUT_THRESHOLD,
     TOOL_RESULT_TRUNCATE,
     RECENT_TURNS_TO_KEEP,
+    build_llm_extra_body,
 )
 from .model_select import (
     classify_task,
@@ -78,6 +79,7 @@ __all__ = [
     "WORKER_UPGRADE_THRESHOLD", "WORKER_DOWNGRADE_THRESHOLD",
     "GLOBAL_NO_IMPROVEMENT_LIMIT", "WNS_TARGET_THRESHOLD",
     "SMALL_OUTPUT_THRESHOLD", "TOOL_RESULT_TRUNCATE", "RECENT_TURNS_TO_KEEP",
+    "build_llm_extra_body",
     # model_select
     "classify_task", "get_task_capability_score", "estimate_context_complexity",
     "compute_model_scores", "select_model",

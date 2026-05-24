@@ -233,6 +233,8 @@ class ContextState:
     failed_strategies: list[FailedStrategyRecord] = field(default_factory=list)
     # Tool result cache: tool_name:args_hash -> (round, result). Cleared on phase transition.
     tool_cache: dict[str, tuple[int, str]] = field(default_factory=dict)
+    # Per-phase tool call counters for rate limiting. Reset at each phase entry.
+    tool_phase_call_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

@@ -19,7 +19,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
@@ -37,6 +37,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     tool_round = 0
     tools_called: list[str] = []
     llm_summary = ""
+    state.context.tool_phase_call_counts.clear()
 
     while True:
         tool_round += 1
@@ -112,6 +113,25 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     tool_args = {}
+
+                # Rate limiting for read-only tools
+                if tool_name in PHASE_TOOL_RATE_LIMITS:
+                    call_count = state.context.tool_phase_call_counts.get(tool_name, 0) + 1
+                    state.context.tool_phase_call_counts[tool_name] = call_count
+                    if call_count > PHASE_TOOL_RATE_LIMITS[tool_name]:
+                        result = (f"[RATE LIMITED] Tool '{tool_name}' called {call_count} times this phase "
+                                  f"(limit: {PHASE_TOOL_RATE_LIMITS[tool_name]}). ")
+                        if tool_name == "rapidwright_search_cells":
+                            result += ("Use cell_types parameter to batch multiple types in one call, "
+                                       "or get_design_info for type overview.")
+                        elif tool_name == "vivado_run_tcl":
+                            result += ("Use dedicated tools (vivado_get_cached_high_fanout_nets, "
+                                       "vivado_report_timing_summary) instead of raw Tcl.")
+                        if deps.compat is not None:
+                            deps.compat.add_message("tool", result, {
+                                "tool_call_id": tc.id, "name": tool_name,
+                            })
+                        continue
 
                 tool_start = time.time()
                 result = await call_tool_fn(
@@ -228,21 +248,10 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     model = state.model.current_model
     state.model.llm_call_count += 1
 
-    # Build reasoning config
-    reasoning_cfg = None
-    if deps.reasoning_config:
-        if model == state.model.planner_model:
-            reasoning_cfg = deps.reasoning_config.get("planner")
-        elif model == state.model.worker_model:
-            reasoning_cfg = deps.reasoning_config.get("worker")
-
-    extra_body = None
-    if reasoning_cfg and reasoning_cfg.get("enabled"):
-        reasoning_payload = {"enabled": True}
-        max_output = reasoning_cfg.get("max_output_tokens")
-        if max_output is not None:
-            reasoning_payload["max_output_tokens"] = max_output
-        extra_body = {"reasoning": reasoning_payload}
+    extra_body = build_llm_extra_body(
+        deps.reasoning_config, model,
+        state.model.planner_model, state.model.worker_model,
+    )
 
     last_exception = None
     for retry in range(max_retries):

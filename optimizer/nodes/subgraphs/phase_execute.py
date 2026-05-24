@@ -22,7 +22,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -49,6 +49,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     tools_called: list[str] = []
     wns_before = state.timing.latest_wns
     llm_summary = ""
+    state.context.tool_phase_call_counts.clear()
     reached_callback = False  # track if the strategy reached callback indicating completion
 
     # Record phase entry
@@ -164,6 +165,25 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if "resource_multiplier" not in tool_args:
                         tool_args["resource_multiplier"] = _compute_adaptive_pblock_multiplier(state)
                         logger.info(f"[EXECUTE] Adaptive resource_multiplier: {tool_args['resource_multiplier']:.2f}")
+
+                # Rate limiting for read-only tools
+                if tool_name in PHASE_TOOL_RATE_LIMITS:
+                    call_count = state.context.tool_phase_call_counts.get(tool_name, 0) + 1
+                    state.context.tool_phase_call_counts[tool_name] = call_count
+                    if call_count > PHASE_TOOL_RATE_LIMITS[tool_name]:
+                        result = (f"[RATE LIMITED] Tool '{tool_name}' called {call_count} times this phase "
+                                  f"(limit: {PHASE_TOOL_RATE_LIMITS[tool_name]}). ")
+                        if tool_name == "rapidwright_search_cells":
+                            result += ("Use cell_types parameter to batch multiple types in one call, "
+                                       "or get_design_info for type overview.")
+                        elif tool_name == "vivado_run_tcl":
+                            result += ("Use dedicated tools (vivado_get_cached_high_fanout_nets, "
+                                       "vivado_report_timing_summary) instead of raw Tcl.")
+                        if deps.compat is not None:
+                            deps.compat.add_message("tool", result, {
+                                "tool_call_id": tc.id, "name": tool_name,
+                            })
+                        continue
 
                 tool_start = time.time()
                 logger.info(f"[EXECUTE] Calling {tool_name}")
@@ -337,20 +357,10 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     model = state.model.current_model
     state.model.llm_call_count += 1
 
-    reasoning_cfg = None
-    if deps.reasoning_config:
-        if model == state.model.planner_model:
-            reasoning_cfg = deps.reasoning_config.get("planner")
-        elif model == state.model.worker_model:
-            reasoning_cfg = deps.reasoning_config.get("worker")
-
-    extra_body = None
-    if reasoning_cfg and reasoning_cfg.get("enabled"):
-        reasoning_payload = {"enabled": True}
-        max_output = reasoning_cfg.get("max_output_tokens")
-        if max_output is not None:
-            reasoning_payload["max_output_tokens"] = max_output
-        extra_body = {"reasoning": reasoning_payload}
+    extra_body = build_llm_extra_body(
+        deps.reasoning_config, model,
+        state.model.planner_model, state.model.worker_model,
+    )
 
     last_exception = None
     for retry in range(max_retries):
@@ -668,12 +678,12 @@ def _compute_adaptive_pblock_multiplier(state) -> float:
     # Local utilization (preferred) — fallback to global if not available
     util = _get_local_pblock_utilization(state)
     if util is None:
-        lut_used = state.timing.utilization.get("LUT", 0)
-        lut_total = state.timing.device_capacity.get("LUT", 1)
+        lut_used = state.timing.resource_utilization.get("LUT", 0) if state.timing.resource_utilization else 0
+        lut_total = state.timing.device_capacity.get("LUT", 1) if state.timing.device_capacity else 1
         util = lut_used / max(lut_total, 1)
 
     # Size-aware decay: larger modules need less relative multiplier
-    lut_count = state.timing.utilization.get("LUT", 0)
+    lut_count = state.timing.resource_utilization.get("LUT", 0) if state.timing.resource_utilization else 0
     size_penalty = 0.1 * math.log10(max(lut_count, 1))
 
     multiplier = 1.2 + util * 0.3 - size_penalty

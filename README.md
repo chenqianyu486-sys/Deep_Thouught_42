@@ -99,8 +99,10 @@ init_analysis ──► [WNS >= 0?]
 | 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
 | 12 | DCP identity integrity | `vivado_open_checkpoint` removed from LLM tool whitelist in EXECUTE phase |
 | 13 | **Critical path-aware PBLOCK** | PBLOCK region selection centers on critical-path cells (top 10 paths) via automatic `critical_path_cells` injection in EXECUTE phase. Distance weight `0.3` balances proximity vs. region tightness — configurable via `distance_weight_factor`. Principle #7: `state.timing.critical_paths` as single source of truth for cell positions. |
-| 14 | **Tool result caching** | Phase-local tool cache avoids redundant MCP calls when LLM requests the same tool+args repeatedly. Cache cleared on phase transition. |
-| 15 | **Adaptive PBLOCK multiplier** | `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))` — automatically tightens PBLOCK region at low utilization, expands at high utilization. `util_local` preferred, falls back to global chip utilization. |
+| 14 | **Tool result caching** | Phase-local tool cache avoids redundant MCP calls when LLM requests the same tool+args repeatedly. Cache auto-invalidated after any side-effect execution tool (place_design, route_design, etc.) to prevent stale physical data. |
+| 15 | **Read-only tool whitelist control** | Tools redundant with Dashboard data (`get_wns`, `get_resource_counts`) removed from ANALYZE/EVALUATE whitelists. Rate limiting (max 3 calls/phase for `search_cells`, max 5 for `vivado_run_tcl`) prevents LLM from exhausting rounds on repeated queries. |
+| 16 | **Adaptive PBLOCK multiplier** | `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))` — automatically tightens PBLOCK region at low utilization, expands at high utilization. `util_local` preferred, falls back to global chip utilization. |
+| 17 | **LLM prompt caching** | Every API call sends `{"cache": {"prompt": true}}` via `extra_body`. OpenRouter caches the system prompt prefix across repeated calls in the same session, saving ~4KB per call × 44 calls ≈ 176KB per iteration. Shared `build_llm_extra_body()` in `optimizer/pure/constants.py`. |
 
 ---
 
@@ -438,8 +440,10 @@ init_analysis ──► [WNS >= 0?]
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
 | 12 | DCP 身份完整性 | 在 EXECUTE 阶段，将 `vivado_open_checkpoint` 从 LLM 工具白名单中移除 |
-| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；phase 切换时清空 |
-| 14 | **PBLOCK 自适应紧缩** | 公式 `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))`，低利用率自动紧缩 region，高利用率自动宽松 |
+| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；执行工具（place_design, route_design 等）后自动失效缓存防止物理数据过期 |
+| 14 | **只读工具白名单控制** | 与 Dashboard 数据冗余的工具（`get_wns`, `get_resource_counts`）从 ANALYZE/EVALUATE 白名单移除；Rate limiting（`search_cells` 最多 3 次/phase, `vivado_run_tcl` 最多 5 次/phase）防止 LLM 浪费轮次 |
+| 15 | **PBLOCK 自适应紧缩** | 公式 `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))`，低利用率自动紧缩 region，高利用率自动宽松 |
+| 16 | **LLM 提示缓存** | 每次 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`。OpenRouter 在同一会话的重复调用间缓存系统提示前缀，每轮迭代节省约 4KB×44 次 ≈ 176KB tokens。共享函数 `build_llm_extra_body()` 位于 `optimizer/pure/constants.py`。 |
 
 ---
 

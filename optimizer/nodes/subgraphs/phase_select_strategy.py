@@ -19,6 +19,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.step_state import extract_step_state
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
+from optimizer.pure.constants import build_llm_extra_body
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -203,21 +204,10 @@ async def _call_phase_llm(state, deps, phase_tools):
     model = state.model.current_model
     state.model.llm_call_count += 1
 
-    # Build reasoning config
-    reasoning_cfg = None
-    if deps.reasoning_config:
-        if model == state.model.planner_model:
-            reasoning_cfg = deps.reasoning_config.get("planner")
-        elif model == state.model.worker_model:
-            reasoning_cfg = deps.reasoning_config.get("worker")
-
-    extra_body = None
-    if reasoning_cfg and reasoning_cfg.get("enabled"):
-        reasoning_payload = {"enabled": True}
-        max_output = reasoning_cfg.get("max_output_tokens")
-        if max_output is not None:
-            reasoning_payload["max_output_tokens"] = max_output
-        extra_body = {"reasoning": reasoning_payload}
+    extra_body = build_llm_extra_body(
+        deps.reasoning_config, model,
+        state.model.planner_model, state.model.worker_model,
+    )
 
     try:
         kwargs = dict(

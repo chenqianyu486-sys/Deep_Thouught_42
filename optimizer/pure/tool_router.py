@@ -196,19 +196,27 @@ async def call_tool(
                 if tool_name == "vivado_open_checkpoint":
                     dcp_path = arguments.get("dcp_path", "?")
                     logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
-                # Cache successful result
-                if tool_cache is not None and tool_name not in _NO_CACHE_TOOLS:
-                    cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
-                    tool_cache[cache_key] = (tool_round, result_text)
+                # Cache successful result, or invalidate cache after side-effect tool
+                if tool_cache is not None:
+                    if tool_name not in _NO_CACHE_TOOLS:
+                        cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+                        tool_cache[cache_key] = (tool_round, result_text)
+                    else:
+                        tool_cache.clear()
+                        logger.info(f"[CACHE_INVALIDATED] by {tool_name} (round {tool_round})")
                 return result_text
             logger.info(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                 f"result_size=0 chars, heartbeats={heartbeat_count}"
             )
-            # Cache empty result too (no output is still a valid result)
-            if tool_cache is not None and tool_name not in _NO_CACHE_TOOLS:
-                cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
-                tool_cache[cache_key] = (tool_round, "(no output)")
+            # Cache empty result too, or invalidate cache after side-effect tool
+            if tool_cache is not None:
+                if tool_name not in _NO_CACHE_TOOLS:
+                    cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+                    tool_cache[cache_key] = (tool_round, "(no output)")
+                else:
+                    tool_cache.clear()
+                    logger.info(f"[CACHE_INVALIDATED] by {tool_name} (round {tool_round})")
             return "(no output)"
         except asyncio.TimeoutError:
             elapsed = time.time() - start_time

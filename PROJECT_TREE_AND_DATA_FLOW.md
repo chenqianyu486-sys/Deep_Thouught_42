@@ -96,7 +96,7 @@ llm_tool_loop_node (调度器)
   │    if phase==EVALUATE && done_reason: exit
   │
   ├── ANALYZE ─────────→ SELECT_STRATEGY
-  │  仅分析工具(~18个)   极简工具(~4个)
+  │  仅分析工具(~16个)   极简工具(~4个)
   │  最多12轮             最多6轮
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
@@ -104,8 +104,9 @@ llm_tool_loop_node (调度器)
   │                      最多30轮, SKILL_CHAIN 自动串联
   │
   ├── EXECUTE ─────────→ EVALUATE
-  │  链式动作+事后评估    评估工具(~8个)
-  │  工具结果缓存(同phase内相同参数自动命中)   PBLOCK自适应multiplier(公式C)
+  │  链式动作+事后评估    评估工具(~7个, 不含vivado_get_wns)
+  │  工具结果缓存(同phase内相同参数自动命中, 执行工具后自动失效)
+  │  PBLOCK自适应multiplier(公式C)
   │  DCP身份保护          最多30轮
   │
   └── EVALUATE → (exit) 或 ANALYZE
@@ -133,8 +134,10 @@ llm_tool_loop_node (调度器)
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
 | 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
 | 12 | DCP 身份完整 | EXECUTE 阶段移除 vivado_open_checkpoint 白名单 |
-| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；phase 切换时清空 |
-| 14 | **PBLOCK 自适应紧缩** | 采用公式 `M = max(1.10, 1.2 + util_local × 0.3 - 0.1×log10(N_LUT))`，低利用率自动紧缩 region |
+| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；执行工具（place_design, route_design 等）后自动失效缓存防止过期物理数据 |
+| 14 | **只读工具白名单控制** | 与 Dashboard 冗余的 get_wns/get_resource_counts 在 ANALYZE/EVALUATE 阶段移除白名单；search_cells 限 3 次/phase，run_tcl 限 5 次/phase |
+| 15 | **PBLOCK 自适应紧缩** | 采用公式 `M = max(1.10, 1.2 + util_local × 0.3 - 0.1×log10(N_LUT))`，低利用率自动紧缩 region |
+| 16 | **LLM 提示缓存** | 每次 LLM 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，OpenRouter 在同一会话中缓存系统提示前缀。所有阶段（ANALYZE/SELECT/EXECUTE/EVALUATE）的 `_call_phase_llm()` 均通过共享函数 `build_llm_extra_body()`（`optimizer/pure/constants.py`）统一构造 extra_body，消除4份重复代码。 |
 
 ## 3. 核心数据流
 
@@ -222,7 +225,8 @@ dynamic_gradient:
 | 最近 N 轮消息 | `preserve_role_turns=6` 保留原始 role |
 | report_step_state 格式 | 双重提醒：① 一次性 User FORMAT_GUARD ② 每调用前 System prompt 压印 |
 | 工具重复检测 | `_recent_tools` 滑动窗口，>=3次+delta<0.05ns → REPETITION DETECTED |
-| 工具结果缓存 | `state.context.tool_cache` — 同 phase 内相同参数工具调用自动返回 `[CACHED]`，避免重复执行；phase 切换时清空 |
+| 工具结果缓存 | `state.context.tool_cache` — 同 phase 内相同参数工具调用自动返回 `[CACHED]`，避免重复执行；phase 切换时清空。执行工具后自动失效缓存（`tool_cache.clear()`），防止过期物理数据被误用 |
+| 工具调用频率限制 | `state.context.tool_phase_call_counts` — 只读工具超限后返回 `[RATE LIMITED]` 消息，引导 LLM 使用 Dashboard 数据或批量参数 |
 | 周期反思 | 每 8 tool_round 注入 REFLECTION CHECKPOINT |
 | DCP 身份 | EXECUTE 阶段从白名单移除 `vivado_open_checkpoint`；`current_dcp_path` 全程追踪 |
 | 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |

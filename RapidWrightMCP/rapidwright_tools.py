@@ -436,51 +436,60 @@ def get_design_info() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-def search_cells(pattern: Optional[str] = None, 
-                cell_type: Optional[str] = None, 
+def search_cells(pattern: Optional[str] = None,
+                cell_type: Optional[str] = None,
+                cell_types: Optional[list[str]] = None,
                 limit: int = 100) -> Dict[str, Any]:
     """
     Search for cells in the current design.
-    
+
     Args:
         pattern: Name pattern to match (case-insensitive)
         cell_type: Filter by cell type
+        cell_types: Filter by multiple cell types (use instead of repeated search_cells calls)
         limit: Maximum number of results
-        
+
     Returns:
         Dictionary with matching cells
     """
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
-    
+
     if _current_design is None:
         return {"error": "No design loaded. Use load_design first."}
-    
+
     try:
         design = _current_design
         matching_cells = []
         pattern_lower = pattern.lower() if pattern else None
-        
+
+        # Build set of accepted cell types from cell_type (single) and cell_types (list)
+        accepted_types: set[str] = set()
+        if cell_type:
+            accepted_types.add(cell_type)
+        if cell_types:
+            accepted_types.update(cell_types)
+
         for cell in design.getCells():
             if len(matching_cells) >= limit:
                 break
-            
+
             cell_name = str(cell.getName())
             cell_type_str = str(cell.getType())
-            
+
             # Apply filters
             if pattern_lower and pattern_lower not in cell_name.lower():
                 continue
-            if cell_type and cell_type != cell_type_str:
+            if accepted_types and cell_type_str not in accepted_types:
                 continue
-            
+
             # Get placement info
             placement = "unplaced"
             if cell.isPlaced():
                 site = cell.getSite()
                 if site:
                     placement = str(site.getName())
-            
+
             matching_cells.append({
                 "name": cell_name,
                 "type": cell_type_str,
