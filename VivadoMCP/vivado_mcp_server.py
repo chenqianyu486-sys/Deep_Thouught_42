@@ -453,31 +453,6 @@ def get_critical_high_fanout_nets(
     if not sorted_nets:
         return f"No high fanout nets (fanout >= {min_fanout}) found in the {num_paths} most critical paths."
     
-    # Fallback: direct TCL cell counting when table parsing yields nothing
-    if resources["LUT"] == 0 and resources["FF"] == 0:
-        try:
-            fallback_cmd = (
-                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
-                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
-                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
-                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]";'
-                'puts "URAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"URAM*\\"}]]"'
-            )
-            fb = run_tcl_command(fallback_cmd, timeout=timeout)
-            for fline in fb.split('\n'):
-                fline = fline.strip()
-                if fline.startswith('LUT:'):
-                    resources["LUT"] = int(fline.split(':')[1])
-                elif fline.startswith('FF:'):
-                    resources["FF"] = int(fline.split(':')[1])
-                elif fline.startswith('DSP:'):
-                    resources["DSP"] = int(fline.split(':')[1])
-                elif fline.startswith('BRAM:'):
-                    resources["BRAM"] = int(fline.split(':')[1])
-                elif fline.startswith('URAM:'):
-                    resources["URAM"] = int(fline.split(':')[1])
-        except Exception:
-            pass
 
     # Format output
     result_lines = [
@@ -837,8 +812,6 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
                     logger.debug(f"Failed to parse URAM from line: {line}")
                     pass
     
-    # Fallback: direct TCL cell counting when table parsing yields nothing
-    if resources["LUT"] == 0 and resources["FF"] == 0:
         try:
             fallback_cmd = (
                 'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
@@ -1410,7 +1383,7 @@ async def list_tools():
         ),
         Tool(
             name="run_tcl",
-            description="Execute an arbitrary Tcl command in Vivado.",
+            description="Execute a Tcl command in Vivado. Use ONLY for strategy-specific commands (e.g., detailed path reporting). Do NOT use for ad-hoc timing analysis — use report_timing_summary instead.",
             inputSchema={
                 "type": "object",
                 "properties": {

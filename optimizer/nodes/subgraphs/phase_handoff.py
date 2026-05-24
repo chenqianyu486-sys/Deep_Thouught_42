@@ -95,6 +95,7 @@ async def transition_phase(
     from_phase: LoopPhase,
     to_phase: LoopPhase,
     handoff: PhaseHandoff,
+    tool_cache: dict | None = None,
 ) -> None:
     """Archive current phase messages and start a fresh message segment.
 
@@ -144,6 +145,11 @@ async def transition_phase(
             from_phase.value, to_phase.value,
             current_count,
         )
+
+        # 5. Clear phase-local tool cache
+        if tool_cache is not None:
+            tool_cache.clear()
+            logger.debug("[phase_handoff] Tool cache cleared")
 
     except Exception as e:
         logger.warning(f"[phase_handoff] Transition failed (non-critical): {e}")

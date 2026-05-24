@@ -231,6 +231,8 @@ class ContextState:
     flow_control_log_max: int = 100
     # Failed strategy tracking (canonical source in V2, replaces MemoryManager._failed_strategies)
     failed_strategies: list[FailedStrategyRecord] = field(default_factory=list)
+    # Tool result cache: tool_name:args_hash -> (round, result). Cleared on phase transition.
+    tool_cache: dict[str, tuple[int, str]] = field(default_factory=dict)
 
 
 @dataclass

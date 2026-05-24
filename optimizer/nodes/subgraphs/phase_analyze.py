@@ -122,6 +122,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     iteration=state.iteration.current,
                     tool_round=tool_round,
                     high_fanout_nets=state.timing.high_fanout_nets,
+                    tool_cache=state.context.tool_cache,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[ANALYZE] {tool_name} completed in {tool_elapsed:.1f}s")
@@ -176,7 +177,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     )
     state.strategy.analysis_summary = llm_summary
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, handoff)
+    await transition_phase(deps, LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, handoff, tool_cache=state.context.tool_cache)
     return LoopPhase.SELECT_STRATEGY
 
 

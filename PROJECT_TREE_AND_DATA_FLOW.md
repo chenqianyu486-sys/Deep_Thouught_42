@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 13 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）
+│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）、step_state.py（report_step_state 解析）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -66,7 +66,7 @@ OptimizerState (可变 dataclass，7 个子切片)
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
-├── ContextState    — 压缩计数/原始工具输出缓冲/LLM 消息日志/FC 决策轨迹/失败策略记录
+├── ContextState    — 压缩计数/原始工具输出缓冲/工具结果缓存/LLM 消息日志/FC 决策轨迹/失败策略记录
 ├── ControlState    — 退出条件/DCP 路径/step_state
 └── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
 + 6 模块仪表盘容器 (纯输出 dataclass，由 state_space.py 构建): StateSpace → DashboardGlobalState / DashboardTimingClusters / DashboardPhysicalCongestion / DashboardNetlistQuality / DashboardConstraints / DashboardDynamicGradient
@@ -105,7 +105,8 @@ llm_tool_loop_node (调度器)
   │
   ├── EXECUTE ─────────→ EVALUATE
   │  链式动作+事后评估    评估工具(~8个)
-  │  DCP身份保护          最多8轮
+  │  工具结果缓存(同phase内相同参数自动命中)   PBLOCK自适应multiplier(公式C)
+  │  DCP身份保护          最多30轮
   │
   └── EVALUATE → (exit) 或 ANALYZE
       DONE/WNS>=0 → ITERATION_END; CONTINUE → ANALYZE
@@ -132,6 +133,8 @@ llm_tool_loop_node (调度器)
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
 | 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
 | 12 | DCP 身份完整 | EXECUTE 阶段移除 vivado_open_checkpoint 白名单 |
+| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；phase 切换时清空 |
+| 14 | **PBLOCK 自适应紧缩** | 采用公式 `M = max(1.10, 1.2 + util_local × 0.3 - 0.1×log10(N_LUT))`，低利用率自动紧缩 region |
 
 ## 3. 核心数据流
 
@@ -219,6 +222,7 @@ dynamic_gradient:
 | 最近 N 轮消息 | `preserve_role_turns=6` 保留原始 role |
 | report_step_state 格式 | 双重提醒：① 一次性 User FORMAT_GUARD ② 每调用前 System prompt 压印 |
 | 工具重复检测 | `_recent_tools` 滑动窗口，>=3次+delta<0.05ns → REPETITION DETECTED |
+| 工具结果缓存 | `state.context.tool_cache` — 同 phase 内相同参数工具调用自动返回 `[CACHED]`，避免重复执行；phase 切换时清空 |
 | 周期反思 | 每 8 tool_round 注入 REFLECTION CHECKPOINT |
 | DCP 身份 | EXECUTE 阶段从白名单移除 `vivado_open_checkpoint`；`current_dcp_path` 全程追踪 |
 | 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |

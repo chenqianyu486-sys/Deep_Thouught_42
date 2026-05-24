@@ -177,6 +177,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
+                    tool_cache=state.context.tool_cache,
                 )
                 summary = summarize_tool_result(
                     tool_name, result,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 
 from pathlib import Path
@@ -158,6 +159,12 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             tool_args["critical_path_cells"] = cells
                             logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
 
+                # Auto-compute adaptive resource_multiplier for pblock strategy
+                if tool_name == "rapidwright_execute_pblock_strategy":
+                    if "resource_multiplier" not in tool_args:
+                        tool_args["resource_multiplier"] = _compute_adaptive_pblock_multiplier(state)
+                        logger.info(f"[EXECUTE] Adaptive resource_multiplier: {tool_args['resource_multiplier']:.2f}")
+
                 tool_start = time.time()
                 logger.info(f"[EXECUTE] Calling {tool_name}")
                 result = await call_tool_fn(
@@ -168,6 +175,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     iteration=state.iteration.current,
                     tool_round=tool_round,
                     high_fanout_nets=state.timing.high_fanout_nets,
+                    tool_cache=state.context.tool_cache,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
@@ -287,7 +295,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         message_count=tool_round,
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff)
+    await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff, tool_cache=state.context.tool_cache)
     return LoopPhase.EVALUATE
 
 
@@ -647,3 +655,35 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
         state.timing.critical_paths_stale = False
         logger.info(f"[EXECUTE] Auto-refreshed {len(cell_paths)} critical paths")
     # cell_paths 为空时不修改 stale 标志 — 下次触发时重试
+
+
+def _compute_adaptive_pblock_multiplier(state) -> float:
+    """Compute adaptive PBLOCK resource_multiplier using Formula C.
+
+    M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))
+    Clamp: [1.10, 1.50]
+
+    Uses global utilization as fallback when local utilization is unavailable.
+    """
+    # Local utilization (preferred) — fallback to global if not available
+    util = _get_local_pblock_utilization(state)
+    if util is None:
+        lut_used = state.timing.utilization.get("LUT", 0)
+        lut_total = state.timing.device_capacity.get("LUT", 1)
+        util = lut_used / max(lut_total, 1)
+
+    # Size-aware decay: larger modules need less relative multiplier
+    lut_count = state.timing.utilization.get("LUT", 0)
+    size_penalty = 0.1 * math.log10(max(lut_count, 1))
+
+    multiplier = 1.2 + util * 0.3 - size_penalty
+    return max(1.10, min(1.50, multiplier))
+
+
+def _get_local_pblock_utilization(state) -> float | None:
+    """Extract local utilization within the critical-path bounding box.
+
+    TODO: Implement by querying cell coordinates from RapidWright.
+    Returns None to fall back to global utilization.
+    """
+    return None

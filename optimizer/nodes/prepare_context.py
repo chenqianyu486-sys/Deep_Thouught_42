@@ -51,6 +51,11 @@ Your text response MUST contain your analysis (hypothesis, strategy_rationale,
 observed signals) as free-form chain-of-thought reasoning.
 Process control goes in the report_step_state tool call, analysis goes in text.
 
+EXECUTE PHASE PROTOCOL:
+  - Execute the selected strategy, then call report_step_state(EXEC_DONE).
+  - Do NOT re-analyze timing data or call analysis tools in EXECUTE.
+  - Trust the auto-evaluation (WNS delta) provided by the system.
+
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely

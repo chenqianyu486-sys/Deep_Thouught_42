@@ -99,6 +99,8 @@ init_analysis ──► [WNS >= 0?]
 | 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
 | 12 | DCP identity integrity | `vivado_open_checkpoint` removed from LLM tool whitelist in EXECUTE phase |
 | 13 | **Critical path-aware PBLOCK** | PBLOCK region selection centers on critical-path cells (top 10 paths) via automatic `critical_path_cells` injection in EXECUTE phase. Distance weight `0.3` balances proximity vs. region tightness — configurable via `distance_weight_factor`. Principle #7: `state.timing.critical_paths` as single source of truth for cell positions. |
+| 14 | **Tool result caching** | Phase-local tool cache avoids redundant MCP calls when LLM requests the same tool+args repeatedly. Cache cleared on phase transition. |
+| 15 | **Adaptive PBLOCK multiplier** | `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))` — automatically tightens PBLOCK region at low utilization, expands at high utilization. `util_local` preferred, falls back to global chip utilization. |
 
 ---
 
@@ -436,6 +438,8 @@ init_analysis ──► [WNS >= 0?]
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
 | 12 | DCP 身份完整性 | 在 EXECUTE 阶段，将 `vivado_open_checkpoint` 从 LLM 工具白名单中移除 |
+| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；phase 切换时清空 |
+| 14 | **PBLOCK 自适应紧缩** | 公式 `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))`，低利用率自动紧缩 region，高利用率自动宽松 |
 
 ---
 

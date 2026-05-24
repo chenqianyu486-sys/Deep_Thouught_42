@@ -2652,8 +2652,10 @@ def report_timing() -> Dict[str, Any]:
     利用 TimingGraph.getMaxDelayPath() 计算最差数据路径延迟,
     并与设计的时钟周期要求比较得出 WNS.
 
-    注意: 这是相对于 Vivado 签核时序的 ~2% 近似模型。
-    用于优化探索期间的快速反馈, 但最终结果务必用 Vivado 验证。
+    注意: 这是简化时序模型，误差随时钟频率增大。
+    在 >500MHz 高频设计下误差可达 0.5ns+。
+    仅用于趋势判断 (improve vs regress)，不可用于绝对值决策。
+    最终结果以 Vivado report_timing_summary 为准。
 
     Returns:
         dict with:
@@ -2736,7 +2738,7 @@ def report_timing() -> Dict[str, Any]:
             "endpoints_failing": 0,
             "elapsed_ms": round(elapsed_ms, 0),
             "message": (
-                f"Approximate timing (RapidWright ~2% error vs Vivado): "
+                f"Approximate timing (RapidWright simplified, ~0.5ns+ error at >500MHz): "
                 f"WNS={wns_ns:.3f}ns, "
                 f"max_delay={max_delay_ps:.0f}ps, "
                 f"clock_period={clock_period_ns:.3f}ns"

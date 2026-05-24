@@ -75,12 +75,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         # Quick-check tools during execution
         "vivado_report_timing_summary",
         "vivado_get_wns",
-        "vivado_extract_critical_path_cells",
-        "vivado_get_critical_high_fanout_nets",
-        "rapidwright_report_timing",
         # Internal tools
         "report_step_state",
-        "vivado_get_raw_tool_output",
     }),
 
     LoopPhase.EVALUATE: frozenset({

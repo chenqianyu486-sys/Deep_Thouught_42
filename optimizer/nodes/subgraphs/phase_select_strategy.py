@@ -143,6 +143,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
+                    tool_cache=state.context.tool_cache,
                 )
                 summary = summarize_tool_result(tool_name, result)
                 if deps.compat is not None:
@@ -171,7 +172,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         message_count=tool_round,
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff)
+    await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff, tool_cache=state.context.tool_cache)
     return LoopPhase.EXECUTE
 
 
