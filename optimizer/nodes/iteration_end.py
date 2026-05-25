@@ -25,6 +25,7 @@ from ..pure.model_select import (
     select_model as select_model_fn,
     estimate_context_complexity,
 )
+from ..pure.tool_router import call_tool as call_tool_fn
 from ..color import green
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,25 @@ async def iteration_end_node(
                                f"wns_delta={state.timing.best_wns - state.timing.prev_best_wns:.3f}" if state.timing.prev_best_wns is not None else "initial_improvement",
                                phase="ITERATION_END",
                                strategy=strategy_label)
+            # ⚡ Competition requirement: save best result to output DCP incrementally
+            # so if wall-clock expires, the best result is preserved on disk
+            if state.control.output_dcp and deps.vivado_session:
+                try:
+                    logger.info(
+                        f"[iteration_end] WNS improved to {state.timing.best_wns:.3f}ns, "
+                        f"updating output DCP..."
+                    )
+                    result = await call_tool_fn(
+                        "vivado_write_checkpoint",
+                        {"dcp_path": str(state.control.output_dcp.resolve()), "force": True},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+                    if "error" not in result.lower():
+                        logger.info(f"[iteration_end] Output DCP updated (WNS={state.timing.best_wns:.3f}ns)")
+                    else:
+                        logger.warning(f"[iteration_end] Failed to update output DCP: {result}")
+                except Exception as e:
+                    logger.warning(f"[iteration_end] Failed to save output DCP: {e}")
         elif state.control.done_reason == "iteration_success":
             record_flow_signal(state, "ITERATION_SUCCESS", "llm_signaled_success",
                                phase="ITERATION_END", strategy=strategy_label)
