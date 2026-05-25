@@ -10,7 +10,8 @@ objectives:
 
 rules:
   restrictions:
-    - "DO NOT re-open/reload DCP — already open in Vivado & RapidWright"
+    - "DO NOT re-open/reload DCP unless you get a 'No design loaded' error — in that case, call rapidwright_read_checkpoint with the input DCP path first, then retry."
+    - "NEVER use hardcoded paths (like /home/weijie/... or /path/to/...). Use the DCP path from the Current Optimization State section instead."
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"

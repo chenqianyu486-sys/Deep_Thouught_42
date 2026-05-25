@@ -1,6 +1,6 @@
 """Check exit node: evaluate termination conditions.
 
-Checks WNS target, no-improvement limit, and cost limit.
+Checks WNS target, no-improvement limit, cost limit, and wall-clock timeout.
 
 Reference: dcp_optimizer.py get_completion() (L4926-4948),
 optimize() (L5203-5216).
@@ -9,6 +9,7 @@ optimize() (L5203-5216).
 from __future__ import annotations
 
 import logging
+import time
 
 from ..state import OptimizerState, record_flow_signal
 from ..deps import NodeDeps
@@ -29,6 +30,7 @@ async def check_exit_node(
         1. WNS target met (latest_wns >= 0)
         2. Global no-improvement limit reached
         3. Cost hard limit reached
+        4. Wall-clock timeout (redundant safety net with iteration_start)
 
     Note: This node sets state.control.is_done; the after_check_exit edge
     function reads it to route to SAVE_OUTPUT or ITERATION_START.
@@ -37,6 +39,19 @@ async def check_exit_node(
     Returns:
         Next node name (edge after_check_exit resolves final destination).
     """
+    # Wall-clock timeout (redundant with iteration_start)
+    if state.control.start_time is not None:
+        elapsed = time.time() - state.control.start_time
+        if elapsed > state.control.wall_clock_timeout:
+            state.control.is_done = True
+            state.control.done_reason = "wall_clock_timeout"
+            logger.warning(
+                yellow(f"[check_exit] Wall-clock timeout: "
+                       f"{elapsed:.0f}s > {state.control.wall_clock_timeout:.0f}s")
+            )
+            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase="CHECK_EXIT")
+            return NodeName.CHECK_EXIT
+
     # WNS target check
     current_valid = (
         state.timing.latest_wns is not None
