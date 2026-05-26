@@ -246,13 +246,26 @@ def build_context_snapshot(
 
 def _stale_annotation(signal_key: str, refreshed_fields: set[str]) -> str:
     """Map a derived signal key back to its source field and check freshness."""
-    _STATIC_RESOURCE_KEYS = frozenset({"lut", "dsp", "bram", "uram", "design_type"})
-    if signal_key.lower() in _STATIC_RESOURCE_KEYS:
+    # Static fields: never show stale marker
+    _STATIC_KEYS = frozenset({
+        "lut", "dsp", "bram", "uram", "design_type",
+        "cell_count", "net_count", "top_cell_types",
+        "clock_period", "target_frequency", "pvt_corner",
+        "device_capacity", "total_control_sets", "avg_control_sets_per_slice",
+    })
+    if signal_key.lower() in _STATIC_KEYS:
         return ""
+    # Freshness-gated fields
     if signal_key in ("max_fanout", "high_fanout_count"):
         return "" if "high_fanout_nets" in refreshed_fields else " (initial, not refreshed)"
     if signal_key.startswith("cp_spread_"):
         return "" if "critical_path_spread" in refreshed_fields else " (initial, not refreshed)"
+    if signal_key in ("avg_wirelength", "long_route_nets_count"):
+        return "" if "route_status" in refreshed_fields else " (initial, not refreshed)"
+    if signal_key == "cross_domain_paths_count":
+        return "" if "cdc_paths" in refreshed_fields else " (initial, not refreshed)"
+    if signal_key in ("false_paths_count", "multicycle_paths_count", "io_delay_defined_pct"):
+        return ""  # constraints are static (don't change during optimization)
     return "" if "resource_utilization" in refreshed_fields else " (initial, not refreshed)"
 
 

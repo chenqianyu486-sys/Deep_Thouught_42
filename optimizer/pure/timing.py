@@ -173,6 +173,141 @@ def compute_timing_hash(raw_text: str) -> str:
     return hashlib.sha256(raw_text.encode()).hexdigest()[:16]
 
 
+def parse_route_status(report: str) -> dict:
+    """Parse Vivado report_route_status output.
+
+    Extracts: total_nets, routed_nets, unresolved_nets, long_route_nets_count,
+    and estimates avg_wirelength from route metrics when available.
+
+    Returns:
+        dict with keys: total_nets, routed_nets, unresolved_nets,
+        long_route_nets_count, avg_wirelength (None if not available).
+    """
+    result: dict = {
+        "total_nets": 0, "routed_nets": 0, "unresolved_nets": 0,
+        "long_route_nets_count": 0, "avg_wirelength": None,
+    }
+    lines = report.split('\n')
+    for line in lines:
+        s = line.strip().lower()
+        if 'total nets' in s or 'nets total' in s:
+            m = re.search(r'(\d[\d,]*)', line)
+            if m:
+                result["total_nets"] = int(m.group(1).replace(",", ""))
+        elif 'routed' in s and 'unrouted' not in s:
+            m = re.search(r'(\d[\d,]*)', line)
+            if m and "total" not in s:
+                result["routed_nets"] = int(m.group(1).replace(",", ""))
+        elif 'unresolved' in s or 'unrouted' in s:
+            m = re.search(r'(\d[\d,]*)', line)
+            if m:
+                result["unresolved_nets"] = int(m.group(1).replace(",", ""))
+        elif 'long route' in s or 'longest route' in s:
+            m = re.search(r'(\d[\d,]*)', line)
+            if m:
+                result["long_route_nets_count"] = int(m.group(1).replace(",", ""))
+        elif 'average wirelength' in s or 'avg wirelength' in s:
+            m = re.search(r'([\d.]+)', line)
+            if m:
+                result["avg_wirelength"] = float(m.group(1))
+    return result
+
+
+def parse_control_sets(report: str) -> dict:
+    """Parse Vivado report_control_sets output.
+
+    Fallback: if report_control_sets is unavailable, estimate from
+    unique control set count via fanout analysis.
+
+    Returns:
+        dict with keys: total_control_sets, avg_per_slice (None if SLICE count unknown).
+    """
+    result: dict = {"total_control_sets": 0, "avg_per_slice": None}
+    if not report or not report.strip():
+        return result
+    lines = report.split('\n')
+    for line in lines:
+        s = line.strip()
+        if 'control set' in s.lower() and re.search(r'\d', s):
+            m = re.search(r'(\d[\d,]*)', s)
+            if m and 'unique' in s.lower():
+                result["total_control_sets"] = int(m.group(1).replace(",", ""))
+            elif m and 'total' in s.lower():
+                result["total_control_sets"] = max(result["total_control_sets"], int(m.group(1).replace(",", "")))
+    if result["total_control_sets"] == 0:
+        for line in lines:
+            m = re.search(r'(\d[\d,]*)\s*control', line, re.IGNORECASE)
+            if m:
+                result["total_control_sets"] = int(m.group(1).replace(",", ""))
+                break
+    return result
+
+
+def parse_cdc_paths(report: str) -> int:
+    """Parse report_timing -cross_clock output to count cross-domain paths.
+
+    Returns:
+        Number of cross-clock-domain timing paths found.
+    """
+    if not report or not report.strip():
+        return 0
+    count = 0
+    lines = report.split('\n')
+    for line in lines:
+        if 'Slack' in line and 'Source' not in line and '---' not in line:
+            count += 1
+    if count == 0:
+        for line in lines:
+            if re.search(r'^\s*\d+\.', line):
+                count += 1
+    return count
+
+
+def parse_design_info(result_text: str) -> dict | None:
+    """Parse RapidWright get_design_info JSON output into standardized dict.
+
+    Returns:
+        dict with keys: design_name, cell_count, net_count, top_cell_types,
+        or None if parse fails.
+    """
+    import json
+    try:
+        data = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if data.get("status") != "success":
+        return None
+    return {
+        "design_name": str(data.get("design_name", "")),
+        "cell_count": int(data.get("cell_count", 0)),
+        "net_count": int(data.get("net_count", 0)),
+        "top_cell_types": dict(data.get("top_cell_types", {})),
+    }
+
+
+def parse_pvt_corner(timing_report: str) -> str:
+    """Extract PVT corner from report_timing_summary header.
+
+    Vivado timing reports include a header line like:
+      'Speed Grade: -2  PVT: slow_0p95v_85c'
+    or similar. Returns the PVT string, or default 'slow_0p95v_85c'.
+    """
+    if not timing_report:
+        return "slow_0p95v_85c"
+    for line in timing_report.split('\n'):
+        if 'PVT' in line or 'pvt' in line:
+            m = re.search(r'PVT[:\s]+(\S+)', line, re.IGNORECASE)
+            if m:
+                return m.group(1).rstrip(',.;')
+        if 'Speed Grade' in line and ('slow' in line or 'fast' in line or 'typ' in line):
+            for token in line.split():
+                token_lower = token.lower().rstrip(',.;')
+                if any(c in token_lower for c in ('slow', 'fast', 'typ', '0p', '_')):
+                    if len(token) > 4:
+                        return token.rstrip(',.;')
+    return "slow_0p95v_85c"
+
+
 def parse_hold_timing(timing_text: str) -> dict:
     """Parse hold timing section from report_timing_summary output.
 

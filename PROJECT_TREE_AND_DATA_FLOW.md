@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）、step_state.py（report_step_state 解析）
+│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -62,7 +62,7 @@ fpl26_optimization_contest/
 
 ```
 OptimizerState (可变 dataclass，7 个子切片)
-├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据
+├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
@@ -97,7 +97,8 @@ llm_tool_loop_node (调度器)
   │
   ├── ANALYZE ─────────→ SELECT_STRATEGY
   │  仅分析工具(~16个)   极简工具(~4个)
-  │  最多12轮             最多6轮
+  │  首轮最多8轮(Dashboard已预填)  最多6轮
+  │  后续迭代最多12轮
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
   │  策略说明+执行计划    全工具(~25个, 不含vivado_open_checkpoint)
@@ -163,6 +164,42 @@ _prepare_api_messages():
 
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §3.1-§3.2](architecture.md)。
 
+### 3.1.1 init_analysis 增强数据提取
+
+`init_analysis_node` 在优化开始前一次性提取所有可获取的设计数据，填入 Dashboard 的 6 个模块，避免 LLM 在 ANALYZE 阶段浪费工具调用轮次：
+
+```
+Phase A (并行初始化):
+  vivado_open_checkpoint ∥ rapidwright_initialize_rapidwright
+
+Phase B (跨服务器并行管线):
+  Vivado pipeline (10步串行) ∥ RapidWright pipeline (3步串行)
+  Vivado:  timing_summary → clock_period → hold_timing → high_fanout_nets
+           → resource_utilization → critical_path_cells → route_status
+           → control_sets → false_paths → multicycle_paths → IO_delay → CDC
+  RapidWright: read_checkpoint → device_topology → design_info
+
+Phase C (跨服务器分析):
+  critical_path_spread → congestion_analysis
+```
+
+**提取数据与 Dashboard 模块映射**:
+
+| 数据 | Dashboard 模块 | 新鲜度 |
+|------|---------------|--------|
+| WNS/TNS/Failing endpoints | M1 Global State | 动态 (后续工具刷新) |
+| Clock period, hold timing, utilization | M1 Global State | 静态 / 动态 |
+| Critical path cells + spread | M2 Timing Clusters | 动态 |
+| Route status (wirelength, long nets) | M3 Physical Congestion | 动态 |
+| Congestion (global score) | M3 Physical Congestion | 动态 |
+| Control sets, CDC paths, cell types | M4 Netlist Quality | 静态 |
+| High fanout nets | M4 Netlist Quality | 动态 |
+| Constraints (false/multicycle paths, IO delay) | M5 Constraints | 静态 |
+| PVT corner | M5 Constraints | 静态 |
+| Delta data | M6 Dynamic Gradient | 初始为空 |
+
+**验证**: `make run_init_analysis DCP=<path>` 运行完整提取 + Dashboard 构建 + 字段完整性检查，无需 LLM。
+
 ### 3.2 Agent 上下文 Dashboard (6 模块 StateSpace)
 
 每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）。数据由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化的 6 模块 YAML：
@@ -194,11 +231,27 @@ timing_clusters:
 # Module 3: Physical & Congestion Metrics
 physical_congestion:
   global_congestion_score: 0.65
-  avg_wirelength: N/A
+  avg_wirelength: 12.3
+  long_route_nets_count: 42
   hotspots: [...]
 
 # Module 4: Netlist Quality Profiler
+netlist_quality:
+  total_control_sets: 5
+  avg_control_sets_per_slice: 0.12
+  cross_domain_paths_count: 3
+  top_cell_types: LUT6:1234, FDRE:5678, CARRY8:210, LUT5:98, ...
+  high_fanout_nets: [...]
+
 # Module 5: Constraints Environment
+constraints_env:
+  clock_definitions:
+    clk_fpl26contest: 300.0 MHz
+  false_paths_count: 2
+  multicycle_paths_count: 1
+  io_delay_defined_pct: 85.00%
+  pvt_corner: slow_0p95v_85c
+
 # Module 6: Dynamic Gradient (Delta)
 dynamic_gradient:
   delta_wns: +0.0770
@@ -206,7 +259,7 @@ dynamic_gradient:
   action_status: Success
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看全 5 模块，EXECUTE 阶段只看 global_state + dynamic_gradient。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（含 constraints_env），EXECUTE 阶段只看 global_state + dynamic_gradient。
 
 - 纯数据，无判断标签 → LLM 自主推理
 - 每次通过 `build_state_space()` 重建，不进入 MessageStore

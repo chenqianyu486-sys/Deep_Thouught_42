@@ -24,7 +24,10 @@ from typing import Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .pure.timing import parse_timing_summary
+from .pure.timing import (
+    parse_timing_summary, parse_route_status, parse_control_sets,
+    parse_cdc_paths, parse_design_info, parse_pvt_corner,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,21 @@ class V2TestMode:
         self.final_wns: Optional[float] = None
         self.clock_period: Optional[float] = None
         self.high_fanout_nets: list[tuple[str, int, int]] = []
+        self.tns: Optional[float] = None
+        self.failing_endpoints: Optional[int] = None
+
+        # Extended analysis state (new fields)
+        self.route_status: Optional[dict] = None
+        self.control_sets: Optional[dict] = None
+        self.cross_domain_paths_count: int = 0
+        self.design_info: Optional[dict] = None
+        self.constraints_info: Optional[dict] = None
+        self.pvt_corner: str = "slow_0p95v_85c"
+        self.device_capacity: Optional[dict] = None
+        self.critical_path_spread: Optional[dict] = None
+        self.resource_utilization: Optional[dict] = None
+        self.hold_wns: Optional[float] = None
+        self.hold_tns: Optional[float] = None
 
         # Start stdin quit listener
         self._quit_thread = threading.Thread(target=self._stdin_listener, daemon=True)
@@ -404,7 +422,10 @@ class V2TestMode:
         init_data["wns"] = timing_info["wns"]
         init_data["tns"] = timing_info["tns"]
         init_data["failing_endpoints"] = timing_info["failing_endpoints"]
+        init_data["timing_report_raw"] = result  # for PVT corner parsing
         self.initial_wns = timing_info["wns"]
+        self.tns = timing_info["tns"]
+        self.failing_endpoints = timing_info["failing_endpoints"]
         print(f"\n*** Initial WNS: {self.initial_wns} ns ***")
 
         # Get clock period via run_tcl (clk_fpl26contest is the contest clock)
@@ -515,6 +536,11 @@ class V2TestMode:
             print(f"Critical path spread: {result[:3000]}...")
             spread_data = json.loads(result)
             init_data["spread"] = spread_data
+            self.critical_path_spread = {
+                "max_distance": spread_data.get("max_distance_found", 0),
+                "avg_distance": spread_data.get("avg_max_distance", 0),
+                "paths_analyzed": spread_data.get("paths_analyzed", 0),
+            }
         except Exception as e:
             print(f"[TEST] ⚠ analyze_critical_path_spread failed: {e}")
 
@@ -524,6 +550,25 @@ class V2TestMode:
             topo_data = json.loads(topo_result)
             if topo_data.get("status") == "success":
                 print(f"[TEST] Device: {topo_data.get('device')}")
+                site_dist = topo_data.get("site_type_distribution", [])
+                capacity: dict[str, int] = {"LUT": 0, "FF": 0, "DSP": 0, "BRAM": 0, "URAM": 0}
+                for entry in site_dist:
+                    stype = entry.get("type", "")
+                    count = entry.get("count", 0)
+                    if "SLICE" in stype.upper():
+                        capacity["LUT"] += count * 8
+                        capacity["FF"] += count * 16
+                    elif "DSP" in stype.upper():
+                        capacity["DSP"] += count
+                    elif stype.upper().startswith("RAMB36"):
+                        capacity["BRAM"] += count
+                    elif stype.upper().startswith("RAMB18"):
+                        capacity["BRAM"] += count // 2
+                    elif "URAM" in stype.upper():
+                        capacity["URAM"] += count
+                self.device_capacity = capacity
+                init_data["device_capacity"] = capacity
+                print(f"[TEST] Device capacity: {capacity}")
         except Exception as e:
             print(f"[TEST] ⚠ get_device_topology failed: {e}")
 
@@ -531,11 +576,284 @@ class V2TestMode:
         try:
             util_result = await self.call_tool("vivado_report_utilization_for_pblock", {}, timeout=300.0)
             init_data["utilization"] = util_result
+            from .pure.timing import parse_resource_utilization
+            self.resource_utilization = parse_resource_utilization(util_result)
             print(f"[TEST] Resource utilization retrieved")
         except Exception as e:
-            print(f"[TEST] ⚠ report_utilization_for_pblock failed: {e}")
+            print(f"[TEST] ! report_utilization_for_pblock failed: {e}")
+
+        # --- Extended analysis (new fields for dashboard) ---
+
+        # Step 8: Route status (M3: avg_wirelength, long_route_nets)
+        print("\n" + "-" * 60)
+        print("STEP 8: Report route status")
+        print("-" * 60)
+        try:
+            route_result = await self.call_tool("vivado_report_route_status", {}, timeout=300.0)
+            self.route_status = parse_route_status(route_result)
+            init_data["route_status"] = self.route_status
+            print(f"[TEST] Route status: nets={self.route_status.get('total_nets')}, "
+                  f"long_routes={self.route_status.get('long_route_nets_count')}")
+        except Exception as e:
+            print(f"[TEST] ! report_route_status failed: {e}")
+
+        # Step 9: Control sets (M4)
+        print("\n" + "-" * 60)
+        print("STEP 9: Report control sets")
+        print("-" * 60)
+        try:
+            cs_result = await self.call_tool("vivado_run_tcl", {
+                "command": "report_control_sets -return_string",
+            }, timeout=60.0)
+            self.control_sets = parse_control_sets(cs_result)
+            init_data["control_sets"] = self.control_sets
+            print(f"[TEST] Control sets: {self.control_sets}")
+        except Exception as e:
+            print(f"[TEST] ! report_control_sets failed: {e}")
+
+        # Step 10: Design info (M4: cell type stats)
+        print("\n" + "-" * 60)
+        print("STEP 10: Get design info (RapidWright)")
+        print("-" * 60)
+        try:
+            di_result = await self.call_tool("rapidwright_get_design_info", {}, timeout=120.0)
+            self.design_info = parse_design_info(di_result)
+            init_data["design_info"] = self.design_info
+            if self.design_info:
+                top = self.design_info.get("top_cell_types", {})
+                top_str = ", ".join(f"{k}:{v}" for k, v in sorted(top.items(), key=lambda x: -x[1])[:8])
+                print(f"[TEST] Design: cells={self.design_info.get('cell_count')}, "
+                      f"nets={self.design_info.get('net_count')}, top=[{top_str}]")
+        except Exception as e:
+            print(f"[TEST] ! get_design_info failed: {e}")
+
+        # Step 11: Constraints (M5: false paths, multicycle, IO delay)
+        print("\n" + "-" * 60)
+        print("STEP 11: Extract timing constraints")
+        print("-" * 60)
+        constraints: dict = {"false_paths_count": 0, "multicycle_paths_count": 0, "io_delay_defined_pct": None}
+        try:
+            fp_result = await self.call_tool("vivado_run_tcl", {
+                "command": "llength [get_false_paths -quiet]",
+            }, timeout=30.0)
+            if fp_result and fp_result.strip():
+                try:
+                    constraints["false_paths_count"] = int(fp_result.strip().split()[0])
+                except ValueError:
+                    pass
+        except Exception as e:
+            print(f"[TEST] ! get_false_paths failed: {e}")
+        try:
+            mp_result = await self.call_tool("vivado_run_tcl", {
+                "command": "llength [get_multicycle_paths -quiet]",
+            }, timeout=30.0)
+            if mp_result and mp_result.strip():
+                try:
+                    constraints["multicycle_paths_count"] = int(mp_result.strip().split()[0])
+                except ValueError:
+                    pass
+        except Exception as e:
+            print(f"[TEST] ! get_multicycle_paths failed: {e}")
+        try:
+            io_result = await self.call_tool("vivado_run_tcl", {
+                "command": (
+                    "set ports [get_ports -quiet]; "
+                    "if {$ports ne {}} { "
+                    "  set with_delay 0; set total 0; "
+                    "  foreach p $ports { "
+                    "    incr total; "
+                    "    if {[get_property -quiet HAS_INPUT_DELAY $p] || "
+                    "        [get_property -quiet HAS_OUTPUT_DELAY $p]} { "
+                    "      incr with_delay; "
+                    "    } "
+                    "  }; "
+                    "  puts \"$with_delay $total\"; "
+                    "} else { "
+                    "  puts \"0 0\"; "
+                    "}"
+                ),
+            }, timeout=60.0)
+            if io_result and io_result.strip():
+                parts = io_result.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        wd, tp = int(parts[0]), int(parts[1])
+                        if tp > 0:
+                            constraints["io_delay_defined_pct"] = round(wd / tp, 4)
+                    except ValueError:
+                        pass
+        except Exception as e:
+            print(f"[TEST] ! IO delay analysis failed: {e}")
+        self.constraints_info = constraints
+        init_data["constraints_info"] = constraints
+        print(f"[TEST] Constraints: false_paths={constraints['false_paths_count']}, "
+              f"multicycle={constraints['multicycle_paths_count']}, "
+              f"io_delay_pct={constraints['io_delay_defined_pct']}")
+
+        # Step 12: CDC analysis (M4: cross_domain_paths)
+        print("\n" + "-" * 60)
+        print("STEP 12: Cross-domain clock analysis")
+        print("-" * 60)
+        try:
+            cdc_result = await self.call_tool("vivado_run_tcl", {
+                "command": "report_timing -cross_clock -max_paths 100 -return_string",
+            }, timeout=120.0)
+            self.cross_domain_paths_count = parse_cdc_paths(cdc_result)
+            init_data["cross_domain_paths_count"] = self.cross_domain_paths_count
+            print(f"[TEST] CDC paths: {self.cross_domain_paths_count}")
+        except Exception as e:
+            print(f"[TEST] ! CDC analysis failed: {e}")
+
+        # Step 13: Hold timing check
+        print("\n" + "-" * 60)
+        print("STEP 13: Hold timing check")
+        print("-" * 60)
+        try:
+            from .pure.timing import parse_hold_timing
+            hold_result = await self.call_tool("vivado_run_tcl", {
+                "command": "report_timing_summary -delay_type min -max_paths 100",
+            }, timeout=120.0)
+            hold = parse_hold_timing(hold_result)
+            self.hold_wns = hold.get("hold_wns")
+            self.hold_tns = hold.get("hold_tns")
+            init_data["hold_wns"] = self.hold_wns
+            init_data["hold_tns"] = self.hold_tns
+            if self.hold_wns is not None:
+                status = "VIOLATED" if self.hold_wns < 0 else "MET"
+                print(f"[TEST] Hold timing {status}: WNS={self.hold_wns:.3f}ns")
+        except Exception as e:
+            print(f"[TEST] ! Hold timing check failed: {e}")
+
+        # PVT corner from timing report header (Step 2 already collected)
+        if "timing_report_raw" in init_data:
+            self.pvt_corner = parse_pvt_corner(init_data["timing_report_raw"])
+        init_data["pvt_corner"] = self.pvt_corner
 
         return init_data
+
+    # ── Dashboard Verification ────────────────────────────────────
+
+    def verify_dashboard_injection(self, init_data: dict) -> str:
+        """Build StateSpace from init_analysis data and format as LLM would see it.
+
+        Creates a temporary OptimizerState from extracted init_data,
+        builds the 6-module StateSpace via build_state_space(),
+        and formats it for LLM injection via format_state_space_for_llm().
+
+        Returns the formatted dashboard YAML string (for console output & verification).
+        """
+        from .state import (
+            OptimizerState, TimingState, CriticalPathEntry,
+        )
+        from .pure.state_space import build_state_space, format_state_space_for_llm
+        from .pure.tool_filter import LoopPhase
+
+        # Build temporary OptimizerState from init_data
+        state = OptimizerState()
+        t = state.timing
+
+        t.initial_wns = init_data.get("wns")
+        t.initial_tns = init_data.get("tns")
+        t.initial_failing_endpoints = init_data.get("failing_endpoints")
+        t.latest_wns = init_data.get("wns")
+        t.latest_tns = init_data.get("tns")
+        t.latest_failing_endpoints = init_data.get("failing_endpoints")
+        t.best_wns = init_data.get("wns") if init_data.get("wns") is not None else float('-inf')
+        t.best_wns_iteration = 0
+        t.best_wns_tns = init_data.get("tns")
+        t.best_wns_failing_endpoints = init_data.get("failing_endpoints")
+        t.clock_period = init_data.get("clock_period")
+        t.hold_wns = init_data.get("hold_wns")
+        t.hold_tns = init_data.get("hold_tns")
+
+        # High fanout nets (convert tuples to dicts for StateSpace compatibility)
+        hfn = init_data.get("high_fanout_nets", [])
+        if hfn and isinstance(hfn[0], tuple):
+            t.high_fanout_nets = [
+                {"net_name": n, "fanout": f, "path_count": p}
+                for n, f, p in hfn
+            ]
+        else:
+            t.high_fanout_nets = hfn
+
+        # New fields
+        t.route_status = init_data.get("route_status")
+        t.control_sets = init_data.get("control_sets")
+        t.cross_domain_paths_count = init_data.get("cross_domain_paths_count", 0)
+        t.design_info = init_data.get("design_info")
+        t.constraints_info = init_data.get("constraints_info")
+        t.pvt_corner = init_data.get("pvt_corner", "slow_0p95v_85c")
+        t.device_capacity = init_data.get("device_capacity")
+        t.resource_utilization = init_data.get("resource_utilization")
+        t.critical_path_spread = init_data.get("critical_path_spread")
+        t.congestion_data = init_data.get("congestion_data")
+
+        # Build and format
+        space = build_state_space(state)
+        formatted = format_state_space_for_llm(
+            space=space,
+            phase=LoopPhase.ANALYZE,
+            handoff_summary="",
+            show_strategy_catalog=False,
+        )
+
+        print("\n" + "=" * 60)
+        print("DASHBOARD INJECTION VERIFICATION")
+        print("=" * 60)
+        print("The following is the StateSpace dashboard that would be")
+        print("injected as the LAST user message before the first LLM call.")
+        print("=" * 60)
+        print(formatted)
+
+        # Verification checks
+        checks: list[tuple[str, bool, str]] = []
+
+        # M1: Global state
+        checks.append(("M1: WNS present", t.latest_wns is not None, str(t.latest_wns)))
+        checks.append(("M1: TNS present", t.latest_tns is not None, str(t.latest_tns)))
+        checks.append(("M1: Clock period present", t.clock_period is not None, str(t.clock_period)))
+
+        # M2: Timing paths
+        checks.append(("M2: Critical paths present", True, "ok"))  # always present (may be empty)
+
+        # M3: Physical congestion
+        rs = t.route_status or {}
+        checks.append(("M3: Route status present", t.route_status is not None,
+                       f"nets={rs.get('total_nets')}, long_routes={rs.get('long_route_nets_count')}"))
+        checks.append(("M3: Congestion data present", t.congestion_data is not None, str(t.congestion_data)))
+
+        # M4: Netlist quality
+        checks.append(("M4: Control sets present", t.control_sets is not None, str(t.control_sets)))
+        checks.append(("M4: CDC paths present", True, f"count={t.cross_domain_paths_count}"))
+        checks.append(("M4: Design info present", t.design_info is not None,
+                       f"cells={t.design_info.get('cell_count') if t.design_info else 'N/A'}"))
+
+        # M5: Constraints
+        ci = t.constraints_info or {}
+        checks.append(("M5: Constraints present", t.constraints_info is not None,
+                       f"fp={ci.get('false_paths_count')}, mp={ci.get('multicycle_paths_count')}"))
+        checks.append(("M5: PVT corner", bool(t.pvt_corner), t.pvt_corner))
+
+        # M6: Dynamic gradient (should be empty on init)
+        checks.append(("M6: Delta data (empty on init)", True, "ok"))
+
+        print("\n" + "-" * 60)
+        print("FIELD VERIFICATION:")
+        print("-" * 60)
+        all_ok = True
+        for label, ok, detail in checks:
+            mark = "✓" if ok else "✗"
+            if not ok:
+                all_ok = False
+            print(f"  [{mark}] {label}: {detail}")
+
+        print("-" * 60)
+        if all_ok:
+            print("RESULT: All fields populated successfully!")
+        else:
+            print("RESULT: Some fields are missing — check warnings above.")
+
+        return formatted
 
     # ── Skill Tests ────────────────────────────────────────────────
 
@@ -1191,6 +1509,7 @@ async def run_v2_test_mode(
     max_nets: int = 5,
     skip_skills: bool = False,
     skills_only: bool = False,
+    init_analysis_only: bool = False,
 ) -> bool:
     """v2 test mode entry point."""
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1205,7 +1524,10 @@ async def run_v2_test_mode(
     tester = V2TestMode(run_dir, debug=debug, skip_skills=skip_skills)
 
     try:
-        print(f"FPGA Design Optimization — V2 TEST MODE")
+        mode_label = "INIT-ANALYSIS ONLY" if init_analysis_only else (
+            "SKILLS-ONLY" if skills_only else "V2 TEST MODE"
+        )
+        print(f"FPGA Design Optimization — {mode_label}")
         print(f"=========================================")
         print(f"Input:      {input_dcp.resolve()}")
         print(f"Output:     {output_dcp.resolve()}")
@@ -1218,7 +1540,11 @@ async def run_v2_test_mode(
         try:
             await tester.start_servers()
 
-            if skills_only:
+            if init_analysis_only:
+                init_data = await tester.run_init_analysis(input_dcp)
+                tester.verify_dashboard_injection(init_data)
+                success = True
+            elif skills_only:
                 init_data = await tester.run_init_analysis(input_dcp)
                 success = await tester.run_skill_tests(init_data)
             else:

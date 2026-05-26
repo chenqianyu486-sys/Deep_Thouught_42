@@ -133,10 +133,11 @@ def _build_physical_congestion(state: OptimizerState) -> DashboardPhysicalConges
                 dominant_module=h.get("dominant_module", ""),
             ))
 
+    rs = state.timing.route_status or {}
     return DashboardPhysicalCongestion(
         global_congestion_score=cd.get("global_score"),
-        avg_wirelength=None,   # TODO: parse from Vivado report_route_status
-        long_route_nets_count=0,  # TODO: parse from Vivado report_route_status
+        avg_wirelength=rs.get("avg_wirelength"),
+        long_route_nets_count=rs.get("long_route_nets_count", 0),
         congestion_hotspots=hotspots,
         pblock_overflow_count=cd.get("pblock_overflow_count", 0),
     )
@@ -161,15 +162,22 @@ def _build_netlist_quality(state: OptimizerState) -> DashboardNetlistQuality:
                 is_replicated=False,
             ))
 
-    # TODO: cross_domain_paths_count — count paths where source_clock != dest_clock
-    # from timing report CDC analysis. Requires Vivado report_timing -cross_clock parsing.
+    cs = state.timing.control_sets or {}
+    di = state.timing.design_info or {}
+    cell_summary = ""
+    if di.get("top_cell_types"):
+        cell_summary = ", ".join(
+            f"{k}:{v}" for k, v in
+            sorted(di["top_cell_types"].items(), key=lambda x: -x[1])[:8]
+        )
 
     return DashboardNetlistQuality(
-        total_control_sets=0,        # TODO: Vivado report_control_sets
-        avg_control_sets_per_slice=None,  # TODO: Vivado report_control_sets
+        total_control_sets=cs.get("total_control_sets", 0),
+        avg_control_sets_per_slice=cs.get("avg_per_slice"),
         high_fanout_nets=nets,
-        failed_inferences=[],        # TODO: synthesis log parsing (not available post-synth)
-        cross_domain_paths_count=0,  # TODO: CDC analysis from timing report
+        failed_inferences=[],  # synthesis log not available post-synth
+        cross_domain_paths_count=state.timing.cross_domain_paths_count,
+        cell_type_summary=cell_summary,
     )
 
 
@@ -182,17 +190,13 @@ def _build_constraints_env(state: OptimizerState) -> DashboardConstraints:
     if cp and cp > 0:
         clock_defs["clk_fpl26contest"] = round(1000.0 / cp, 1)
 
-    # TODO: false_paths_count — Vivado get_false_paths
-    # TODO: multicycle_paths_count — Vivado get_multicycle_paths
-    # TODO: io_delay_defined_pct — analyze all I/O ports for set_input_delay/set_output_delay
-    # TODO: pvt_corner — extract from report_timing header or Vivado report_pvt
-
+    ci = state.timing.constraints_info or {}
     return DashboardConstraints(
         clock_definitions=clock_defs,
-        false_paths_count=0,
-        multicycle_paths_count=0,
-        io_delay_defined_pct=None,
-        pvt_corner="slow_0p95v_85c",  # UltraScale+ standard slow corner
+        false_paths_count=ci.get("false_paths_count", 0),
+        multicycle_paths_count=ci.get("multicycle_paths_count", 0),
+        io_delay_defined_pct=ci.get("io_delay_defined_pct"),
+        pvt_corner=state.timing.pvt_corner or "slow_0p95v_85c",
     )
 
 
@@ -353,6 +357,8 @@ def format_state_space_for_llm(
         lines.append(f"  total_control_sets: {nq.total_control_sets}")
         lines.append(f"  avg_control_sets_per_slice: {nq.avg_control_sets_per_slice:.2f}" if nq.avg_control_sets_per_slice is not None else "  avg_control_sets_per_slice: N/A")
         lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}")
+        if nq.cell_type_summary:
+            lines.append(f"  top_cell_types: {nq.cell_type_summary}")
         if nq.high_fanout_nets:
             lines.append(f"  high_fanout_nets:  # {len(nq.high_fanout_nets)} nets")
             for net in nq.high_fanout_nets[:10]:

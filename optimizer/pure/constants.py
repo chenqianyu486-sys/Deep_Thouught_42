@@ -108,6 +108,9 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_get_critical_high_fanout_nets": frozenset({"high_fanout_nets"}),
     "rapidwright_analyze_critical_path_spread": frozenset({"critical_path_spread"}),
     "vivado_extract_critical_path_pins": frozenset({"critical_path_spread"}),
+    "vivado_report_route_status": frozenset({"route_status"}),
+    "vivado_report_timing_summary": frozenset({"timing_summary", "cdc_paths"}),
+    "rapidwright_get_design_info": frozenset({"design_info"}),
 }
 
 

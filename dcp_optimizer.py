@@ -8205,6 +8205,11 @@ Examples:
         help="Run v2 skill-only test: quick validation of skill invocations without place/route."
     )
     parser.add_argument(
+        "--test-init-analysis",
+        action="store_true",
+        help="Run init analysis only (no LLM): extracts all design data, builds StateSpace dashboard, and verifies field completeness."
+    )
+    parser.add_argument(
         "--dashboard",
         action="store_true",
         help="Enable web dashboard for real-time state monitoring (default port: 8080)."
@@ -8287,13 +8292,16 @@ Examples:
         sys.exit(exit_code)
     
     # V2 test mode — validate tools/skills without LLM (no API key needed)
-    if args.test_v2 or args.test_v2_only_skills:
+    if args.test_v2 or args.test_v2_only_skills or args.test_init_analysis:
         from optimizer.test_mode import run_v2_test_mode
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         run_dir = Path.cwd() / f"dcp_optimizer_run-{timestamp}"
 
-        print(f"FPGA Design Optimization - V2 TEST MODE")
+        mode_label = "INIT-ANALYSIS ONLY" if args.test_init_analysis else (
+            "SKILLS-ONLY" if args.test_v2_only_skills else "V2 TEST MODE"
+        )
+        print(f"FPGA Design Optimization - {mode_label}")
         print(f"=========================================")
         print(f"Input:       {args.input_dcp.resolve()}")
         print(f"Output:      {args.output_dcp.resolve()}")
@@ -8308,6 +8316,7 @@ Examples:
             max_nets=args.max_nets,
             skip_skills=args.skip_skills or args.test_v2_only_skills,
             skills_only=args.test_v2_only_skills,
+            init_analysis_only=args.test_init_analysis,
         )
         sys.exit(0 if success else 1)
 

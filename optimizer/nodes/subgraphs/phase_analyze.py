@@ -33,7 +33,10 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     Returns:
         LoopPhase.SELECT_STRATEGY (always, even if analysis was incomplete).
     """
-    max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.ANALYZE, 12)
+    is_first_iteration = (state.iteration.current == 1)
+    max_rounds = 8 if is_first_iteration else PHASE_MAX_ROUNDS.get(LoopPhase.ANALYZE, 12)
+    if is_first_iteration:
+        logger.info(f"[ANALYZE] First iteration: reduced max rounds to {max_rounds} (dashboard pre-filled)")
     tool_round = 0
     tools_called: list[str] = []
     llm_summary = ""

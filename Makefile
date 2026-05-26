@@ -93,6 +93,7 @@ help:
 	@echo "  run_skill_test       - Run only skill invocation tests (quick, no place/route)"
 	@echo "  run_test_v2          - Run v2 test mode (validate MCP tools/skills, no LLM)"
 	@echo "  run_skill_test_v2    - Run v2 skill-only test (quick validation, no place/route)"
+	@echo "  run_init_analysis    - Run init analysis only: extract data + verify dashboard completeness (no LLM, new)"
 	@echo "  validate             - Validate functional equivalence between two DCPs"
 	@echo "  validate_demo        - Run validation demo (self-check)"
 	@echo "  validate-submission  - Find and validate optimized DCP against original"
@@ -113,6 +114,7 @@ help:
 	@echo "  make run_skill_test DCP=logicnets_jscl.dcp"
 	@echo "  make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp"
 	@echo "  make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp"
+	@echo "  make run_init_analysis DCP=demo_corundum_25g_misses_timing.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp"
 	@echo "  make validate GOLDEN=design.dcp REVISED=design_optimized.dcp VECTORS=50000"
 	@echo "  make validate_demo"
@@ -556,6 +558,44 @@ run_skill_test_v2:
 	fi; \
 	echo ""; \
 	$(PYTHON) dcp_optimizer.py "$(DCP)" --test-v2-only-skills
+
+# Run init_analysis only: extract all design data, build StateSpace dashboard, and verify field completeness (no LLM)
+run_init_analysis:
+	@if [ -z "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP variable not set$(COLOR_RESET)\n"; \
+		echo "Usage: make run_init_analysis DCP=input.dcp"; \
+		echo ""; \
+		echo "Runs init analysis (MCP tools only, no LLM) and verifies"; \
+		echo "that all 6 StateSpace dashboard modules are populated."; \
+		echo ""; \
+		echo "Examples:"; \
+		echo "  make run_init_analysis DCP=demo_corundum_25g_misses_timing.dcp"; \
+		echo "  make run_init_analysis DCP=logicnets_jscl.dcp"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(DCP)" ]; then \
+		printf "$(COLOR_RED)Error: DCP file not found: $(DCP)$(COLOR_RESET)\n"; \
+		exit 1; \
+	fi
+	@printf "$(COLOR_GREEN)Running init analysis + dashboard verification on $(DCP)...$(COLOR_RESET)\n"
+	@# Set up Java from Vivado if Java is not available
+	@if ! command -v java >/dev/null 2>&1; then \
+		printf "$(COLOR_YELLOW)Java not found on PATH, attempting to use Java from Vivado...$(COLOR_RESET)\n"; \
+		VIVADO_PATH=$$(command -v $(VIVADO_EXEC) 2>/dev/null); \
+		if [ -n "$$VIVADO_PATH" ]; then \
+			VIVADO_BIN_DIR=$$(dirname $$VIVADO_PATH); \
+			VIVADO_ROOT=$$(dirname $$VIVADO_BIN_DIR); \
+			VIVADO_JAVA="$$VIVADO_ROOT/tps/lnx64/jre11*/bin/java"; \
+			if ls $$VIVADO_JAVA >/dev/null 2>&1; then \
+				JAVA_FOUND=$$(ls $$VIVADO_JAVA | head -n 1); \
+				export JAVA_HOME=$$(dirname $$(dirname $$JAVA_FOUND)); \
+				export PATH="$$JAVA_HOME/bin:$$PATH"; \
+				printf "$(COLOR_GREEN)Using Java from Vivado: %s$(COLOR_RESET)\n" "$$JAVA_HOME"; \
+			fi; \
+		fi; \
+	fi; \
+	echo ""; \
+	$(PYTHON) dcp_optimizer.py "$(DCP)" --test-init-analysis
 
 # Validation target: Validate functional equivalence between two DCPs
 validate:

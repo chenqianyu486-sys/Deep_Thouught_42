@@ -104,6 +104,18 @@ class TimingState:
     device_capacity: Optional[dict] = None  # {"LUT": N, "FF": N, "DSP": N, "BRAM": N, "URAM": N}
     # Congestion analysis result (populated when analyze_congestion tool runs)
     congestion_data: Optional[dict] = None
+    # Route status (populated during init_analysis from report_route_status)
+    route_status: Optional[dict] = None
+    # Control sets (populated during init_analysis from report_control_sets)
+    control_sets: Optional[dict] = None
+    # Cross-domain paths count from CDC analysis (populated during init_analysis)
+    cross_domain_paths_count: int = 0
+    # Design info from RapidWright get_design_info (populated during init_analysis)
+    design_info: Optional[dict] = None
+    # Constraints environment info (populated during init_analysis)
+    constraints_info: Optional[dict] = None
+    # PVT corner extracted from timing report header (populated during init_analysis)
+    pvt_corner: str = "slow_0p95v_85c"
 
 
 @dataclass
@@ -440,6 +452,7 @@ class DashboardNetlistQuality:
     high_fanout_nets: list[DashboardHighFanoutNet] = field(default_factory=list)
     failed_inferences: list[str] = field(default_factory=list)
     cross_domain_paths_count: int = 0
+    cell_type_summary: str = ""  # top cell types from design_info (e.g. "LUT6:1200, FDRE:800, ...")
 
 
 @dataclass
