@@ -313,3 +313,115 @@ class TestBuildGraph:
         final = run_async(graph.run(state, deps, entry="init_analysis"))
         assert final.control.start_time is not None
         assert final.control.end_time is not None
+
+    def test_graph_all_nodes_have_edges(self):
+        """Every registered node has an outgoing edge."""
+        from optimizer import build_optimizer_graph
+        graph = build_optimizer_graph()
+        for node_name in graph._nodes:
+            assert node_name in graph._edges, f"Node '{node_name}' has no edge registered"
+
+    def test_graph_loop_execution_with_mocked_nodes(self):
+        """Full graph traversal with mocked nodes: init -> 3 iterations -> save.
+
+        Uses mocked node functions to avoid MCP dependencies
+        while testing edge routing and graph loop logic.
+        """
+        from optimizer import build_optimizer_graph
+
+        graph = build_optimizer_graph()
+
+        async def mock_init(state, deps):
+            state.control.start_time = 1000.0
+            state.timing.initial_wns = -0.5
+            state.timing.best_wns = -0.5
+            state.timing.latest_wns = -0.5
+            return NodeName.ITERATION_START
+
+        async def mock_iter_start(state, deps):
+            state.iteration.current += 1
+            return NodeName.SELECT_MODEL
+
+        async def mock_select_model(state, deps):
+            state.model.current_model = "test-model"
+            return NodeName.PREPARE_CONTEXT
+
+        async def mock_prepare(state, deps):
+            return NodeName.LLM_TOOL_LOOP
+
+        async def mock_llm_loop(state, deps):
+            state.model.llm_call_count += 1
+            return NodeName.ITERATION_END
+
+        async def mock_iter_end(state, deps):
+            state.iteration.global_no_improvement += 1
+            return NodeName.CHECK_EXIT
+
+        async def mock_check_exit(state, deps):
+            if state.iteration.global_no_improvement >= 3:
+                state.control.is_done = True
+                state.control.done_reason = "max_no_improvement"
+            return NodeName.CHECK_EXIT
+
+        async def mock_save(state, deps):
+            state.control.end_time = 2000.0
+            return NodeName.END
+
+        graph._nodes = {
+            NodeName.INIT_ANALYSIS: mock_init,
+            NodeName.ITERATION_START: mock_iter_start,
+            NodeName.SELECT_MODEL: mock_select_model,
+            NodeName.PREPARE_CONTEXT: mock_prepare,
+            NodeName.LLM_TOOL_LOOP: mock_llm_loop,
+            NodeName.ITERATION_END: mock_iter_end,
+            NodeName.CHECK_EXIT: mock_check_exit,
+            NodeName.SAVE_OUTPUT: mock_save,
+        }
+
+        state = OptimizerState()
+        deps = NodeDeps()
+        final = run_async(graph.run(state, deps, entry=NodeName.INIT_ANALYSIS))
+
+        assert final.control.start_time == 1000.0
+        assert final.control.end_time == 2000.0
+        assert final.control.done_reason == "max_no_improvement"
+        assert final.iteration.current == 3
+        assert final.iteration.global_no_improvement == 3
+        assert final.model.llm_call_count == 3
+
+    def test_user_exit_during_loop(self):
+        """User exit request during loop should route to save_output."""
+        from optimizer import build_optimizer_graph
+
+        graph = build_optimizer_graph()
+
+        async def mock_init(state, deps):
+            state.control.start_time = 1000.0
+            state.timing.initial_wns = -0.5
+            state.timing.best_wns = -0.5
+            state.timing.latest_wns = -0.5
+            return NodeName.ITERATION_START
+
+        async def mock_iter_start(state, deps):
+            state.iteration.current += 1
+            # Simulate user requesting exit mid-iteration
+            state.control.user_exit_requested = True
+            return NodeName.SELECT_MODEL
+
+        async def passthrough(state, deps):
+            return NodeName.END
+
+        graph._nodes = {
+            NodeName.INIT_ANALYSIS: mock_init,
+            NodeName.ITERATION_START: mock_iter_start,
+            NodeName.SELECT_MODEL: passthrough,
+            NodeName.SAVE_OUTPUT: passthrough,
+        }
+        graph._edges[NodeName.SAVE_OUTPUT] = NodeName.END
+
+        state = OptimizerState()
+        deps = NodeDeps()
+        final = run_async(graph.run(state, deps, entry=NodeName.INIT_ANALYSIS))
+
+        assert final.control.is_done is True
+        assert final.control.done_reason == "user_requested"

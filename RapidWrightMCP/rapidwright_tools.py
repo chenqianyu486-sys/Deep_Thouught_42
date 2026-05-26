@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Global state
 _initialized = False
 _current_design = None
+_last_dcp_path = None  # Track last loaded DCP for auto-reload on process restart
 
 # Cache for device-level site enumeration (device_name -> list of site objects)
 _device_sites_cache: Dict[str, list] = {}
@@ -29,6 +30,31 @@ def _clear_caches() -> None:
     _device_sites_cache.clear()
     _tile_info_cache.clear()
     logger.debug("Cleared site/tile caches")
+
+
+def _ensure_design_loaded() -> str | None:
+    """Auto-reload last known DCP if design was lost (e.g., after process restart).
+    
+    Returns error string if design is still unavailable, None otherwise.
+    """
+    global _current_design
+    if _current_design is not None:
+        return None
+    if _last_dcp_path is None:
+        return "No design loaded. Call read_checkpoint first."
+    if not _initialized:
+        return "RapidWright not initialized. Call initialize_rapidwright first."
+    try:
+        from com.xilinx.rapidwright.design import Design
+        logger.info(f"Auto-reloading design from {_last_dcp_path}")
+        design = Design.readCheckpoint(str(_last_dcp_path))
+        _current_design = design
+        _clear_caches()
+        logger.info(f"Auto-reload successful: {_last_dcp_path.name}")
+        return None
+    except Exception as e:
+        logger.error(f"Auto-reload failed: {e}")
+        return f"No design loaded and auto-reload failed: {e}"
 
 
 def initialize_rapidwright(jvm_max_memory: str = "4G") -> Dict[str, Any]:
@@ -279,7 +305,7 @@ def read_checkpoint(dcp_path: str) -> Dict[str, Any]:
     Returns:
         Dictionary with load status and basic design info
     """
-    global _current_design
+    global _current_design, _last_dcp_path
     
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
@@ -296,6 +322,7 @@ def read_checkpoint(dcp_path: str) -> Dict[str, Any]:
         logger.info(f"Loading design from {dcp_file}")
         design = Design.readCheckpoint(str(dcp_file))
         _current_design = design
+        _last_dcp_path = dcp_file  # Save for auto-reload
         _clear_caches()
 
         return {
@@ -327,8 +354,9 @@ def write_checkpoint(dcp_path: str, overwrite: bool = False) -> Dict[str, Any]:
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
     
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
     
     try:
         from com.xilinx.rapidwright.tests import CodePerfTracker
@@ -405,8 +433,9 @@ def get_design_info() -> Dict[str, Any]:
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
     
-    if _current_design is None:
-        return {"error": "No design loaded. Use load_design first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
     
     try:
         design = _current_design
@@ -455,8 +484,9 @@ def search_cells(pattern: Optional[str] = None,
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use load_design first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         design = _current_design
@@ -667,8 +697,9 @@ def optimize_lut_input_cone(hierarchical_input_pins: list[str]) -> Dict[str, Any
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
     
-    if _current_design is None:
-        return {"error": "No design loaded. Use load_design first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
     
     try:
         from com.xilinx.rapidwright.eco import LUTInputConeOpt
@@ -799,8 +830,9 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from com.xilinx.rapidwright.eco import FanOutOptimization
@@ -1241,8 +1273,9 @@ def analyze_critical_path_spread(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
     
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
     
     # Load data from file if specified
     if input_file:
@@ -1707,8 +1740,9 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         logger.info("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f, pin_paths_sample=%s",
@@ -1778,8 +1812,9 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -1872,8 +1907,9 @@ def smart_region_search(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -1991,9 +2027,10 @@ def analyze_pblock_region(
         logger.warning("analyze_pblock_region: RapidWright not initialized")
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        logger.warning("analyze_pblock_region: No design loaded")
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        logger.warning(f"analyze_pblock_region: {err}")
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2068,9 +2105,10 @@ def execute_pblock_strategy(
         logger.warning("execute_pblock_strategy: RapidWright not initialized")
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        logger.warning("execute_pblock_strategy: No design loaded")
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        logger.warning(f"execute_pblock_strategy: {err}")
+        return {"error": err}
 
     # Auto-detect resource counts from the loaded design when not specified
     if target_lut_count == 0 or target_ff_count == 0:
@@ -2156,8 +2194,9 @@ def execute_physopt_strategy(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2214,8 +2253,9 @@ def execute_fanout_strategy(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2270,8 +2310,9 @@ def flatten_lut_cascade(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2325,8 +2366,9 @@ def optimize_pin_swapping(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2387,8 +2429,9 @@ def replicate_critical_cells(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2443,8 +2486,9 @@ def analyze_register_retiming(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2500,8 +2544,9 @@ def execute_register_retiming(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2567,8 +2612,9 @@ def smart_retiming(
 
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2625,8 +2671,9 @@ def route_design_rwroute(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     import time
 
@@ -2682,8 +2729,9 @@ def report_timing() -> Dict[str, Any]:
 
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     import time
     try:
@@ -2779,8 +2827,9 @@ def analyze_congestion_spreading(
 
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2834,8 +2883,9 @@ def execute_congestion_spreading(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2887,8 +2937,9 @@ def analyze_net_swapping(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext
@@ -2939,8 +2990,9 @@ def execute_net_swapping(
     if not _initialized:
         return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
 
-    if _current_design is None:
-        return {"error": "No design loaded. Use read_checkpoint first."}
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
 
     try:
         from skills import SkillRegistry, SkillContext

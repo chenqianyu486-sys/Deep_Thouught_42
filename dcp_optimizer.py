@@ -7824,6 +7824,7 @@ async def optimize_v2(
     # ── Step 2: Start MCP sessions ───────────────────────────────
     exit_stack = AsyncExitStack()
     script_dir = Path(__file__).parent.resolve()
+    dashboard_runner = None
 
     try:
         # RapidWright MCP server
@@ -8055,7 +8056,6 @@ async def optimize_v2(
         )
 
         # ── Step 8: Build and run graph ───────────────────────────
-        dashboard_runner = None
         if dashboard:
             from dashboard import DashboardStateTracer, start_dashboard
             tracer = DashboardStateTracer()

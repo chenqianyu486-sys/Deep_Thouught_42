@@ -327,7 +327,7 @@ def parse_hold_timing(timing_text: str) -> dict:
         if 'Hold' in s and ('WNS' in s or 'WHS' in s):
             in_hold = True
             continue
-        if in_hold and s and not s.startswith('-'):
+        if in_hold and s and not s.startswith('---'):
             parts = s.split()
             try:
                 if len(parts) >= 4:
