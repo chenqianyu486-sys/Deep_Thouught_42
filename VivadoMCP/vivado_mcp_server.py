@@ -57,7 +57,9 @@ _vivado_path: Optional[str] = None
 _vivado_log_file: Optional[str] = None
 _vivado_journal_file: Optional[str] = None
 _design_open: bool = False
-_command_pending: bool = False  # True if a command timed out and may still be running
+# Last successfully opened DCP path — used for auto-reopen after restart.
+# Vivado Tcl timeout poisons the session; we kill and restart, then reopen.
+_last_dcp_path: Optional[str] = None
 
 
 def get_vivado_path() -> str:
@@ -178,30 +180,12 @@ def wait_for_prompt(proc: pexpect.spawn, timeout: float) -> str:
     return proc.before
 
 
-def sync_after_timeout(proc: pexpect.spawn, timeout: float = 300) -> str:
-    """
-    After a timeout, wait for the previous command to complete.
-    Returns the output from the command that was running.
-    """
-    global _command_pending
-    if not _command_pending:
-        return ""
-    
-    wait_timeout = max(timeout, 300)
-    try:
-        output = wait_for_prompt(proc, timeout=wait_timeout)
-        _command_pending = False
-        return f"[Previous command completed]\n{output}"
-    except pexpect.TIMEOUT:
-        # Still stuck — Vivado is truly hung, flag for restart
-        _command_pending = True
-        raise RuntimeError(f"Vivado appears to be hung (waited {wait_timeout:.0f}s). Use restart_vivado to recover.")
-
-
 def _run_single_tcl(proc, command: str, timeout: float) -> str:
-    """Execute a single Tcl command line and return its output."""
-    global _command_pending
+    """Execute a single Tcl command line and return its output.
 
+    Vivado Tcl timeout poisons the session — the process is killed
+    and restarted, then the last DCP is reopened automatically.
+    """
     cmd_log = command if len(command) < 200 else command[:200] + "..."
     logger.info(f"Executing Tcl: {cmd_log}")
 
@@ -216,8 +200,12 @@ def _run_single_tcl(proc, command: str, timeout: float) -> str:
         logger.info("Tcl command completed successfully")
         return output.strip()
     except pexpect.TIMEOUT:
-        _command_pending = True
         logger.error(f"Tcl command timed out after {timeout}s: {cmd_log}")
+        logger.warning(
+            "Vivado session poisoned by timeout — restarting process and reopening DCP"
+        )
+        _restart_and_reopen()
+        logger.info("Vivado restarted and DCP reopened after timeout")
         raise
 
 
@@ -228,6 +216,9 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     Supports multi-line scripts: commands separated by newlines are executed
     sequentially in the same Vivado session (variables persist across lines).
 
+    Note: If a previous command timed out, _run_single_tcl already restarted
+    Vivado internally, so this function always starts with a fresh session.
+
     Args:
         command: Tcl command(s) to execute
         timeout: Timeout in seconds per line (None for default 300s)
@@ -235,14 +226,8 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     Returns:
         Command output as string
     """
-    global _command_pending
-
     proc = ensure_vivado()
     effective_timeout = timeout if timeout is not None else 300
-
-    # If a previous command timed out, wait for it to complete first
-    if _command_pending:
-        sync_output = sync_after_timeout(proc, timeout=effective_timeout)
 
     # Split multi-line commands and execute sequentially
     cmd_lines = [line.strip() for line in command.split("\n") if line.strip()]
@@ -262,12 +247,26 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
         return _run_single_tcl(proc, command, effective_timeout)
 
 
+def _restart_and_reopen() -> None:
+    """Kill Vivado, restart, and reopen the last DCP.
+
+    Called automatically on Tcl timeout — the session is poisoned
+    and cannot be recovered. The new session is clean.
+    """
+    global _design_open, _vivado_log_file, _vivado_journal_file, _last_dcp_path
+    restart_vivado_process()
+    if _last_dcp_path:
+        logger.info(f"Reopening DCP: {_last_dcp_path}")
+        run_tcl_command(f"open_checkpoint {{{_last_dcp_path}}}", timeout=600)
+        _design_open = True
+        logger.info("DCP reopened successfully after restart")
+
+
 def restart_vivado_process() -> str:
     """Kill and restart Vivado process."""
-    global _design_open, _command_pending, _vivado_log_file, _vivado_journal_file
+    global _design_open, _vivado_log_file, _vivado_journal_file
     cleanup_vivado()
     _design_open = False
-    _command_pending = False
     start_vivado(_vivado_log_file, _vivado_journal_file)
     return "Vivado restarted successfully."
 
@@ -741,102 +740,40 @@ def extract_critical_path_pins(
 
 def report_utilization_for_pblock(timeout: float = 300.0) -> str:
     """
-    Get detailed resource utilization report for pblock sizing.
-    
-    Returns utilization of key resources:
-    - LUTs, FFs, DSPs, BRAMs, URAMs
-    - Formatted for easy parsing and pblock size calculation
+    Get resource utilization using multiple lightweight get_cells -filter queries.
+
+    Uses Vivado's native -filter engine (C++ O(n) scan, ~1-2s for 200K cells)
+    instead of report_utilization -return_string which times out on >100K cells.
+    Uses PRIMITIVE_GROUP for cross-architecture compatibility (UltraScale/Versal).
+
+    Each query is a single-line Tcl command safe for run_tcl_command's
+    line-by-line sendline model (no multi-line foreach/if blocks).
+
+    Returns:
+        Formatted string with LUT/FF/DSP/BRAM/URAM counts for pblock sizing.
     """
-    cmd = "report_utilization -return_string"
-    
+    tcl_script = (
+        'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == LUT && REF_NAME =~ LUT*}]]"\n'
+        'puts "FF:[llength [get_cells -hier -quiet -filter {REF_NAME =~ FD*}]]"\n'
+        'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == DSP}]]"\n'
+        'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == BRAM || PRIMITIVE_GROUP == BLOCKRAM}]]"\n'
+        'puts "URAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == URAM}]]"'
+    )
     try:
-        report = run_tcl_command(cmd, timeout=timeout)
+        output = run_tcl_command(tcl_script, timeout=timeout)
     except Exception as e:
         return f"Error generating utilization report: {str(e)}"
-    
-    # Parse key resource counts
-    resources = {
-        "LUT": 0,
-        "FF": 0,
-        "DSP": 0,
-        "BRAM": 0,
-        "URAM": 0
-    }
-    
-    lines = report.split('\n')
-    for line in lines:
-        # Look for slice logic section
-        if '| Slice LUTs' in line or '| LUT as Logic' in line:
-            parts = line.split('|')
-            if len(parts) >= 3:
-                try:
-                    resources["LUT"] = int(parts[2].strip().split()[0])
-                except Exception:
-                    logger.debug(f"Failed to parse LUT from line: {line}")
-                    pass
-        
-        stripped = line.strip()
-        if 'Register as Flip Flop' in stripped or 'Slice Registers' in stripped:
-            parts = line.split('|')
-            if len(parts) >= 3:
-                try:
-                    resources["FF"] = int(parts[2].strip().split()[0])
-                except Exception:
-                    logger.debug(f"Failed to parse FF from line: {line}")
-                    pass
-        
-        if '| DSPs' in line and '| Block RAM' not in line:
-            parts = line.split('|')
-            if len(parts) >= 3:
-                try:
-                    resources["DSP"] = int(parts[2].strip().split()[0])
-                except Exception:
-                    logger.debug(f"Failed to parse DSP from line: {line}")
-                    pass
-        
-        if '| Block RAM Tile' in line:
-            parts = line.split('|')
-            if len(parts) >= 3:
-                try:
-                    resources["BRAM"] = int(parts[2].strip().split()[0])
-                except Exception:
-                    logger.debug(f"Failed to parse BRAM from line: {line}")
-                    pass
-        
-        if '| URAM' in line:
-            parts = line.split('|')
-            if len(parts) >= 3:
-                try:
-                    resources["URAM"] = int(parts[2].strip().split()[0])
-                except Exception:
-                    logger.debug(f"Failed to parse URAM from line: {line}")
-                    pass
-    
-        try:
-            fallback_cmd = (
-                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
-                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
-                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
-                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]";'
-                'puts "URAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"URAM*\\"}]]"'
-            )
-            fb = run_tcl_command(fallback_cmd, timeout=timeout)
-            for fline in fb.split('\n'):
-                fline = fline.strip()
-                if fline.startswith('LUT:'):
-                    resources["LUT"] = int(fline.split(':')[1])
-                elif fline.startswith('FF:'):
-                    resources["FF"] = int(fline.split(':')[1])
-                elif fline.startswith('DSP:'):
-                    resources["DSP"] = int(fline.split(':')[1])
-                elif fline.startswith('BRAM:'):
-                    resources["BRAM"] = int(fline.split(':')[1])
-                elif fline.startswith('URAM:'):
-                    resources["URAM"] = int(fline.split(':')[1])
-        except Exception:
-            pass
 
-    # Format output
+    resources = {"LUT": 0, "FF": 0, "DSP": 0, "BRAM": 0, "URAM": 0}
+    for line in output.split('\n'):
+        line = line.strip()
+        for key in resources:
+            if line.startswith(f"{key}:"):
+                try:
+                    resources[key] = int(line.split(':')[1])
+                except (ValueError, IndexError):
+                    pass
+
     result_lines = [
         "=== Design Resource Utilization ===",
         "",
@@ -854,71 +791,40 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
         f"BRAMs: {int(resources['BRAM'] * 1.5):8,}",
         f"URAMs: {int(resources['URAM'] * 1.5):8,}",
     ]
-    
+
     return "\n".join(result_lines)
 
 
 def get_resource_counts(timeout: float = 300.0) -> str:
-    """Get structured resource counts as JSON.
+    """Get structured resource counts as JSON using lightweight get_cells -filter queries.
 
-    Parses report_utilization output and returns clean JSON with
-    LUT, FF, DSP, and BRAM used counts.
+    Uses Vivado's native -filter engine (C++ O(n) scan, ~1-2s for 200K cells).
+    Uses PRIMITIVE_GROUP for cross-architecture compatibility (UltraScale/Versal).
 
     Returns:
         JSON string: {"lut": 30839, "ff": 1660, "dsp": 0, "bram": 0}
     """
-    cmd = "report_utilization -return_string"
+    tcl_script = (
+        'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == LUT && REF_NAME =~ LUT*}]]"\n'
+        'puts "FF:[llength [get_cells -hier -quiet -filter {REF_NAME =~ FD*}]]"\n'
+        'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == DSP}]]"\n'
+        'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == BRAM || PRIMITIVE_GROUP == BLOCKRAM}]]"'
+    )
     try:
-        report = run_tcl_command(cmd, timeout=timeout)
+        output = run_tcl_command(tcl_script, timeout=timeout)
     except Exception as e:
         return json.dumps({"error": str(e)})
 
     resources = {"lut": 0, "ff": 0, "dsp": 0, "bram": 0}
-    lines = report.split('\n')
-    for line in lines:
-        parts = line.split('|')
-        if len(parts) >= 3:
-            raw = parts[2].strip()
-            val_str = raw.split()[0] if raw else "0"
-            try:
-                val = int(val_str)
-            except ValueError:
-                continue
-
-            stripped = line.strip()
-            if 'Slice LUTs' in stripped or 'LUT as Logic' in stripped:
-                resources["lut"] = val
-            elif 'Register as Flip Flop' in stripped or 'Slice Registers' in stripped:
-                resources["ff"] = val
-            elif 'DSPs' in stripped:
-                if 'Block RAM' not in stripped:
-                    resources["dsp"] = val
-            elif 'Block RAM Tile' in stripped:
-                resources["bram"] = val
-
-    # Fallback: if parsing returned all zeros (likely format mismatch),
-    # use direct TCL cell counting which is format-independent.
-    if resources["lut"] == 0 and resources["ff"] == 0:
-        try:
-            fallback_cmd = (
-                'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"SLICE.lut*\\"}]]";'
-                'puts "FF:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"FD*\\"}]]";'
-                'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"DSP*\\"}]]";'
-                'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_TYPE =~ \\"RAMB*\\"}]]"'
-            )
-            fb = run_tcl_command(fallback_cmd, timeout=timeout)
-            for line in fb.split('\n'):
-                line = line.strip()
-                if line.startswith('LUT:'):
-                    resources["lut"] = int(line.split(':')[1])
-                elif line.startswith('FF:'):
-                    resources["ff"] = int(line.split(':')[1])
-                elif line.startswith('DSP:'):
-                    resources["dsp"] = int(line.split(':')[1])
-                elif line.startswith('BRAM:'):
-                    resources["bram"] = int(line.split(':')[1])
-        except Exception:
-            pass
+    key_map = {"LUT": "lut", "FF": "ff", "DSP": "dsp", "BRAM": "bram"}
+    for line in output.split('\n'):
+        line = line.strip()
+        for k, v in key_map.items():
+            if line.startswith(f"{k}:"):
+                try:
+                    resources[v] = int(line.split(':')[1])
+                except (ValueError, IndexError):
+                    pass
 
     return json.dumps(resources)
 
@@ -1815,11 +1721,15 @@ async def call_tool(name: str, arguments: dict):
         if name == "open_checkpoint":
             dcp_path = arguments["dcp_path"]
             timeout = arguments.get("timeout", 300)
-            
+
             # Close existing design if open
             if _design_open:
                 close_current_design()
-            
+
+            # Save path for potential auto-reopen on timeout restart
+            global _last_dcp_path
+            _last_dcp_path = dcp_path
+
             # Open the checkpoint
             output = run_tcl_command(f"open_checkpoint {{{dcp_path}}}", timeout=timeout)
             _design_open = True

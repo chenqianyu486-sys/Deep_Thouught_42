@@ -177,6 +177,18 @@ table.transitions tr:hover { background: #12122a; }
         <div class="value" id="ssTnsSetup">--</div>
       </div>
       <div class="stat">
+        <div class="label">Best WNS</div>
+        <div class="value" id="ssBestWns">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Best WNS Iter</div>
+        <div class="value" id="ssBestWnsIter">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Cells / Nets</div>
+        <div class="value" id="ssCellNetCount" style="font-size:12px">--</div>
+      </div>
+      <div class="stat">
         <div class="label">WHS Hold</div>
         <div class="value" id="ssWhsHold">--</div>
       </div>
@@ -682,6 +694,18 @@ function updateStateSpace(ss) {
     $('ssWnsSetup').textContent = gs.wns_setup != null ? formatNum(gs.wns_setup) + 'ns' : '--';
     $('ssWnsSetup').className = 'value ' + (gs.wns_setup != null ? (gs.wns_setup >= 0 ? 'positive' : 'negative') : '');
     $('ssTnsSetup').textContent = gs.tns_setup != null ? formatNum(gs.tns_setup, 2) + 'ns' : '--';
+    // Best WNS
+    const bestWnsEl = $('ssBestWns');
+    if (gs.best_wns != null) {
+      bestWnsEl.textContent = formatNum(gs.best_wns) + 'ns';
+      bestWnsEl.className = 'value ' + (gs.best_wns >= 0 ? 'positive' : 'negative');
+    } else {
+      bestWnsEl.textContent = '--';
+      bestWnsEl.className = 'value';
+    }
+    $('ssBestWnsIter').textContent = gs.best_wns_iteration != null ? gs.best_wns_iteration : '--';
+    // Design scale
+    $('ssCellNetCount').textContent = (gs.cell_count ? formatNum(gs.cell_count) : '?') + ' / ' + (gs.net_count ? formatNum(gs.net_count) : '?');
     $('ssWhsHold').textContent = gs.whs_hold != null ? formatNum(gs.whs_hold) + 'ns' : '--';
     $('ssWhsHold').className = 'value ' + (gs.whs_hold != null ? (gs.whs_hold >= 0 ? 'positive' : 'negative') : '');
     $('ssThsHold').textContent = gs.ths_hold != null ? formatNum(gs.ths_hold, 2) + 'ns' : '--';

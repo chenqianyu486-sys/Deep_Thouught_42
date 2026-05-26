@@ -116,6 +116,22 @@ class TimingState:
     constraints_info: Optional[dict] = None
     # PVT corner extracted from timing report header (populated during init_analysis)
     pvt_corner: str = "slow_0p95v_85c"
+    # Phase checkpoint: which init_analysis steps have completed (for skip-on-restart)
+    # Steps: timing_done, clocks_done, hold_done, util_done, route_done,
+    #        constraints_done (false/multicycle/IO), cdc_done
+    analysis_checkpoints: dict[str, bool] = field(default_factory=lambda: {
+        "timing_done": False,
+        "clocks_done": False,
+        "hold_done": False,
+        "util_done": False,
+        "route_done": False,
+        "constraints_done": False,
+        "cdc_done": False,
+    })
+    # Adaptive timeout factor based on design cell count.
+    # Set after initial size probe in init_analysis.
+    # 1.0 for <50K cells, 1.5 for 50K-150K, 3.0 for >150K.
+    design_size_factor: float = 1.0
 
 
 @dataclass
@@ -394,6 +410,12 @@ class DashboardGlobalState:
     ff_utilization: Optional[float] = None
     bram_utilization: Optional[float] = None
     dsp_utilization: Optional[float] = None
+    # Best values across iterations (for progress tracking)
+    best_wns: Optional[float] = None
+    best_wns_iteration: Optional[int] = None
+    # Design scale (from design_info)
+    cell_count: int = 0
+    net_count: int = 0
 
 
 @dataclass
@@ -431,9 +453,9 @@ class DashboardPhysicalCongestion:
     """Module 3: Physical and congestion metrics."""
     global_congestion_score: Optional[float] = None   # 0.0~1.0, >0.85 critical
     avg_wirelength: Optional[float] = None
-    long_route_nets_count: int = 0
+    long_route_nets_count: Optional[int] = None       # None=unknown, 0=analyzed+none
     congestion_hotspots: list[DashboardCongestionHotspot] = field(default_factory=list)
-    pblock_overflow_count: int = 0
+    pblock_overflow_count: Optional[int] = None        # None=not_measured, 0=measured+none
 
 
 @dataclass
@@ -462,6 +484,7 @@ class DashboardConstraints:
     false_paths_count: int = 0
     multicycle_paths_count: int = 0
     io_delay_defined_pct: Optional[float] = None   # 0.0~1.0
+    total_io_ports: Optional[int] = None             # None=parse failed, 0=no ports
     pvt_corner: str = "slow_0p95v_85c"
 
 

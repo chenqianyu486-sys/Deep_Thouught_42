@@ -28,6 +28,73 @@ from config_loader import get_worker_model_config
 logger = logging.getLogger(__name__)
 
 
+def _checkpoint_done(state: OptimizerState, step: str) -> bool:
+    """Check if an init_analysis step is already completed (for skip-on-restart)."""
+    return state.timing.analysis_checkpoints.get(step, False)
+
+
+def _mark_checkpoint(state: OptimizerState, step: str) -> None:
+    """Atomically mark a step as completed after validate-then-commit."""
+    state.timing.analysis_checkpoints[step] = True
+    logger.info(f"[init_analysis] Checkpoint committed: {step}")
+
+
+# Design size bins for adaptive timeout scaling.
+# Base: <50K cells (small designs like logicnets_jscl at 37K).
+# 1.5x: 50K-150K (medium designs like corundum at 197K — actually 197K > 150K).
+# 3.0x: >150K (large designs like boom_soc at ~1M).
+DESIGN_SIZE_BINS: list[tuple[int, int, float]] = [
+    (0, 50000, 1.0),
+    (50000, 150000, 1.5),
+    (150000, 2**31, 3.0),
+]
+MAX_TIMEOUT: float = 900.0  # Hard cap: never wait more than 15 min per call
+
+
+def _compute_size_factor(cell_count: int) -> float:
+    """Map cell count to timeout multiplier using DESIGN_SIZE_BINS."""
+    for lo, hi, factor in DESIGN_SIZE_BINS:
+        if lo <= cell_count < hi:
+            return factor
+    return 3.0
+
+
+def scaled_timeout(base: float, state: OptimizerState) -> float:
+    """Apply design size factor to a base timeout, capped at MAX_TIMEOUT."""
+    return min(base * state.timing.design_size_factor, MAX_TIMEOUT)
+
+
+async def _probe_design_size(state: OptimizerState, deps: NodeDeps) -> int:
+    """Quickly probe design cell count via lightweight Tcl.
+
+    Runs `llength [get_cells -hier]` which completes in ~1-2s even
+    for 200K-cell designs. Sets state.timing.design_size_factor for
+    adaptive timeout scaling.
+
+    Returns:
+        Cell count (int), or 0 if probe fails.
+    """
+    try:
+        result = await call_tool_fn(
+            "vivado_run_tcl",
+            {"command": "llength [get_cells -hier -quiet]", "timeout": 30},
+            deps.rapidwright_session, deps.vivado_session,
+        )
+        count_str = result.strip().split()[0] if result.strip() else "0"
+        cell_count = int(count_str) if count_str.lstrip("-").isdigit() else 0
+        factor = _compute_size_factor(cell_count)
+        state.timing.design_size_factor = factor
+        logger.info(
+            f"[init_analysis] Design size probe: {cell_count} cells, "
+            f"timeout factor={factor}"
+        )
+        return cell_count
+    except Exception as e:
+        logger.warning(f"[init_analysis] Size probe failed, using default factor: {e}")
+        state.timing.design_size_factor = 1.0
+        return 0
+
+
 async def init_analysis_node(
     state: OptimizerState, deps: NodeDeps
 ) -> str:
@@ -62,7 +129,7 @@ async def init_analysis_node(
         async def _init_vivado():
             result = await call_tool_fn(
                 "vivado_open_checkpoint",
-                {"dcp_path": str(input_dcp.resolve())},
+                {"dcp_path": str(input_dcp.resolve()), "timeout": 600},
                 deps.rapidwright_session, deps.vivado_session,
             )
             if "error" in result.lower() and "opened successfully" not in result.lower():
@@ -81,6 +148,9 @@ async def init_analysis_node(
 
         await asyncio.gather(_init_vivado(), _init_rapidwright())
 
+        # Probe design size for adaptive timeout scaling
+        await _probe_design_size(state, deps)
+
         # ════════════════════════════════════════════════════════════
         # Phase B: Parallel pipelines — Vivado (sequential) || RapidWright (sequential)
         # ════════════════════════════════════════════════════════════
@@ -93,35 +163,48 @@ async def init_analysis_node(
             nonlocal timing_report, cell_names_for_spread
 
             # Step B1: Report timing summary
-            timing_report = await call_tool_fn(
-                "vivado_report_timing_summary", {},
-                deps.rapidwright_session, deps.vivado_session,
-            )
-            timing_info = parse_timing_summary(timing_report)
+            if _checkpoint_done(state, "timing_done"):
+                logger.info("[init_analysis] Skipping timing step (checkpoint done)")
+            else:
+                timing_report = await call_tool_fn(
+                    "vivado_report_timing_summary",
+                    {"timeout": scaled_timeout(300, state)},
+                    deps.rapidwright_session, deps.vivado_session,
+                )
+                timing_info = parse_timing_summary(timing_report)
 
-            state.timing.initial_wns = timing_info["wns"]
-            state.timing.initial_tns = timing_info["tns"]
-            state.timing.initial_failing_endpoints = timing_info["failing_endpoints"]
-            state.timing.latest_tns = timing_info["tns"]
-            state.timing.latest_failing_endpoints = timing_info["failing_endpoints"]
-            state.timing.best_wns = timing_info["wns"] if timing_info["wns"] is not None else float('-inf')
-            state.timing.latest_wns = timing_info["wns"]
-            state.timing.best_wns_iteration = 0
-            state.timing.best_wns_tns = timing_info["tns"]
-            state.timing.best_wns_failing_endpoints = timing_info["failing_endpoints"]
-            logger.info(
-                f"[init_analysis] Timing: WNS={state.timing.initial_wns}, "
-                f"TNS={state.timing.initial_tns}, FE={state.timing.initial_failing_endpoints}"
-            )
+                state.timing.initial_wns = timing_info["wns"]
+                state.timing.initial_tns = timing_info["tns"]
+                state.timing.initial_failing_endpoints = timing_info["failing_endpoints"]
+                state.timing.latest_tns = timing_info["tns"]
+                state.timing.latest_failing_endpoints = timing_info["failing_endpoints"]
+                state.timing.best_wns = timing_info["wns"] if timing_info["wns"] is not None else float('-inf')
+                state.timing.latest_wns = timing_info["wns"]
+                state.timing.best_wns_iteration = 0
+                state.timing.best_wns_tns = timing_info["tns"]
+                state.timing.best_wns_failing_endpoints = timing_info["failing_endpoints"]
+                logger.info(
+                    f"[init_analysis] Timing: WNS={state.timing.initial_wns}, "
+                    f"TNS={state.timing.initial_tns}, FE={state.timing.initial_failing_endpoints}"
+                )
 
-            # PVT corner from timing report header
-            state.timing.pvt_corner = parse_pvt_corner(timing_report)
+                # PVT corner from timing report header
+                state.timing.pvt_corner = parse_pvt_corner(timing_report)
+                _mark_checkpoint(state, "timing_done")
 
             # Step B2: Get clock period
-            await _extract_clock_period(state, deps)
+            if _checkpoint_done(state, "clocks_done"):
+                logger.info("[init_analysis] Skipping clock period step (checkpoint done)")
+            else:
+                await _extract_clock_period(state, deps)
+                _mark_checkpoint(state, "clocks_done")
 
             # Step B3: Hold timing check
-            await _extract_hold_timing(state, deps)
+            if _checkpoint_done(state, "hold_done"):
+                logger.info("[init_analysis] Skipping hold timing step (checkpoint done)")
+            else:
+                await _extract_hold_timing(state, deps)
+                _mark_checkpoint(state, "hold_done")
 
             # Step B4: High fanout nets
             nets_report = await call_tool_fn(
@@ -133,12 +216,16 @@ async def init_analysis_node(
             logger.info(f"[init_analysis] Found {len(state.timing.high_fanout_nets)} high fanout nets")
 
             # Step B5: Resource utilization
-            util_report = await call_tool_fn(
-                "vivado_report_utilization_for_pblock", {},
-                deps.rapidwright_session, deps.vivado_session,
-            )
-            state.timing.resource_utilization = parse_resource_utilization(util_report)
-            logger.info(f"[init_analysis] Resource utilization: {state.timing.resource_utilization}")
+            if _checkpoint_done(state, "util_done"):
+                logger.info("[init_analysis] Skipping utilization step (checkpoint done)")
+            else:
+                util_report = await call_tool_fn(
+                    "vivado_report_utilization_for_pblock", {},
+                    deps.rapidwright_session, deps.vivado_session,
+                )
+                state.timing.resource_utilization = parse_resource_utilization(util_report)
+                logger.info(f"[init_analysis] Resource utilization: {state.timing.resource_utilization}")
+                _mark_checkpoint(state, "util_done")
 
             # Step B6: Critical path cells (for spread analysis later)
             cells_json = await call_tool_fn(
@@ -152,28 +239,40 @@ async def init_analysis_node(
             cell_names_for_spread = [p["cells"] for p in cell_paths]
 
             # Step B7: Route status (M3: avg_wirelength, long_route_nets)
-            try:
-                route_report = await call_tool_fn(
-                    "vivado_report_route_status", {},
-                    deps.rapidwright_session, deps.vivado_session,
-                )
-                state.timing.route_status = parse_route_status(route_report)
-                logger.info(
-                    f"[init_analysis] Route status: "
-                    f"nets={state.timing.route_status.get('total_nets')}, "
-                    f"long_routes={state.timing.route_status.get('long_route_nets_count')}"
-                )
-            except Exception as e:
-                logger.warning(f"[init_analysis] Route status failed: {e}")
+            if _checkpoint_done(state, "route_done"):
+                logger.info("[init_analysis] Skipping route status step (checkpoint done)")
+            else:
+                try:
+                    route_report = await call_tool_fn(
+                        "vivado_report_route_status",
+                        {"timeout": scaled_timeout(300, state)},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+                    state.timing.route_status = parse_route_status(route_report)
+                    logger.info(
+                        f"[init_analysis] Route status: "
+                        f"nets={state.timing.route_status.get('total_nets')}, "
+                        f"long_routes={state.timing.route_status.get('long_route_nets_count')}"
+                    )
+                    _mark_checkpoint(state, "route_done")
+                except Exception as e:
+                    logger.warning(f"[init_analysis] Route status failed: {e}")
 
             # Step B8: Control sets (M4)
-            await _extract_control_sets(state, deps)
-
             # Step B9: Constraints — false paths, multicycle paths, IO delay (M5)
-            await _extract_constraints(state, deps)
+            if _checkpoint_done(state, "constraints_done"):
+                logger.info("[init_analysis] Skipping constraints step (checkpoint done)")
+            else:
+                await _extract_control_sets(state, deps)
+                await _extract_constraints(state, deps)
+                _mark_checkpoint(state, "constraints_done")
 
             # Step B10: CDC analysis (M4: cross_domain_paths_count)
-            await _extract_cdc_paths(state, deps)
+            if _checkpoint_done(state, "cdc_done"):
+                logger.info("[init_analysis] Skipping CDC step (checkpoint done)")
+            else:
+                await _extract_cdc_paths(state, deps)
+                _mark_checkpoint(state, "cdc_done")
 
         async def _rapidwright_pipeline():
             # Step B-R1: Read checkpoint in RapidWright
@@ -231,7 +330,6 @@ async def init_analysis_node(
             if "error" not in congestion_data:
                 state.timing.congestion_data = {
                     "global_score": congestion_data.get("congested_ratio", 0.0),
-                    "pblock_overflow_count": 0,
                 }
                 logger.info(
                     f"[init_analysis] Congestion: ratio={congestion_data.get('congested_ratio', 0.0):.3f}, "
@@ -480,6 +578,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
                 try:
                     with_delay = int(parts[0])
                     total_ports = int(parts[1])
+                    constraints["total_io_ports"] = total_ports
                     if total_ports > 0:
                         constraints["io_delay_defined_pct"] = round(with_delay / total_ports, 4)
                 except ValueError:

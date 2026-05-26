@@ -33,6 +33,37 @@ logger = logging.getLogger(__name__)
 # Maximum violating paths in StateSpace (user spec says Top 20)
 MAX_VIOLATING_PATHS = 20
 
+# ── Annotation helpers for LLM context formatting ─────────────────
+# These distinguish "not analyzed" (None) from "analyzed but empty" ([] / 0)
+# so the LLM doesn't misinterpret empty lists as "no issues".
+
+
+def _annotated_list(items, empty_reason: str) -> str | None:
+    """Generate YAML list annotation.
+
+    Returns:
+        None  — caller should format items directly (list has data)
+        str   — annotated YAML line for None (not analyzed) or [] (empty result)
+    """
+    if items is None:
+        return '"N/A(not_analyzed)"'
+    if not items:
+        return f"[]  # {empty_reason}"
+    return None  # has data — caller formats items
+
+
+def _annotated_val(value, fmt: str | None = None, reason: str = "not_available") -> str:
+    """Generate YAML scalar value with annotation for None.
+
+    Non-None values are formatted with fmt (if provided) or str().
+    None gets a quoted N/A with reason:  "N/A(reason)"
+    """
+    if value is None:
+        return f'"N/A({reason})"'
+    if fmt:
+        return fmt.format(value)
+    return str(value)
+
 # Phase-aware module filters for LLM context injection.
 PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
@@ -90,6 +121,14 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
     bu = _compute_utilization(timing.resource_utilization, timing.device_capacity, "BRAM")
     du = _compute_utilization(timing.resource_utilization, timing.device_capacity, "DSP")
 
+    # Best WNS: handle -inf initial state
+    best_wns = timing.best_wns if timing.best_wns > float('-inf') else None
+
+    # Design scale from design_info (populated by RapidWright)
+    di = timing.design_info or {}
+    cell_count = di.get("cell_count", 0)
+    net_count = di.get("net_count", 0)
+
     return DashboardGlobalState(
         current_stage=current_stage,
         iteration_count=state.iteration.current,
@@ -102,6 +141,10 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
         ff_utilization=fu,
         bram_utilization=bu,
         dsp_utilization=du,
+        best_wns=best_wns,
+        best_wns_iteration=timing.best_wns_iteration,
+        cell_count=cell_count,
+        net_count=net_count,
     )
 
 
@@ -134,12 +177,15 @@ def _build_physical_congestion(state: OptimizerState) -> DashboardPhysicalConges
             ))
 
     rs = state.timing.route_status or {}
+    # long_route_nets_count: None if route_status not available, otherwise the count
+    lr = rs.get("long_route_nets_count")
+    long_route_val: int | None = lr if lr is not None else None
     return DashboardPhysicalCongestion(
         global_congestion_score=cd.get("global_score"),
         avg_wirelength=rs.get("avg_wirelength"),
-        long_route_nets_count=rs.get("long_route_nets_count", 0),
+        long_route_nets_count=long_route_val,
         congestion_hotspots=hotspots,
-        pblock_overflow_count=cd.get("pblock_overflow_count", 0),
+        pblock_overflow_count=cd.get("pblock_overflow_count"),
     )
 
 
@@ -196,6 +242,7 @@ def _build_constraints_env(state: OptimizerState) -> DashboardConstraints:
         false_paths_count=ci.get("false_paths_count", 0),
         multicycle_paths_count=ci.get("multicycle_paths_count", 0),
         io_delay_defined_pct=ci.get("io_delay_defined_pct"),
+        total_io_ports=ci.get("total_io_ports"),
         pvt_corner=state.timing.pvt_corner or "slow_0p95v_85c",
     )
 
@@ -289,8 +336,11 @@ def format_state_space_for_llm(
         lines.append(f"  current_stage: {gs.current_stage or 'UNKNOWN'}")
         lines.append(f"  iteration_count: {gs.iteration_count}")
         lines.append(f"  target_frequency: {gs.target_frequency}")
-        lines.append(f"  wns_setup: {gs.wns_setup:.3f}" if gs.wns_setup is not None else "  wns_setup: N/A")
-        lines.append(f"  tns_setup: {gs.tns_setup:.3f}" if gs.tns_setup is not None else "  tns_setup: N/A")
+        lines.append(f"  wns_setup: {gs.wns_setup:.3f}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')
+        lines.append(f"  tns_setup: {gs.tns_setup:.3f}" if gs.tns_setup is not None else '  tns_setup: "N/A(not_analyzed)"')
+        lines.append(f"  best_wns: {_annotated_val(gs.best_wns, '{:.3f}', 'initial_state')}")
+        if gs.best_wns_iteration is not None:
+            lines.append(f"  best_wns_iteration: {gs.best_wns_iteration}")
         if gs.whs_hold is not None:
             lines.append(f"  whs_hold: {gs.whs_hold:.3f}")
         if gs.ths_hold is not None:
@@ -303,6 +353,9 @@ def format_state_space_for_llm(
             lines.append(f"  bram_utilization: {gs.bram_utilization:.2%}")
         if gs.dsp_utilization is not None:
             lines.append(f"  dsp_utilization: {gs.dsp_utilization:.2%}")
+        if gs.cell_count > 0:
+            lines.append(f"  cell_count: {gs.cell_count}")
+            lines.append(f"  net_count: {gs.net_count}")
         lines.append("")
 
     # ── Module 2: Timing Path Clusters ─────────────────────────────
@@ -327,7 +380,8 @@ def format_state_space_for_llm(
                 if p.path_group:
                     lines.append(f"      path_group: {p.path_group}")
         else:
-            lines.append("  top_paths: []")
+            ann = _annotated_list(tc.top_violating_paths, "no_violating_paths_extracted")
+            lines.append(f"  top_paths: {ann}")
         lines.append("")
 
     # ── Module 3: Physical & Congestion Metrics ────────────────────
@@ -335,18 +389,23 @@ def format_state_space_for_llm(
         pc = space.physical_congestion
         lines.append("# Module 3: Physical & Congestion Metrics")
         lines.append("physical_congestion:")
-        lines.append(f"  global_congestion_score: {pc.global_congestion_score:.2f}" if pc.global_congestion_score is not None else "  global_congestion_score: N/A")
-        lines.append(f"  avg_wirelength: {pc.avg_wirelength:.1f}" if pc.avg_wirelength is not None else "  avg_wirelength: N/A")
-        lines.append(f"  long_route_nets_count: {pc.long_route_nets_count}")
-        lines.append(f"  pblock_overflow_count: {pc.pblock_overflow_count}")
-        if pc.congestion_hotspots:
+        lines.append(f"  global_congestion_score: {_annotated_val(pc.global_congestion_score, '{:.2f}', 'congestion_analysis_not_supported')}")
+        lines.append(f"  avg_wirelength: {_annotated_val(pc.avg_wirelength, '{:.1f}', 'data_not_available')}")
+        lr = _annotated_val(pc.long_route_nets_count, reason="data_not_available")
+        lines.append(f"  long_route_nets_count: {lr}")
+        pb = _annotated_val(pc.pblock_overflow_count, reason="not_measured")
+        lines.append(f"  pblock_overflow_count: {pb}")
+        ann = _annotated_list(pc.congestion_hotspots, "no_congestion_hotspots")
+        if ann is not None:
+            lines.append(f"  hotspots: {ann}")
+        elif pc.congestion_hotspots:
             lines.append(f"  hotspots:  # {len(pc.congestion_hotspots)} regions")
             for h in pc.congestion_hotspots[:5]:
                 lines.append(f"    - bbox: [{h.x1},{h.y1}]-[{h.x2},{h.y2}]")
                 lines.append(f"      severity: {h.severity:.2f}")
                 lines.append(f"      module: {h.dominant_module}")
         else:
-            lines.append("  hotspots: []")
+            lines.append("  hotspots: []  # no_congestion_hotspots")
         lines.append("")
 
     # ── Module 4: Netlist Quality Profiler ─────────────────────────
@@ -355,7 +414,7 @@ def format_state_space_for_llm(
         lines.append("# Module 4: Netlist Quality Profiler")
         lines.append("netlist_quality:")
         lines.append(f"  total_control_sets: {nq.total_control_sets}")
-        lines.append(f"  avg_control_sets_per_slice: {nq.avg_control_sets_per_slice:.2f}" if nq.avg_control_sets_per_slice is not None else "  avg_control_sets_per_slice: N/A")
+        lines.append(f"  avg_control_sets_per_slice: {_annotated_val(nq.avg_control_sets_per_slice, '{:.2f}', 'data_not_available')}")
         lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}")
         if nq.cell_type_summary:
             lines.append(f"  top_cell_types: {nq.cell_type_summary}")
@@ -365,13 +424,15 @@ def format_state_space_for_llm(
                 rep = " (replicated)" if net.is_replicated else ""
                 lines.append(f"    - {net.net_name}: fanout={net.fanout_count}{rep}")
         else:
-            lines.append("  high_fanout_nets: []")
+            ann = _annotated_list(nq.high_fanout_nets, "no_high_fanout_nets_found")
+            lines.append(f"  high_fanout_nets: {ann}")
         if nq.failed_inferences:
             lines.append(f"  failed_inferences:  # {len(nq.failed_inferences)}")
             for fi in nq.failed_inferences[:5]:
                 lines.append(f"    - {fi}")
         else:
-            lines.append("  failed_inferences: []")
+            ann = _annotated_list(nq.failed_inferences, "synthesis_log_not_available_post_synthesis")
+            lines.append(f"  failed_inferences: {ann}")
         lines.append("")
 
     # ── Module 5: Constraints Environment ──────────────────────────
@@ -387,7 +448,14 @@ def format_state_space_for_llm(
             lines.append("  clock_definitions: {}")
         lines.append(f"  false_paths_count: {ce.false_paths_count}")
         lines.append(f"  multicycle_paths_count: {ce.multicycle_paths_count}")
-        lines.append(f"  io_delay_defined_pct: {ce.io_delay_defined_pct:.2%}" if ce.io_delay_defined_pct is not None else "  io_delay_defined_pct: N/A")
+        if ce.io_delay_defined_pct is None:
+            if ce.total_io_ports == 0:
+                iodp = '"N/A(no_io_ports)"'
+            else:
+                iodp = '"N/A(parse_failed)"'
+        else:
+            iodp = f"{ce.io_delay_defined_pct:.2%}"
+        lines.append(f"  io_delay_defined_pct: {iodp}")
         lines.append(f"  pvt_corner: {ce.pvt_corner}")
         lines.append("")
 
@@ -396,9 +464,9 @@ def format_state_space_for_llm(
         dg = space.dynamic_gradient
         lines.append("# Module 6: Dynamic Gradient (Delta)")
         lines.append("dynamic_gradient:")
-        lines.append(f"  delta_wns: {dg.delta_wns:+.4f}" if dg.delta_wns is not None else "  delta_wns: N/A")
-        lines.append(f"  delta_tns: {dg.delta_tns:+.4f}" if dg.delta_tns is not None else "  delta_tns: N/A")
-        lines.append(f"  delta_congestion: {dg.delta_congestion:+.4f}" if dg.delta_congestion is not None else "  delta_congestion: N/A")
+        lines.append(f"  delta_wns: {_annotated_val(dg.delta_wns, '{:+.4f}', 'initial_state_no_delta')}")
+        lines.append(f"  delta_tns: {_annotated_val(dg.delta_tns, '{:+.4f}', 'initial_state_no_delta')}")
+        lines.append(f"  delta_congestion: {_annotated_val(dg.delta_congestion, '{:+.4f}', 'initial_state_no_delta')}")
         lines.append(f"  last_action_taken: {dg.last_action_taken or 'none'}")
         lines.append(f"  action_status: {dg.action_status or 'PENDING'}")
         lines.append("")
