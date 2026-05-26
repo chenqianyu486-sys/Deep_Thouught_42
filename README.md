@@ -103,6 +103,8 @@ init_analysis ──► [WNS >= 0?]
 | 15 | **Read-only tool whitelist control** | Tools redundant with Dashboard data (`get_wns`, `get_resource_counts`) removed from ANALYZE/EVALUATE whitelists. Rate limiting (max 3 calls/phase for `search_cells`, max 5 for `vivado_run_tcl`) prevents LLM from exhausting rounds on repeated queries. |
 | 16 | **Adaptive PBLOCK multiplier** | `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))` — automatically tightens PBLOCK region at low utilization, expands at high utilization. `util_local` preferred, falls back to global chip utilization. |
 | 17 | **LLM prompt caching** | Every API call sends `{"cache": {"prompt": true}}` via `extra_body`. OpenRouter caches the system prompt prefix across repeated calls in the same session, saving ~4KB per call × 44 calls ≈ 176KB per iteration. Shared `build_llm_extra_body()` in `optimizer/pure/constants.py`. |
+| 18 | **Data trustworthiness annotations** | Dashboard distinguishes `None` (not analyzed) from `[]`/`0` (analyzed but zero). Every N/A and empty list carries a machine-readable reason: `"N/A(congestion_analysis_not_supported)"`, `[]  # no_high_fanout_nets_found`. |
+| 19 | **Vivado timeout auto-restart** | Tcl timeout poisons the Vivado session. Instead of `sync_after_timeout()` (unreliable), the MCP server kills, restarts, and reopens the DCP automatically. `_command_pending` + `sync_after_timeout()` removed. |
 
 ---
 
@@ -185,7 +187,7 @@ The dashboard provides 19 real-time panels (6-module StateSpace + 13 legacy deta
 
 | Module | Panel | Content |
 |--------|-------|---------|
-| **M1** | **Global State & Targets** | Stage badge, WNS/TNS/WHS/THS margins, LUT/FF/DSP/BRAM utilization bars |
+| **M1** | **Global State & Targets** | Stage badge, WNS/TNS/WHS/THS margins, best WNS, LUT/FF/DSP/BRAM utilization bars, cell/net count |
 | **M2** | **Timing Path Clusters** | Top-20 violating endpoints with clock groups, logic/route delay ratio, logic levels |
 | **M3** | **Physical & Congestion** | Global congestion score, hotspots (bbox + severity + module), pblock overflows |
 | **M4** | **Netlist Quality** | High fanout nets (with replication status), control sets, cross-domain paths, failed inferences |
@@ -444,6 +446,8 @@ init_analysis ──► [WNS >= 0?]
 | 14 | **只读工具白名单控制** | 与 Dashboard 数据冗余的工具（`get_wns`, `get_resource_counts`）从 ANALYZE/EVALUATE 白名单移除；Rate limiting（`search_cells` 最多 3 次/phase, `vivado_run_tcl` 最多 5 次/phase）防止 LLM 浪费轮次 |
 | 15 | **PBLOCK 自适应紧缩** | 公式 `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))`，低利用率自动紧缩 region，高利用率自动宽松 |
 | 16 | **LLM 提示缓存** | 每次 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`。OpenRouter 在同一会话的重复调用间缓存系统提示前缀，每轮迭代节省约 4KB×44 次 ≈ 176KB tokens。共享函数 `build_llm_extra_body()` 位于 `optimizer/pure/constants.py`。 |
+| 17 | **Dashboard 数据可信度注解** | Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）。每个 N/A 和空列表携带机器可读原因: `"N/A(congestion_analysis_not_supported)"`、`[]  # no_high_fanout_nets_found`。 |
+| 18 | **Vivado 超时自动重启** | Tcl 超时会污染 Vivado session。不再使用不可靠的 `sync_after_timeout()`，改为 MCP server 内部自动 kill→restart→reopen DCP。移除 `_command_pending` 全局状态。 |
 
 ---
 

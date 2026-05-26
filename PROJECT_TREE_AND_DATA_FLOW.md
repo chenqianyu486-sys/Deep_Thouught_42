@@ -175,7 +175,7 @@ Phase A (并行初始化):
 Phase B (跨服务器并行管线):
   Vivado pipeline (10步串行) ∥ RapidWright pipeline (3步串行)
   Vivado:  timing_summary → clock_period → hold_timing → high_fanout_nets
-           → resource_utilization → critical_path_cells → route_status
+           → resource_utilization(get_cells -filter, 非report_*) → critical_path_cells → route_status
            → control_sets → false_paths → multicycle_paths → IO_delay → CDC
   RapidWright: read_checkpoint → device_topology → design_info
 
@@ -190,6 +190,8 @@ Phase C (跨服务器分析):
 | WNS/TNS/Failing endpoints | M1 Global State | 动态 (后续工具刷新) |
 | Clock period, hold timing, utilization | M1 Global State | 静态 / 动态 |
 | Critical path cells + spread | M2 Timing Clusters | 动态 |
+| Best WNS / best_wns_iteration | M1 Global State | 静态(初始为 N/A(initial_state)) |
+| Cell count / net count | M1 Global State | 静态(来自 RapidWright) |
 | Route status (wirelength, long nets) | M3 Physical Congestion | 动态 |
 | Congestion (global score) | M3 Physical Congestion | 动态 |
 | Control sets, CDC paths, cell types | M4 Netlist Quality | 静态 |
@@ -259,7 +261,14 @@ dynamic_gradient:
   action_status: Success
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（含 constraints_env），EXECUTE 阶段只看 global_state + dynamic_gradient。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 5 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现），EXECUTE 阶段只看 global_state + dynamic_gradient。
+
+**LLM 防歧义注解**: Dashboard 所有 N/A 和空列表都带有动态原因，区分"未分析"与"确实为零"：
+- `best_wns: "N/A(initial_state)"` — 首次迭代前尚未有最佳值
+- `high_fanout_nets: []  # no_high_fanout_nets_found` — 已分析，结果为 0
+- `global_congestion_score: "N/A(congestion_analysis_not_supported)"` — 当前设备不支持该分析
+- `io_delay_defined_pct: "N/A(no_io_ports)"` — 设计中无 IO 端口
+- `long_route_nets_count: "N/A(data_not_available)"` — 路由状态数据不可用
 
 - 纯数据，无判断标签 → LLM 自主推理
 - 每次通过 `build_state_space()` 重建，不进入 MessageStore

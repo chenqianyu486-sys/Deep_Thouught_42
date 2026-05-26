@@ -65,6 +65,10 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，token 估算统一使用 `ContextEstimator`（tiktoken cl100k_base）
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`
 - **DCP 身份完整性**: `state.control.current_dcp_path` 在全流程中追踪 Vivado 打开的 DCP 文件。EXECUTE 阶段从 LLM 工具白名单中移除 `vivado_open_checkpoint`
+- **Vivado Tcl 超时自动重启**: Tcl 命令超时会污染 Vivado session（`pexpect` 不返回 prompt）。MCP server 内部自动执行 `kill → restart → reopen DCP`，不尝试 `sync_after_timeout()`。移除 `_command_pending` 全局状态（`VivadoMCP/vivado_mcp_server.py`）
+- **init_analysis 去 `report_*` 化**: Agent pipeline 禁用 cost 不可预测的 `report_*` 命令。`report_utilization -return_string` → 5 条 `get_cells -filter {PRIMITIVE_GROUP == ...}`（Vivado C++ filter 引擎，200K cells ~5-10s）
+- **init_analysis 原子提交 checkpoint**: 7 个步骤各自独立原子提交（`run → validate → mark_done`）。Vivado 重启后自动跳过已完成步骤
+- **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s
 
 ## 2. V1→V2 迁移映射
 
@@ -265,6 +269,7 @@ inject_context_snapshot_at_end(api_messages):
 - `prepare_context_node` 不再注入 Dashboard（仅做压缩 + FORMAT_GUARD注入 + handoff injection）
 
 **设计要点**:
+- **LLM 防歧义注解**: _annotated_list() / _annotated_val() 辅助函数确保 [] 和 N/A 都携带机器可读原因: "N/A(congestion_analysis_not_supported)"、[]  # no_high_fanout_nets_found- **Module 1 新增**: best_wns/best_wns_iteration(追踪优化进展)、cell_count/net_count(设计规模上下文)- **类型契约**: Dashboard 严格区分 None(未分析) 与 []/0(已分析但为零)
 - **纯数据 Dashboard**: 只呈现客观测量值，不含 FAILED/PLATEAUED/do_not_repeat 等判断标签
 - **trajectory**: 记录每轮迭代策略名、前后 WNS、delta
 - **design_signals**: 从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）
@@ -952,11 +957,19 @@ planner:
 WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
 PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
 
+# Dashboard 新鲜度追踪 (工具→影响字段映射)
 DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_report_utilization_for_pblock": {"resource_utilization"},
     "vivado_get_critical_high_fanout_nets": {"high_fanout_nets"},
     "rapidwright_analyze_critical_path_spread": {"critical_path_spread"},
 }
+
+# init_analysis 自适应超时 (design_size_factor 分档)
+DESIGN_SIZE_BINS = [(0, 50000, 1.0), (50000, 150000, 1.5), (150000, 2**31, 3.0)]
+MAX_TIMEOUT = 900.0  # 单次工具调用硬上限 (秒)
+
+# Vivado Tcl 命令规范: Agent pipeline 禁用 report_* (cost 不可预测)
+# 改用 get_* 命令 (cost 线性可控), 详见 init_analysis.py 与 vivado_mcp_server.py
 ```
 
 ## 11. Tool 描述增强（2026-05 新增）

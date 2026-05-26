@@ -1,6 +1,6 @@
 # ALWAYS:
 **ALWAYS read `README.md` & `PROJECT_TREE_AND_DATA_FLOW.md` before exploring the code.**
-**ALWAYS update `README.md` & `PROJECT_TREE_AND_DATA_FLOW.md` after task accomplished(if necessary).**
+**ALWAYS update `README.md`、`PROJECT_TREE_AND_DATA_FLOW.md` & `architecture.md` after task accomplished(if necessary).**
 **ALWAYS use English to write code comment, but use Chinese to write plans.**
 
 # Guidelines:
