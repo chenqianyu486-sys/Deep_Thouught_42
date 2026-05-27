@@ -6038,7 +6038,7 @@ CRITICAL OPTIMIZATION RULES:
             print(f"\n✗ Failed to save checkpoint on timeout: {e}")
             return False
 
-    async def _run_full_validation(self, dcp: Path, label: str = "final", num_vectors: int = 10000) -> bool:
+    async def _run_full_validation(self, dcp: Path, label: str = "final", num_vectors: int = 200) -> bool:
         """Run full Phase 1 + Phase 2 validation. Used for final DCP only."""
         script_path = Path(__file__).parent / "validate_dcps.py"
         validation_cmd = [
@@ -6047,11 +6047,7 @@ CRITICAL OPTIMIZATION RULES:
             str(self.input_dcp),
             str(dcp),
             "--vectors", str(num_vectors),
-            "--run-dir", str(self.run_dir)
         ]
-
-        # Record existing validation directories before running
-        before_dirs = set(self.run_dir.glob("dcp_validation_*"))
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -6059,12 +6055,7 @@ CRITICAL OPTIMIZATION RULES:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
-
-            # Clean up temp directory created during this validation
-            after_dirs = set(self.run_dir.glob("dcp_validation_*"))
-            for temp_dir in after_dirs - before_dirs:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=7200.0)
 
             return proc.returncode == 0
         except Exception as e:

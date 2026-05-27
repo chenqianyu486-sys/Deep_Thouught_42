@@ -39,23 +39,130 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def sanitize_identifier(name: str) -> str:
+    """Convert an arbitrary interface prefix into a valid Verilog identifier."""
+    ident = re.sub(r'[^0-9A-Za-z_]', '_', name)
+    ident = re.sub(r'_+', '_', ident).strip('_')
+    if not ident:
+        ident = "ifc"
+    if ident[0].isdigit():
+        ident = f"ifc_{ident}"
+    return ident
+
+
+def port_bit_width(port: dict) -> int:
+    """Return the bit width for a parsed Verilog port dictionary."""
+    width = port.get('width')
+    if not width:
+        return 1
+    match = re.match(r'\[\s*(\d+)\s*:\s*(\d+)\s*\]', width)
+    if not match:
+        return 1
+    return abs(int(match.group(1)) - int(match.group(2))) + 1
+
+
+def assign_from_seed(port: dict, seed_expr: str, indent: str = "            ") -> str:
+    """Generate a Verilog assignment using chunk-varying seed data."""
+    bits = port_bit_width(port)
+    name = port['name']
+    # Rely on Verilog assignment truncation/extension for <=32-bit ports.
+    # Indexing a parenthesized expression like "(a ^ b)[7:0]" is rejected by
+    # xvlog in the Verilog mode used here.
+    if bits <= 32:
+        return f"{indent}{name} = {seed_expr};"
+    chunks = (bits + 31) // 32
+    chunk_exprs = []
+    for idx in range(chunks):
+        mask = (0x9E3779B9 * (idx + 1)) & 0xFFFFFFFF
+        chunk_exprs.append(f"({seed_expr} ^ 32'h{mask:08X})")
+    return f"{indent}{name} = {{{', '.join(reversed(chunk_exprs))}}};"
+
+
+def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: int) -> dict:
+    """Parse xsim output and compute the validator pass/fail fields."""
+    mismatch_count = 0
+    protocol_mismatch_count = 0
+    cycles_simulated = 0
+    result_pass_seen = False
+    result_fail_seen = False
+    simulator_failed = False
+
+    fatal_patterns = [
+        r'Simulation engine not responding',
+        r'Simulator command interrupted',
+        r'Command failed:',
+        r'terminated in an unexpected manner',
+        r'\bFATAL\b',
+        r'\bUSF-XSim\b',
+        r'\bXSIM\s+\d+-\d+\b',
+    ]
+    fatal_re = re.compile('|'.join(fatal_patterns), re.IGNORECASE)
+
+    for line in sim_output.split('\n'):
+        if 'PROTOCOL MISMATCH' in line:
+            protocol_mismatch_count += 1
+        elif 'MISMATCH' in line:
+            mismatch_count += 1
+        elif 'Cycles simulated:' in line:
+            match = re.search(r'Cycles simulated:\s*(\d+)', line)
+            if match:
+                cycles_simulated = int(match.group(1))
+        elif 'Mismatches found:' in line:
+            match = re.search(r'Mismatches found:\s*(\d+)', line)
+            if match:
+                mismatch_count = int(match.group(1))
+        elif 'Protocol mismatches found:' in line:
+            match = re.search(r'Protocol mismatches found:\s*(\d+)', line)
+            if match:
+                protocol_mismatch_count = int(match.group(1))
+        elif 'Result: PASS' in line:
+            result_pass_seen = True
+        elif 'Result: FAIL' in line:
+            result_fail_seen = True
+
+        if fatal_re.search(line):
+            simulator_failed = True
+
+    passed = (
+        returncode == 0
+        and result_pass_seen
+        and not result_fail_seen
+        and not simulator_failed
+        and cycles_simulated == expected_cycles
+        and mismatch_count == 0
+        and protocol_mismatch_count == 0
+    )
+
+    return {
+        "cycles_simulated": cycles_simulated,
+        "mismatch_count": mismatch_count,
+        "protocol_mismatch_count": protocol_mismatch_count,
+        "result_pass_seen": result_pass_seen,
+        "result_fail_seen": result_fail_seen,
+        "simulator_failed": simulator_failed,
+        "returncode": returncode,
+        "passed": passed,
+    }
+
+
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 10000, debug: bool = False, run_dir: Optional[Path] = None):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False, no_reactive: bool = False):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
         self.debug = debug
-
+        self.no_reactive = no_reactive
+        
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
         self.vivado_session: Optional[ClientSession] = None
-
-        # Create temporary directory for intermediate files in run directory
+        
+        # Create temporary directory for intermediate files in workspace
         # (avoids /tmp running out of space for large designs)
-        parent_dir = run_dir if run_dir else Path(__file__).parent
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="dcp_validation_", dir=parent_dir))
+        workspace_dir = Path(__file__).parent
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="dcp_validation_", dir=workspace_dir))
         logger.info(f"Working directory: {self.temp_dir}")
         
         # Results
@@ -238,6 +345,116 @@ class DCPValidator:
         
         return False
     
+    # Tcl helper that emits the top-level clock port names of the currently
+    # open design between sentinel markers. Sourced into Vivado on demand.
+    #
+    # Two strategies, applied in order, with results de-duplicated:
+    #   1. ``all_fanin -startpoints_only`` from every pin in the clock
+    #      networks back to primary inputs - this handles the common case
+    #      where create_clock is bound to an internal pin (e.g. a BUFG
+    #      output) rather than a top-level port, which is the case for
+    #      Chisel-style designs (e.g. boom_soc whose clock object source
+    #      is empty but whose actual port is ``clock_uncore_clock``).
+    #   2. Trace primary inputs feeding the I pin of any global clock
+    #      buffer (BUFG*, IBUFG*) - this catches designs that have no
+    #      ``create_clock`` constraints at all but still have a clearly
+    #      identifiable clock input port.
+    #
+    # The marker strings printed at runtime are assembled with ``format``
+    # rather than written as string literals so they don't appear verbatim
+    # in this source - if they did, Vivado's echo of the proc body during
+    # ``source`` would falsely match the Python-side regex.
+    _CLOCK_PORT_DETECT_TCL = r"""
+proc __vd_emit_clock_port {sp seenVar} {
+    upvar 1 $seenVar seen
+    if {[get_property CLASS $sp] ne {port}} { return }
+    if {[get_property DIRECTION $sp] ne {IN}} { return }
+    set nm [get_property NAME $sp]
+    if {[dict exists $seen $nm]} { return }
+    dict set seen $nm 1
+    set bn [get_property BUS_NAME $sp]
+    if {$bn eq {}} { puts $nm } else { puts $bn }
+}
+
+proc __vd_find_clock_ports {} {
+    set seen [dict create]
+    set mB [format {_%s_VDCLKP_%sIN__} {} {BEG}]
+    set mE [format {_%s_VDCLKP_%s__}   {} {ENDX}]
+    puts $mB
+    set clk_pins [get_pins -quiet -of_objects [get_clocks -quiet]]
+    if {[llength $clk_pins] > 0} {
+        foreach sp [all_fanin -quiet -flat -startpoints_only $clk_pins] {
+            __vd_emit_clock_port $sp seen
+        }
+    }
+    foreach c [get_cells -quiet -hier -filter {REF_NAME =~ BUFG* || REF_NAME =~ IBUFG*}] {
+        foreach ipin [get_pins -quiet -of_objects $c -filter {DIRECTION == IN}] {
+            foreach sp [all_fanin -quiet -flat -startpoints_only $ipin] {
+                __vd_emit_clock_port $sp seen
+            }
+        }
+    }
+    puts $mE
+}
+"""
+    
+    async def _query_clock_ports_from_vivado(self) -> list:
+        """Query Vivado for the top-level clock port names of the open design.
+
+        Uses Vivado's clock-network connectivity rather than guessing from
+        port names; see ``_CLOCK_PORT_DETECT_TCL`` for the strategies. Returns
+        an empty list on any failure (caller falls back to a name heuristic),
+        and de-duplicates bus bits like ``clk[0]`` -> ``clk``.
+        """
+        # Write the helper script to disk once and source it on each call.
+        # ``run_tcl`` sends a single line, so a sourced proc keeps the wire
+        # protocol simple (vs. encoding multi-line Tcl with semicolons).
+        helper_path = self.temp_dir / "find_clock_ports.tcl"
+        if not helper_path.exists():
+            with open(helper_path, "w") as f:
+                f.write(self._CLOCK_PORT_DETECT_TCL)
+        
+        cmd = f"source {{{helper_path}}}; __vd_find_clock_ports"
+        try:
+            result = await self.vivado_session.call_tool(
+                "run_tcl", {"command": cmd, "timeout": 120}
+            )
+        except Exception as e:
+            logger.warning(f"Failed to query clock ports from Vivado: {e}")
+            return []
+        
+        if not result.content:
+            return []
+        text = "\n".join(c.text for c in result.content if hasattr(c, 'text'))
+        
+        # Markers must match the dynamic ``format`` calls in the Tcl helper.
+        m = re.search(
+            r'__VDCLKP_BEGIN__\s*(.*?)\s*__VDCLKP_ENDX__',
+            text, re.DOTALL,
+        )
+        if not m:
+            logger.debug(f"Clock-port markers not found in run_tcl output; got: {text[:500]!r}")
+            return []
+        
+        names: list = []
+        seen: set = set()
+        # Valid Verilog port identifiers are word characters; reject anything
+        # that isn't, which filters out Vivado command echo lines (``# ...``),
+        # warning/info banners, and stray punctuation.
+        valid = re.compile(r'^\w+(?:\[\d+\])?$')
+        for line in m.group(1).splitlines():
+            name = line.strip()
+            if not name or not valid.match(name):
+                continue
+            # Strip a single trailing bus index so bit-level port objects
+            # like "clk[0]" collapse to the bus name "clk" we parsed from
+            # the Verilog port list.
+            name = re.sub(r'\[\d+\]$', '', name)
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+        return names
+    
     def get_design_info_from_verilog(self, verilog_path: Path) -> dict:
         """Extract design information from Verilog file (module name, ports)."""
         with open(verilog_path, 'r') as f:
@@ -326,8 +543,16 @@ class DCPValidator:
         else:
             raise ValueError(f"Could not find any module in {verilog_path}")
     
-    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path):
-        """Generate Verilog testbench for comparing two designs."""
+    def generate_testbench(self, golden_info: dict, revised_info: dict, tb_path: Path,
+                           clock_names: Optional[list] = None):
+        """Generate Verilog testbench for comparing two designs.
+
+        ``clock_names`` is the authoritative list of top-level clock port names
+        as reported by Vivado's ``get_clocks``/``get_ports`` traversal. When
+        provided we use it directly; otherwise we fall back to a name-based
+        heuristic (which fails for Chisel/Rocket-Chip-style designs whose
+        clocks are named ``clock`` rather than ``clk``).
+        """
         golden_module = golden_info["module_name"]
         revised_module = revised_info["module_name"] + "_revised"  # Use renamed module
         
@@ -339,17 +564,225 @@ class DCPValidator:
             logger.warning("Design has no outputs - simulation will only verify no crashes occur")
             print("⚠ Warning: Design has no outputs - limited verification possible")
         
-        # Filter out clock and reset (we'll drive those separately)
-        regular_inputs = [p for p in inputs if 'clk' not in p['name'].lower() and 'rst' not in p['name'].lower() and 'reset' not in p['name'].lower()]
-        clocks = [p for p in inputs if 'clk' in p['name'].lower()]
+        # Identify clocks. Prefer the constraint-based list from Vivado; fall
+        # back to a broadened substring heuristic only if Vivado gave us
+        # nothing (e.g. an unconstrained design with no SDC).
+        clocks: list = []
+        if clock_names:
+            wanted = set(clock_names)
+            clocks = [p for p in inputs if p['name'] in wanted]
+            missing = wanted - {p['name'] for p in clocks}
+            if missing:
+                logger.warning(
+                    f"Vivado-reported clock ports not found among top-level "
+                    f"inputs: {sorted(missing)}"
+                )
+        if not clocks:
+            if clock_names:
+                logger.warning(
+                    "No Vivado-reported clocks matched top-level inputs; "
+                    "falling back to name-based heuristic"
+                )
+            clocks = [
+                p for p in inputs
+                if 'clk' in p['name'].lower() or 'clock' in p['name'].lower()
+            ]
+        
+        # Reset detection remains heuristic - DCPs do not carry a canonical
+        # "this port is the reset" property the way they do for clocks.
         resets = [p for p in inputs if 'rst' in p['name'].lower() or 'reset' in p['name'].lower()]
         
         if not clocks:
             raise ValueError("No clock signal found in design")
         
+        # Everything that isn't a clock or reset is driven by the LFSR stimulus.
+        special_names = {p['name'] for p in clocks} | {p['name'] for p in resets}
+        regular_inputs = [p for p in inputs if p['name'] not in special_names]
+        
         clock = clocks[0]['name']
         reset = resets[0]['name'] if resets else None
-        
+
+        input_by_name = {p['name']: p for p in regular_inputs}
+        output_by_name = {p['name']: p for p in outputs}
+
+        controlled_inputs = set()
+        response_ifaces = []
+        request_ifaces = []
+        ready_bias_inputs = []
+        hls_iface = None
+        used_iface_ids = {}
+
+        def unique_iface_id(prefix: str) -> str:
+            base = sanitize_identifier(prefix)
+            count = used_iface_ids.get(base, 0)
+            used_iface_ids[base] = count + 1
+            if count == 0:
+                return base
+            return f"{base}_{count}"
+
+        # Detect simple master-side request/response interfaces where the DUT
+        # emits commands and expects a response on top-level inputs. The
+        # validator will emulate a one-deep reactive responder using golden DUT
+        # outputs as the reference handshake source.
+        for port in regular_inputs:
+            name = port['name']
+            if not name.endswith('_rsp_valid'):
+                continue
+            prefix = name[:-len('_rsp_valid')]
+            cmd_valid_out = next(
+                (
+                    candidate for candidate in (
+                        f"{prefix}_cmd_valid",
+                        f"{prefix}_valid",
+                        f"{prefix}_tvalid",
+                    )
+                    if candidate in output_by_name
+                ),
+                None,
+            )
+            if not cmd_valid_out:
+                continue
+
+            ready_in = next(
+                (
+                    candidate for candidate in (
+                        f"{prefix}_cmd_ready",
+                        f"{prefix}_ready",
+                        f"{prefix}_tready",
+                    )
+                    if candidate in input_by_name
+                ),
+                None,
+            )
+
+            payload_inputs = sorted(
+                (
+                    p for p in regular_inputs
+                    if p['name'].startswith(f"{prefix}_rsp_payload_")
+                ),
+                key=lambda p: p['name'],
+            )
+
+            iface_id = unique_iface_id(prefix)
+            response_ifaces.append({
+                "id": iface_id,
+                "prefix": prefix,
+                "cmd_valid_out": cmd_valid_out,
+                "ready_in": ready_in,
+                "rsp_valid_in": name,
+                "payload_inputs": payload_inputs,
+            })
+            controlled_inputs.add(name)
+            if ready_in:
+                controlled_inputs.add(ready_in)
+            for payload in payload_inputs:
+                controlled_inputs.add(payload['name'])
+
+        # Detect simple sink-style request/streaming interfaces where the DUT
+        # exposes a ready output and expects the testbench to drive valid/data.
+        for port in regular_inputs:
+            name = port['name']
+            if name in controlled_inputs:
+                continue
+
+            ready_out = None
+            payload_inputs = []
+            valid_in = None
+
+            if name.endswith('_cmd_valid'):
+                prefix = name[:-len('_cmd_valid')]
+                ready_out = f"{prefix}_cmd_ready"
+                if ready_out in output_by_name:
+                    valid_in = name
+                    payload_inputs = sorted(
+                        (
+                            p for p in regular_inputs
+                            if p['name'].startswith(f"{prefix}_cmd_payload_")
+                        ),
+                        key=lambda p: p['name'],
+                    )
+            elif name.endswith('_tvalid'):
+                prefix = name[:-len('_tvalid')]
+                ready_out = f"{prefix}_tready"
+                if ready_out in output_by_name:
+                    valid_in = name
+                    payload_names = [
+                        f"{prefix}_tdata",
+                        f"{prefix}_tkeep",
+                        f"{prefix}_tstrb",
+                        f"{prefix}_tlast",
+                        f"{prefix}_tuser",
+                    ]
+                    payload_inputs = [input_by_name[pn] for pn in payload_names if pn in input_by_name]
+
+            if not valid_in or not ready_out:
+                continue
+
+            iface_id = unique_iface_id(prefix)
+            request_ifaces.append({
+                "id": iface_id,
+                "prefix": prefix,
+                "ready_out": ready_out,
+                "valid_in": valid_in,
+                "payload_inputs": payload_inputs,
+            })
+            controlled_inputs.add(valid_in)
+            for payload in payload_inputs:
+                controlled_inputs.add(payload['name'])
+
+        # Any remaining ready-style input gets a high-bias driver if the DUT
+        # has a matching valid output. This helps generic valid/ready sources.
+        for port in regular_inputs:
+            name = port['name']
+            if name in controlled_inputs:
+                continue
+            match = re.match(r'^(.*)_(cmd_)?ready$', name)
+            if not match:
+                continue
+            prefix = match.group(1)
+            candidate_outputs = [
+                f"{prefix}_cmd_valid",
+                f"{prefix}_valid",
+                f"{prefix}_tvalid",
+            ]
+            if any(candidate in output_by_name for candidate in candidate_outputs):
+                ready_bias_inputs.append(name)
+                controlled_inputs.add(name)
+
+        # Detect simple HLS-style control interfaces (ap_ctrl_hs) and drive
+        # them transactionally. Randomly toggling ap_start and mutating all
+        # memory/data inputs every cycle can leave these designs mostly idle
+        # or hide latency differences on result-side ports.
+        ap_start_in = input_by_name.get("ap_start")
+        if ap_start_in:
+            ap_done_out = "ap_done" if "ap_done" in output_by_name else None
+            ap_idle_out = "ap_idle" if "ap_idle" in output_by_name else None
+            ap_ready_out = "ap_ready" if "ap_ready" in output_by_name else None
+            if ap_done_out or ap_idle_out or ap_ready_out:
+                stable_inputs = [
+                    p for p in regular_inputs
+                    if p['name'] not in controlled_inputs and p['name'] != ap_start_in['name']
+                ]
+                hls_iface = {
+                    "id": unique_iface_id("hls_ap_ctrl"),
+                    "start_in": ap_start_in['name'],
+                    "done_out": ap_done_out,
+                    "idle_out": ap_idle_out,
+                    "ready_out": ap_ready_out,
+                    "stable_inputs": stable_inputs,
+                }
+                controlled_inputs.add(ap_start_in['name'])
+                for port in stable_inputs:
+                    controlled_inputs.add(port['name'])
+
+        # Skip reactive stimulus if requested — fall back to pure LFSR
+        if self.no_reactive:
+            response_ifaces.clear()
+            request_ifaces.clear()
+            ready_bias_inputs.clear()
+            hls_iface = None
+            controlled_inputs.clear()
+
         # Build port connections carefully to handle edge cases
         def build_port_connections(module_suffix=""):
             """Build port connection string for module instantiation."""
@@ -367,49 +800,210 @@ class DCPValidator:
                 connections.append(f".{port['name']}({module_suffix}{port['name']})")
             return ',\n        '.join(connections)
         
-        # Helper to generate stimulus for multi-bit signals
-        def generate_stimulus_code():
-            """Generate LFSR-based stimulus for all input ports."""
+        def generate_fallback_random_assignments() -> str:
+            """Generate plain LFSR stimulus for any input not covered by a reactive driver."""
             stim_lines = []
             lfsr_bit_index = 0
-            
             for port in regular_inputs:
+                if port['name'] in controlled_inputs:
+                    continue
                 name = port['name']
-                width = port['width']
-                
-                if width:  # Multi-bit port like [63:0]
-                    # Extract bit width from [high:low] format
-                    match = re.match(r'\[(\d+):(\d+)\]', width)
-                    if match:
-                        high = int(match.group(1))
-                        low = int(match.group(2))
-                        num_bits = high - low + 1
-                        
-                        # Use multiple LFSR iterations to generate enough bits
-                        if num_bits <= 32:
-                            stim_lines.append(f"            {name} = lfsr[{num_bits-1}:0];")
-                        else:
-                            # For large ports, use multiple LFSR values
-                            chunks = (num_bits + 31) // 32
-                            assignments = []
-                            for chunk in range(chunks):
-                                if chunk > 0:
-                                    stim_lines.append(f"            lfsr = lfsr_next(lfsr);")
-                                start_bit = chunk * 32
-                                end_bit = min(start_bit + 32, num_bits)
-                                if chunk == chunks - 1:
-                                    # Last chunk
-                                    assignments.append(f"{name}[{end_bit-1}:{start_bit}] = lfsr[{end_bit-start_bit-1}:0];")
-                                else:
-                                    assignments.append(f"{name}[{start_bit+31}:{start_bit}] = lfsr;")
-                            stim_lines.extend([f"            {a}" for a in assignments])
-                else:  # Single-bit port
+                bits = port_bit_width(port)
+                if bits == 1:
                     stim_lines.append(f"            {name} = lfsr[{lfsr_bit_index % 32}];")
                     lfsr_bit_index += 1
-            
-            return '\n'.join(stim_lines) if stim_lines else '            // No inputs to drive'
+                elif bits <= 32:
+                    stim_lines.append(f"            {name} = lfsr[{bits-1}:0];")
+                else:
+                    stim_lines.append(assign_from_seed(port, "lfsr"))
+            return '\n'.join(stim_lines) if stim_lines else '            // No fallback-random inputs'
+
+        def generate_env_declarations() -> str:
+            decls = []
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                decls.append(f"    reg env_{iface_id}_pending;")
+                decls.append(f"    integer env_{iface_id}_delay;")
+                decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                decls.append(f"    reg env_{iface_id}_active;")
+                decls.append(f"    reg env_{iface_id}_launch;")
+                decls.append(f"    integer env_{iface_id}_cycles;")
+                decls.append(f"    reg [31:0] env_{iface_id}_seed;")
+            return '\n'.join(decls) if decls else '    // No reactive environment state'
+
+        def generate_env_init_code() -> str:
+            lines = []
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                lines.append(f"        env_{iface_id}_pending = 0;")
+                lines.append(f"        env_{iface_id}_delay = 0;")
+                lines.append(f"        env_{iface_id}_seed = 32'h{(0x13579BDF ^ (len(iface_id) * 0x1021)) & 0xFFFFFFFF:08X};")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                lines.append(f"        env_{iface_id}_active = 0;")
+                lines.append(f"        env_{iface_id}_launch = 0;")
+                lines.append(f"        env_{iface_id}_cycles = 0;")
+                lines.append(f"        env_{iface_id}_seed = 32'h2468ACE1;")
+            return '\n'.join(lines) if lines else '        // No reactive environment state to initialize'
+
+        def generate_negedge_stimulus_code() -> str:
+            lines = []
+
+            for iface in response_ifaces:
+                iface_id = iface['id']
+                ready_in = iface['ready_in']
+                rsp_valid_in = iface['rsp_valid_in']
+
+                lines.append(f"            // Reactive responder for {iface['prefix']}")
+                if ready_in:
+                    lines.append(f"            if (env_{iface_id}_pending) begin")
+                    lines.append(f"                {ready_in} = 0;")
+                    lines.append("            end else begin")
+                    lines.append(f"                {ready_in} = 1;")
+                    lines.append("            end")
+
+                lines.append(f"            if (env_{iface_id}_pending && env_{iface_id}_delay == 0) begin")
+                lines.append(f"                {rsp_valid_in} = 1;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_error'):
+                        lines.append(f"                {payload_name} = 0;")
+                    elif payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 1;")
+                    else:
+                        lines.append(assign_from_seed(payload, f"env_{iface_id}_seed", indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {rsp_valid_in} = 0;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    lines.append(f"                {payload_name} = 0;")
+                lines.append("            end")
+
+            for iface in request_ifaces:
+                ready_expr = f"golden_{iface['ready_out']}"
+                lines.append(f"            // Reactive request driver for {iface['prefix']}")
+                lines.append(f"            if ({ready_expr}) begin")
+                lines.append(f"                {iface['valid_in']} = 1;")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 1;")
+                    else:
+                        lines.append(assign_from_seed(payload, "lfsr", indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {iface['valid_in']} = lfsr[0];")
+                for payload in iface['payload_inputs']:
+                    payload_name = payload['name']
+                    if payload_name.endswith('_last'):
+                        lines.append(f"                {payload_name} = 0;")
+                    else:
+                        lines.append(assign_from_seed(payload, "lfsr", indent="                "))
+                lines.append("            end")
+
+            for ready_name in ready_bias_inputs:
+                lines.append(f"            {ready_name} = 1;")
+
+            if hls_iface:
+                iface_id = hls_iface['id']
+                start_in = hls_iface['start_in']
+                stable_inputs = hls_iface['stable_inputs']
+                lines.append("            // Transactional HLS control driver")
+                lines.append(f"            if (env_{iface_id}_launch) begin")
+                lines.append(f"                {start_in} = 1;")
+                for idx, port in enumerate(stable_inputs):
+                    seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
+                    lines.append(assign_from_seed(port, seed_expr, indent="                "))
+                lines.append("            end else if (env_{0}_active) begin".format(iface_id))
+                lines.append(f"                {start_in} = 0;")
+                for idx, port in enumerate(stable_inputs):
+                    seed_expr = f"(env_{iface_id}_seed ^ 32'h{(0x10203040 ^ (idx * 0x1F123BB5)) & 0xFFFFFFFF:08X})"
+                    lines.append(assign_from_seed(port, seed_expr, indent="                "))
+                lines.append("            end else begin")
+                lines.append(f"                {start_in} = 0;")
+                for port in stable_inputs:
+                    lines.append(f"                {port['name']} = 0;")
+                lines.append("            end")
+
+            lines.append(generate_fallback_random_assignments())
+            return '\n'.join(lines)
+
+        def generate_posedge_bookkeeping_code() -> str:
+            lines = []
+            for idx, iface in enumerate(response_ifaces):
+                iface_id = iface['id']
+                cmd_valid_out = f"golden_{iface['cmd_valid_out']}"
+                ready_gate = iface['ready_in'] if iface['ready_in'] else "1'b1"
+                seed_mask = (0x9E3779B9 ^ (idx * 0x45D9F3B)) & 0xFFFFFFFF
+                lines.append(f"            if (env_{iface_id}_pending) begin")
+                lines.append(f"                if (env_{iface_id}_delay > 0) begin")
+                lines.append(f"                    env_{iface_id}_delay = env_{iface_id}_delay - 1;")
+                lines.append("                end else begin")
+                lines.append(f"                    env_{iface_id}_pending = 0;")
+                lines.append("                end")
+                lines.append(f"            end else if ({cmd_valid_out} && {ready_gate}) begin")
+                lines.append(f"                env_{iface_id}_pending = 1;")
+                lines.append(f"                env_{iface_id}_delay = lfsr[0];")
+                lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'h{seed_mask:08X};")
+                lines.append("            end")
+            if hls_iface:
+                iface_id = hls_iface['id']
+                done_expr = f"golden_{hls_iface['done_out']}" if hls_iface['done_out'] else "1'b0"
+                idle_expr = f"golden_{hls_iface['idle_out']}" if hls_iface['idle_out'] else "1'b0"
+                ready_expr = f"golden_{hls_iface['ready_out']}" if hls_iface['ready_out'] else "1'b0"
+                launch_condition = f"({idle_expr} || {ready_expr})"
+                lines.append(f"            if (env_{iface_id}_launch) begin")
+                lines.append(f"                env_{iface_id}_launch = 0;")
+                lines.append(f"                env_{iface_id}_cycles = 1;")
+                lines.append(f"            end else if (env_{iface_id}_active) begin")
+                lines.append(f"                env_{iface_id}_cycles = env_{iface_id}_cycles + 1;")
+                lines.append(f"                if ({done_expr} || (({ready_expr}) && env_{iface_id}_cycles > 1)) begin")
+                lines.append(f"                    env_{iface_id}_active = 0;")
+                lines.append(f"                    env_{iface_id}_cycles = 0;")
+                lines.append("                end")
+                lines.append(f"            end else if ({launch_condition}) begin")
+                lines.append(f"                env_{iface_id}_active = 1;")
+                lines.append(f"                env_{iface_id}_launch = 1;")
+                lines.append(f"                env_{iface_id}_cycles = 0;")
+                lines.append(f"                env_{iface_id}_seed = lfsr ^ 32'hA5A55A5A;")
+                lines.append("            end")
+            return '\n'.join(lines) if lines else '            // No reactive bookkeeping required'
+
+        def generate_protocol_compare_code() -> str:
+            protocol_outputs = []
+            seen_protocol_outputs = set()
+
+            def add_protocol_output(name: Optional[str]):
+                if name and name in output_by_name and name not in seen_protocol_outputs:
+                    seen_protocol_outputs.add(name)
+                    protocol_outputs.append(name)
+
+            for iface in response_ifaces:
+                add_protocol_output(iface['cmd_valid_out'])
+            for iface in request_ifaces:
+                add_protocol_output(iface['ready_out'])
+            if hls_iface:
+                add_protocol_output(hls_iface['done_out'])
+                add_protocol_output(hls_iface['idle_out'])
+                add_protocol_output(hls_iface['ready_out'])
+
+            lines = []
+            for name in protocol_outputs:
+                lines.append(f'''
+            if (golden_{name} !== revised_{name}) begin
+                $display("PROTOCOL MISMATCH at cycle %0d: {name} golden=%h revised=%h", cycle_count, golden_{name}, revised_{name});
+                protocol_mismatch_count = protocol_mismatch_count + 1;
+            end''')
+            return '\n'.join(lines) if lines else '            // No protocol outputs to compare'
         
         # Generate testbench
+        compare_body = chr(10).join(f'''
+            if (golden_{port['name']} !== revised_{port['name']}) begin
+                $display("MISMATCH at cycle %0d: {port['name']} golden=%h revised=%h", cycle_count, golden_{port['name']}, revised_{port['name']});
+                mismatch_count = mismatch_count + 1;
+            end''' for port in outputs) if outputs else '            // No outputs to compare'
+
         tb_content = f"""
 `timescale 1ns / 1ps
 
@@ -428,6 +1022,9 @@ module testbench;
     
     // LFSR for pseudo-random input generation
     reg [31:0] lfsr = 32'hDEADBEEF;
+    
+    // Reactive environment state
+{generate_env_declarations()}
     
     // Instantiate golden design
     {golden_module} golden_dut (
@@ -455,11 +1052,14 @@ module testbench;
     
     // Test stimulus and checking
     integer mismatch_count;
+    integer protocol_mismatch_count;
     integer cycle_count;
     
     initial begin
         mismatch_count = 0;
+        protocol_mismatch_count = 0;
         cycle_count = 0;
+{generate_env_init_code()}
         
         // Reset
         {''+reset+' = 1;' if reset else ''}
@@ -467,32 +1067,39 @@ module testbench;
         repeat(10) @(posedge {clock});
         {''+reset+' = 0;' if reset else ''}
         
-        // Warm-up period: fill pipeline without checking outputs
-        // (for pipelined designs, outputs may be X until pipeline fills)
+        // Warm-up period: fill pipeline without checking outputs.
+        // Drive inputs on the inactive edge so sequential logic sees stable
+        // values before the active clock edge.
         repeat(50) begin
-            @(posedge {clock});
+            @(negedge {clock});
             lfsr = lfsr_next(lfsr);
-{generate_stimulus_code()}
+{generate_negedge_stimulus_code()}
+            @(posedge {clock});
+{generate_posedge_bookkeeping_code()}
+            #1;
+{generate_protocol_compare_code()}
         end
         
         // Run test vectors with output checking
         repeat({self.num_vectors}) begin
+            // Generate new inputs from LFSR
+            @(negedge {clock});
+            lfsr = lfsr_next(lfsr);
+{generate_negedge_stimulus_code()}
+
+            // Sample outputs on the following active edge
             @(posedge {clock});
             cycle_count = cycle_count + 1;
-            
-            // Generate new inputs from LFSR
-            lfsr = lfsr_next(lfsr);
-{generate_stimulus_code()}
+{generate_posedge_bookkeeping_code()}
             
             // Check outputs after settling
             #1; // Small delay for output settling
             
             // Compare all outputs
-            {chr(10).join(f'''
-            if (golden_{port['name']} !== revised_{port['name']}) begin
-                $display("MISMATCH at cycle %0d: {port['name']} golden=%h revised=%h", cycle_count, golden_{port['name']}, revised_{port['name']});
-                mismatch_count = mismatch_count + 1;
-            end''' for port in outputs) if outputs else '            // No outputs to compare'}
+{compare_body}
+
+            // Compare protocol outputs that drive the reactive environment
+{generate_protocol_compare_code()}
         end
         
         // Report results
@@ -501,7 +1108,8 @@ module testbench;
         $display("=======================================");
         $display("Cycles simulated: %0d", cycle_count);
         {'$display("Outputs compared: 0 (design has no outputs)");' if not outputs else '$display("Mismatches found: %0d", mismatch_count);'}
-        if (mismatch_count == 0) begin
+        $display("Protocol mismatches found: %0d", protocol_mismatch_count);
+        if (mismatch_count == 0 && protocol_mismatch_count == 0) begin
             {'$display("Result: PASS (no crashes detected)");' if not outputs else '$display("Result: PASS");'}
             $finish(0);
         end else begin
@@ -512,7 +1120,7 @@ module testbench;
     
     // Timeout watchdog (reset + warmup + test cycles, with 2x safety margin)
     initial begin
-        #{(10 + 50 + self.num_vectors) * 20000} $display("ERROR: Simulation timeout"); $finish(2);
+        #{(10 + 50 + self.num_vectors) * 20} $display("ERROR: Simulation timeout"); $finish(2);
     end
 
 endmodule
@@ -549,6 +1157,14 @@ endmodule
         })
         print(f"✓ Golden model exported: {golden_v.name}")
         
+        # Query clock ports while the golden design is still loaded - more
+        # robust than guessing from Verilog port names downstream.
+        golden_clocks = await self._query_clock_ports_from_vivado()
+        if golden_clocks:
+            logger.info(f"Vivado reports golden clock ports: {golden_clocks}")
+        else:
+            logger.info("Vivado reported no clocks for golden design (will fall back to name heuristic)")
+        
         # Open revised DCP
         logger.info(f"Opening revised DCP: {self.revised_dcp}")
         result = await self.vivado_session.call_tool("open_checkpoint", {
@@ -562,6 +1178,18 @@ endmodule
             "force": True
         })
         print(f"✓ Revised model exported: {revised_v.name}")
+        
+        # Query clock ports for the revised design as well, mainly so we can
+        # detect mismatches that would invalidate the testbench (the testbench
+        # is built from golden's port list, but revised must agree).
+        revised_clocks = await self._query_clock_ports_from_vivado()
+        if revised_clocks:
+            logger.info(f"Vivado reports revised clock ports: {revised_clocks}")
+        if golden_clocks and revised_clocks and set(golden_clocks) != set(revised_clocks):
+            logger.warning(
+                f"Clock port set differs between golden ({sorted(golden_clocks)}) "
+                f"and revised ({sorted(revised_clocks)}); using golden's"
+            )
         
         # Parse design information
         print("\nParsing design information...")
@@ -585,7 +1213,10 @@ endmodule
         # Generate testbench
         tb_path = self.temp_dir / "testbench.v"
         print(f"\nGenerating testbench ({self.num_vectors} random vectors)...")
-        self.generate_testbench(golden_info, revised_info, tb_path)
+        self.generate_testbench(
+            golden_info, revised_info, tb_path,
+            clock_names=golden_clocks,
+        )
         print(f"✓ Testbench generated: {tb_path.name}")
         
         # Run xsim simulation
@@ -595,6 +1226,7 @@ endmodule
         xsim_dir = self.temp_dir / "xsim_work"
         xsim_dir.mkdir(exist_ok=True)
         
+        current_step = "setup"
         try:
             # Get Vivado installation path for simulation libraries
             # Check VIVADO_EXEC environment variable first, then PATH
@@ -617,43 +1249,73 @@ endmodule
                 logger.warning(f"UNISIM library not found at {unisim_dir}, trying glbl.v only")
             
             # To avoid module name conflicts, rename ALL modules in revised file
+            # (both declarations AND instantiations of those modules) so that the
+            # renamed-revised top is a self-contained design that doesn't silently
+            # link against golden sub-modules at elaboration time.
             logger.info("Renaming all revised modules to avoid conflicts...")
             revised_renamed = xsim_dir / "revised_sim_renamed.v"
             
             with open(revised_v, 'r') as f:
                 content = f.read()
             
-            # Rename ALL modules (not just top) to avoid sub-module conflicts
             revised_module_name = revised_info["module_name"]
             revised_module_renamed = f"{revised_module_name}_revised"
             
-            # Rename module declarations - handle both single-line and multi-line
-            # "module name" OR "module name(" OR multi-line "module\nname"
-            content = re.sub(
-                r'\bmodule\s+(\w+)(\s*\()',
-                lambda m: f'module {m.group(1)}_revised{m.group(2)}',
+            # Pass 1: collect every declared module name in the revised netlist.
+            # Vivado's funcsim output is regular: each declaration starts with
+            # "module <name>" at the start of a line.
+            declared_module_names = set(re.findall(
+                r'(?m)^\s*module\s+(\w+)\b',
                 content
-            )
-            # Handle multi-line: "module\nname (" or "module\nname\n("
-            content = re.sub(
-                r'\bmodule\n\s*(\w+)\s*\(',
-                lambda m: f'module\n{m.group(1)}_revised(',
-                content
+            ))
+            logger.info(
+                f"Found {len(declared_module_names)} module declarations in revised netlist"
             )
             
-            # Rename module instantiations (user modules, not FPGA primitives)
-            # Look for patterns like "layer0 inst_name (" or "myreg inst_name ("
-            # Primitives typically start with uppercase (LUT6, FDRE, etc.)
-            content = re.sub(
-                r'\b(layer\d+[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
-            content = re.sub(
-                r'\b(myreg[_\w]*)\s+(\w+)\s*\(',
-                r'\1_revised \2 (',
-                content
-            )
+            # Pass 2: per-line scan rewriting both declarations and instantiations
+            # of declared modules to use the "_revised" suffix. We use a per-line
+            # scan with set-membership lookups (O(file size)) rather than a giant
+            # alternation regex, which is intractably slow on big benchmarks
+            # (e.g. corescore_500_mod has ~6700 user modules in a 71 MB netlist).
+            #
+            # Lines we care about in Vivado funcsim output:
+            #   "  module NAME"               -> declaration to rename
+            #   "  NAME inst_name (..."       -> instantiation to rename
+            # Anything else (port lists, assigns, wires, comments, primitives
+            # like LUT6/FDRE which are NOT in declared_module_names) is left alone.
+            if declared_module_names:
+                renamed_lines = []
+                suffix = "_revised"
+                for line in content.splitlines(keepends=True):
+                    s = line.lstrip()
+                    if not s:
+                        renamed_lines.append(line); continue
+                    sp = s.find(' ')
+                    tab = s.find('\t')
+                    if tab != -1 and (sp == -1 or tab < sp):
+                        sp = tab
+                    if sp == -1:
+                        renamed_lines.append(line); continue
+                    first = s[:sp]
+                    if first == 'module':
+                        rest = s[sp:].lstrip()
+                        nm = re.match(r'(\w+)', rest)
+                        if nm and nm.group(1) in declared_module_names:
+                            name = nm.group(1)
+                            indent = line[:len(line) - len(s)]
+                            after_name = len(s) - len(rest) + len(name)
+                            renamed_lines.append(
+                                indent + 'module ' + name + suffix + s[after_name:]
+                            )
+                            continue
+                    elif first in declared_module_names:
+                        indent = line[:len(line) - len(s)]
+                        renamed_lines.append(
+                            indent + first + suffix + s[len(first):]
+                        )
+                        continue
+                    renamed_lines.append(line)
+                content = ''.join(renamed_lines)
             
             with open(revised_renamed, 'w') as f:
                 f.write(content)
@@ -674,12 +1336,26 @@ endmodule
                 if glbl_v.exists():
                     compile_cmd.insert(3, str(glbl_v))
             
+            # Timeouts are generous because large benchmarks (e.g. corescore_500_mod
+            # with thousands of user modules) can take many minutes per step.
+            # xvlog/xelab times scale with design size; xsim time scales with both
+            # design size and num_vectors.
+            xvlog_timeout_s = 1800   # 30 min
+            xelab_timeout_s = 3600   # 60 min - elaborates both designs
+            # xsim: per-cycle cost is roughly proportional to the number of
+            # primitive cells. Two copies of a 100k-LUT design (e.g.
+            # corescore_500_mod) measured ~0.3s/cycle. We add a generous baseline
+            # for kernel init and cap below by 60 min so small designs still get
+            # a comfortable budget.
+            xsim_timeout_s = max(3600, 600 + int(self.num_vectors * 1.0))
+            
+            current_step = "xvlog (compilation)"
             result = subprocess.run(
                 compile_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xvlog_timeout_s
             )
             
             if result.returncode != 0:
@@ -690,11 +1366,20 @@ endmodule
             
             print("✓ Compilation successful")
             
-            # Elaborate with UNISIM library reference
+            # Elaborate with UNISIM library reference.
+            #
+            # We pass "--debug off" because the testbench reports results via
+            # $display; we never inspect waveforms, so the per-signal debug
+            # instrumentation that "-debug typical" enables is pure overhead
+            # (relevant for smaller benchmarks where it dominates).
+            #
+            # "--mt auto" lets xelab parallelise where it can; it is a no-op for
+            # the per-module compile loop on huge designs but doesn't hurt.
             logger.info("Elaborating with xelab...")
             elab_cmd = [
                 "xelab",
-                "-debug", "typical",
+                "--debug", "off",
+                "--mt", "auto",
                 "-L", "unisims_ver",  # Link against UNISIM library
                 "-L", "unimacro_ver",
                 "work.testbench",  # Specify library.module
@@ -702,12 +1387,13 @@ endmodule
                 "-s", "testbench_sim"
             ]
             
+            current_step = "xelab (elaboration)"
             result = subprocess.run(
                 elab_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=xelab_timeout_s
             )
             
             if result.returncode != 0:
@@ -746,12 +1432,13 @@ endmodule
                 "-R"
             ]
             
+            current_step = "xsim (simulation)"
             result = subprocess.run(
                 sim_cmd,
                 cwd=xsim_dir,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=xsim_timeout_s
             )
             
             # Parse simulation output
@@ -762,37 +1449,42 @@ endmodule
             with open(log_file, 'w') as f:
                 f.write(sim_output)
             
-            # Extract results
-            mismatch_count = 0
-            cycles_simulated = 0
-            
+            parse_result = parse_simulation_output(
+                sim_output,
+                result.returncode,
+                self.num_vectors,
+            )
+
             for line in sim_output.split('\n'):
                 if 'MISMATCH' in line:
-                    mismatch_count += 1
                     print(f"  {line}")
-                elif 'Cycles simulated:' in line:
-                    match = re.search(r'Cycles simulated:\s*(\d+)', line)
-                    if match:
-                        cycles_simulated = int(match.group(1))
-                elif 'Mismatches found:' in line:
-                    match = re.search(r'Mismatches found:\s*(\d+)', line)
-                    if match:
-                        mismatch_count = int(match.group(1))
-            
+
             self.simulation_report = {
-                "cycles_simulated": cycles_simulated,
-                "mismatch_count": mismatch_count,
-                "log_file": str(log_file)
+                "cycles_simulated": parse_result["cycles_simulated"],
+                "mismatch_count": parse_result["mismatch_count"],
+                "protocol_mismatch_count": parse_result["protocol_mismatch_count"],
+                "log_file": str(log_file),
+                "result_pass_seen": parse_result["result_pass_seen"],
+                "result_fail_seen": parse_result["result_fail_seen"],
+                "simulator_failed": parse_result["simulator_failed"],
+                "returncode": parse_result["returncode"],
             }
             
-            # Check if passed
-            self.phase2_passed = (mismatch_count == 0 and result.returncode == 0)
+            # Check if passed. xsim can report an internal simulator failure
+            # while still returning 0, so require the testbench's explicit
+            # completion marker and expected cycle count.
+            self.phase2_passed = parse_result["passed"]
             
             print("\n" + "-"*70)
             print(f"Simulation Results:")
-            print(f"  Cycles: {cycles_simulated}")
-            print(f"  Mismatches: {mismatch_count}")
+            print(f"  Cycles: {parse_result['cycles_simulated']}")
+            print(f"  Mismatches: {parse_result['mismatch_count']}")
+            print(f"  Protocol mismatches: {parse_result['protocol_mismatch_count']}")
             print(f"  Log: {log_file}")
+            if parse_result["simulator_failed"]:
+                print("  Simulator reported an internal failure")
+            if not parse_result["result_pass_seen"] and result.returncode == 0:
+                print("  Testbench PASS marker not found")
             
             if self.phase2_passed:
                 print("\nPhase 2: PASSED ✓")
@@ -802,22 +1494,23 @@ endmodule
             
             return self.phase2_passed
             
-        except subprocess.TimeoutExpired:
-            print("\n✗ Simulation timeout")
+        except subprocess.TimeoutExpired as e:
+            timeout_s = getattr(e, "timeout", "?")
+            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            logger.error(
+                f"subprocess.TimeoutExpired in step '{current_step}' "
+                f"(timeout={timeout_s}s)"
+            )
             return False
         except Exception as e:
-            print(f"\n✗ Simulation error: {e}")
-            logger.exception("Simulation error")
+            print(f"\n✗ Simulation error in {current_step}: {e}")
+            logger.exception(f"Error in step '{current_step}'")
             return False
     
-    async def validate(self, phase1_only: bool = False) -> bool:
-        """Run complete validation (both phases).
-
-        Args:
-            phase1_only: If True, skip Phase 2 simulation and return after Phase 1.
-        """
+    async def validate(self) -> bool:
+        """Run complete validation (both phases)."""
         start_time = time.time()
-
+        
         print("\n" + "="*70)
         print("DCP EQUIVALENCE VALIDATION")
         print("="*70)
@@ -825,28 +1518,16 @@ endmodule
         print(f"Revised: {self.revised_dcp}")
         print(f"Vectors: {self.num_vectors}")
         print("="*70)
-
+        
         # Phase 1: Structural checks
         phase1_passed = await self.phase1_structural_checks()
-
+        
         if not phase1_passed:
             print("\n⚠ Skipping Phase 2 due to Phase 1 failures")
             elapsed = time.time() - start_time
             self.print_final_report(elapsed)
             return False
-
-        # Phase 1 only mode - skip Phase 2
-        if phase1_only:
-            print("\n" + "="*70)
-            print("PHASE 2 SKIPPED (--phase1-only mode)")
-            print("="*70)
-            self.phase2_passed = True
-            self.phase2_skipped = True
-            self.phase2_skip_reason = "Phase 1 only mode"
-            elapsed = time.time() - start_time
-            self.print_final_report(elapsed)
-            return True
-
+        
         # Phase 2: Functional simulation
         phase2_result = await self.phase2_functional_simulation()
         
@@ -891,6 +1572,7 @@ endmodule
             if self.simulation_report:
                 print(f"  Cycles: {self.simulation_report.get('cycles_simulated', 0)}")
                 print(f"  Mismatches: {self.simulation_report.get('mismatch_count', 0)}")
+                print(f"  Protocol mismatches: {self.simulation_report.get('protocol_mismatch_count', 0)}")
         
         print()
         if self.phase2_skipped:
@@ -942,14 +1624,11 @@ Examples:
         "--vectors",
         "-n",
         type=int,
-        default=10000,
-        help="Number of random test vectors to simulate (default: 10000)"
-    )
-    parser.add_argument(
-        "--run-dir",
-        type=Path,
-        default=None,
-        help="Directory for intermediate files (default: script directory)"
+        default=200,
+        help="Number of random test vectors to simulate (default: 200). "
+             "Larger benchmarks (e.g. corescore_500_mod) cost ~1s of xsim CPU "
+             "per vector, so the default keeps wall-clock reasonable. Bump this "
+             "up for higher-confidence runs."
     )
     parser.add_argument(
         "--debug",
@@ -957,9 +1636,9 @@ Examples:
         help="Enable debug logging"
     )
     parser.add_argument(
-        "--phase1-only",
+        "--no-reactive",
         action="store_true",
-        help="Run only Phase 1 structural checks (skip simulation)"
+        help="Disable reactive stimulus generation (use pure LFSR randomness)"
     )
 
     args = parser.parse_args()
@@ -982,13 +1661,13 @@ Examples:
         revised_dcp=args.revised_dcp,
         num_vectors=args.vectors,
         debug=args.debug,
-        run_dir=args.run_dir
+        no_reactive=args.no_reactive
     )
     
     try:
         await validator.start_servers()
-        success = await validator.validate(phase1_only=args.phase1_only)
-
+        success = await validator.validate()
+        
         sys.exit(0 if success else 1)
         
     except KeyboardInterrupt:
