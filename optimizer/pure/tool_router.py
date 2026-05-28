@@ -12,7 +12,13 @@ import time
 from typing import Any, Optional
 
 from context_manager.logging_config import sanitize_payload
-from .constants import ROUTING_FAILURE_PHRASES
+from .constants import (
+    ROUTING_FAILURE_PHRASES,
+    _TOOL_TIMEOUT_DEFAULTS,
+    _DEFAULT_TOOL_TIMEOUT,
+    _TOOL_TIMEOUT_MAX,
+    _MCP_ERROR_PATTERNS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,18 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def _is_mcp_error_response(text: str) -> bool:
+    """Check if an MCP tool response string indicates a recoverable error.
+    
+    MCP servers may return error strings containing [ERROR] patterns instead
+    of raising exceptions. These must be treated as failures by the agent
+    framework: no caching, cache invalidation, and proper error tracking.
+    """
+    if not text:
+        return False
+    return any(pat in text for pat in _MCP_ERROR_PATTERNS)
+
+
 async def call_tool(
     tool_name: str,
     arguments: dict,
@@ -47,6 +65,7 @@ async def call_tool(
     tool_round: int = 0,
     high_fanout_nets: list | None = None,
     tool_cache: dict | None = None,
+    design_size_factor: float = 1.0,
 ) -> str:
     """Execute a tool call on the appropriate MCP server.
 
@@ -169,10 +188,15 @@ async def call_tool(
 
     heartbeat_task = asyncio.create_task(_heartbeat())
 
-    # Application-level timeout: give the MCP server its requested timeout plus margin,
-    # so hung servers don't block the optimizer indefinitely.
-    request_timeout = arguments.get("timeout", 300)
-    app_timeout = max(request_timeout * 1.5, 300)
+    # Application-level timeout: use per-tool defaults scaled by design size,
+    # with user-specified timeout taking priority.
+    user_timeout = arguments.get("timeout")
+    if user_timeout is not None:
+        request_timeout = float(user_timeout)
+    else:
+        base_timeout = _TOOL_TIMEOUT_DEFAULTS.get(tool_name, _DEFAULT_TOOL_TIMEOUT)
+        request_timeout = min(base_timeout * design_size_factor, _TOOL_TIMEOUT_MAX)
+    app_timeout = max(request_timeout * 1.5, 120)  # Minimum 120s application timeout
 
     try:
         try:
@@ -196,14 +220,16 @@ async def call_tool(
                 if tool_name == "vivado_open_checkpoint":
                     dcp_path = arguments.get("dcp_path", "?")
                     logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
-                # Cache successful result, or invalidate cache after side-effect tool
+                # Detect MCP error responses — must not be cached and must invalidate cache
+                is_error_response = _is_mcp_error_response(result_text)
+                # Cache logic: error responses and side-effect tools both invalidate cache
                 if tool_cache is not None:
-                    if tool_name not in _NO_CACHE_TOOLS:
+                    if is_error_response or tool_name in _NO_CACHE_TOOLS:
+                        tool_cache.clear()
+                        logger.info(f"[CACHE_INVALIDATED] by {tool_name} (round {tool_round}, error={is_error_response})")
+                    else:
                         cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
                         tool_cache[cache_key] = (tool_round, result_text)
-                    else:
-                        tool_cache.clear()
-                        logger.info(f"[CACHE_INVALIDATED] by {tool_name} (round {tool_round})")
                 return result_text
             logger.info(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
@@ -211,12 +237,12 @@ async def call_tool(
             )
             # Cache empty result too, or invalidate cache after side-effect tool
             if tool_cache is not None:
-                if tool_name not in _NO_CACHE_TOOLS:
-                    cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
-                    tool_cache[cache_key] = (tool_round, "(no output)")
-                else:
+                if tool_name in _NO_CACHE_TOOLS:
                     tool_cache.clear()
                     logger.info(f"[CACHE_INVALIDATED] by {tool_name} (round {tool_round})")
+                else:
+                    cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
+                    tool_cache[cache_key] = (tool_round, "(no output)")
             return "(no output)"
         except asyncio.TimeoutError:
             elapsed = time.time() - start_time

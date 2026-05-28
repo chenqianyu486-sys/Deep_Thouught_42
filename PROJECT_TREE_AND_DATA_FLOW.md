@@ -142,6 +142,13 @@ llm_tool_loop_node (调度器)
 | 17 | **未布局 DCP 保存防护** | `save_output` 在写入输出 DCP 前查询 `get_property STATUS [current_design]`，若未布线则自动执行 `place_design` + `route_design` 修复后再保存 |
 | 18 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告 `Design State`，若非 `Routed` 则记录警告并追加 `[WARNING: design not routed]` 到评估通知 |
 | 19 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace`，若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS |
+| 20 | **phys_opt_design 安全守卫（字符串绕过修复）** | `_is_truthy()` 规范化布尔类值（`"true"`/`"1"`/`"yes"`）后再检查被阻止的 retiming 选项，防止 LLM 通过字符串类型参数绕过安全守卫 |
+| 21 | **MCP 错误响应检测** | `tool_router.py` 检测 MCP 工具返回中的 `[ERROR]` 模式（超时、重启、多行中止）。错误响应与副作用工具同等处理：清空整个工具缓存，不缓存错误结果，确保 Agent 框架正确记录失败 |
+| 22 | **工具超时分级 + 设计规模缩放** | `_TOOL_TIMEOUT_DEFAULTS` 为 30+ 工具映射基线超时（30s–3600s）。`call_tool()` 接受 `design_size_factor` 参数；最终超时 = `min(base × factor, 900s)`。用户指定 `timeout` 参数优先 |
+| 23 | **多行 Tcl 事务安全** | `run_tcl_command` 对多行脚本用 `info complete` 预检语法（跳过花括号不平衡行）。执行失败时返回结构化 `[ERROR]` 字符串而非抛异常，Agent 框架可继续使用恢复后的会话 |
+| 24 | **设计状态标志同步** | `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志与 Vivado 实际状态，检查 `[ERROR]`、`ERROR:` 和 `no current design` 三种错误模式 |
+| 25 | **PBLOCK 单元过滤（CLOCK/IO 排除）** | `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制 |
+| 26 | **显式管线数据流** | `init_analysis` Phase B 管线返回 `dict` 而非使用 `nonlocal` 变量。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get()` 读取 `cell_names_for_spread`，消除隐式数据流 |
 
 ## 3. 核心数据流
 

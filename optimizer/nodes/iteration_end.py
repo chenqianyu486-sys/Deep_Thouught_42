@@ -83,6 +83,7 @@ async def iteration_end_node(
                         "vivado_write_checkpoint",
                         {"dcp_path": str(state.control.output_dcp.resolve()), "force": True},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
                     if "error" not in result.lower():
                         logger.info(f"[iteration_end] Output DCP updated (WNS={state.timing.best_wns:.3f}ns)")

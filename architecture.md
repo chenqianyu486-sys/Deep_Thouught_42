@@ -65,7 +65,14 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，token 估算统一使用 `ContextEstimator`（tiktoken cl100k_base）
 - **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`
 - **DCP 身份完整性**: `state.control.current_dcp_path` 在全流程中追踪 Vivado 打开的 DCP 文件。EXECUTE 阶段从 LLM 工具白名单中移除 `vivado_open_checkpoint`
-- **Vivado Tcl 超时自动重启**: Tcl 命令超时会污染 Vivado session（`pexpect` 不返回 prompt）。MCP server 内部自动执行 `kill → restart → reopen DCP`，不尝试 `sync_after_timeout()`。移除 `_command_pending` 全局状态（`VivadoMCP/vivado_mcp_server.py`）
+- **Vivado Tcl 超时自动重启**: Tcl 命令超时会污染 Vivado session（`pexpect` 不返回 prompt）。MCP server 内部自动执行 `kill → restart → reopen DCP`，不尝试 `sync_after_timeout()`。移除 `_command_pending` 全局状态。超时后返回结构化 `[ERROR]` 字符串而非抛异常，`_restarting` 重入保护防止递归重启。Agent 框架通过 `_MCP_ERROR_PATTERNS` 检测错误响应并清空工具缓存（`VivadoMCP/vivado_mcp_server.py` + `optimizer/pure/tool_router.py`）
+- **phys_opt_design 安全守卫增强**: `_is_truthy()` 规范化布尔类值（`True`/`"true"`/`"1"`/`"yes"`）后再检查被阻止的 retiming 选项（`retime`/`interconnect_retime`），防止 LLM 通过字符串类型参数绕过安全守卫（`VivadoMCP/vivado_mcp_server.py`）
+- **多行 Tcl 事务安全**: `run_tcl_command` 对多行脚本执行 `info complete` 语法预检（跳过花括号不平衡行）。执行失败时返回 `[ERROR]` 结构化字符串而非 `raise`，Agent 框架可继续使用恢复后的会话（`VivadoMCP/vivado_mcp_server.py`）
+- **设计状态标志同步**: `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志，检查 `[ERROR]`/`ERROR:`/`no current design` 三种模式。在 `close_design` 和 DCP 重开后调用（`VivadoMCP/vivado_mcp_server.py`）
+- **PBLOCK 单元过滤**: `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制（`VivadoMCP/vivado_mcp_server.py`）
+- **工具超时分级 + 设计规模缩放**: `_TOOL_TIMEOUT_DEFAULTS` 为 30+ 工具映射基线超时（30s–3600s）。`call_tool()` 接受 `design_size_factor` 参数；最终超时 = `min(base × factor, 900s)`。用户指定 `timeout` 参数优先。所有 44 个调用点传入 `state.timing.design_size_factor`（`optimizer/pure/constants.py` + `optimizer/pure/tool_router.py`）
+- **MCP 错误响应检测**: `tool_router.py` 通过 `_is_mcp_error_response()` 检测 MCP 返回的 `[ERROR]` 模式（超时、重启、多行中止、进程终止）。错误响应与副作用工具同等处理：清空整个工具缓存，不缓存错误结果，确保 `tool_errors` 追踪和 Dashboard `action_status` 正确反映失败（`optimizer/pure/tool_router.py` + `optimizer/pure/constants.py`）
+- **显式管线数据流**: `init_analysis` Phase B 的 `_vivado_pipeline()` 和 `_rapidwright_pipeline()` 从 `nonlocal` 变量改为返回 `dict`。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get("cell_names_for_spread")` 读取数据，消除隐式数据流（`optimizer/nodes/init_analysis.py`）
 - **init_analysis 去 `report_*` 化**: Agent pipeline 禁用 cost 不可预测的 `report_*` 命令。`report_utilization -return_string` → 5 条 `get_cells -filter {PRIMITIVE_GROUP == ...}`（Vivado C++ filter 引擎，200K cells ~5-10s）
 - **init_analysis 原子提交 checkpoint**: 7 个步骤各自独立原子提交（`run → validate → mark_done`）。Vivado 重启后自动跳过已完成步骤
 - **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s

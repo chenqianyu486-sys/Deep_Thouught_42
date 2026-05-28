@@ -43,6 +43,7 @@ async def rollback_node(
             "vivado_open_checkpoint",
             {"dcp_path": str(ckpt.resolve())},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         if "error" in result.lower():
             logger.error(f"[ROLLBACK] Failed to open checkpoint: {result[:200]}")
@@ -53,6 +54,7 @@ async def rollback_node(
         wns_result = await call_tool_fn(
             "vivado_get_wns", {},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         if wns_result and wns_result.strip() not in ("", "(no output)", "PARSE_ERROR"):
             try:

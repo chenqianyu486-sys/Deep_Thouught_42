@@ -198,6 +198,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     tool_round=tool_round,
                     high_fanout_nets=state.timing.high_fanout_nets,
                     tool_cache=state.context.tool_cache,
+                    design_size_factor=state.timing.design_size_factor,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
@@ -251,6 +252,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             await call_tool_fn(
                                 "vivado_write_checkpoint", {"dcp_path": str(pre_unplace_ckpt), "force": True},
                                 deps.rapidwright_session, deps.vivado_session,
+                                design_size_factor=state.timing.design_size_factor,
                             )
                             pre_unplace_path = pre_unplace_ckpt
                         except Exception as e:
@@ -325,11 +327,13 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             await call_tool_fn(
                 "vivado_open_checkpoint", {"dcp_path": str(pre_unplace_path)},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             # Refresh WNS after restore
             restore_result = await call_tool_fn(
                 "vivado_report_timing_summary", {},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             restore_timing = parse_timing_summary(restore_result)
             if restore_timing.get("wns") is not None:
@@ -494,6 +498,7 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_write_checkpoint",
             {"dcp_path": str(ckpt_path.resolve()), "force": True},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         state.control.best_checkpoint_path = ckpt_path
         logger.info(f"Saved best checkpoint: WNS={state.timing.best_wns:.3f}ns")
@@ -559,6 +564,7 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     timing_result = await call_tool_fn(
         "vivado_report_timing_summary", {},
         deps.rapidwright_session, deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
     )
     # Detect false-positive timing from unplaced/unrouted designs
     design_not_routed = "Design State" in timing_result and "Routed" not in timing_result
@@ -624,6 +630,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
         pre_ckpt_result = await call_tool_fn(
             "vivado_write_checkpoint", {"dcp_path": "/tmp/pre_chain_pblock.dcp", "force": True},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         pre_chain_path = "/tmp/pre_chain_pblock.dcp"
     except Exception as e:
@@ -643,6 +650,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             raw_result = await call_tool_fn(
                 target_tool, args,
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             summary = summarize_tool_result(
                 target_tool, raw_result,
@@ -682,6 +690,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     await call_tool_fn(
                         "vivado_open_checkpoint", {"dcp_path": pre_chain_path},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
                     state.control.current_dcp_path = Path(pre_chain_path).resolve()
                     # Refresh WNS after restore so state matches Vivado
@@ -689,6 +698,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                         restore_result = await call_tool_fn(
                             "vivado_report_timing_summary", {},
                             deps.rapidwright_session, deps.vivado_session,
+                            design_size_factor=state.timing.design_size_factor,
                         )
                         restore_wns = parse_timing_summary(restore_result)
                         if restore_wns is not None:
@@ -714,6 +724,7 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
         "vivado_extract_critical_path_cells",
         {"num_paths": 10},
         deps.rapidwright_session, deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
     )
     cell_paths = parse_critical_path_cells(result)
     if cell_paths:

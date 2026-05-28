@@ -173,3 +173,70 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {}},
     ],
 }
+
+
+# ── Per-tool timeout defaults (seconds) ──────────────────────────
+# Quick read-only queries use short timeouts; execution tools use long timeouts.
+# All timeouts are multiplied by design_size_factor at call time.
+# User-specified timeout in arguments always takes priority.
+
+_TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
+    # Fast read-only queries (< 60s base)
+    "vivado_get_wns": 30.0,
+    "vivado_search_cells": 60.0,
+    "vivado_get_resource_counts": 60.0,
+    "vivado_get_cached_high_fanout_nets": 10.0,
+    "rapidwright_get_device_topology": 30.0,
+    "rapidwright_get_design_info": 30.0,
+    "rapidwright_search_cells": 60.0,
+    "rapidwright_analyze_critical_path_spread": 60.0,
+    "rapidwright_analyze_congestion": 60.0,
+    # Medium queries (60-120s base)
+    "vivado_report_timing_summary": 120.0,
+    "vivado_report_route_status": 120.0,
+    "vivado_run_tcl": 120.0,
+    "vivado_extract_critical_path_cells": 120.0,
+    "vivado_extract_critical_path_pins": 120.0,
+    "vivado_get_critical_high_fanout_nets": 120.0,
+    "vivado_report_utilization_for_pblock": 120.0,
+    "rapidwright_read_checkpoint": 120.0,
+    "rapidwright_analyze_pblock_region": 120.0,
+    "rapidwright_initialize_rapidwright": 60.0,
+    # Heavy execution tools (300-3600s base)
+    "vivado_open_checkpoint": 600.0,
+    "vivado_place_design": 1800.0,
+    "vivado_route_design": 1800.0,
+    "vivado_phys_opt_design": 3600.0,
+    "vivado_write_checkpoint": 300.0,
+    "vivado_write_verilog_simulation": 300.0,
+    "vivado_create_and_apply_pblock": 300.0,
+    "rapidwright_execute_pblock_strategy": 600.0,
+    "rapidwright_execute_fanout_strategy": 300.0,
+    "rapidwright_optimize_cell_placement": 300.0,
+    "rapidwright_execute_congestion_spreading": 300.0,
+    "rapidwright_execute_register_retiming": 300.0,
+    "rapidwright_execute_net_swapping": 300.0,
+    "rapidwright_optimize_lut_input_cone": 300.0,
+    "rapidwright_replicate_critical_cells": 300.0,
+    "rapidwright_smart_region_search": 300.0,
+    "rapidwright_optimize_fanout_batch": 300.0,
+    "rapidwright_write_checkpoint": 300.0,
+    "rapidwright_compare_design_structure": 120.0,
+}
+
+_DEFAULT_TOOL_TIMEOUT: float = 300.0
+_TOOL_TIMEOUT_MAX: float = 900.0  # Hard cap: never wait more than 15 min per call
+
+
+# ── MCP error response detection patterns ──────────────────────────
+# MCP servers may return error strings starting with [ERROR] instead of
+# raising exceptions. These must be treated as failures: no caching,
+# cache invalidation, and the error must propagate to the agent framework.
+
+_MCP_ERROR_PATTERNS: tuple[str, ...] = (
+    "[ERROR] Tcl command timed out",
+    "[ERROR] Application-level timeout",
+    "[ERROR] Multi-line script aborted",
+    "[ERROR] Multi-line script validation failed",
+    "[ERROR] Vivado process terminated",
+)

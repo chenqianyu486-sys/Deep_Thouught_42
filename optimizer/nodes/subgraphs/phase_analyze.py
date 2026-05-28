@@ -146,6 +146,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     tool_round=tool_round,
                     high_fanout_nets=state.timing.high_fanout_nets,
                     tool_cache=state.context.tool_cache,
+                    design_size_factor=state.timing.design_size_factor,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[ANALYZE] {tool_name} completed in {tool_elapsed:.1f}s")

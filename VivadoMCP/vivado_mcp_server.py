@@ -62,6 +62,19 @@ _design_open: bool = False
 _last_dcp_path: Optional[str] = None
 
 
+def _is_truthy(val) -> bool:
+    """Check if a value represents a truthy/affirmative setting.
+    
+    Handles both boolean True and string representations like
+    "true", "1", "yes" that LLMs may send instead of proper booleans.
+    """
+    if val is True:
+        return True
+    if isinstance(val, str) and val.lower() in ("true", "1", "yes"):
+        return True
+    return False
+
+
 def get_vivado_path() -> str:
     """Get Vivado executable path from global setting, VIVADO_EXEC env var, or PATH."""
     global _vivado_path
@@ -206,7 +219,14 @@ def _run_single_tcl(proc, command: str, timeout: float) -> str:
         )
         _restart_and_reopen()
         logger.info("Vivado restarted and DCP reopened after timeout")
-        raise
+        # Return structured error instead of raising — the session has been recovered,
+        # callers can continue using the restarted Vivado session.
+        return (
+            f"[ERROR] Tcl command timed out after {timeout}s.\n"
+            f"Command: {cmd_log}\n"
+            f"Vivado session has been automatically restarted and DCP reopened.\n"
+            f"Please retry your operation."
+        )
 
 
 def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
@@ -216,15 +236,16 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     Supports multi-line scripts: commands separated by newlines are executed
     sequentially in the same Vivado session (variables persist across lines).
 
-    Note: If a previous command timed out, _run_single_tcl already restarted
-    Vivado internally, so this function always starts with a fresh session.
+    For multi-line scripts, a syntax pre-check is performed using
+    'info complete' (no side effects). If a line fails during execution,
+    the function returns a structured error instead of raising an exception.
 
     Args:
         command: Tcl command(s) to execute
         timeout: Timeout in seconds per line (None for default 300s)
 
     Returns:
-        Command output as string
+        Command output as string, or [ERROR] string on failure.
     """
     proc = ensure_vivado()
     effective_timeout = timeout if timeout is not None else 300
@@ -233,18 +254,47 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     cmd_lines = [line.strip() for line in command.split("\n") if line.strip()]
     if len(cmd_lines) > 1:
         logger.info(f"Executing multi-line Tcl script ({len(cmd_lines)} lines)")
+        
+        # Phase 1: Syntax pre-check using 'info complete' (no side effects).
+        # Skip lines with unbalanced braces — they break Tcl string interpolation.
+        for i, line in enumerate(cmd_lines):
+            # Skip validation for lines with unbalanced braces (unsafe to wrap in {})
+            if line.count('{') != line.count('}'):
+                logger.warning(f"Skipping syntax check for line {i+1} (unbalanced braces): {line[:80]}")
+                continue
+            try:
+                check = _run_single_tcl(proc, f"info complete {{ {line} }}", 10)
+                # info complete returns "1" for complete scripts, "0" for incomplete
+                if check.strip().endswith("0"):
+                    return (
+                        f"[ERROR] Multi-line script validation failed at line {i+1}.\n"
+                        f"Line content: {line[:200]}\n"
+                        f"Vivado session is still intact. Fix the syntax and retry."
+                    )
+            except Exception:
+                # Pre-check failed (e.g., timeout) — proceed anyway, actual execution will catch errors
+                logger.warning(f"Syntax check timed out for line {i+1}, proceeding with execution")
+        
+        # Phase 2: Execute all lines sequentially
         outputs = []
         for i, line in enumerate(cmd_lines):
-            try:
-                out = _run_single_tcl(proc, line, effective_timeout)
-                if out:
-                    outputs.append(out)
-            except pexpect.TIMEOUT:
-                outputs.append(f"[LINE {i+1} TIMEOUT] {line[:100]}")
-                raise
+            out = _run_single_tcl(proc, line, effective_timeout)
+            if out:
+                outputs.append(out)
+            # Check if this line returned an error (from _run_single_tcl's new behavior)
+            if out and out.startswith("[ERROR]"):
+                outputs.append(
+                    f"[ERROR] Multi-line script aborted at line {i+1}/{len(cmd_lines)}. "
+                    f"Lines 1-{i} have been executed and CANNOT be rolled back. "
+                    f"Vivado session has been restarted if needed."
+                )
+                return "\n".join(outputs)
         return "\n".join(outputs)
     else:
         return _run_single_tcl(proc, command, effective_timeout)
+
+
+_restarting = False  # Module-level reentry guard
 
 
 def _restart_and_reopen() -> None:
@@ -252,14 +302,43 @@ def _restart_and_reopen() -> None:
 
     Called automatically on Tcl timeout — the session is poisoned
     and cannot be recovered. The new session is clean.
+    
+    Includes reentry guard to prevent recursive restart if the
+    reopen itself times out.
     """
-    global _design_open, _vivado_log_file, _vivado_journal_file, _last_dcp_path
-    restart_vivado_process()
-    if _last_dcp_path:
-        logger.info(f"Reopening DCP: {_last_dcp_path}")
-        run_tcl_command(f"open_checkpoint {{{_last_dcp_path}}}", timeout=600)
+    global _design_open, _vivado_log_file, _vivado_journal_file, _last_dcp_path, _restarting
+    if _restarting:
+        logger.error("Already restarting — skipping recursive restart")
+        return
+    _restarting = True
+    try:
+        restart_vivado_process()
+        if _last_dcp_path:
+            logger.info(f"Reopening DCP: {_last_dcp_path}")
+            result = run_tcl_command(f"open_checkpoint {{{_last_dcp_path}}}", timeout=600)
+            if "[ERROR]" in result or "ERROR:" in result or "opened successfully" not in result.lower():
+                logger.error(f"Failed to reopen DCP after restart: {result[:200]}")
+                _design_open = False
+            else:
+                _design_open = True
+            logger.info("DCP reopened after restart")
+    finally:
+        _restarting = False
+
+
+def _sync_design_open_flag() -> None:
+    """Synchronize _design_open flag with actual Vivado state.
+    
+    Queries Vivado for the current design status and updates the flag.
+    Called after operations that may change design state outside our control.
+    """
+    global _design_open
+    result = run_tcl_command("get_property STATUS [current_design]", timeout=10)
+    # Check for MCP error patterns AND Vivado native error patterns
+    if "[ERROR]" in result or "ERROR:" in result or "no current design" in result.lower():
+        _design_open = False
+    else:
         _design_open = True
-        logger.info("DCP reopened successfully after restart")
 
 
 def restart_vivado_process() -> str:
@@ -276,7 +355,7 @@ def close_current_design() -> str:
     global _design_open
     if _design_open:
         output = run_tcl_command("close_design")
-        _design_open = False
+        _sync_design_open_flag()
         return output
     return "No design was open."
 
@@ -1033,6 +1112,7 @@ def create_and_apply_pblock(
     ranges: str,
     apply_to: str = "current_design",
     is_soft: bool = False,
+    exclude_clocks: bool = True,
     timeout: float = 300.0,
     validate_resources: bool = True,
     max_expansion_attempts: int = 3
@@ -1047,6 +1127,7 @@ def create_and_apply_pblock(
         apply_to: What to apply pblock to - "current_design" applies to all cells in the design,
                  or provide a cell pattern (e.g., "design_1_wrapper_i/*")
         is_soft: If False, sets IS_SOFT property to 0 (hard constraint)
+        exclude_clocks: If True, exclude CLOCK and IO primitives from pblock (default: True)
         validate_resources: If True, validate resources and auto-expand if needed
         max_expansion_attempts: Maximum times to try expanding the pblock
     
@@ -1089,7 +1170,17 @@ def create_and_apply_pblock(
             
             # Apply pblock to cells
             if apply_to == "current_design":
-                add_cmd = f"add_cells_to_pblock {pblock_name} [get_cells -hierarchical]"
+                # Exclude CLOCK and IO primitives — only constrain relocatable logic cells.
+                # NOTE: This filter syntax must be validated in Vivado Console before deployment.
+                # Vivado PRIMITIVE_GROUP values: PAD, IO, CLOCK, BRAM, DSP, etc.
+                if exclude_clocks:
+                    add_cmd = (
+                        f"add_cells_to_pblock {pblock_name} "
+                        f"[get_cells -hierarchical -filter "
+                        f"{{IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}}]"
+                    )
+                else:
+                    add_cmd = f"add_cells_to_pblock {pblock_name} [get_cells -hierarchical]"
             else:
                 add_cmd = f"add_cells_to_pblock {pblock_name} [get_cells {apply_to}]"
             
@@ -1921,7 +2012,7 @@ async def call_tool(name: str, arguments: dict):
                 )]
             
             # Block dangerous boolean options
-            _phys_blocked = [opt for opt in BLOCKED_BOOL_OPTIONS if arguments.get(opt)]
+            _phys_blocked = [opt for opt in BLOCKED_BOOL_OPTIONS if _is_truthy(arguments.get(opt))]
             if _phys_blocked:
                 return [TextContent(
                     type="text",
@@ -1953,7 +2044,7 @@ async def call_tool(name: str, arguments: dict):
                 ]
                 
                 for opt in bool_options:
-                    if arguments.get(opt):
+                    if _is_truthy(arguments.get(opt)):
                         cmd += f" -{opt}"
                 
                 # String options

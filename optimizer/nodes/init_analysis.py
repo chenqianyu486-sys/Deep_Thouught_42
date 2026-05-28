@@ -79,6 +79,7 @@ async def _probe_design_size(state: OptimizerState, deps: NodeDeps) -> int:
             "vivado_run_tcl",
             {"command": "llength [get_cells -hier -quiet]", "timeout": 30},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         count_str = result.strip().split()[0] if result.strip() else "0"
         cell_count = int(count_str) if count_str.lstrip("-").isdigit() else 0
@@ -131,6 +132,7 @@ async def init_analysis_node(
                 "vivado_open_checkpoint",
                 {"dcp_path": str(input_dcp.resolve()), "timeout": 600},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if "error" in result.lower() and "opened successfully" not in result.lower():
                 raise RuntimeError(f"Failed to open checkpoint: {result}")
@@ -141,6 +143,7 @@ async def init_analysis_node(
             result = await call_tool_fn(
                 "rapidwright_initialize_rapidwright", {},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if "error" in result.lower() and "success" not in result.lower():
                 raise RuntimeError(f"Failed to initialize RapidWright: {result}")
@@ -154,13 +157,15 @@ async def init_analysis_node(
         # ════════════════════════════════════════════════════════════
         # Phase B: Parallel pipelines — Vivado (sequential) || RapidWright (sequential)
         # ════════════════════════════════════════════════════════════
+        # Each pipeline returns a dict of cross-pipeline data instead of
+        # using nonlocal variables, eliminating implicit data flow.
 
-        # Shared containers for cross-pipeline data
-        timing_report = None
-        cell_names_for_spread = None
-
-        async def _vivado_pipeline():
-            nonlocal timing_report, cell_names_for_spread
+        async def _vivado_pipeline() -> dict:
+            """Run Vivado analysis pipeline. Returns extracted data for Phase C."""
+            result: dict = {
+                "timing_report": None,
+                "cell_names_for_spread": None,
+            }
 
             # Step B1: Report timing summary
             if _checkpoint_done(state, "timing_done"):
@@ -170,7 +175,9 @@ async def init_analysis_node(
                     "vivado_report_timing_summary",
                     {"timeout": scaled_timeout(300, state)},
                     deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
                 )
+                result["timing_report"] = timing_report
                 timing_info = parse_timing_summary(timing_report)
 
                 state.timing.initial_wns = timing_info["wns"]
@@ -211,6 +218,7 @@ async def init_analysis_node(
                 "vivado_get_critical_high_fanout_nets",
                 {"num_paths": 50, "min_fanout": 100},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             state.timing.high_fanout_nets = parse_high_fanout_nets(nets_report)
             logger.info(f"[init_analysis] Found {len(state.timing.high_fanout_nets)} high fanout nets")
@@ -222,6 +230,7 @@ async def init_analysis_node(
                 util_report = await call_tool_fn(
                     "vivado_report_utilization_for_pblock", {},
                     deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
                 )
                 state.timing.resource_utilization = parse_resource_utilization(util_report)
                 logger.info(f"[init_analysis] Resource utilization: {state.timing.resource_utilization}")
@@ -232,11 +241,12 @@ async def init_analysis_node(
                 "vivado_extract_critical_path_cells",
                 {"num_paths": 50},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             cell_paths = parse_critical_path_cells(cells_json)
             if cell_paths:
                 update_critical_paths(state, cell_paths, iteration=0)
-            cell_names_for_spread = [p["cells"] for p in cell_paths]
+            result["cell_names_for_spread"] = [p["cells"] for p in cell_paths] if cell_paths else None
 
             # Step B7: Route status (M3: avg_wirelength, long_route_nets)
             if _checkpoint_done(state, "route_done"):
@@ -247,6 +257,7 @@ async def init_analysis_node(
                         "vivado_report_route_status",
                         {"timeout": scaled_timeout(300, state)},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
                     state.timing.route_status = parse_route_status(route_report)
                     logger.info(
@@ -274,12 +285,16 @@ async def init_analysis_node(
                 await _extract_cdc_paths(state, deps)
                 _mark_checkpoint(state, "cdc_done")
 
-        async def _rapidwright_pipeline():
+            return result
+
+        async def _rapidwright_pipeline() -> dict:
+            """Run RapidWright analysis pipeline. Returns extracted data for Phase C."""
             # Step B-R1: Read checkpoint in RapidWright
             result = await call_tool_fn(
                 "rapidwright_read_checkpoint",
                 {"dcp_path": str(input_dcp.resolve())},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if "error" in result.lower() and "success" not in result.lower():
                 logger.warning(f"[init_analysis] Could not load design in RapidWright: {result}")
@@ -290,19 +305,26 @@ async def init_analysis_node(
             # Step B-R3: Design info (M4: cell type statistics)
             await _extract_design_info(state, deps)
 
-        await asyncio.gather(_vivado_pipeline(), _rapidwright_pipeline())
+            return {}
+
+        # Phase B: Parallel execution with explicit return values (no nonlocal)
+        vivado_result, rw_result = await asyncio.gather(
+            _vivado_pipeline(), _rapidwright_pipeline()
+        )
 
         # ════════════════════════════════════════════════════════════
         # Phase C: Cross-server analysis (sequential on RW)
         # ════════════════════════════════════════════════════════════
 
-        # Step C1: Critical path spread
+        # Step C1: Critical path spread (uses explicit return value from Vivado pipeline)
+        cell_names_for_spread = vivado_result.get("cell_names_for_spread")
         if cell_names_for_spread:
             try:
                 spread_result = await call_tool_fn(
                     "rapidwright_analyze_critical_path_spread",
                     {"critical_paths_data": cell_names_for_spread},
                     deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
                 )
                 spread_data = json.loads(spread_result)
                 state.timing.critical_path_spread = {
@@ -322,6 +344,7 @@ async def init_analysis_node(
             congestion_result = await call_tool_fn(
                 "rapidwright_analyze_congestion", {},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if isinstance(congestion_result, str):
                 congestion_data = json.loads(congestion_result)
@@ -375,6 +398,7 @@ async def _extract_clock_period(state: OptimizerState, deps: NodeDeps) -> None:
         clock_result = await call_tool_fn(
             "vivado_run_tcl", {"command": tcl_cmd},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         period = None
         if clock_result and clock_result.strip():
@@ -401,6 +425,7 @@ async def _extract_clock_period(state: OptimizerState, deps: NodeDeps) -> None:
             fallback_result = await call_tool_fn(
                 "vivado_run_tcl", {"command": fallback_cmd},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if fallback_result and fallback_result.strip():
                 for token in fallback_result.strip().split():
@@ -429,6 +454,7 @@ async def _extract_hold_timing(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_run_tcl",
             {"command": "report_timing_summary -delay_type min -max_paths 100"},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         hold = parse_hold_timing(hold_report)
         if hold.get("hold_wns") is not None:
@@ -452,6 +478,7 @@ async def _extract_device_capacity(state: OptimizerState, deps: NodeDeps) -> Non
         topo_result = await call_tool_fn(
             "rapidwright_get_device_topology", {},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         topo_data = json.loads(topo_result)
         if topo_data.get("status") == "success":
@@ -484,6 +511,7 @@ async def _extract_design_info(state: OptimizerState, deps: NodeDeps) -> None:
         result = await call_tool_fn(
             "rapidwright_get_design_info", {},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         info = parse_design_info(result)
         if info:
@@ -506,6 +534,7 @@ async def _extract_control_sets(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_run_tcl",
             {"command": "report_control_sets -return_string"},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         state.timing.control_sets = parse_control_sets(result)
         logger.info(f"[init_analysis] Control sets: {state.timing.control_sets}")
@@ -523,6 +552,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_run_tcl",
             {"command": "llength [get_false_paths -quiet]"},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         if fp_result and fp_result.strip():
             val = fp_result.strip().split()[0]
@@ -539,6 +569,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_run_tcl",
             {"command": "llength [get_multicycle_paths -quiet]"},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         if mp_result and mp_result.strip():
             val = mp_result.strip().split()[0]
@@ -571,6 +602,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
                 "}"
             )},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         if io_result and io_result.strip():
             parts = io_result.strip().split()
@@ -601,6 +633,7 @@ async def _extract_cdc_paths(state: OptimizerState, deps: NodeDeps) -> None:
             "vivado_run_tcl",
             {"command": "report_timing -cross_clock -max_paths 100 -return_string"},
             deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
         )
         state.timing.cross_domain_paths_count = parse_cdc_paths(cdc_report)
         logger.info(f"[init_analysis] CDC paths: {state.timing.cross_domain_paths_count}")

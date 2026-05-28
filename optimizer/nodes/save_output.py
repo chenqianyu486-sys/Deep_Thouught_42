@@ -82,6 +82,7 @@ async def save_output_node(
                 "vivado_run_tcl",
                 {"command": "report_timing_summary -delay_type min -max_paths 100"},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             hold = parse_hold_timing(hold_report)
             if hold.get("hold_wns") is not None:
@@ -102,6 +103,7 @@ async def save_output_node(
                 "vivado_run_tcl",
                 {"command": "get_property STATUS [current_design]"},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if "Routed" not in status_result:
                 if "Placed" not in status_result:
@@ -112,10 +114,12 @@ async def save_output_node(
                     await call_tool_fn(
                         "vivado_place_design", {"directive": "Default", "timeout": 3600},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
                     await call_tool_fn(
                         "vivado_route_design", {"directive": "Default", "timeout": 3600},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
                     logger.info("[save_output] Place+route completed for unplaced design")
                 else:
@@ -126,6 +130,7 @@ async def save_output_node(
                     await call_tool_fn(
                         "vivado_route_design", {"directive": "Default", "timeout": 3600},
                         deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
                     )
         except Exception as e:
             logger.warning(f"[save_output] Design state check/repair failed: {e}")
@@ -138,6 +143,7 @@ async def save_output_node(
                 "vivado_write_checkpoint",
                 {"dcp_path": str(state.control.output_dcp.resolve()), "force": True},
                 deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
             )
             if "error" in result.lower():
                 logger.warning(f"[save_output] Failed to write DCP: {result}")

@@ -145,6 +145,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
                     tool_cache=state.context.tool_cache,
+                    design_size_factor=state.timing.design_size_factor,
                 )
                 summary = summarize_tool_result(tool_name, result)
                 if deps.compat is not None:
