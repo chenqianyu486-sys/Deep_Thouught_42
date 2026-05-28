@@ -145,6 +145,7 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
         best_wns_iteration=timing.best_wns_iteration,
         cell_count=cell_count,
         net_count=net_count,
+        design_not_routed=timing.design_not_routed,
     )
 
 
@@ -334,6 +335,8 @@ def format_state_space_for_llm(
         lines.append("# Module 1: Global State & Targets")
         lines.append("global_state:")
         lines.append(f"  current_stage: {gs.current_stage or 'UNKNOWN'}")
+        if gs.design_not_routed:
+            lines.append("  # WARNING: Design is NOT routed — WNS/TNS may be inaccurate (estimated delays, no routing)")
         lines.append(f"  iteration_count: {gs.iteration_count}")
         lines.append(f"  target_frequency: {gs.target_frequency}")
         lines.append(f"  wns_setup: {gs.wns_setup:.3f}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')

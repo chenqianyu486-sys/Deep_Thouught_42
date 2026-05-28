@@ -458,7 +458,9 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
         return
     # Warn if timing report comes from an unrouted design
     if tool_name == "vivado_report_timing_summary":
-        if "Design State" in raw_result and "Routed" not in raw_result:
+        not_routed = "Design State" in raw_result and "Routed" not in raw_result
+        state.timing.design_not_routed = not_routed
+        if not_routed:
             logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
     timing = parse_timing_summary(raw_result)
     wns = timing.get("wns")
@@ -560,6 +562,7 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     )
     # Detect false-positive timing from unplaced/unrouted designs
     design_not_routed = "Design State" in timing_result and "Routed" not in timing_result
+    state.timing.design_not_routed = design_not_routed
     if design_not_routed:
         logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
     timing = parse_timing_summary(timing_result)

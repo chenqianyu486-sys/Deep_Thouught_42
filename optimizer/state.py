@@ -132,6 +132,10 @@ class TimingState:
     # Set after initial size probe in init_analysis.
     # 1.0 for <50K cells, 1.5 for 50K-150K, 3.0 for >150K.
     design_size_factor: float = 1.0
+    # Flag: whether the design is NOT routed (detected from timing report Design State).
+    # True = design is unplaced/unrouted → WNS may be inaccurate (false positive).
+    # Updated by _post_eval_hook / _track_wns_from_result every time a timing report is parsed.
+    design_not_routed: bool = False
 
 
 @dataclass
@@ -416,6 +420,8 @@ class DashboardGlobalState:
     # Design scale (from design_info)
     cell_count: int = 0
     net_count: int = 0
+    # Whether the design is NOT routed (from timing report Design State)
+    design_not_routed: bool = False
 
 
 @dataclass

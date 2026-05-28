@@ -276,6 +276,7 @@ dynamic_gradient:
 - 纯数据，无判断标签 → LLM 自主推理
 - 每次通过 `build_state_space()` 重建，不进入 MessageStore
 - 同时作为 Web 前端 `data.state_space` 通过 WebSocket 推送
+- **设计状态标注（design_not_routed）**: 当 `_post_eval_hook` / `_track_wns_from_result` 检测到 `report_timing_summary` 输出中 `Design State` 不含 `Routed` 时，设置 `state.timing.design_not_routed = True`。Dashboard M1 `current_stage` 下方显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`，防止 LLM 基于未布线设计的虚假 WNS 做出错误决策。
 
 > 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §3.4-§3.5](architecture.md)。
 

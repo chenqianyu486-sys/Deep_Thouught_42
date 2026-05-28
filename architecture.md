@@ -277,6 +277,7 @@ inject_context_snapshot_at_end(api_messages):
 - **design_type_note**: 当 `design_type == "combinational_only"` 时注入策略优先级提示
 - **Dashboard 新鲜度机制**: `DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注
 - **active_tools**: 最近使用过的工具列表（去重保序）
+- **设计状态标注（design_not_routed）**: `_post_eval_hook` 和 `_track_wns_from_result` 从 `report_timing_summary` 的 `Design State` 字段检测设计是否已布线。未布线时 `state.timing.design_not_routed = True`，通过 `_build_global_state` 传入 DashboardModule1，在 `current_stage` 下方注入 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate` 警告行。LLM 看到此警告后应避免基于虚假 WNS 做 DONE 决策。
 - **明确声明**: "This is a factual data dashboard" + "You decide the next action"
 - **无持久化**: 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
