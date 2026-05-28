@@ -10,12 +10,15 @@ for fast, reliable large-region discovery. Falls back to full-device assessment
 and multi-region split suggestions when single contiguous region is insufficient.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

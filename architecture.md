@@ -798,7 +798,36 @@ V2:
             optimize_v2() 返回前打印最终结果行（best_wns + converged）
 ```
 
-### 5.14 429降级机制
+### 5.14 未布局 DCP 防护机制
+
+三层防护防止保存未布局/未布线的 DCP 作为输出：
+
+```
+Layer 1: save_output 保存前检查
+  save_output_node:
+    1. 查询 get_property STATUS [current_design]
+    2. 若不含 "Routed":
+       - 若不含 "Placed": 自动执行 place_design + route_design
+       - 若含 "Placed": 自动执行 route_design
+    3. 修复后再写入输出 DCP
+
+Layer 2: EXECUTE 阶段虚假正 WNS 检测
+  _post_eval_hook / _track_wns_from_result:
+    1. 检查 report_timing_summary 输出中的 "Design State" 字段
+    2. 若不含 "Routed": 记录警告 + 追加 "[WARNING: design not routed]" 到评估通知
+    3. WNS 仍然更新（soft warning，不阻断 flow control）
+
+Layer 3: EXECUTE 阶段 unplace 自动回滚
+  run_execute_phase:
+    1. 追踪 vivado_place_design(directive="unplace") 调用
+    2. 保存 pre-unplace checkpoint 到 /tmp/pre_unplace_{iter}_{round}.dcp
+    3. 后续 vivado_place_design(非 unplace) 清除标志
+    4. 阶段退出时若标志仍为 True:
+       - 从 pre-unplace checkpoint 恢复
+       - 刷新 WNS/TNS/FE
+```
+
+### 5.15 429降级机制
 
 ```
 1. 保存rate_limited_model

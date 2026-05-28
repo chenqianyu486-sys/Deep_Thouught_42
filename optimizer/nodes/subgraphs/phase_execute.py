@@ -48,6 +48,8 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     tool_round = 0
     tools_called: list[str] = []
     wns_before = state.timing.latest_wns
+    unplaced_without_replace = False
+    pre_unplace_path: Path | None = None
     llm_summary = ""
     state.context.tool_phase_call_counts.clear()
     reached_callback = False  # track if the strategy reached callback indicating completion
@@ -239,6 +241,23 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 _track_wns_from_result(state, tool_name, result)
                 await _try_save_best_checkpoint(state, deps)
 
+                # Track place_design -unplace for rollback guard
+                if tool_name == "vivado_place_design":
+                    directive = tool_args.get("directive", "").lower()
+                    if directive == "unplace":
+                        unplaced_without_replace = True
+                        try:
+                            pre_unplace_ckpt = Path(f"/tmp/pre_unplace_{state.iteration.current}_{tool_round}.dcp")
+                            await call_tool_fn(
+                                "vivado_write_checkpoint", {"dcp_path": str(pre_unplace_ckpt), "force": True},
+                                deps.rapidwright_session, deps.vivado_session,
+                            )
+                            pre_unplace_path = pre_unplace_ckpt
+                        except Exception as e:
+                            logger.warning(f"[EXECUTE] Failed to save pre-unplace checkpoint: {e}")
+                    else:
+                        unplaced_without_replace = False
+
                 # Track critical path data
                 if tool_name == "vivado_extract_critical_path_cells":
                     cell_paths = parse_critical_path_cells(result)
@@ -295,6 +314,30 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         # No tool calls
         if _check_wns_target_met(state):
             break
+
+    # Auto-rollback if design left unplaced at phase exit
+    if unplaced_without_replace and pre_unplace_path is not None:
+        logger.warning(
+            f"[EXECUTE] WARNING: Design left unplaced at phase exit — "
+            f"restoring from pre-unplace checkpoint"
+        )
+        try:
+            await call_tool_fn(
+                "vivado_open_checkpoint", {"dcp_path": str(pre_unplace_path)},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            # Refresh WNS after restore
+            restore_result = await call_tool_fn(
+                "vivado_report_timing_summary", {},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            restore_timing = parse_timing_summary(restore_result)
+            if restore_timing.get("wns") is not None:
+                state.timing.latest_wns = restore_timing["wns"]
+                state.timing.latest_tns = restore_timing.get("tns")
+                state.timing.latest_failing_endpoints = restore_timing.get("failing_endpoints")
+        except Exception as e:
+            logger.warning(f"[EXECUTE] Auto-rollback failed: {e}")
 
     # Phase exit: build handoff
     llm_summary = llm_summary or f"Execution of {state.strategy.current_strategy} completed."
@@ -413,6 +456,10 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
     if tool_name not in ("vivado_report_timing_summary", "vivado_phys_opt_design",
                          "vivado_route_design", "vivado_get_wns"):
         return
+    # Warn if timing report comes from an unrouted design
+    if tool_name == "vivado_report_timing_summary":
+        if "Design State" in raw_result and "Routed" not in raw_result:
+            logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
     timing = parse_timing_summary(raw_result)
     wns = timing.get("wns")
     tns = timing.get("tns")
@@ -511,6 +558,10 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         "vivado_report_timing_summary", {},
         deps.rapidwright_session, deps.vivado_session,
     )
+    # Detect false-positive timing from unplaced/unrouted designs
+    design_not_routed = "Design State" in timing_result and "Routed" not in timing_result
+    if design_not_routed:
+        logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
     timing = parse_timing_summary(timing_result)
     wns = timing.get("wns")
     tns = timing.get("tns")
@@ -536,6 +587,8 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         f"[EVAL] After {tool_name}: WNS={wns:.3f}ns "
         f"(delta={delta:+.3f}ns vs previous). {verdict}."
     )
+    if design_not_routed:
+        eval_notice += " [WARNING: design not routed]"
     if tns is not None:
         eval_notice += f" TNS={tns:.3f}ns"
     if deps.compat is not None:

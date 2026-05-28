@@ -105,6 +105,9 @@ init_analysis ──► [WNS >= 0?]
 | 17 | **LLM prompt caching** | Every API call sends `{"cache": {"prompt": true}}` via `extra_body`. OpenRouter caches the system prompt prefix across repeated calls in the same session, saving ~4KB per call × 44 calls ≈ 176KB per iteration. Shared `build_llm_extra_body()` in `optimizer/pure/constants.py`. |
 | 18 | **Data trustworthiness annotations** | Dashboard distinguishes `None` (not analyzed) from `[]`/`0` (analyzed but zero). Every N/A and empty list carries a machine-readable reason: `"N/A(congestion_analysis_not_supported)"`, `[]  # no_high_fanout_nets_found`. |
 | 19 | **Vivado timeout auto-restart** | Tcl timeout poisons the Vivado session. Instead of `sync_after_timeout()` (unreliable), the MCP server kills, restarts, and reopens the DCP automatically. `_command_pending` + `sync_after_timeout()` removed. |
+| 20 | **Unplaced DCP save guard** | Before writing the output DCP, `save_output` queries `get_property STATUS [current_design]`. If the design is not routed, it auto-repairs via `place_design` + `route_design` before saving. Prevents saving unplaced DCPs that would fail `validate_dcps.py`. |
+| 21 | **False-positive WNS detection** | `_post_eval_hook` and `_track_wns_from_result` check `Design State` in timing reports. If not `Routed`, a warning is logged and appended to the eval notice (`[WARNING: design not routed]`), alerting the LLM that WNS may be inaccurate. |
+| 22 | **Unplace auto-rollback** | EXECUTE phase tracks `place_design -unplace` calls. If the phase exits without a subsequent `place_design` (non-unplace), the design is automatically restored from a pre-unplace checkpoint and WNS refreshed. |
 
 ---
 
@@ -448,6 +451,9 @@ init_analysis ──► [WNS >= 0?]
 | 16 | **LLM 提示缓存** | 每次 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`。OpenRouter 在同一会话的重复调用间缓存系统提示前缀，每轮迭代节省约 4KB×44 次 ≈ 176KB tokens。共享函数 `build_llm_extra_body()` 位于 `optimizer/pure/constants.py`。 |
 | 17 | **Dashboard 数据可信度注解** | Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）。每个 N/A 和空列表携带机器可读原因: `"N/A(congestion_analysis_not_supported)"`、`[]  # no_high_fanout_nets_found`。 |
 | 18 | **Vivado 超时自动重启** | Tcl 超时会污染 Vivado session。不再使用不可靠的 `sync_after_timeout()`，改为 MCP server 内部自动 kill→restart→reopen DCP。移除 `_command_pending` 全局状态。 |
+| 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`。若设计未布线，自动执行 `place_design` + `route_design` 修复后再保存。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
+| 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。 |
+| 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
 
 ---
 

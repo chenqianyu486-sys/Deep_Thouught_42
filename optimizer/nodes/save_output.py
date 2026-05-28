@@ -95,6 +95,41 @@ async def save_output_node(
         except Exception as e:
             logger.warning(f"[save_output] Hold timing check failed: {e}")
 
+    # Guard: check design is routed before saving DCP
+    if state.control.output_dcp and deps.vivado_session:
+        try:
+            status_result = await call_tool_fn(
+                "vivado_run_tcl",
+                {"command": "get_property STATUS [current_design]"},
+                deps.rapidwright_session, deps.vivado_session,
+            )
+            if "Routed" not in status_result:
+                if "Placed" not in status_result:
+                    logger.warning(
+                        f"[save_output] WARNING: Design is not routed (status: {status_result.strip()}). "
+                        f"Attempting place+route before save."
+                    )
+                    await call_tool_fn(
+                        "vivado_place_design", {"directive": "Default", "timeout": 3600},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+                    await call_tool_fn(
+                        "vivado_route_design", {"directive": "Default", "timeout": 3600},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+                    logger.info("[save_output] Place+route completed for unplaced design")
+                else:
+                    logger.warning(
+                        f"[save_output] WARNING: Design is placed but not routed (status: {status_result.strip()}). "
+                        f"Attempting route before save."
+                    )
+                    await call_tool_fn(
+                        "vivado_route_design", {"directive": "Default", "timeout": 3600},
+                        deps.rapidwright_session, deps.vivado_session,
+                    )
+        except Exception as e:
+            logger.warning(f"[save_output] Design state check/repair failed: {e}")
+
     # Write output DCP
     if state.control.output_dcp and deps.vivado_session:
         try:

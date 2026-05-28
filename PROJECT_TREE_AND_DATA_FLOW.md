@@ -139,6 +139,9 @@ llm_tool_loop_node (调度器)
 | 14 | **只读工具白名单控制** | 与 Dashboard 冗余的 get_wns/get_resource_counts 在 ANALYZE/EVALUATE 阶段移除白名单；search_cells 限 3 次/phase，run_tcl 限 5 次/phase |
 | 15 | **PBLOCK 自适应紧缩** | 采用公式 `M = max(1.10, 1.2 + util_local × 0.3 - 0.1×log10(N_LUT))`，低利用率自动紧缩 region |
 | 16 | **LLM 提示缓存** | 每次 LLM 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，OpenRouter 在同一会话中缓存系统提示前缀。所有阶段（ANALYZE/SELECT/EXECUTE/EVALUATE）的 `_call_phase_llm()` 均通过共享函数 `build_llm_extra_body()`（`optimizer/pure/constants.py`）统一构造 extra_body，消除4份重复代码。 |
+| 17 | **未布局 DCP 保存防护** | `save_output` 在写入输出 DCP 前查询 `get_property STATUS [current_design]`，若未布线则自动执行 `place_design` + `route_design` 修复后再保存 |
+| 18 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告 `Design State`，若非 `Routed` 则记录警告并追加 `[WARNING: design not routed]` 到评估通知 |
+| 19 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace`，若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS |
 
 ## 3. 核心数据流
 
