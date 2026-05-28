@@ -360,9 +360,9 @@ class TestYamlFormatting:
     def test_none_values_display_na(self):
         space = StateSpace()  # all defaults = None/0
         text = format_state_space_for_llm(space=space, phase=LoopPhase.ANALYZE)
-        assert "wns_setup: N/A" in text
-        assert "tns_setup: N/A" in text
-        assert "global_congestion_score: N/A" in text
+        assert 'wns_setup: "N/A(not_analyzed)"' in text
+        assert 'tns_setup: "N/A(not_analyzed)"' in text
+        assert 'global_congestion_score: "N/A(congestion_analysis_not_supported)"' in text
 
     def test_percentage_format(self):
         state = make_state()
