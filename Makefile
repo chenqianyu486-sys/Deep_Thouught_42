@@ -301,7 +301,7 @@ build-rapidwright:
 		printf "$(COLOR_YELLOW)Initializing RapidWright git submodule...$(COLOR_RESET)\n"; \
 		git submodule update --init RapidWright; \
 	fi
-	@cd "$(RAPIDWRIGHT_PATH)" && JAVA_HOME=$$JAVA_HOME ./gradlew jar -p "$(RAPIDWRIGHT_PATH)"
+	@cd "$(RAPIDWRIGHT_PATH)" && chmod +x gradlew && JAVA_HOME=$$JAVA_HOME ./gradlew jar -p "$(RAPIDWRIGHT_PATH)"
 	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"
