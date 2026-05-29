@@ -74,6 +74,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.strategy.current_phase = ""
         state.strategy.current_strategy = ""
         state.control.done_reason = "rollback"
+        state.control.post_rollback_analyze = True
         record_flow_signal(state, "ROLLBACK", "rollback_auto", phase="EVALUATE")
         return LoopPhase.ANALYZE
 
@@ -135,6 +136,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 record_flow_signal(state, "ROLLBACK", "rollback_llm", phase="EVALUATE",
                                    result_status=step_state.result_status or "")
                 state.control.done_reason = "rollback"
+                state.control.post_rollback_analyze = True
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
                 return LoopPhase.ANALYZE

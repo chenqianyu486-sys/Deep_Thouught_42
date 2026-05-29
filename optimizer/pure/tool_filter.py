@@ -67,6 +67,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_place_design",
         "vivado_route_design",
         "vivado_phys_opt_design",
+        "vivado_physopt_and_route",
         "vivado_write_checkpoint",
         "vivado_run_tcl",
         # Quick-check tools during execution

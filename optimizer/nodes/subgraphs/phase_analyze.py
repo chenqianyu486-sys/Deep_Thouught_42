@@ -34,13 +34,14 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         LoopPhase.SELECT_STRATEGY (always, even if analysis was incomplete).
     """
     is_first_iteration = (state.iteration.current == 1)
-    is_post_rollback = (state.control.done_reason == "rollback" and state.iteration.current > 1)
+    is_post_rollback = state.control.post_rollback_analyze
     if is_first_iteration or is_post_rollback:
         max_rounds = 8
         reason = "dashboard pre-filled" if is_first_iteration else "post-rollback (dashboard refreshed)"
         logger.info(f"[ANALYZE] Reduced max rounds to {max_rounds} ({reason})")
     else:
         max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.ANALYZE, 12)
+    state.control.post_rollback_analyze = False
     tool_round = 0
     tools_called: list[str] = []
     llm_summary = ""
@@ -316,8 +317,33 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
 def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: str) -> None:
     """Parse WNS from timing tool results."""
     if tool_name not in ("vivado_report_timing_summary", "vivado_phys_opt_design",
-                         "vivado_route_design", "vivado_get_wns"):
+                         "vivado_route_design", "vivado_get_wns", "vivado_physopt_and_route"):
         return
+
+    if tool_name == "vivado_physopt_and_route":
+        try:
+            data = json.loads(raw_result)
+            post = data.get("post_optimization", {})
+            if isinstance(post, dict) and post.get("wns") is not None:
+                wns = float(post["wns"])
+                tns = float(post.get("tns")) if post.get("tns") is not None else None
+                fe = int(post.get("failing_endpoints")) if post.get("failing_endpoints") is not None else None
+                if wns is not None:
+                    state.timing.latest_wns = wns
+                    if tns is not None:
+                        state.timing.latest_tns = tns
+                    if fe is not None:
+                        state.timing.latest_failing_endpoints = fe
+                    if wns > state.timing.best_wns:
+                        state.timing.best_wns = wns
+                        state.timing.best_wns_iteration = state.iteration.current
+                        state.timing.best_wns_tns = tns
+                        state.timing.best_wns_failing_endpoints = fe
+                        state.control.needs_save = True
+                return  # skip parse_timing_summary if we got WNS from JSON
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
     timing = parse_timing_summary(raw_result)
     wns = timing.get("wns")
     tns = timing.get("tns")

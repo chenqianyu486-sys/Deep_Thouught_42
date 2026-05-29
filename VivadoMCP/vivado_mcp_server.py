@@ -61,6 +61,15 @@ _design_open: bool = False
 # Vivado Tcl timeout poisons the session; we kill and restart, then reopen.
 _last_dcp_path: Optional[str] = None
 
+# PhysOpt safety guard: block retiming directives that cause functional errors
+PHYSOPT_BLOCKED_DIRECTIVES: frozenset[str] = frozenset({"AlternateFlowWithRetiming", "AddRetime"})
+PHYSOPT_BLOCKED_BOOL_OPTIONS: frozenset[str] = frozenset({"retime", "interconnect_retime"})
+PHYSOPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
+    "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
+    "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
+    "AlternateReplication", "AggressiveFanoutOpt", "RQS",
+})
+
 
 def _is_truthy(val) -> bool:
     """Check if a value represents a truthy/affirmative setting.
@@ -884,8 +893,7 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
         Formatted string with LUT/FF/DSP/BRAM/URAM counts for pblock sizing.
     """
     tcl_script = (
-        'set lut_count [llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == LUT && REF_NAME =~ LUT*}]]\n'
-        'if {$lut_count == 0} { set lut_count [llength [get_cells -hier -quiet -filter {REF_NAME =~ LUT*}]] }\n'
+        'set lut_count [llength [get_cells -hier -quiet -filter {REF_NAME =~ LUT*}]]\n'
         'puts "LUT:$lut_count"\n'
         'puts "FF:[llength [get_cells -hier -quiet -filter {REF_NAME =~ FD*}]]"\n'
         'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == DSP}]]"\n'
@@ -1841,18 +1849,10 @@ async def list_tools():
         ),
         Tool(
             name="physopt_and_route",
-            description="""Run phys_opt_design + route_design + report_timing_summary as atomic operation.
-
-Intended for use in the PhysOpt+RegisterRetiming combined strategy. This tool:
-1. Captures pre-optimization WNS/TNS via report_timing_summary
-2. Runs phys_opt_design with the specified directive (safety-guarded)
-3. Routes the design after physical optimization
-4. Captures post-optimization WNS/TNS via report_timing_summary
-
-Returns a JSON object with pre/post timing summaries and operation outputs.
-Each step is independently try/except guarded so partial results are returned on failure.
-
-WARNING: Only safe directives are allowed (same as phys_opt_design). Retiming directives are blocked.""",
+            description="""Run phys_opt_design + route_design as an atomic combined operation.
+Captures pre- and post-optimization timing (WNS/TNS). Use this tool for the
+PhysOpt+RegisterRetiming combined strategy. Returns JSON with pre/post timing
+summaries. Only safe directives are allowed; retiming directives blocked.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2074,34 +2074,26 @@ async def call_tool(name: str, arguments: dict):
             timeout = arguments.get("timeout", 3600)  # 1 hour default for physical optimization
             
             # === SAFETY GUARD: Block retiming directives/flags that cause functional errors ===
-            BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
-            BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
-            SAFE_DIRECTIVES = {
-                "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
-                "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
-                "AlternateReplication", "AggressiveFanoutOpt", "RQS",
-            }
-            
             _phys_directive = arguments.get("directive")
-            if _phys_directive and _phys_directive in BLOCKED_DIRECTIVES:
+            if _phys_directive and _phys_directive in PHYSOPT_BLOCKED_DIRECTIVES:
                 return [TextContent(
                     type="text",
                     text=(
                         f"Error: Directive '{_phys_directive}' is BLOCKED because it causes functional errors "
                         f"(retiming breaks design correctness). "
-                        f"Use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                        f"Use a safe directive instead: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
                     )
                 )]
             
             # Block dangerous boolean options
-            _phys_blocked = [opt for opt in BLOCKED_BOOL_OPTIONS if _is_truthy(arguments.get(opt))]
+            _phys_blocked = [opt for opt in PHYSOPT_BLOCKED_BOOL_OPTIONS if _is_truthy(arguments.get(opt))]
             if _phys_blocked:
                 return [TextContent(
                     type="text",
                     text=(
                         f"Error: Boolean option(s) BLOCKED: {', '.join(_phys_blocked)}. "
                         f"These retiming-related options cause functional errors. "
-                        f"Remove them and use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                        f"Remove them and use a safe directive instead: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
                     )
                 )]
             # === END SAFETY GUARD ===
@@ -2146,28 +2138,21 @@ async def call_tool(name: str, arguments: dict):
             directive = arguments.get("directive", "Explore")
 
             # === SAFETY GUARD: same as phys_opt_design ===
-            BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
-            BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
-            SAFE_DIRECTIVES = {
-                "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
-                "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
-                "AlternateReplication", "AggressiveFanoutOpt", "RQS",
-            }
-            if directive in BLOCKED_DIRECTIVES:
+            if directive in PHYSOPT_BLOCKED_DIRECTIVES:
                 return [TextContent(
                     type="text",
                     text=(
                         f"Error: Directive '{directive}' is BLOCKED because it causes functional errors "
                         f"(retiming breaks design correctness). "
-                        f"Use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                        f"Use a safe directive instead: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
                     )
                 )]
-            if directive not in SAFE_DIRECTIVES:
+            if directive not in PHYSOPT_SAFE_DIRECTIVES:
                 return [TextContent(
                     type="text",
                     text=(
                         f"Error: Directive '{directive}' is not in the safe directive list. "
-                        f"Allowed directives: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                        f"Allowed directives: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
                     )
                 )]
             # === END SAFETY GUARD ===
@@ -2216,6 +2201,15 @@ async def call_tool(name: str, arguments: dict):
             except Exception as e:
                 error_messages.append(f"post_timing_failed: {e}")
                 result["post_optimization"] = {"error": str(e)}
+
+            # If post-optimization timing data is missing/unavailable, mark as partial
+            if "post_optimization" in result and (
+                isinstance(result["post_optimization"], dict)
+                and result["post_optimization"].get("wns") is None
+            ):
+                if result["status"] == "success":
+                    result["status"] = "partial"
+                    error_messages.append("post_timing_no_wns")
 
             if error_messages:
                 result["errors"] = error_messages

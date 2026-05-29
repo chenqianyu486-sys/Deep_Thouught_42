@@ -197,7 +197,7 @@ STRATEGIES = {
         "trigger": "Logic-depth limited design (logic_delay > 70%), WNS > -2.0, "
                    "deep combinational chains (>2 LUTs), FF > 0",
         "sequence": [
-            {"step": "physopt_and_route", "platform": "Vivado",
+            {"step": "vivado_physopt_and_route", "platform": "Vivado",
              "params": {"directive": "Explore"},
              "note": "Combined PhysOpt + route in one atomic call. Returns pre/post WNS."},
             {"step": "analyze_register_retiming", "platform": "RapidWright",

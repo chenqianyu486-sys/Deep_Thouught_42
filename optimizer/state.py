@@ -288,6 +288,7 @@ class ControlState:
     run_dir: Optional[Path] = None
     best_checkpoint_path: Optional[Path] = None  # DCP saved when best_wns last improved, for rollback
     current_dcp_path: Optional[Path] = None  # DCP path currently loaded in Vivado
+    post_rollback_analyze: bool = False  # set by EVALUATE when rollback detected, used by next ANALYZE
 
 
 @dataclass

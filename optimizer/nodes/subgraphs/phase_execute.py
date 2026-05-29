@@ -57,7 +57,7 @@ SIDE_EFFECT_TOOLS = frozenset({
     "rapidwright_optimize_cell_placement",
     "rapidwright_optimize_lut_input_cone",
 })
-NO_PROGRESS_LIMIT = 8
+NO_PROGRESS_LIMIT = 12
 
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -313,10 +313,47 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Post-eval hook for critical tools
                 if tool_name in POST_EVAL_TOOLS:
-                    try:
-                        await _post_eval_hook(state, deps, tool_name)
-                    except Exception as e:
-                        logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
+                    # For physopt_and_route, WNS is already in the JSON result
+                    if tool_name == "vivado_physopt_and_route":
+                        try:
+                            data = json.loads(result) if result else {}
+                            post = data.get("post_optimization", {})
+                            if isinstance(post, dict) and post.get("wns") is not None:
+                                prev_wns = state.timing.latest_wns
+                                new_wns = float(post["wns"])
+                                raw_tns = post.get("tns")
+                                new_tns = float(raw_tns) if isinstance(raw_tns, (int, float)) else None
+                                raw_fe = post.get("failing_endpoints")
+                                new_fe = int(raw_fe) if isinstance(raw_fe, (int, float)) else None
+                                state.timing.latest_wns = new_wns
+                                if new_tns is not None:
+                                    state.timing.latest_tns = new_tns
+                                if new_fe is not None:
+                                    state.timing.latest_failing_endpoints = new_fe
+                                if new_wns > state.timing.best_wns:
+                                    state.timing.best_wns = new_wns
+                                    state.timing.best_wns_iteration = state.iteration.current
+                                    state.timing.best_wns_tns = new_tns
+                                    state.timing.best_wns_failing_endpoints = new_fe
+                                    state.control.needs_save = True
+                                delta = new_wns - prev_wns if prev_wns is not None else 0.0
+                                verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
+                                eval_notice = f"[EVAL] After {tool_name}: WNS={new_wns:.3f}ns (delta={delta:+.3f}ns vs previous). {verdict}."
+                                if new_tns is not None:
+                                    eval_notice += f" TNS={new_tns:.3f}ns"
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user", eval_notice)
+                                logger.info(f"[EXECUTE] Post-eval (from result): {tool_name} -> WNS={new_wns:.3f}ns (delta={delta:+.3f}, {verdict})")
+                            else:
+                                # Fallback to full timing report if JSON doesn't have WNS
+                                await _post_eval_hook(state, deps, tool_name)
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            await _post_eval_hook(state, deps, tool_name)
+                    else:
+                        try:
+                            await _post_eval_hook(state, deps, tool_name)
+                        except Exception as e:
+                            logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
                 await _try_save_best_checkpoint(state, deps)
 
                 # Chain actions for skills
@@ -542,18 +579,38 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
 
 def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: str) -> None:
     if tool_name not in ("vivado_report_timing_summary", "vivado_phys_opt_design",
-                         "vivado_route_design", "vivado_get_wns"):
+                         "vivado_route_design", "vivado_get_wns", "vivado_physopt_and_route"):
         return
-    # Warn if timing report comes from an unrouted design
-    if tool_name == "vivado_report_timing_summary":
-        not_routed = "Design State" in raw_result and "Routed" not in raw_result
-        state.timing.design_not_routed = not_routed
-        if not_routed:
-            logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
-    timing = parse_timing_summary(raw_result)
-    wns = timing.get("wns")
-    tns = timing.get("tns")
-    fe = timing.get("failing_endpoints")
+    if tool_name != "vivado_report_timing_summary":
+        state.timing.design_not_routed = False  # clear stale flag for non-timing tools
+    # Try JSON path for physopt_and_route
+    wns = None
+    tns = None
+    fe = None
+    if tool_name == "vivado_physopt_and_route":
+        try:
+            data = json.loads(raw_result)
+            post = data.get("post_optimization", {})
+            if isinstance(post, dict) and "wns" in post and post.get("wns") is not None:
+                wns = float(post["wns"])
+                raw_tns = post.get("tns")
+                tns = float(raw_tns) if isinstance(raw_tns, (int, float)) else None
+                raw_fe = post.get("failing_endpoints")
+                fe = int(raw_fe) if isinstance(raw_fe, (int, float)) else None
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    # Fallback to string parsing
+    if wns is None:
+        # Warn if timing report comes from an unrouted design
+        if tool_name == "vivado_report_timing_summary":
+            not_routed = "Design State" in raw_result and "Routed" not in raw_result
+            state.timing.design_not_routed = not_routed
+            if not_routed:
+                logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
+        timing = parse_timing_summary(raw_result)
+        wns = timing.get("wns")
+        tns = timing.get("tns")
+        fe = timing.get("failing_endpoints")
     if wns is not None:
         state.timing.latest_wns = wns
         if tns is not None:

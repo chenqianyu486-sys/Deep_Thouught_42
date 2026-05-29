@@ -165,6 +165,37 @@ def summarize_tool_result(
     elif tool_name == "vivado_run_tcl_info":
         summary_parts.append(f"Output: {line_count} lines, {char_count} chars")
 
+    elif tool_name == "vivado_physopt_and_route":
+        try:
+            data = json.loads(raw_result)
+            post = data.get("post_optimization", {})
+            if isinstance(post, dict) and post.get("wns") is not None:
+                wns = float(post["wns"])
+                tns = float(post.get("tns")) if post.get("tns") is not None else None
+                fe = int(post.get("failing_endpoints")) if post.get("failing_endpoints") is not None else None
+                summary_parts.append(f"WNS: {wns:.3f}")
+                if tns is not None:
+                    summary_parts.append(f"TNS: {tns:.3f}")
+                if fe is not None:
+                    summary_parts.append(f"Failing endpoints: {fe}")
+                key_details["wns"] = round(wns, 3)
+                if prev_best_wns is not None and prev_best_wns > float('-inf'):
+                    key_details["wns_delta"] = round(wns - prev_best_wns, 3)
+                key_details["tns"] = round(tns, 3) if tns is not None else None
+                key_details["failing_endpoints"] = fe
+            pre = data.get("pre_optimization", {})
+            if isinstance(pre, dict) and pre.get("wns") is not None:
+                key_details["pre_wns"] = round(pre["wns"], 3)
+                key_details["pre_tns"] = round(pre["tns"], 3) if pre.get("tns") is not None else None
+            if data.get("physopt_directive"):
+                key_details["directive"] = data["physopt_directive"]
+            if data.get("errors"):
+                status = "partial"
+                summary_parts.append(f"Errors: {len(data['errors'])}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            # Not valid JSON, treat as text
+            pass
+
     elif tool_name == "vivado_extract_critical_path_pins":
         try:
             data = json.loads(raw_result)
@@ -271,7 +302,7 @@ def summarize_tool_result(
     if tool_name in ("vivado_get_wns",):
         was_truncated = False
     elif tool_name in ("vivado_phys_opt_design", "vivado_report_timing_summary",
-                       "vivado_route_design", "vivado_place_design"):
+                       "vivado_route_design", "vivado_place_design", "vivado_physopt_and_route"):
         was_truncated = True
     elif tool_name.startswith("rapidwright_"):
         was_truncated = False
