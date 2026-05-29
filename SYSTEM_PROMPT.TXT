@@ -15,6 +15,11 @@ rules:
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
+    - "CRITICAL: When WNS regresses, the system AUTOMATICALLY restores best_checkpoint.dcp
+       in the EVALUATE phase. Do NOT try to manually find or open checkpoint files.
+       Do NOT run 'ls *.dcp' or 'find' commands via vivado_run_tcl. Just signal EXEC_DONE
+       and let the system handle rollback. You will receive a [SYSTEM — Rollback Occurred]
+       notification with the restored WNS."
     - "CRITICAL: Dashboard Module 1 provides WNS, TNS, LUT/FF/BRAM/DSP utilization
        before EVERY turn. Do NOT call get_wns or get_resource_counts — use the
        dashboard values directly (they are the live state)."
@@ -59,6 +64,7 @@ strategies:
     congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
     register_retiming: "Register Retiming (deep chains >2 LUTs between FFs, requires FF>0)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
+    physopt_retiming_combined: "PhysOpt + Register Retiming (Combined) — logic-depth limited designs with deep chains. Executes PhysOpt then Retiming in one iteration."
 
   selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region, then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools."
 
@@ -76,6 +82,7 @@ safety_constraints:
   - "All optimizations MUST preserve functional behavior."
   - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
   - "Register retiming over global phys_opt_design -retime (causes functional errors in NN designs)."
+  - "PhysOpt+RegisterRetiming: Use vivado_physopt_and_route (NOT standalone phys_opt_design). The combined tool auto-routes after PhysOpt, ensuring retiming analysis sees a routed design."
 
 final_output:
   save_to: OUTPUT_DCP_PATH

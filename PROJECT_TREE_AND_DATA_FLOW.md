@@ -29,7 +29,7 @@ fpl26_optimization_contest/
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 9 种策略库
+├── strategy_library.py           # 10 种策略库
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件
@@ -130,7 +130,7 @@ llm_tool_loop_node (调度器)
 | 5 | 关注点分离 | Worker（250K）执行 vs Planner（1M）策略决策 |
 | 6 | 单一调用路径 | V2 仅原生函数调用，无 XML/YAML 回退 |
 | 7 | 单一事实来源 | 运行时数据在 OptimizerState；MemoryManager 仅存消息+执行压缩引擎；DCPOptimizerCompat 仅 V1 使用 |
-| 8 | 领域知识编码 | 9 策略含触发条件，LLM 自主选择 |
+| 8 | 领域知识编码 | 10 策略含触发条件，LLM 自主选择 |
 | 9 | 数据可信度 | DASHBOARD_REFRESH_MAP 追踪字段新鲜度 |
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
 | 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
@@ -365,6 +365,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 | CongestionSpreading | congestion=HIGH | `rapidwright_analyze_congestion_spreading` |
 | RegisterRetiming | 深组合逻辑链 (>2 LUTs) | `rapidwright_analyze_register_retiming` |
 | NetSwap | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
+| PhysOpt+RegisterRetiming | Logic-depth limited (>70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | `vivado_physopt_and_route` (atomic PhysOpt+route, then retiming) |
 
 ### 3.7 Tool 描述增强
 

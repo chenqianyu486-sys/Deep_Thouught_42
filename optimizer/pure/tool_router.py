@@ -27,6 +27,7 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "vivado_place_design",
     "vivado_route_design",
     "vivado_phys_opt_design",
+    "vivado_physopt_and_route",
     "vivado_write_checkpoint",
     "vivado_create_and_apply_pblock",
     "rapidwright_execute_pblock_strategy",
@@ -168,7 +169,7 @@ async def call_tool(
 
     # Execute via MCP
     logger.info(f"[MCP_REQUEST] tool={tool_name}, args={sanitize_payload(arguments)}")
-    start_time = time.time()
+    start_time = time.monotonic()
 
     # Heartbeat for long-running MCP calls
     heartbeat_count = 0
@@ -181,7 +182,7 @@ async def call_tool(
             if heartbeat_done.is_set():
                 break
             heartbeat_count += 1
-            hb_elapsed = time.time() - start_time
+            hb_elapsed = time.monotonic() - start_time
             logger.info(
                 f"[HEARTBEAT #{heartbeat_count}] Tool '{tool_name}' still running after {hb_elapsed:.1f}s"
             )
@@ -204,7 +205,7 @@ async def call_tool(
                 session.call_tool(actual_name, arguments),
                 timeout=app_timeout,
             )
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
 
             if result and hasattr(result, 'content') and result.content:
                 text_parts = []
@@ -245,7 +246,7 @@ async def call_tool(
                     tool_cache[cache_key] = (tool_round, "(no output)")
             return "(no output)"
         except asyncio.TimeoutError:
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
             logger.error(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                 f"FAILED: Application-level timeout ({app_timeout:.0f}s), "
@@ -257,7 +258,7 @@ async def call_tool(
                 "suggest_recovery": "restart_vivado",
             })
         except Exception as e:
-            elapsed = time.time() - start_time
+            elapsed = time.monotonic() - start_time
             logger.error(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                 f"FAILED: {e}, heartbeats={heartbeat_count}"

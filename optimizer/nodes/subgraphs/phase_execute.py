@@ -33,9 +33,31 @@ logger = logging.getLogger(__name__)
 # Tools that trigger mandatory WNS evaluation
 POST_EVAL_TOOLS = frozenset({
     "vivado_route_design",
-    "rapidwright_execute_fanout_strategy",
     "rapidwright_execute_pblock_strategy",
+    "vivado_physopt_and_route",  # triggers WNS eval after PhysOpt+route
 })
+
+# Tools that modify the design (side-effect tools).
+# Used for no-progress detection: if LLM only calls read-only tools for
+# NO_PROGRESS_LIMIT consecutive rounds, exit the phase early.
+SIDE_EFFECT_TOOLS = frozenset({
+    "vivado_place_design",
+    "vivado_route_design",
+    "vivado_phys_opt_design",
+    "vivado_physopt_and_route",
+    "vivado_create_and_apply_pblock",
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+})
+NO_PROGRESS_LIMIT = 8
 
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -53,6 +75,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     llm_summary = ""
     state.context.tool_phase_call_counts.clear()
     reached_callback = False  # track if the strategy reached callback indicating completion
+    no_progress_count = 0  # consecutive rounds without side-effect tool calls
 
     # Record phase entry
     phase_entry = PhaseEntry(
@@ -131,6 +154,8 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
         # Execute tool calls
         if message.tool_calls:
+            round_had_side_effect = False
+            force_exit = False  # set by inner loop to break outer while
             for tc in message.tool_calls:
                 if not tc.function:
                     continue
@@ -138,6 +163,8 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 tool_name = tc.function.name
                 state.iteration.tools_used.append(tool_name)
                 tools_called.append(tool_name)
+                if tool_name in SIDE_EFFECT_TOOLS:
+                    round_had_side_effect = True
 
                 try:
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
@@ -167,6 +194,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if "resource_multiplier" not in tool_args:
                         tool_args["resource_multiplier"] = _compute_adaptive_pblock_multiplier(state)
                         logger.info(f"[EXECUTE] Adaptive resource_multiplier: {tool_args['resource_multiplier']:.2f}")
+
+                # Auto-inject critical_paths for LUT cascade tool
+                if tool_name == "rapidwright_flatten_lut_cascade":
+                    if not tool_args.get("critical_paths") and state.timing.critical_paths:
+                        paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
+                        if paths:
+                            tool_args["critical_paths"] = paths
+                            logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
 
                 # Rate limiting for read-only tools
                 if tool_name in PHASE_TOOL_RATE_LIMITS:
@@ -296,6 +331,23 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     except Exception as e:
                         logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
 
+                # Force exit on large WNS regression (>0.5ns below best).
+                # EVALUATE will detect regression via detect_rollback_needed()
+                # and trigger automatic rollback — no need for LLM to spin here.
+                if (state.timing.latest_wns is not None
+                        and state.timing.best_wns != float('-inf')
+                        and state.timing.latest_wns < state.timing.best_wns - 0.5):
+                    logger.warning(
+                        yellow(f"[EXECUTE] Large WNS regression: {state.timing.latest_wns:.3f} "
+                               f"< best {state.timing.best_wns:.3f} - 0.5, forcing exit")
+                    )
+                    record_flow_signal(
+                        state, "SYSTEM_EXIT", "large_regression",
+                        phase="EXECUTE_STRATEGY",
+                    )
+                    force_exit = True
+                    break
+
                 # Track tool errors
                 result_lower = summary.lower() if summary else ""
                 if "error" in result_lower and "success" not in result_lower:
@@ -311,9 +363,41 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 except Exception as e:
                     logger.warning(f"[EXECUTE] Critical path auto-refresh failed: {e}")
 
+            # Break outer while if inner for loop requested force exit
+            if force_exit:
+                break
+
+            # No-progress detection: exit if LLM only calls read-only tools
+            if round_had_side_effect:
+                no_progress_count = 0
+            else:
+                no_progress_count += 1
+                if no_progress_count >= NO_PROGRESS_LIMIT:
+                    logger.warning(
+                        f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
+                        f"without side-effect tools)"
+                    )
+                    record_flow_signal(
+                        state, "SYSTEM_EXIT", "no_progress",
+                        phase="EXECUTE_STRATEGY",
+                    )
+                    break
+
             continue
 
-        # No tool calls
+        # No tool calls — count as no-progress round
+        no_progress_count += 1
+        if no_progress_count >= NO_PROGRESS_LIMIT:
+            logger.warning(
+                f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
+                f"without side-effect tools)"
+            )
+            record_flow_signal(
+                state, "SYSTEM_EXIT", "no_progress",
+                phase="EXECUTE_STRATEGY",
+            )
+            break
+
         if _check_wns_target_met(state):
             break
 
@@ -674,6 +758,10 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             if step_failed:
                 raise RuntimeError(f"{target_tool} reported error in result: {summary[:200]}")
             _track_wns_from_result(state, target_tool, raw_result)
+
+            # Update current_dcp_path after opening a new checkpoint
+            if target_tool == "vivado_open_checkpoint" and "dcp_path" in args:
+                state.control.current_dcp_path = Path(args["dcp_path"]).resolve()
 
             # Mark critical paths stale after placement-affecting chain tools
             if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):

@@ -359,6 +359,25 @@ def format_state_space_for_llm(
         if gs.cell_count > 0:
             lines.append(f"  cell_count: {gs.cell_count}")
             lines.append(f"  net_count: {gs.net_count}")
+        # Design delay profile hint (SELECT_STRATEGY only)
+        if phase == LoopPhase.SELECT_STRATEGY and space.timing_clusters.top_violating_paths:
+            logic_pcts = [
+                p.logic_delay_pct for p in space.timing_clusters.top_violating_paths
+                if p.logic_delay_pct is not None
+            ]
+            if logic_pcts:
+                avg_logic = sum(logic_pcts) / len(logic_pcts)
+                if avg_logic > 0.7:
+                    profile = "logic_delay_dominated"
+                    hint = "PBLOCK/PhysOpt/RegisterRetiming preferred; LUTCascade often ineffective for NN datapaths"
+                elif avg_logic < 0.3:
+                    profile = "route_delay_dominated"
+                    hint = "PBLOCK/CongestionSpreading/NetSwap preferred"
+                else:
+                    profile = "mixed"
+                    hint = "PBLOCK first, then PhysOpt or Fanout"
+                lines.append(f"  design_delay_profile: {profile}  # avg_logic_delay_pct={avg_logic:.2f}")
+                lines.append(f"  strategy_hint: {hint}")
         lines.append("")
 
     # ── Module 2: Timing Path Clusters ─────────────────────────────
@@ -633,5 +652,14 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
                 lines.append(f"  sequence: {' -> '.join(seq_steps)}")
 
             lines.append("  avoid: vivado_run_tcl — use the tool above instead.")
+
+            # Combined strategy flow guidance
+            if current_strategy == "PhysOpt+RegisterRetiming":
+                lines.append("  combined_strategy_flow:")
+                lines.append("    step_1: vivado_physopt_and_route(directive='Explore')")
+                lines.append("    step_2: rapidwright_analyze_register_retiming(critical_paths=<from Dashboard>)")
+                lines.append("    step_3: rapidwright_execute_register_retiming(retiming_candidates=<from step_2>)")
+                lines.append("    step_4: signal EXEC_DONE")
+                lines.append("  note: step_3 auto-chains open_checkpoint + route_design")
     except Exception:
         pass

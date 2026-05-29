@@ -723,7 +723,7 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
         "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
         "flow_control": {"enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"]},
         "strategy_phase": {"enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"]},
-        "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "NetSwap"]}
+        "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]}
     },
     "required": ["step_id", "result_status", "flow_control"]
 }
@@ -939,6 +939,7 @@ api_messages = [
 **安全约束**：
 - 禁止使用 `phys_opt_design` 的 retiming 指令（`AlternateFlowWithRetiming`、`AddRetime`）
 - RegisterRetiming skill 使用的局部 FF 插入比全局 retiming 更安全
+- PhysOpt+RegisterRetiming 组合策略：必须使用 `vivado_physopt_and_route`（非独立的 phys_opt_design）。组合工具在 PhysOpt 后自动布线，确保 retiming 分析在布好线的设计上进行。
 - pin swapping 和 net swapping 仅交换等效引脚，不改变逻辑函数
 
 ## 8. 心跳日志系统

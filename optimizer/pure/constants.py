@@ -121,6 +121,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
 PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "rapidwright_search_cells": 3,
     "vivado_run_tcl": 5,
+    "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
 }
 
 # ── Skill chain actions ──────────────────────────────────────────
@@ -172,6 +173,20 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_place_design", "args": {}},
         {"tool": "vivado_route_design", "args": {}},
     ],
+    # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
+    "rapidwright_execute_register_retiming": [
+        {"tool": "vivado_open_checkpoint",
+         "args_from_skill": {"dcp_path": "checkpoint_path"}},
+        {"tool": "vivado_route_design", "args": {}},
+    ],
+    # Auto-chain: open fanout checkpoint, place, then route before WNS eval.
+    # Without this, post-eval sees unplaced design and reports false WNS improvement.
+    "rapidwright_execute_fanout_strategy": [
+        {"tool": "vivado_open_checkpoint",
+         "args_from_skill": {"dcp_path": "checkpoint_path"}},
+        {"tool": "vivado_place_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {}},
+    ],
 }
 
 
@@ -207,6 +222,7 @@ _TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
     "vivado_place_design": 1800.0,
     "vivado_route_design": 1800.0,
     "vivado_phys_opt_design": 3600.0,
+    "vivado_physopt_and_route": 3600.0,
     "vivado_write_checkpoint": 300.0,
     "vivado_write_verilog_simulation": 300.0,
     "vivado_create_and_apply_pblock": 300.0,

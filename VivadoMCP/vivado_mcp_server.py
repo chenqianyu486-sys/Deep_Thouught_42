@@ -75,6 +75,48 @@ def _is_truthy(val) -> bool:
     return False
 
 
+def _parse_timing_summary(report: str) -> dict:
+    """Extract WNS, TNS, and failing endpoints from report_timing_summary output."""
+    result: dict = {"wns": None, "tns": None, "failing_endpoints": None}
+    lines = report.split('\n')
+
+    header_idx = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith('Command:'):
+            continue
+        if 'Attempting to get a license' in stripped or 'Got license' in stripped:
+            continue
+        if any(x in stripped for x in ['INFO:', 'WARNING:', 'ERROR:', 'Common 17-']):
+            continue
+        if any(stripped.startswith(x) for x in ['phys_opt_design', 'place_design', 'route_design', 'report_']):
+            continue
+        if 'WNS(ns)' in line and 'TNS(ns)' in line:
+            header_idx = i
+            break
+    if header_idx == -1:
+        return result
+
+    for data_line in lines[header_idx + 1:]:
+        stripped = data_line.strip()
+        if not stripped or stripped.startswith('---') or stripped.startswith('==='):
+            continue
+        if any(x in stripped for x in ['Command:', 'INFO:', 'WARNING:', 'ERROR:', 'Attempting', 'Got license', 'Common 17-']):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 3:
+            try:
+                result["wns"] = float(parts[0])
+                result["tns"] = float(parts[1])
+                result["failing_endpoints"] = int(parts[2])
+                break
+            except (ValueError, IndexError):
+                continue
+    return result
+
+
 def get_vivado_path() -> str:
     """Get Vivado executable path from global setting, VIVADO_EXEC env var, or PATH."""
     global _vivado_path
@@ -199,6 +241,16 @@ def _run_single_tcl(proc, command: str, timeout: float) -> str:
     Vivado Tcl timeout poisons the session — the process is killed
     and restarted, then the last DCP is reopened automatically.
     """
+    # Block shell commands via Tcl exec — not the intended use of this tool
+    stripped = command.strip()
+    # Check first line (startswith) and any subsequent line (substring)
+    # to catch multi-line scripts like "set x 5\nexec ls"
+    if stripped.startswith("exec ") or stripped.startswith("exec\t") or "\nexec " in stripped:
+        return (
+            "[BLOCKED] Shell commands via 'exec' are not allowed in vivado_run_tcl. "
+            "Use Vivado Tcl commands only (report_*, get_*, set_property, etc.)."
+        )
+
     cmd_log = command if len(command) < 200 else command[:200] + "..."
     logger.info(f"Executing Tcl: {cmd_log}")
 
@@ -832,7 +884,9 @@ def report_utilization_for_pblock(timeout: float = 300.0) -> str:
         Formatted string with LUT/FF/DSP/BRAM/URAM counts for pblock sizing.
     """
     tcl_script = (
-        'puts "LUT:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == LUT && REF_NAME =~ LUT*}]]"\n'
+        'set lut_count [llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == LUT && REF_NAME =~ LUT*}]]\n'
+        'if {$lut_count == 0} { set lut_count [llength [get_cells -hier -quiet -filter {REF_NAME =~ LUT*}]] }\n'
+        'puts "LUT:$lut_count"\n'
         'puts "FF:[llength [get_cells -hier -quiet -filter {REF_NAME =~ FD*}]]"\n'
         'puts "DSP:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == DSP}]]"\n'
         'puts "BRAM:[llength [get_cells -hier -quiet -filter {PRIMITIVE_GROUP == BRAM || PRIMITIVE_GROUP == BLOCKRAM}]]"\n'
@@ -1785,6 +1839,34 @@ async def list_tools():
                 }
             }
         ),
+        Tool(
+            name="physopt_and_route",
+            description="""Run phys_opt_design + route_design + report_timing_summary as atomic operation.
+
+Intended for use in the PhysOpt+RegisterRetiming combined strategy. This tool:
+1. Captures pre-optimization WNS/TNS via report_timing_summary
+2. Runs phys_opt_design with the specified directive (safety-guarded)
+3. Routes the design after physical optimization
+4. Captures post-optimization WNS/TNS via report_timing_summary
+
+Returns a JSON object with pre/post timing summaries and operation outputs.
+Each step is independently try/except guarded so partial results are returned on failure.
+
+WARNING: Only safe directives are allowed (same as phys_opt_design). Retiming directives are blocked.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directive": {
+                        "type": "string",
+                        "description": "phys_opt_design directive (default: Explore). Safe directives: Default, Explore, ExploreWithHoldFix, ExploreWithAggressiveHoldFix, AggressiveExplore, AlternateReplication, AggressiveFanoutOpt, RuntimeOptimized, RQS"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds for phys_opt_design and route_design (default: 3600)"
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -2058,6 +2140,87 @@ async def call_tool(name: str, arguments: dict):
             
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Physical optimization complete.\n\n{output}")]
+
+        elif name == "physopt_and_route":
+            timeout = arguments.get("timeout", 3600)
+            directive = arguments.get("directive", "Explore")
+
+            # === SAFETY GUARD: same as phys_opt_design ===
+            BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
+            BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
+            SAFE_DIRECTIVES = {
+                "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
+                "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
+                "AlternateReplication", "AggressiveFanoutOpt", "RQS",
+            }
+            if directive in BLOCKED_DIRECTIVES:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Directive '{directive}' is BLOCKED because it causes functional errors "
+                        f"(retiming breaks design correctness). "
+                        f"Use a safe directive instead: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                    )
+                )]
+            if directive not in SAFE_DIRECTIVES:
+                return [TextContent(
+                    type="text",
+                    text=(
+                        f"Error: Directive '{directive}' is not in the safe directive list. "
+                        f"Allowed directives: {', '.join(sorted(SAFE_DIRECTIVES))}"
+                    )
+                )]
+            # === END SAFETY GUARD ===
+
+            result = {
+                "status": "success",
+                "physopt_directive": directive,
+                "pre_optimization": {},
+                "post_optimization": {},
+                "physopt_output": "",
+                "route_output": "",
+            }
+            error_messages = []
+
+            # Step 1: Pre-optimization timing
+            try:
+                pre_timing = run_tcl_command("report_timing_summary -return_string", timeout=120)
+                result["pre_optimization"] = _parse_timing_summary(pre_timing)
+            except Exception as e:
+                error_messages.append(f"pre_timing_failed: {e}")
+                result["pre_optimization"] = {"error": str(e)}
+
+            # Step 2: phys_opt_design
+            try:
+                cmd = f"phys_opt_design -directive {directive}"
+                physopt_output = run_tcl_command(cmd, timeout=timeout)
+                result["physopt_output"] = physopt_output[:2000]
+            except Exception as e:
+                error_messages.append(f"physopt_failed: {e}")
+                result["physopt_output"] = f"Error: {e}"
+                result["status"] = "partial"
+
+            # Step 3: route_design
+            try:
+                route_output = run_tcl_command("route_design", timeout=timeout)
+                result["route_output"] = route_output[:2000]
+            except Exception as e:
+                error_messages.append(f"route_failed: {e}")
+                result["route_output"] = f"Error: {e}"
+                result["status"] = "partial"
+
+            # Step 4: Post-optimization timing
+            try:
+                post_timing = run_tcl_command("report_timing_summary -return_string", timeout=120)
+                result["post_optimization"] = _parse_timing_summary(post_timing)
+            except Exception as e:
+                error_messages.append(f"post_timing_failed: {e}")
+                result["post_optimization"] = {"error": str(e)}
+
+            if error_messages:
+                result["errors"] = error_messages
+
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

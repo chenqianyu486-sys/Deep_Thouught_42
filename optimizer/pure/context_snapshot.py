@@ -31,6 +31,7 @@ STRATEGY_TO_PRIMARY_TOOL: dict[str, str] = {
     "CongestionSpreading": "rapidwright_execute_congestion_spreading",
     "RegisterRetiming": "rapidwright_execute_register_retiming",
     "NetSwap": "rapidwright_execute_net_swapping",
+    "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
 }
 
 # Phase-aware section filters: which sections to show for each phase.

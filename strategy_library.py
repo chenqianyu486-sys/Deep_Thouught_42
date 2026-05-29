@@ -192,6 +192,22 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "PhysOpt+RegisterRetiming": {
+        "name": "PhysOpt + Register Retiming (Combined)",
+        "trigger": "Logic-depth limited design (logic_delay > 70%), WNS > -2.0, "
+                   "deep combinational chains (>2 LUTs), FF > 0",
+        "sequence": [
+            {"step": "physopt_and_route", "platform": "Vivado",
+             "params": {"directive": "Explore"},
+             "note": "Combined PhysOpt + route in one atomic call. Returns pre/post WNS."},
+            {"step": "analyze_register_retiming", "platform": "RapidWright",
+             "params": {"delay_threshold": 0.5, "min_chain_depth": 2},
+             "note": "READ-ONLY: find retiming candidates on routed design"},
+            {"step": "execute_register_retiming", "platform": "RapidWright",
+             "params": {"max_retiming_ops": 5},
+             "note": "Insert pipeline FFs. Auto-chains open_checkpoint + route_design"},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -206,6 +222,7 @@ STRATEGY_LABEL_MAP = {
     "RegisterRetiming": "RegisterRetiming",
     "NetSwap": "NetSwap",
     "SmartRetiming": "SmartRetiming",
+    "PhysOpt+RegisterRetiming": "PhysOpt+RegisterRetiming",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -219,6 +236,7 @@ STRATEGY_SKILL_MAP = {
     "RegisterRetiming": "execute_register_retiming",
     "SmartRetiming": "smart_retiming",
     "NetSwap": "execute_net_swapping",
+    "PhysOpt+RegisterRetiming": "physopt_register_retiming",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -407,7 +425,7 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     # ordered list matching original numbering
     ordered = ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade",
                "CellReplication", "CongestionSpreading", "RegisterRetiming",
-               "SmartRetiming", "NetSwap"]
+               "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]
     for i, key in enumerate(ordered, 1):
         if key in excluded:
             continue

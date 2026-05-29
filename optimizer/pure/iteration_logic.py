@@ -41,6 +41,16 @@ def update_iteration_counters(
         state.model.worker_consecutive_success = 0
         if model_used == state.model.worker_model and is_optimization:
             state.model.worker_consecutive_failures += 1
+        # For high-frequency designs (period <= 2.0ns), small improvements
+        # within 1% of clock period still count as progress
+        if (state.timing.clock_period is not None
+                and state.timing.clock_period <= 2.0
+                and state.timing.latest_wns is not None
+                and state.timing.best_wns != float('-inf')):
+            delta = state.timing.latest_wns - state.timing.best_wns
+            threshold = state.timing.clock_period * 0.01  # 1% of period
+            if delta > -threshold:
+                return  # don't increment no_improvement
         state.iteration.global_no_improvement += 1
 
 

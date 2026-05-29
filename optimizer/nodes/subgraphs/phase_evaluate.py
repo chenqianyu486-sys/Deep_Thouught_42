@@ -152,6 +152,15 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 _handle_exhausted(state, deps)
                 return LoopPhase.ANALYZE
 
+            elif flow_signal == "EXEC_DONE":
+                # LLM sometimes sends EXEC_DONE from EVALUATE (confused with EXECUTE phase).
+                # Treat as NEXT_ITERATION — execution is done, proceed to next iteration.
+                logger.info("[EVALUATE] EXEC_DONE received in EVALUATE phase, treating as NEXT_ITERATION")
+                _handle_next_iteration(state, deps, llm_summary or "Execution complete (EXEC_DONE from EVALUATE).")
+                state.strategy.current_phase = ""
+                state.strategy.current_strategy = ""
+                return LoopPhase.ANALYZE
+
             # Unknown signal: treat as CONTINUE
             logger.info(f"[EVALUATE] Unknown flow_signal: {flow_signal}, treating as CONTINUE")
             return LoopPhase.ANALYZE
