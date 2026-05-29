@@ -144,7 +144,7 @@ setup:
 	@printf "$(COLOR_GREEN)===== FPGA Design Optimization Setup =====$(COLOR_RESET)\n"
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[1/8] Checking for wget/curl (required for downloads)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[1/9] Checking for wget/curl (required for downloads)...$(COLOR_RESET)\n"
 	@if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then \
 		printf "$(COLOR_RED)✗ Neither wget nor curl found$(COLOR_RESET)\n"; \
 		echo "Please install wget or curl:"; \
@@ -154,7 +154,7 @@ setup:
 	@printf "$(COLOR_GREEN)✓ wget/curl available$(COLOR_RESET)\n"
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[2/8] Installing Python dependencies...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[2/9] Installing Python dependencies...$(COLOR_RESET)\n"
 	@EXTERNALLY_MANAGED=$$($(PYTHON) -c "import sysconfig; print(sysconfig.get_path('stdlib') + '/EXTERNALLY-MANAGED')") && \
 	if [ -f "$$EXTERNALLY_MANAGED" ]; then \
 		printf "$(COLOR_YELLOW)PEP 668 detected (Ubuntu 22.04+), using --break-system-packages$(COLOR_RESET)\n"; \
@@ -163,23 +163,9 @@ setup:
 		$(PIP) install -r requirements.txt; \
 	fi
 	@printf "$(COLOR_GREEN)✓ Python dependencies installed$(COLOR_RESET)\n"
-	@printf "$(COLOR_YELLOW)  Patching rapidwright for JPype classpath fix...$(COLOR_RESET)\n"
-	@$(PYTHON) scripts/patch_rapidwright.py 2>/dev/null; \
-		if [ $$? -eq 0 ]; then \
-			printf "$(COLOR_GREEN)  ✓ rapidwright patched$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_YELLOW)  ⚠ rapidwright patch skipped (non-critical)$(COLOR_RESET)\n"; \
-		fi
-	@printf "$(COLOR_YELLOW)  Patching skill DesignTools import paths...$(COLOR_RESET)\n"
-	@$(PYTHON) scripts/patch_skill_imports.py 2>/dev/null; \
-		if [ $$? -eq 0 ]; then \
-			printf "$(COLOR_GREEN)  ✓ skill imports patched$(COLOR_RESET)\n"; \
-		else \
-			printf "$(COLOR_YELLOW)  ⚠ skill import patch skipped (non-critical)$(COLOR_RESET)\n"; \
-		fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[3/8] Pre-caching tiktoken encoding...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[3/9] Pre-caching tiktoken encoding...$(COLOR_RESET)\n"
 	@mkdir -p $(TIKTOKEN_CACHE_DIR)
 	@if [ -f "$(TIKTOKEN_CACHE_DIR)/$(TIKTOKEN_BPE_CACHE_KEY)" ]; then \
 		printf "$(COLOR_GREEN)✓ tiktoken cl100k_base already cached$(COLOR_RESET)\n"; \
@@ -196,7 +182,7 @@ setup:
 	fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[4/8] Checking Vivado...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[4/9] Checking Vivado...$(COLOR_RESET)\n"
 	@if command -v $(VIVADO_EXEC) >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Vivado found: %s$(COLOR_RESET)\n" "$$(command -v $(VIVADO_EXEC))"; \
 		$(VIVADO_EXEC) -version | head -n 1; \
@@ -210,7 +196,7 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[5/8] Checking Java...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[5/9] Checking Java...$(COLOR_RESET)\n"
 	@if command -v java >/dev/null 2>&1; then \
 		printf "$(COLOR_GREEN)✓ Java found: %s$(COLOR_RESET)\n" "$$(command -v java)"; \
 		java -version 2>&1 | head -n 1; \
@@ -243,11 +229,26 @@ setup:
 	fi
 	@echo ""
 	
-	@printf "$(COLOR_YELLOW)[6/8] Building RapidWright from source...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[6/9] Building RapidWright from source...$(COLOR_RESET)\n"
 	@$(MAKE) build-rapidwright
 	@echo ""
-	
-	@printf "$(COLOR_YELLOW)[7/8] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
+
+	@printf "$(COLOR_YELLOW)[7/9] Patching rapidwright and skill imports...$(COLOR_RESET)\n"
+	@$(PYTHON) scripts/patch_rapidwright.py 2>/dev/null; \
+		if [ $$? -eq 0 ]; then \
+			printf "$(COLOR_GREEN)  ✓ rapidwright JPype classpath patched$(COLOR_RESET)\n"; \
+		else \
+			printf "$(COLOR_YELLOW)  ⚠ rapidwright patch skipped (non-critical)$(COLOR_RESET)\n"; \
+		fi
+	@$(PYTHON) scripts/patch_skill_imports.py 2>/dev/null; \
+		if [ $$? -eq 0 ]; then \
+			printf "$(COLOR_GREEN)  ✓ skill DesignTools imports patched$(COLOR_RESET)\n"; \
+		else \
+			printf "$(COLOR_YELLOW)  ⚠ skill import patch skipped (non-critical)$(COLOR_RESET)\n"; \
+		fi
+	@echo ""
+
+	@printf "$(COLOR_YELLOW)[8/9] Downloading example DCP: $(EXAMPLE_DCP_1)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_1)" ]; then \
@@ -263,7 +264,7 @@ setup:
 	fi
 	@echo ""
 
-	@printf "$(COLOR_YELLOW)[8/8] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)[9/9] Downloading example DCP: $(EXAMPLE_DCP_2)...$(COLOR_RESET)\n"
 	@if [ "$(SKIP_EXAMPLES)" = "1" ]; then \
 		printf "$(COLOR_YELLOW)Skipping example DCP downloads (SKIP_EXAMPLES=1)$(COLOR_RESET)\n"; \
 	elif [ -f "$(EXAMPLE_DCP_2)" ]; then \
@@ -302,7 +303,15 @@ build-rapidwright:
 		git submodule update --init RapidWright; \
 	fi
 	@cd "$(RAPIDWRIGHT_PATH)" && chmod +x gradlew && JAVA_HOME=$$JAVA_HOME ./gradlew jar -p "$(RAPIDWRIGHT_PATH)"
-	@printf "$(COLOR_GREEN)✓ RapidWright built successfully$(COLOR_RESET)\n"
+	@printf "$(COLOR_GREEN)✓ RapidWright JAR built$(COLOR_RESET)\n"
+	@printf "$(COLOR_YELLOW)  Installing RapidWright Python package from local source...$(COLOR_RESET)\n"
+	@EXTERNALLY_MANAGED=$$($(PYTHON) -c "import sysconfig; print(sysconfig.get_path('stdlib') + '/EXTERNALLY-MANAGED')") && \
+	if [ -f "$$EXTERNALLY_MANAGED" ]; then \
+		$(PYTHON) -m pip install --break-system-packages -e "$(RAPIDWRIGHT_PATH)/python/"; \
+	else \
+		$(PIP) install -e "$(RAPIDWRIGHT_PATH)/python/"; \
+	fi
+	@printf "$(COLOR_GREEN)✓ RapidWright Python package installed$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  RAPIDWRIGHT_PATH=$(RAPIDWRIGHT_PATH)$(COLOR_RESET)\n"
 	@printf "$(COLOR_GREEN)  CLASSPATH=$(CLASSPATH)$(COLOR_RESET)\n"
 
