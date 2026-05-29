@@ -11,17 +11,24 @@ import os
 import sys
 import shutil
 import site
+import importlib.util
 
 
 def find_rapidwright_py():
-    """在 venv 的 site-packages 中定位 rapidwright/rapidwright.py"""
-    for sp in site.getsitepackages():
-        rw_file = os.path.join(sp, "rapidwright", "rapidwright.py")
-        if os.path.isfile(rw_file):
-            return rw_file
+    """定位 rapidwright/rapidwright.py — 兼容 editable install、venv、user-site。"""
+    # Method 1: importlib (handles editable installs, venv, egg-link, etc.)
+    try:
+        spec = importlib.util.find_spec('rapidwright')
+        if spec and spec.submodule_search_locations:
+            pkg_dir = spec.submodule_search_locations[0]
+            rw_file = os.path.join(pkg_dir, 'rapidwright.py')
+            if os.path.isfile(rw_file):
+                return rw_file
+    except (ModuleNotFoundError, ValueError):
+        pass
 
-    # pip install 到用户目录的情况
-    for sp in site.getusersitepackages():
+    # Method 2: fallback to site-packages scan
+    for sp in site.getsitepackages() + [site.getusersitepackages()]:
         rw_file = os.path.join(sp, "rapidwright", "rapidwright.py")
         if os.path.isfile(rw_file):
             return rw_file

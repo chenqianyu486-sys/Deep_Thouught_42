@@ -14,17 +14,17 @@ import sys
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 需要修补的文件及其行号
+# 需要修补的文件
 PATCH_TARGETS = [
-    ("skills/congestion_spreading_strategy.py", 244),
-    ("skills/net_detour_optimization.py", 449),
+    "skills/congestion_spreading_strategy.py",
+    "skills/net_detour_optimization.py",
 ]
 
 WRONG_IMPORT = "from com.xilinx.rapidwright.design.tools import DesignTools"
 CORRECT_IMPORT = "from com.xilinx.rapidwright.design import DesignTools"
 
 
-def patch_file(rel_path, line_num):
+def patch_file(rel_path):
     filepath = os.path.join(PROJECT_ROOT, rel_path)
     if not os.path.isfile(filepath):
         print(f"[patch] SKIP: {rel_path} not found")
@@ -33,35 +33,31 @@ def patch_file(rel_path, line_num):
     with open(filepath, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
-    if line_num < 1 or line_num > len(lines):
-        print(f"[patch] SKIP: {rel_path} line {line_num} out of range")
+    patched = False
+    for i, line in enumerate(lines):
+        if CORRECT_IMPORT in line:
+            print(f"[patch] Already correct: {rel_path}:{i+1}")
+            patched = True
+        elif WRONG_IMPORT in line:
+            lines[i] = line.replace(WRONG_IMPORT, CORRECT_IMPORT)
+            print(f"[patch] Patched: {rel_path}:{i+1}")
+            patched = True
+
+    if not patched:
+        print(f"[patch] WARNING: {rel_path} has no matching import line")
         return False
-
-    idx = line_num - 1
-    current = lines[idx]
-
-    if CORRECT_IMPORT in current:
-        print(f"[patch] Already patched: {rel_path}:{line_num}")
-        return True
-
-    if WRONG_IMPORT not in current:
-        print(f"[patch] WARNING: {rel_path}:{line_num} has unexpected content, skipping")
-        return False
-
-    lines[idx] = current.replace(WRONG_IMPORT, CORRECT_IMPORT)
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    print(f"[patch] Patched: {rel_path}:{line_num}")
     return True
 
 
 def main():
     print("[patch] Fixing DesignTools import paths in skill files...")
     success = True
-    for rel_path, line_num in PATCH_TARGETS:
-        if not patch_file(rel_path, line_num):
+    for rel_path in PATCH_TARGETS:
+        if not patch_file(rel_path):
             success = False
 
     if success:
