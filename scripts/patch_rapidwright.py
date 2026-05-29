@@ -41,9 +41,12 @@ def patch_file(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 检查是否已修补
+    # 检查是否已修补 (新式源修复 或 旧式补丁)
+    if "RAPIDWRIGHT_PATH is set: use local build" in content:
+        print(f"[patch] Already fixed in source: {filepath}")
+        return True
     if "glob.glob" in content and "基于 RAPIDWRIGHT_PATH 重新构造" in content:
-        print(f"[patch] Already patched: {filepath}")
+        print(f"[patch] Already patched (legacy): {filepath}")
         return True
 
     # 检查是否包含原始 bug 代码

@@ -22,7 +22,7 @@ import jpype
 import jpype.imports
 from jpype.types import *
 from typing import List, Optional
-import os, urllib.request, platform, shutil
+import os, urllib.request, platform, shutil, glob
 
 version='2025.2.1'
 java_home_var='JAVA_HOME'
@@ -50,6 +50,7 @@ def start_jvm():
             os.environ[java_home_var] = java_home
     
     if not os.environ.get('RAPIDWRIGHT_PATH'):
+        # No RAPIDWRIGHT_PATH: use standalone JAR (pip install from PyPI)
         dir_path = os.path.dirname(os.path.realpath(__file__))
         file_name = "rapidwright-"+version+"-standalone-"+os_str+".jar"
         classpath = os.path.join(dir_path,file_name)
@@ -57,11 +58,32 @@ def start_jvm():
             url = "http://github.com/Xilinx/RapidWright/releases/download/v"+version+"-beta/" + file_name
             urllib.request.urlretrieve(url,classpath)
         kwargs['classpath'] = classpath
-    if not os.environ.get('CLASSPATH') and os.environ.get('RAPIDWRIGHT_PATH'):
-        rwPath = os.environ.get('RAPIDWRIGHT_PATH')
-        classpath = rwPath + "/bin:" + rwPath + "/jars/*"
-        print("ERROR: RAPIDWRIGHT_PATH is set but CLASSPATH is not set.  Please set CLASSPATH=" + classpath)
-        exit(1)
+    else:
+        # RAPIDWRIGHT_PATH is set: use local build
+        rwPath = os.environ['RAPIDWRIGHT_PATH']
+        bin_dir = rwPath + "/bin"
+        jars_glob = rwPath + "/jars/*"
+        
+        classpath_str = os.environ.get('CLASSPATH', '')
+        if rwPath in classpath_str:
+            # CLASSPATH set and contains RAPIDWRIGHT_PATH: expand wildcards
+            paths = []
+            for p in classpath_str.split(':'):
+                if '*' in p:
+                    expanded = sorted(glob.glob(p))
+                    if expanded:
+                        paths.extend(expanded)
+                else:
+                    paths.append(p)
+            kwargs['classpath'] = ':'.join(paths)
+        else:
+            # CLASSPATH missing or incorrect: build from RAPIDWRIGHT_PATH
+            paths = [bin_dir]
+            expanded = sorted(glob.glob(jars_glob))
+            if expanded:
+                paths.extend(expanded)
+            kwargs['classpath'] = ':'.join(paths)
+
     if not jpype.isJVMStarted():
         jpype.startJVM(**kwargs)
 
