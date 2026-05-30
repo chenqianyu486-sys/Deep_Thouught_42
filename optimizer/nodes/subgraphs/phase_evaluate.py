@@ -196,8 +196,12 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                             result += ("Use cell_types parameter to batch multiple types in one call, "
                                        "or get_design_info for type overview.")
                         elif tool_name == "vivado_run_tcl":
-                            result += ("Use dedicated tools (vivado_get_cached_high_fanout_nets, "
-                                       "vivado_report_timing_summary) instead of raw Tcl.")
+                            result += (
+                                "Dashboard already contains fresh timing data from init_analysis. "
+                                "Use vivado_report_timing_summary or Dashboard values directly "
+                                "instead of raw Tcl. For execution commands (place_design, "
+                                "route_design, phys_opt_design), use the dedicated MCP tools."
+                            )
                         if deps.compat is not None:
                             deps.compat.add_message("tool", result, {
                                 "tool_call_id": tc.id, "name": tool_name,

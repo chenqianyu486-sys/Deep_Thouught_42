@@ -1867,6 +1867,50 @@ summaries. Only safe directives are allowed; retiming directives blocked.""",
                 }
             }
         ),
+        Tool(
+            name="opt_design",
+            description="""Run Vivado opt_design for logic-level optimization (retarget, remap,
+constant propagation). Operates BEFORE placement -- modifies the synthesized netlist.
+
+Use when PhysOpt (post-place) is ineffective due to pure logic-depth bottlenecks
+(6-7 LUT levels, 100% logic delay, combinational-dominated designs).
+
+IMPORTANT: After opt_design, the netlist has changed and MUST be re-placed + re-routed.
+The optimizer framework auto-chains place_design -> route_design -> report_timing_summary
+after this tool via SKILL_CHAIN_ACTIONS.
+
+Directives:
+  - Explore (default): Balanced optimization for UltraScale+
+  - ExploreArea: Area-focused optimization
+  - ExploreSequentialArea: Area-focused with sequential awareness
+  - RuntimeOptimized: Fast optimization for large designs
+  - AddRemap: Aggressive LUT remapping (may reduce logic levels)
+
+opt_design has NO retiming options -- it is fully safe for functional correctness.
+Unlike phys_opt_design, there are no blocked directives.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directive": {
+                        "type": "string",
+                        "enum": ["Default", "Explore", "ExploreArea", "ExploreSequentialArea", "RuntimeOptimized", "AddRemap"],
+                        "default": "Explore",
+                        "description": "opt_design directive. Explore: balanced. AddRemap: aggressive LUT remapping."
+                    },
+                    "retarget": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Retarget logic to equivalent primitives"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "default": 600,
+                        "description": "Timeout in seconds"
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
@@ -2215,6 +2259,61 @@ async def call_tool(name: str, arguments: dict):
                 result["errors"] = error_messages
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "opt_design":
+            timeout = arguments.get("timeout", 600)
+            directive = arguments.get("directive", "Explore")
+            retarget = arguments.get("retarget", True)
+
+            # No safety guard needed: opt_design has NO retiming options
+            # (unlike phys_opt_design which has AlternateFlowWithRetiming, AddRetime)
+
+            # Get WNS before opt_design for delta reporting
+            wns_before = None
+            try:
+                timing_result = run_tcl_command("report_timing_summary -max_paths 1 -return_string", timeout=60)
+                _m = re.search(r'WNS(?:\(ns\))?:\s*(-?[\d.]+)', timing_result)
+                if _m:
+                    wns_before = float(_m.group(1))
+            except Exception:
+                pass
+
+            # Build and run opt_design command
+            cmd = "opt_design"
+            if directive:
+                cmd += f" -directive {directive}"
+            if retarget:
+                cmd += " -retarget"
+
+            result_text = run_tcl_command(cmd, timeout=timeout)
+
+            # Check for "no optimization" patterns
+            no_opt_patterns = [
+                "No optimization performed",
+                "0 cells optimized",
+                "INFO: [Opt 31-138]",
+            ]
+            no_opt_detected = any(p.lower() in result_text.lower() for p in no_opt_patterns)
+
+            # Get WNS after
+            wns_after = None
+            try:
+                timing_result2 = run_tcl_command("report_timing_summary -max_paths 1 -return_string", timeout=60)
+                _m2 = re.search(r'WNS(?:\(ns\))?:\s*(-?[\d.]+)', timing_result2)
+                if _m2:
+                    wns_after = float(_m2.group(1))
+            except Exception:
+                pass
+
+            response_data = {
+                "status": "no_optimization" if no_opt_detected else "completed",
+                "directive": directive,
+                "wns_before": wns_before,
+                "wns_after": wns_after,
+                "wns_delta": round(wns_after - wns_before, 4) if (wns_before is not None and wns_after is not None) else None,
+                "vivado_output": result_text[:5000],
+            }
+            return [TextContent(type="text", text=json.dumps(response_data))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

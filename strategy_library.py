@@ -68,6 +68,23 @@ STRATEGIES = {
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},
         ],
     },
+    "OptDesign": {
+        "name": "Logic Optimization (opt_design)",
+        "trigger": "Logic-depth limited design (>70% logic delay), PhysOpt ineffective, "
+                   "6-7 LUT levels on critical paths",
+        "ff_prerequisite": "",
+        "sequence": [
+            {"step": "opt_design_strategy", "platform": "RapidWright",
+             "params": {"directive": "Explore", "retarget": True},
+             "note": "Generate opt_design plan + auto-chain Vivado execution"},
+            {"step": "place_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-place after netlist change"},
+            {"step": "route_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-route"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: evaluate timing"},
+        ],
+    },
     "Fanout": {
        "name": "High Fanout Net Optimization",
        "trigger": "High fanout nets, no spread",
@@ -142,6 +159,9 @@ STRATEGIES = {
     "RegisterRetiming": {
         "name": "Register Retiming (Targeted Pipeline Insertion)",
         "trigger": "WNS stuck, deep combinational chains (>2 LUTs) on critical paths",
+        "ff_prerequisite": "⚠️  REQUIRES adequate flip-flops (FF utilization >= 2%). "
+                           "With low FF count, retiming has minimal impact — "
+                           "FFs are physical insertion targets for pipeline stage creation.",
         "sequence": [
             {"step": "extract_critical_path_pins", "platform": "Vivado",
              "params": {"num_paths": 20},
@@ -214,6 +234,7 @@ STRATEGIES = {
 STRATEGY_LABEL_MAP = {
     "PBLOCK": "PBLOCK",
     "PhysOpt": "PhysOpt",
+    "OptDesign": "OptDesign",
     "Fanout": "Fanout",
     "LUTCascade": "LUTCascade",
     "PinSwap": "PinSwap",
@@ -228,6 +249,7 @@ STRATEGY_LABEL_MAP = {
 STRATEGY_SKILL_MAP = {
     "PBLOCK": "pblock_strategy",
     "PhysOpt": "physopt_strategy",
+    "OptDesign": "opt_design_strategy",
     "Fanout": "fanout_strategy",
     "LUTCascade": "lut_cascade_flattening",
     "PinSwap": "pin_swapping_strategy",
@@ -341,6 +363,9 @@ SKILL_GUIDANCE = {
         "condition": "WNS stuck, critical paths have deep combinational chains (>2 LUTs between FFs)",
         "prerequisite": "Load DCP via read_checkpoint first, call extract_critical_path_pins in Vivado",
         "interpretation": "Empty candidates = no deep chains found. Non-empty = segments where pipeline registers would help.",
+        "contraindications": "⚠️  FF utilization < 2%: register retiming may have minimal impact — "
+                             "very few FFs available as pipeline insertion targets. "
+                             "Prefer PBLOCK or PhysOpt for combinational-dominated designs.",
     },
     "execute_register_retiming": {
         "category": "OPTIMIZATION",
@@ -350,7 +375,9 @@ SKILL_GUIDANCE = {
         "prerequisite": "Call analyze_register_retiming first to get candidate list",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM - inserting FFs changes logic depth and routing. Limit to 5 ops per call.",
-        "contraindications": "Do NOT use when Vivado global retiming (phys_opt_design -retime) has already been tried and caused functional errors. This targeted approach is safer but still modifies netlist topology.",
+        "contraindications": "Do NOT use when Vivado global retiming (phys_opt_design -retime) has already been tried and caused functional errors. "
+                             "⚠️  FF utilization < 2%: very few sequential elements available for pipeline insertion — retiming impact will be minimal. "
+                             "This targeted approach is safer than global retiming but still modifies netlist topology.",
     },
     "analyze_net_swapping": {
         "category": "ANALYSIS",
@@ -368,6 +395,26 @@ SKILL_GUIDANCE = {
         "prerequisite": "Call analyze_net_swapping first to get candidate list",
         "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "LOW - swaps are within a single SLICE, limited blast radius. If WNS regresses >0.05ns, roll back to pre_swap_checkpoint.",
+    },
+    "opt_design_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "directive (default: Explore), retarget (default: True)",
+        "output": "execution plan with recommended opt_design parameters",
+        "condition": "Logic-depth limited design (>70% logic delay), PhysOpt ineffective, "
+                     "6-7 LUT levels on critical paths",
+        "prerequisite": "Design must be loaded. opt_design runs BEFORE placement — "
+                        "no placement/routing prerequisites needed.",
+        "post_actions": "Chain auto-executes: vivado_opt_design → vivado_place_design → "
+                        "vivado_route_design → vivado_report_timing_summary → "
+                        "vivado_extract_critical_path_cells",
+        "risk": "LOW — opt_design has NO retiming options. Unlike phys_opt_design, "
+                "all directives are safe for functional correctness. "
+                "Netlist changes are logic-equivalent remapping (Vivado-guaranteed).",
+        "contraindications": "NOT for designs already at minimal LUT depth. "
+                             "NOT for designs where routing delay (not logic depth) is the bottleneck. "
+                             "After opt_design, validate_dcps.py Phase 1 (structural) may fail due to "
+                             "expected cell name changes — Phase 2 (functional simulation) provides "
+                             "the correctness guarantee.",
     },
 }
 
@@ -423,7 +470,7 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     excluded = set(exclude_strategies or [])
     parts = ["Available strategies:"]
     # ordered list matching original numbering
-    ordered = ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade",
+    ordered = ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",
                "CellReplication", "CongestionSpreading", "RegisterRetiming",
                "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]
     for i, key in enumerate(ordered, 1):
@@ -431,7 +478,10 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
             continue
         s = STRATEGIES.get(key)
         if s:
-            parts.append(f"  strategy_{i}: {s['name']} (trigger: {s['trigger']})")
+            line = f"  strategy_{i}: {s['name']} (trigger: {s['trigger']})"
+            if s.get('ff_prerequisite'):
+                line += f" - {s['ff_prerequisite']}"
+            parts.append(line)
     if not parts[1:]:
         parts.append("  (all strategies excluded)")
     return "\n".join(parts)

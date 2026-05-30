@@ -54,6 +54,7 @@ COMPLEX_TOOLS = {
     "analyze_pblock_region",
     "execute_pblock_strategy",
     "execute_physopt_strategy",
+    "execute_opt_design_strategy",
     "execute_fanout_strategy",
     "analyze_net_detour",
     "optimize_cell_placement",
@@ -689,6 +690,33 @@ async def list_tools() -> list[Tool]:
                     "design_is_routed": {
                         "type": "boolean",
                         "description": "Whether the design is currently routed",
+                        "default": True
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="execute_opt_design_strategy",
+            description="""Generate opt_design execution plan for Vivado.
+
+            Returns a structured plan for running logic-level optimization in Vivado,
+            including opt_design, place_design, route_design, and report_timing_summary steps.
+
+            Trigger: 6-7 LUT levels, 100% logic delay, combinational-dominated designs.
+            Input: directive for opt_design, retarget flag.
+            Output: structured plan with ordered Vivado steps.
+            Use when PhysOpt (post-place) is ineffective due to pure logic-depth bottlenecks.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "directive": {
+                        "type": "string",
+                        "description": "opt_design directive (Explore, ExploreArea, ExploreSequentialArea, RuntimeOptimized, AddRemap)",
+                        "default": "Explore"
+                    },
+                    "retarget": {
+                        "type": "boolean",
+                        "description": "Retarget logic to equivalent primitives",
                         "default": True
                     }
                 }
@@ -1433,6 +1461,12 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             result = rw.execute_physopt_strategy(
                 directive=arguments.get("directive", "Default"),
                 design_is_routed=arguments.get("design_is_routed", True),
+            )
+
+        elif name == "execute_opt_design_strategy":
+            result = rw.execute_opt_design_strategy(
+                directive=arguments.get("directive", "Explore"),
+                retarget=arguments.get("retarget", True),
             )
 
         elif name == "execute_fanout_strategy":

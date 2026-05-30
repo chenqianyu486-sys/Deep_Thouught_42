@@ -66,6 +66,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         # Vivado execution tools
         "vivado_place_design",
         "vivado_route_design",
+        "vivado_opt_design",
         "vivado_phys_opt_design",
         "vivado_physopt_and_route",
         "vivado_write_checkpoint",

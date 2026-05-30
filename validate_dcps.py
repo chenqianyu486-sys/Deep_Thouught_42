@@ -148,12 +148,13 @@ def parse_simulation_output(sim_output: str, returncode: int, expected_cycles: i
 class DCPValidator:
     """Validates functional equivalence between two DCPs."""
     
-    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False, no_reactive: bool = False):
+    def __init__(self, golden_dcp: Path, revised_dcp: Path, num_vectors: int = 200, debug: bool = False, no_reactive: bool = False, skip_structural_check: bool = False):
         self.golden_dcp = golden_dcp
         self.revised_dcp = revised_dcp
         self.num_vectors = num_vectors
         self.debug = debug
         self.no_reactive = no_reactive
+        self.skip_structural_check = skip_structural_check
         
         self.exit_stack = AsyncExitStack()
         self.rapidwright_session: Optional[ClientSession] = None
@@ -1519,8 +1520,16 @@ endmodule
         print(f"Vectors: {self.num_vectors}")
         print("="*70)
         
-        # Phase 1: Structural checks
-        phase1_passed = await self.phase1_structural_checks()
+        # Phase 1: Structural checks (skip if netlist was intentionally modified,
+        # e.g. by opt_design which remaps cells and changes cell names)
+        if self.skip_structural_check:
+            print("\n⚠ Skipping Phase 1 (structural check disabled — netlist intentionally modified)")
+            print("  Reason: opt_design or similar netlist-modifying optimization was used.")
+            print("  Phase 2 (functional simulation) will still verify correctness.")
+            self.phase1_passed = True
+            phase1_passed = True
+        else:
+            phase1_passed = await self.phase1_structural_checks()
         
         if not phase1_passed:
             print("\n⚠ Skipping Phase 2 due to Phase 1 failures")
@@ -1640,6 +1649,12 @@ Examples:
         action="store_true",
         help="Disable reactive stimulus generation (use pure LFSR randomness)"
     )
+    parser.add_argument(
+        "--skip-structural",
+        action="store_true",
+        help="Skip Phase 1 structural comparison (use when netlist was intentionally "
+             "modified by opt_design or similar logic optimization)"
+    )
 
     args = parser.parse_args()
     
@@ -1661,7 +1676,8 @@ Examples:
         revised_dcp=args.revised_dcp,
         num_vectors=args.vectors,
         debug=args.debug,
-        no_reactive=args.no_reactive
+        no_reactive=args.no_reactive,
+        skip_structural_check=args.skip_structural,
     )
     
     try:

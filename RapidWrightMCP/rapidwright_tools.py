@@ -2229,6 +2229,59 @@ def execute_physopt_strategy(
         return {"error": str(e)}
 
 
+def execute_opt_design_strategy(
+    directive: str = "Explore",
+    retarget: bool = True,
+) -> dict:
+    """Generate opt_design execution plan for Vivado.
+
+    Args:
+        directive: opt_design directive (Explore, ExploreArea, AddRemap, etc.)
+        retarget: Whether to retarget logic to equivalent primitives
+
+    Returns:
+        Dictionary with structured execution plan
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("opt_design_strategy")
+        if skill is None:
+            return {"error": "Skill 'opt_design_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            directive=directive,
+            retarget=retarget,
+        )
+
+        if not result.success:
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing opt_design strategy: {e}")
+        return {"error": str(e)}
+
+
 def execute_fanout_strategy(
     nets: list[dict],
     temp_dir: str = "temp",

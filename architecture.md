@@ -941,6 +941,76 @@ api_messages = [
 - RegisterRetiming skill 使用的局部 FF 插入比全局 retiming 更安全
 - PhysOpt+RegisterRetiming 组合策略：必须使用 `vivado_physopt_and_route`（非独立的 phys_opt_design）。组合工具在 PhysOpt 后自动布线，确保 retiming 分析在布好线的设计上进行。
 - pin swapping 和 net swapping 仅交换等效引脚，不改变逻辑函数
+- **opt_design 跳过 Phase 1 结构对比**：`opt_design` 会重新映射/合并 LUT 单元，导致 cell 名称和数量变化。`validate_dcps.py --skip-structural` 标志允许跳过 Phase 1（结构对比），仅依赖 Phase 2（功能仿真，10000 向量 LFSR 激励）保证功能等价性。在 `save_output_node` 中通过 `state.iteration.tools_used` 检测 `vivado_opt_design` 使用并传递标志。
+- opt_design **无 retiming 选项**（与 `phys_opt_design` 不同），无需额外安全守卫。
+
+## 7.1 EXECUTE 阶段 no-progress 检测优化
+
+**问题**: LLM 在 EXECUTE 阶段反复调用只读分析工具（`vivado_run_tcl report_timing`），12 轮后才被
+no-progress 机制踢出，浪费 ~120s + API 成本。
+
+**方案**（`optimizer/nodes/subgraphs/phase_execute.py`）：
+- `NO_PROGRESS_LIMIT`: 12 → 6
+- 新增 `_pending_tool_count` 局部变量追踪未完成的工具调用：仅在所有工具调用都返回后才计数，防止长执行工具（place_design 1800s, route_design 1800s）误触发 no-progress
+- 与 `_TOOL_TIMEOUT_DEFAULTS` 联动：6 轮 × ~10s LLM 等待 ≈ 60s window，合理覆盖 read-only 工具超时（vivado_run_tcl 120s × factor）
+
+## 7.2 vivado_run_tcl 速率限制强化
+
+**问题**: LLM 使用 `vivado_run_tcl` 将时序报告写入 `/tmp/` 再读取，而非直接调用 `vivado_report_timing_summary`。
+EXECUTE 阶段允许多达 5 次调用加剧问题。
+
+**方案**（`optimizer/pure/constants.py:123`）：
+- `PHASE_TOOL_RATE_LIMITS["vivado_run_tcl"]`: 5 → 2
+- RATE LIMITED 消息更新为：`"Dashboard already contains fresh timing data from init_analysis. Use vivado_report_timing_summary or Dashboard values directly instead of raw Tcl."`
+- 三个 phase 文件（`phase_execute.py`, `phase_analyze.py`, `phase_evaluate.py`）同步更新
+
+## 7.3 RegisterRetiming FF 利用率警告
+
+**问题**: RegisterRetiming 在 FF 利用率仅 0.21% 的设计上被选中 3 次但每次无效——几乎没有 FF 可作为流水线插入目标。
+
+**方案**（`strategy_library.py`, `optimizer/pure/state_space.py`）：
+- `STRATEGIES["RegisterRetiming"]` 新增 `ff_prerequisite` 字段：`"⚠️ REQUIRES adequate flip-flops (FF utilization >= 2%)"`
+- `get_strategy_catalog()` 将 `ff_prerequisite` 追加到策略目录行末尾
+- `state_space.py` 在 SELECT_STRATEGY 阶段注入 `ff_warning`（当 `ff_utilization < 2%` 时）
+- `SKILL_GUIDANCE["analyze_register_retiming"]` 和 `["execute_register_retiming"]` 新增 `contraindications`
+- **不硬性排除该策略**——LLM 保留最终决策权，但警告信息确保充分知情
+
+## 7.4 Pre-placement 逻辑优化（opt_design）策略
+
+**动机**: PhysOpt 和 RegisterRetiming 对纯逻辑深度瓶颈（6-7 LUT 级数，100% logic delay）无效。
+需要 placement 前的逻辑级优化来直接减少 LUT 深度。
+
+**架构**:
+```
+LLM calls rapidwright_opt_design_strategy (RapidWright skill)
+  └─► SKILL_CHAIN_ACTIONS triggers:
+       vivado_opt_design (directive=Explore, retarget=True)
+       → vivado_place_design
+       → vivado_route_design
+       → vivado_report_timing_summary
+       → vivado_extract_critical_path_cells
+```
+
+**文件**：
+| 文件 | 用途 |
+|------|------|
+| `skills/opt_design_strategy.py` | RapidWright Skill 包装器（参数校验、生成 StrategyPlan） |
+| `skills/descriptors/optimization.opt_design@1.0.0.json` | Skill 描述符（defaultMs=600s, directive 默认: Explore） |
+| `VivadoMCP/vivado_mcp_server.py` | `opt_design` MCP 工具（Tcl handler, WNS delta 报告） |
+| `RapidWrightMCP/server.py` | 注册 `execute_opt_design_strategy` |
+| `RapidWrightMCP/rapidwright_tools.py` | `execute_opt_design_strategy()` 函数 |
+| `optimizer/pure/constants.py` | `SKILL_CHAIN_ACTIONS` 5 步链, `_TOOL_TIMEOUT_DEFAULTS` 600s |
+| `strategy_library.py` | OptDesign 策略 + catalog + SKILL_GUIDANCE |
+
+**Directive 选择**：
+- 默认 `Explore`（UltraScale+ xcvu3p 的通用选择，有明确的 UltraScale+ 优化记录）
+- `AddRemap` 可选（更激进的 LUT 重映射，但主要针对 Versal LUT4 架构）
+
+**安全分析**：
+- opt_design 无 retiming 选项 → 不需要 retiming 安全守卫
+- 所有 directive 都是纯逻辑优化（无物理层面副作用）
+- `_NO_CACHE_TOOLS` 和 `SIDE_EFFECT_TOOLS` 已注册 `vivado_opt_design`
+- `_EMPTY_RESULT_PATTERNS` 新增 3 个模式（语义匹配，不包含数值零模式以避免误判）
 
 ## 8. 心跳日志系统
 

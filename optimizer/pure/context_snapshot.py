@@ -31,6 +31,7 @@ STRATEGY_TO_PRIMARY_TOOL: dict[str, str] = {
     "CongestionSpreading": "rapidwright_execute_congestion_spreading",
     "RegisterRetiming": "rapidwright_execute_register_retiming",
     "NetSwap": "rapidwright_execute_net_swapping",
+    "OptDesign": "rapidwright_execute_opt_design_strategy",
     "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
 }
 

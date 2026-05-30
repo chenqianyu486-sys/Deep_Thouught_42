@@ -120,7 +120,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
 # directing the LLM to use alternatives (dashboard data, batch params).
 PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "rapidwright_search_cells": 3,
-    "vivado_run_tcl": 5,
+    "vivado_run_tcl": 2,
     "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
 }
 
@@ -187,6 +187,17 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_place_design", "args": {}},
         {"tool": "vivado_route_design", "args": {}},
     ],
+    # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
+    # opt_design is called by the Vivado MCP tool vivado_opt_design, triggered
+    # via the RapidWright wrapper skill rapidwright_execute_opt_design_strategy.
+    "rapidwright_execute_opt_design_strategy": [
+        {"tool": "vivado_opt_design",
+         "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
+        {"tool": "vivado_place_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
 }
 
 
@@ -238,6 +249,7 @@ _TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
     "rapidwright_optimize_fanout_batch": 300.0,
     "rapidwright_write_checkpoint": 300.0,
     "rapidwright_compare_design_structure": 120.0,
+    "vivado_opt_design": 600.0,
 }
 
 _DEFAULT_TOOL_TIMEOUT: float = 300.0

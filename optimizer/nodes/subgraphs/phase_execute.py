@@ -22,7 +22,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -45,6 +45,7 @@ SIDE_EFFECT_TOOLS = frozenset({
     "vivado_route_design",
     "vivado_phys_opt_design",
     "vivado_physopt_and_route",
+    "vivado_opt_design",
     "vivado_create_and_apply_pblock",
     "rapidwright_execute_pblock_strategy",
     "rapidwright_execute_fanout_strategy",
@@ -57,7 +58,15 @@ SIDE_EFFECT_TOOLS = frozenset({
     "rapidwright_optimize_cell_placement",
     "rapidwright_optimize_lut_input_cone",
 })
-NO_PROGRESS_LIMIT = 12
+# No-progress detection threshold. After this many consecutive rounds
+# without any side-effect tool call, exit the EXECUTE phase early.
+#
+# Coordinated with _TOOL_TIMEOUT_DEFAULTS:
+#   - Longest read-only tool: vivado_run_tcl (120s base × design_size_factor)
+#   - 6 rounds × ~120s worst-case tool wait = ~720s before exit
+#   - Execution tools (place_design=1800s, route_design=1800s) always reset counter
+#   - LLM round-trip latency ~5-15s → ~30-90s overhead per 6-round window
+NO_PROGRESS_LIMIT = 6
 
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -156,6 +165,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         if message.tool_calls:
             round_had_side_effect = False
             force_exit = False  # set by inner loop to break outer while
+            _pending_tool_count = len([tc for tc in message.tool_calls if tc.function])  # Track pending tool calls
             for tc in message.tool_calls:
                 if not tc.function:
                     continue
@@ -214,12 +224,17 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             result += ("Use cell_types parameter to batch multiple types in one call, "
                                        "or get_design_info for type overview.")
                         elif tool_name == "vivado_run_tcl":
-                            result += ("Use dedicated tools (vivado_get_cached_high_fanout_nets, "
-                                       "vivado_report_timing_summary) instead of raw Tcl.")
+                            result += (
+                                "Dashboard already contains fresh timing data from init_analysis. "
+                                "Use vivado_report_timing_summary or Dashboard values directly "
+                                "instead of raw Tcl. For execution commands (place_design, "
+                                "route_design, phys_opt_design), use the dedicated MCP tools."
+                            )
                         if deps.compat is not None:
                             deps.compat.add_message("tool", result, {
                                 "tool_call_id": tc.id, "name": tool_name,
                             })
+                        _pending_tool_count -= 1  # Rate-limited tools count as completed
                         continue
 
                 tool_start = time.time()
@@ -237,6 +252,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
+                _pending_tool_count -= 1  # This tool call is no longer pending
 
                 summary = summarize_tool_result(
                     tool_name, result,
@@ -404,21 +420,26 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             if force_exit:
                 break
 
-            # No-progress detection: exit if LLM only calls read-only tools
+            # No-progress detection: exit if LLM only calls read-only tools.
+            # Only count a round when ALL tools have completed (none pending).
+            # This prevents penalizing rounds where slow tools (place_design/route_design)
+            # are still executing and the LLM hasn't had a chance to call execution tools yet.
             if round_had_side_effect:
                 no_progress_count = 0
-            else:
+            elif _pending_tool_count <= 0:
                 no_progress_count += 1
-                if no_progress_count >= NO_PROGRESS_LIMIT:
-                    logger.warning(
-                        f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
-                        f"without side-effect tools)"
-                    )
-                    record_flow_signal(
-                        state, "SYSTEM_EXIT", "no_progress",
-                        phase="EXECUTE_STRATEGY",
-                    )
-                    break
+            # else: tools still pending — do NOT count this round toward no-progress
+
+            if no_progress_count >= NO_PROGRESS_LIMIT:
+                logger.warning(
+                    f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
+                    f"without side-effect tools)"
+                )
+                record_flow_signal(
+                    state, "SYSTEM_EXIT", "no_progress",
+                    phase="EXECUTE_STRATEGY",
+                )
+                break
 
             continue
 

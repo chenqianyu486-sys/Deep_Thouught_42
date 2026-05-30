@@ -51,7 +51,8 @@ fpl26_optimization_contest/
 │   ├── telemetry.py / errors.py / idempotency.py / tracing.py
 │   ├── descriptor.py / validate_descriptors.py
 │   ├── strategy_plan.py
-│   └── 14 个 Skill 实现文件 + 测试 + JSON 描述符
+│   ├── opt_design_strategy.py       # opt_design RapidWright skill wrapper
+│   └── 15 个 Skill 实现文件 + 测试 + JSON 描述符
 ├── docs/                         # GitHub Pages 竞赛提交文档
 └── (various config files)
 ```
@@ -149,6 +150,10 @@ llm_tool_loop_node (调度器)
 | 24 | **设计状态标志同步** | `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志与 Vivado 实际状态，检查 `[ERROR]`、`ERROR:` 和 `no current design` 三种错误模式 |
 | 25 | **PBLOCK 单元过滤（CLOCK/IO 排除）** | `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制 |
 | 26 | **显式管线数据流** | `init_analysis` Phase B 管线返回 `dict` 而非使用 `nonlocal` 变量。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get()` 读取 `cell_names_for_spread`，消除隐式数据流 |
+| 27 | **EXECUTE no-progress threshold 12→6** | `NO_PROGRESS_LIMIT` 减半，增加 `_pending_tool_count` 守卫（排除正在等待工具调用返回的轮次），与 `_TOOL_TIMEOUT_DEFAULTS` 联动 |
+| 28 | **vivado_run_tcl EXECUTE phase limit 5→2** | Phase rate limit 收紧，RATE LIMITED 消息引导 LLM 使用 Dashboard 数据和专用工具 |
+| 29 | **FF utilization <2% RegisterRetiming 警告** | Dashboard 和 strategy_catalog 中为 RegisterRetiming/SmartRetiming 添加 `ff_warning`，LLM 保留最终决策权 |
+| 30 | **Pre-placement logic optimization (opt_design)** | 新增第 11 个策略，通过 RapidWright skill 包装器 + `SKILL_CHAIN_ACTIONS` 自动链式执行。`validate_dcps.py --skip-structural` 允许跳过 Phase 1 结构对比 |
 
 ## 3. 核心数据流
 
@@ -328,7 +333,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 
 ### 3.5 Skill 机制
 
-**已注册 Skills**（13 个分析型 + 1 个测试用）：
+**已注册 Skills**（14 个分析型 + 1 个测试用）：
 
 | Skill | 类型 | 说明 |
 |-------|------|------|
@@ -349,8 +354,15 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 | `optimization.execute_net_swapping@1.0.0` | non-idempotent | Net Swapping 执行 |
 | `optimization.lut_cascade_flattening@1.0.0` | non-idempotent | LUT 串联展平 |
 | `optimization.critical_path_cell_replication_strategy@1.0.0` | non-idempotent | 关键路径 Cell 复制 |
+| `optimization.opt_design@1.0.0` | non-idempotent | Logic-level optimization (opt_design) with auto-chain: place → route → timing |
 
 > 完整调用链、超时映射、推荐机制见 [architecture.md §4.1](architecture.md)。
+
+**SKILL_CHAIN_ACTIONS 自动链式执行**：`strategy_library.py` 中的策略可通过 `SKILL_CHAIN_ACTIONS` 映射定义自动串联的工具序列。新增 opt_design 链式条目：
+```python
+# opt_design chain: skill → opt_design → place → route → timing → critical_path_cells
+"rapidwright_opt_design_strategy": [...]
+```
 
 ### 3.6 策略库清单（strategy_library.py）
 
@@ -366,6 +378,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 | RegisterRetiming | 深组合逻辑链 (>2 LUTs) | `rapidwright_analyze_register_retiming` |
 | NetSwap | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
 | PhysOpt+RegisterRetiming | Logic-depth limited (>70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | `vivado_physopt_and_route` (atomic PhysOpt+route, then retiming) |
+| OptDesign | Logic-depth limited (>70% logic delay), PhysOpt ineffective | `rapidwright_opt_design_strategy` |
 
 ### 3.7 Tool 描述增强
 

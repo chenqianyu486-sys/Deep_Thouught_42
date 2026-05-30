@@ -238,6 +238,10 @@ _EMPTY_RESULT_PATTERNS = (
     "no high fanout",
     '"optimized_count": 0',
     '"cascades_found": 0',
+    # ── opt_design empty-result patterns ──────────────────────────
+    '"status": "no_optimization"',       # opt_design JSON: explicit no-op status
+    "no optimization performed",         # Vivado opt_design partial match
+    "0 cells optimized",                 # Alternative Vivado wording
 )
 
 

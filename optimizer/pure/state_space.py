@@ -378,6 +378,11 @@ def format_state_space_for_llm(
                     hint = "PBLOCK first, then PhysOpt or Fanout"
                 lines.append(f"  design_delay_profile: {profile}  # avg_logic_delay_pct={avg_logic:.2f}")
                 lines.append(f"  strategy_hint: {hint}")
+                # FF utilization warning for RegisterRetiming (if applicable)
+                if gs.ff_utilization is not None and gs.ff_utilization < 0.02:
+                    lines.append(f"  ff_warning: FF utilization is only {gs.ff_utilization:.2%} — "
+                                 f"register retiming strategies (RegisterRetiming, SmartRetiming) "
+                                 f"have very few pipeline targets and are UNLIKELY to help")
         lines.append("")
 
     # ── Module 2: Timing Path Clusters ─────────────────────────────
