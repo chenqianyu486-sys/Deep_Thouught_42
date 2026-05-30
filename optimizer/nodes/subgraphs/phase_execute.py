@@ -14,7 +14,7 @@ import time
 
 from pathlib import Path
 
-from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal
+from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal, record_strategy_failure
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
@@ -22,7 +22,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, EXECUTE_STRATEGY_TOOL_MAP
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, EXECUTE_STRATEGY_TOOL_MAP, RAPIDWRIGHT_PRECHECK_ENABLED, RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -99,6 +99,28 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     if len(state.strategy.phase_history) > 100:
         state.strategy.phase_history = state.strategy.phase_history[-100:]
     state.strategy.current_phase = "EXECUTE_STRATEGY"
+
+    # Save iteration checkpoint for multi-granularity rollback.
+    # Keeps last 3; old ones are cleaned up.
+    if state.control.run_dir is not None and deps.vivado_session is not None:
+        try:
+            iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
+            await call_tool_fn(
+                "vivado_write_checkpoint", {"dcp_path": str(iter_ckpt.resolve()), "force": True},
+                deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
+            )
+            # Track in state (cap at 3 entries)
+            state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
+            while len(state.control.iteration_checkpoints) > 3:
+                old_it, old_path = state.control.iteration_checkpoints.pop(0)
+                try:
+                    old_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            logger.info(f"[CHECKPOINT] Saved iteration {state.iteration.current} start DCP")
+        except Exception as e:
+            logger.warning(f"[CHECKPOINT] Failed to save iteration checkpoint: {e}")
 
     while True:
         tool_round += 1
@@ -375,10 +397,49 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
                 await _try_save_best_checkpoint(state, deps)
 
-                # Chain actions for skills — gated by post-eval verdict.
-                # When a heavy-chain skill reports UNCHANGED, the skill produced no
-                # netlist change, so running place_design+route_design (~180s) is
-                # wasteful. Run a lightweight validation instead.
+                # ── Level 1: RapidWright directional pre-check ──────────────
+                # Before paying the cost of the Vivado P&R chain (~900s), use
+                # RapidWright's timing estimator (~2.5s) to directionally check
+                # whether the skill's placement change is likely harmful.
+                #
+                # RapidWright is reliable for *directional* comparison (which of
+                # two placements is better) but NOT for absolute WNS values.
+                # See docs/plans/p-r-rollback-abundant-puffin.md for details.
+                precheck_verdict = None
+                if (RAPIDWRIGHT_PRECHECK_ENABLED
+                        and tool_name in SKILL_CHAIN_ACTIONS
+                        and tool_name != "rapidwright_execute_pblock_strategy"  # analysis-only
+                        and deps.rapidwright_session
+                        and state.timing.latest_wns is not None):
+                    precheck_verdict = await _rapidwright_direction_check(state, deps)
+                    if precheck_verdict == "REGRESS":
+                        logger.warning(yellow(
+                            f"[EXECUTE] Pre-check REGRESS for {tool_name}: "
+                            f"skipping Vivado P&R chain (~900s saved)"
+                        ))
+                        state.control.done_reason = "precheck_direction_regress"
+                        record_flow_signal(
+                            state, "SYSTEM_EXIT", "precheck_direction_regress",
+                            phase="EXECUTE_STRATEGY",
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[PRECHECK] {tool_name}: RapidWright timing estimate "
+                                f"shows directional WNS regression. Skipping Vivado "
+                                f"place+route chain. Strategy marked as ineffective."
+                            )
+                        # Record strategy failure so select_model won't retry it
+                        record_strategy_failure(
+                            state, state.strategy.current_strategy,
+                            "strategy_ineffective", tool=tool_name,
+                            detail="precheck_direction_regress"
+                        )
+                        force_exit = True
+                        break
+
+                # ── Chain actions for skills ────────────────────────────
+                # Existing logic: gated by post-eval verdict.
+                # HEAVY_CHAIN_SKILLS can skip expensive chains when UNCHANGED.
                 if tool_name in SKILL_CHAIN_ACTIONS:
                     if (post_eval_verdict == "UNCHANGED"
                             and tool_name in HEAVY_CHAIN_SKILLS
@@ -734,6 +795,83 @@ def _track_cost(state: OptimizerState, response) -> None:
         logger.debug(f"[EXECUTE] Cost tracking failed: {e}")
 
 
+async def _rapidwright_direction_check(state: OptimizerState, deps: NodeDeps) -> str:
+    """Level 1 pre-check: RapidWright timing estimate for directional regression.
+
+    Called AFTER a RapidWright skill has modified the in-memory design
+    but BEFORE executing the expensive Vivado P&R chain (~900s).
+
+    Uses RapidWright's built-in TimingGraph (~2.5s, ~2% error on same-SLR
+    paths) to estimate whether the skill's placement change directionally
+    improved or regressed WNS.
+
+    ⚠️ Limitations for UltraScale+ multi-SLR designs (>200K cells):
+      - RapidWright CANNOT predict route-congestion-induced timing
+      - Absolute WNS values are unreliable (error can reach 0.5ns+ on
+        cross-SLR / long-distance paths)
+      - Only *directional* comparison is trustworthy
+    See plan at docs/plans/p-r-rollback-abundant-puffin.md for details.
+
+    Returns:
+        "IMPROVED"  — RW estimate shows WNS improvement → proceed to chain
+        "REGRESS"   — RW estimate shows significant directional regression
+                       → skip chain, let EVALUATE switch strategy
+        "UNCERTAIN" — cannot determine (no baseline, tool error, etc.)
+                       → fall through to existing chain logic (conservative)
+    """
+    baseline = state.timing.latest_wns
+    if baseline is None:
+        logger.debug("[PRECHECK] No WNS baseline available, skipping pre-check")
+        return "UNCERTAIN"
+
+    try:
+        timing_result = await call_tool_fn(
+            "rapidwright_report_timing", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        # RapidWright report_timing returns JSON (key "wns_ns"), NOT a
+        # Vivado-style text timing summary. Handle both formats.
+        est_wns = None
+        try:
+            data = json.loads(timing_result)
+            if isinstance(data, dict) and "wns_ns" in data:
+                est_wns = float(data["wns_ns"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        if est_wns is None:
+            # Fallback: try parsing as Vivado-style text report
+            timing = parse_timing_summary(timing_result)
+            est_wns = timing.get("wns")
+        if est_wns is None:
+            logger.warning("[PRECHECK] Could not parse RapidWright timing result")
+            return "UNCERTAIN"
+
+        delta = est_wns - baseline
+        logger.info(
+            f"[PRECHECK] RapidWright direction check: "
+            f"baseline={baseline:.3f}ns, est={est_wns:.3f}ns, "
+            f"delta={delta:+.3f}ns"
+        )
+
+        if delta > 0.001:
+            logger.info(green(f"[PRECHECK] Direction looks IMPROVED (delta={delta:+.3f})"))
+            return "IMPROVED"
+        elif delta < -RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD:
+            logger.warning(yellow(
+                f"[PRECHECK] Direction shows REGRESS (delta={delta:+.3f}ns, "
+                f"threshold={RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD:.3f})"
+            ))
+            return "REGRESS"
+        else:
+            logger.info(f"[PRECHECK] Direction UNCERTAIN (delta={delta:+.3f}, within dead band)")
+            return "UNCERTAIN"
+
+    except Exception as e:
+        logger.warning(f"[PRECHECK] RapidWright direction check failed: {e}")
+        return "UNCERTAIN"
+
+
 def _check_wns_target_met(state: OptimizerState) -> bool:
     return (
         state.timing.latest_wns is not None
@@ -894,6 +1032,10 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
     if not chain:
         return
 
+    # Capture pre-chain WNS baseline (before Vivado opens the skill's DCP).
+    # Used by the Level 2 place-only check to compare against post-place timing.
+    chain_baseline_wns = state.timing.latest_wns
+
     # Save pre-chain state for rollback on failure
     pre_chain_path = None
     try:
@@ -952,6 +1094,52 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             # Mark critical paths stale after placement-affecting chain tools
             if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):
                 state.timing.critical_paths_stale = True
+
+            # ── Level 2: Vivado Place-Only timing check ──────────────
+            # After a real place_design (not unplace), evaluate place-only
+            # WNS via a timing report. If it shows regression vs the pre-skill
+            # baseline, skip the remaining route_design step(s) — place-level
+            # regression is unlikely to be fixed by routing.
+            is_unplace = (target_tool == "vivado_place_design"
+                          and args.get("directive", "").lower() == "unplace")
+            if (PLACE_ONLY_CHECK_ENABLED
+                    and target_tool == "vivado_place_design"
+                    and not is_unplace
+                    and tool_name in PLACE_ONLY_CHECK_SKILLS
+                    and deps.vivado_session
+                    and chain_baseline_wns is not None):
+                try:
+                    po_result = await call_tool_fn(
+                        "vivado_report_timing_summary", {},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    po_timing = parse_timing_summary(po_result)
+                    po_wns = po_timing.get("wns")
+                    if po_wns is not None:
+                        po_delta = po_wns - chain_baseline_wns
+                        logger.info(
+                            f"[PLACE-ONLY] {tool_name}: place-only WNS={po_wns:.3f}ns "
+                            f"(delta={po_delta:+.3f}ns vs baseline={chain_baseline_wns:.3f}ns)"
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[PLACE-ONLY] {tool_name}: post-place WNS={po_wns:.3f}ns "
+                                f"(delta={po_delta:+.3f}ns vs pre-skill). "
+                                f"Route step is {'proceeding' if po_delta >= -PLACE_ONLY_REGRESS_THRESHOLD else 'SKIPPED (regression)'}."
+                            )
+                        if po_delta < -PLACE_ONLY_REGRESS_THRESHOLD:
+                            logger.warning(yellow(
+                                f"[PLACE-ONLY] Skipping route for {tool_name}: place-only "
+                                f"WNS regressed {po_delta:+.3f}ns below baseline "
+                                f"(threshold={PLACE_ONLY_REGRESS_THRESHOLD:.3f})"
+                            ))
+                            # Skip remaining chain steps (typically route_design)
+                            # Keep the placed design — no rollback needed.
+                            break
+                except Exception as e:
+                    logger.warning(f"[PLACE-ONLY] Timing check failed: {e}")
+                    # Fall through: continue with route (conservative)
 
             await _try_save_best_checkpoint(state, deps)
             state.iteration.tools_used.append(target_tool)

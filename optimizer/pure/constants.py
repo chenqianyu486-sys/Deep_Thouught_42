@@ -114,6 +114,51 @@ GLOBAL_NO_IMPROVEMENT_LIMIT = 2    # Global no-improvement limit (reduced from 3
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
 
+# ── RapidWright directional pre-check ──────────────────────────────
+# Level 1 pre-filter: before running the expensive Vivado P&R chain,
+# use RapidWright's timing estimation (~2.5s, ~2% error) to check
+# whether the skill's modification directionally improved WNS.
+#
+# RapidWright timing is reliable for *directional* comparison
+# (which of two placements is better), but NOT for absolute WNS
+# values — especially on UltraScale+ multi-SLR designs where route
+# congestion dominates and RW can't predict it without actual routing.
+#
+# See the plan at docs/plans/p-r-rollback-abundant-puffin.md for
+# the three-level funnel design (RW pre-check → Place-Only → Full P&R).
+RAPIDWRIGHT_PRECHECK_ENABLED: bool = True
+# Directional regression threshold: when post-skill RapidWright WNS
+# estimate falls this far below the pre-skill Vivado WNS baseline,
+# treat the change as likely harmful and skip the P&R chain.
+# Not an absolute accuracy claim — only used for direction detection.
+RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD: float = 0.050
+
+
+# ── Vivado Place-Only intermediate check (Level 2) ─────────────────
+# After a skill passes the RapidWright directional pre-check (Level 1),
+# the skill's design DCP is loaded into Vivado and place_design runs.
+# At this point we can get a *placement-level* timing estimate via
+# vivado_report_timing_summary — more reliable than RW timing because
+# Vivado knows the actual placement, though still without routing.
+#
+# Skills suitable for place-only check are those whose auto-chain
+# includes a vivado_place_design step (pblock, fanout, opt_design).
+# Skills without place_design (physopt, register_retiming) skip this.
+PLACE_ONLY_CHECK_ENABLED: bool = True
+
+# Threshold for place-only WNS regression. When place-only WNS falls
+# this far below the pre-skill baseline, skip the remaining route steps.
+# Higher than RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD because place-level
+# timing has less uncertainty than RW estimation.
+PLACE_ONLY_REGRESS_THRESHOLD: float = 0.030
+
+# Skills that trigger place-only check in their chain.
+PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_execute_opt_design_strategy",
+    "rapidwright_execute_pblock_strategy",
+})
+
 # Context thresholds (derived from model config, but we use safe defaults)
 SMALL_OUTPUT_THRESHOLD = 3000      # Bypass summarization below this
 TOOL_RESULT_TRUNCATE = 30000       # Truncation limit for tool results

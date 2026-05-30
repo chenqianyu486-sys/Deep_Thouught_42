@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -289,6 +290,10 @@ class ControlState:
     best_checkpoint_path: Optional[Path] = None  # DCP saved when best_wns last improved, for rollback
     current_dcp_path: Optional[Path] = None  # DCP path currently loaded in Vivado
     post_rollback_analyze: bool = False  # set by EVALUATE when rollback detected, used by next ANALYZE
+    # Iteration-level checkpoints for multi-granularity rollback.
+    # Saved before each EXECUTE phase; capped at 3 entries.
+    # Each entry: (iteration_number, dcp_path).
+    iteration_checkpoints: list = field(default_factory=list)  # list of tuple[int, Path]
 
 
 @dataclass

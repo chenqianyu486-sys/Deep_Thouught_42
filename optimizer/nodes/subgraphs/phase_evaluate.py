@@ -65,6 +65,29 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.strategy.phase_history = state.strategy.phase_history[-100:]
     state.strategy.current_phase = "EVALUATE"
 
+    # ── Handle pre-check regression (Vivado state unchanged) ──
+    # Level 1 pre-check in EXECUTE detected directional WNS regression
+    # and skipped the entire Vivado P&R chain. No rollback is needed
+    # because Vivado was never touched — just auto-switch strategy.
+    if state.control.done_reason == "precheck_direction_regress":
+        logger.info(
+            f"[EVALUATE] Pre-check rejected strategy '{state.strategy.current_strategy}' — "
+            f"auto-switching (design state unchanged, no rollback needed)"
+        )
+        state.strategy.current_phase = ""
+        state.strategy.current_strategy = ""
+        state.control.done_reason = ""
+        record_flow_signal(state, "SWITCH_STRATEGY", "precheck_regress", phase="EVALUATE")
+        if deps.compat is not None:
+            deps.compat.add_message("user",
+                "[SYSTEM — Pre-check Regression]\n"
+                "The previous strategy was rejected by the RapidWright timing pre-check — "
+                "the modification appeared to directionally regress WNS. "
+                "No Vivado P&R was run, so the design state is unchanged. "
+                "Continuing analysis from the current best state."
+            )
+        return LoopPhase.ANALYZE
+
     # ── Auto-detect WNS regression and request rollback ──
     if detect_rollback_needed(state):
         logger.warning(yellow(
