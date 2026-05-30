@@ -20,6 +20,7 @@ from optimizer.pure.timing import (
     parse_hold_timing,
     parse_resource_utilization,
 )
+from skills.pblock_strategy import compute_adaptive_resource_multiplier
 from optimizer.pure.model_select import (
     classify_task,
     compute_model_scores,
@@ -394,3 +395,58 @@ class TestBuildIterationNarrative:
         )
         assert result["outcome"] == "unchanged"
         assert abs(result["wns_delta"]) < 0.001
+
+
+class TestAdaptiveResourceMultiplier:
+    """Test compute_adaptive_resource_multiplier function."""
+
+    def test_small_design(self):
+        """Small design (<10% device) gets higher multiplier."""
+        # 31K LUTs / 394K = 7.9% -> should use 1.8x
+        result = compute_adaptive_resource_multiplier(31000, 2000)
+        assert result == 1.8
+
+    def test_medium_design(self):
+        """Medium design (10-30% device) uses default multiplier."""
+        # 73K LUTs / 394K = 18.5% -> should use 1.5x (default)
+        result = compute_adaptive_resource_multiplier(73000, 96000)
+        assert result == 1.5
+
+    def test_large_design(self):
+        """Large design (>30% device) uses lower multiplier."""
+        # 150K LUTs / 394K = 38.1% -> should use 1.2x
+        result = compute_adaptive_resource_multiplier(150000, 200000)
+        assert result == 1.2
+
+    def test_custom_base_multiplier_small(self):
+        """Custom base multiplier with small design."""
+        # Small design with custom base -> should use max(2.0, 1.8) = 2.0
+        result = compute_adaptive_resource_multiplier(31000, 2000, base_multiplier=2.0)
+        assert result == 2.0
+
+    def test_custom_base_multiplier_medium(self):
+        """Custom base multiplier with medium design."""
+        # Medium design with custom base -> should use 2.0
+        result = compute_adaptive_resource_multiplier(73000, 96000, base_multiplier=2.0)
+        assert result == 2.0
+
+    def test_custom_base_multiplier_large(self):
+        """Custom base multiplier with large design."""
+        # Large design with custom base -> should use min(2.0, 1.2) = 1.2
+        result = compute_adaptive_resource_multiplier(150000, 200000, base_multiplier=2.0)
+        assert result == 1.2
+
+    def test_zero_resources(self):
+        """Zero resources returns small design multiplier."""
+        result = compute_adaptive_resource_multiplier(0, 0)
+        assert result == 1.8
+
+    def test_threshold_10_percent(self):
+        """Exactly 10% threshold returns medium multiplier."""
+        result = compute_adaptive_resource_multiplier(39400, 78800)  # 10%
+        assert result == 1.5
+
+    def test_threshold_30_percent(self):
+        """Exactly 30% threshold returns large multiplier."""
+        result = compute_adaptive_resource_multiplier(118200, 236400)  # 30%
+        assert result == 1.2
