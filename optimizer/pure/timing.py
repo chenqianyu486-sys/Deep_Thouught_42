@@ -319,28 +319,13 @@ def parse_hold_timing(timing_text: str) -> dict:
         dict with keys: hold_wns, hold_tns, hold_failing (None if parse fails).
     """
     result = {"hold_wns": None, "hold_tns": None, "hold_failing": None}
-    lines = timing_text.split('\n')
-
-    in_hold = False
-    for line in lines:
-        s = line.strip()
-        if 'Hold' in s and ('WNS' in s or 'WHS' in s):
-            in_hold = True
-            continue
-        if in_hold and s and not s.startswith('---'):
-            parts = s.split()
-            try:
-                if len(parts) >= 4:
-                    result["hold_wns"] = float(parts[0])
-                    result["hold_tns"] = float(parts[1])
-                    result["hold_failing"] = int(parts[2])
-                elif len(parts) >= 2:
-                    result["hold_wns"] = float(parts[0])
-                    result["hold_tns"] = float(parts[1])
-                break
-            except (ValueError, IndexError):
-                continue
-        if in_hold and 'Setup' in s:
-            break
-
+    m = re.search(
+        r"Hold\s*:\s*(\d+)\s+Failing.*?Worst\s+Slack\s+(-?\d+\.?\d*)ns.*?Total\s+Violation\s+(-?\d+\.?\d*)ns",
+        timing_text,
+        re.DOTALL,
+    )
+    if m:
+        result["hold_failing"] = int(m.group(1))
+        result["hold_wns"] = float(m.group(2))
+        result["hold_tns"] = float(m.group(3))
     return result

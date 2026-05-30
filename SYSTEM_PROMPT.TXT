@@ -117,5 +117,16 @@ safety_constraints:
   - "Register retiming over global phys_opt_design -retime (causes functional errors in NN designs)."
   - "PhysOpt+RegisterRetiming: Use vivado_physopt_and_route (NOT standalone phys_opt_design). The combined tool auto-routes after PhysOpt, ensuring retiming analysis sees a routed design."
 
+
+rapid_timing_feedback:
+  description: "RapidWright provides a fast approximate timing estimate (~2.5s) vs Vivado (~14s) with ~2% error."
+  tool: "rapidwright_report_timing"
+  usage:
+    - "Use rapidwright_report_timing during EXECUTE phase to QUICKLY pre-screen strategy effectiveness BEFORE committing to a full Vivado route_design + report_timing_summary (which costs ~15-20s)."
+    - "CRITICAL: If rapidwright_report_timing shows WNS regressed by >0.05ns, IMMEDIATELY try an alternative strategy — do not waste time on Vivado routing."
+    - "After rapidwright_report_timing shows improvement, THEN proceed with the full Vivado route_design + report_timing_summary for authoritative measurement."
+    - "In one EXECUTE phase, you can call rapidwright_report_timing MULTIPLE TIMES to rapidly iterate through strategy variants, then route only the best candidate."
+  sequence: "quick_timing → if improved: route_design → report_timing_summary → EXEC_DONE | if regressed: switch strategy"
+
 final_output:
   save_to: OUTPUT_DCP_PATH

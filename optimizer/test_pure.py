@@ -129,42 +129,36 @@ class TestIsValidWns:
 
 class TestParseHoldTiming:
     def test_hold_wns_present(self):
-        report = """
-    Setup path
-    WNS(ns)    TNS(ns)    Failing Endpoints
-    -1.000    -5.000    10
-
-    Hold path WNS(ns)    THS(ns)    Failing Endpoints
-     0.050      0.000      0
-    """
+        report = "Hold  :0 Failing Endpoints,  Worst Slack  0.050ns,  Total Violation 0.000ns"
         result = parse_hold_timing(report)
         assert result["hold_wns"] == 0.05
         assert result["hold_tns"] == 0.0
 
     def test_hold_violated(self):
-        report = """
-    Hold path WNS(ns)    THS(ns)    Failing Endpoints
-    -0.123     -5.678    12
-    """
+        report = "Hold  :12 Failing Endpoints,  Worst Slack -0.123ns,  Total Violation -5.678ns"
         result = parse_hold_timing(report)
         assert result["hold_wns"] == -0.123
         assert result["hold_tns"] == -5.678
+        assert result["hold_failing"] == 12
 
-    def test_hold_negative_value_parsed(self):
-        """Negative hold WNS should be parsed correctly (not skipped by separator check)."""
-        report = """
-    --- Hold path ---
-    Hold path WNS(ns)    THS(ns)    Failing Endpoints
-    -0.999     -10.000    5
-    """
+    def test_hold_no_violation(self):
+        report = "Hold  :0 Failing Endpoints,  Worst Slack  0.092ns,  Total Violation 0.000ns"
         result = parse_hold_timing(report)
-        assert result["hold_wns"] == -0.999
-        assert result["hold_tns"] == -10.0
+        assert result["hold_wns"] == 0.092
+        assert result["hold_tns"] == 0.0
+        assert result["hold_failing"] == 0
 
     def test_no_hold_section(self):
-        result = parse_hold_timing("Setup paths all met")
+        result = parse_hold_timing("Setup:0 Failing, Worst Slack 0.010ns")
         assert result["hold_wns"] is None
         assert result["hold_tns"] is None
+
+    def test_hold_in_longer_report(self):
+        report = "clock summary\nSetup:1 Failing\nHold  :0 Failing Endpoints,  Worst Slack  0.092ns,  Total Violation 0.000ns"
+        result = parse_hold_timing(report)
+        assert result["hold_wns"] == 0.092
+        assert result["hold_tns"] == 0.0
+        assert result["hold_failing"] == 0
 
 
 class TestParseResourceUtilization:
