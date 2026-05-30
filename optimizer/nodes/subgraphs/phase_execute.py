@@ -22,7 +22,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, EXECUTE_STRATEGY_TOOL_MAP
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -564,6 +564,22 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
 
     # Inject merged handoff + dashboard as last user message
     inject_merged_dashboard(api_messages, state, LoopPhase.EXECUTE)
+
+    # Strategy enforcement: constrain LLM to execute only the selected strategy.
+    # Prevents drift where LLM switches strategies mid-execution (e.g., selecting
+    # PhysOpt in SELECT_STRATEGY but running PBLOCK+Fanout in EXECUTE).
+    strategy = state.strategy.current_strategy
+    if strategy:
+        tool = EXECUTE_STRATEGY_TOOL_MAP.get(strategy, "")
+        if tool:
+            constraint = (
+                f"[EXECUTE CONSTRAINT] Selected strategy: {strategy}. "
+                f"You MUST call `{tool}` now. Do NOT call any other strategy tool. "
+                f"Do NOT call analysis tools (vivado_report_timing_summary, "
+                f"vivado_extract_critical_path_cells, vivado_run_tcl). "
+                f"After `{tool}` completes, call report_step_state(EXEC_DONE)."
+            )
+            api_messages.append({"role": "user", "content": constraint})
 
     model = state.model.current_model
     state.model.llm_call_count += 1

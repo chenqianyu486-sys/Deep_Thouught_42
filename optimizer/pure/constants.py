@@ -87,6 +87,25 @@ SKILL_TOOL_MAP: dict[str, str] = {
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
 
+# ── EXECUTE phase strategy-to-tool mapping ─────────────────────────
+# Maps strategy names (as selected by LLM in SELECT_STRATEGY) to the
+# corresponding MCP tool to call in the EXECUTE phase.
+# Used by phase_execute.py (runtime constraint injection) and
+# prepare_context.py (LLM prompt generation).  Keep in sync.
+EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
+    "PBLOCK": "rapidwright_execute_pblock_strategy",
+    "PhysOpt": "vivado_physopt_and_route",
+    "Fanout": "rapidwright_execute_fanout_strategy",
+    "LUTCascade": "rapidwright_flatten_lut_cascade",
+    "PinSwap": "rapidwright_optimize_pin_swapping",
+    "CellReplication": "rapidwright_replicate_critical_cells",
+    "RegisterRetiming": "rapidwright_execute_register_retiming",
+    "CongestionSpreading": "rapidwright_execute_congestion_spreading",
+    "NetSwap": "rapidwright_execute_net_swapping",
+    "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
+}
+
+
 # ── Threshold constants ──────────────────────────────────────────
 
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
@@ -176,7 +195,11 @@ def build_llm_extra_body(
 # lightweight validation (place_design without pblock). This prevents
 # wasting ~3 min on a strategy that didn't modify the netlist.
 HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset({
-    "rapidwright_execute_pblock_strategy",
+    # NOTE: rapidwright_execute_pblock_strategy is intentionally excluded.
+    # The skill is analysis-only (returns pblock_ranges); the actual
+    # netlist mutation happens via the SKILL_CHAIN_ACTIONS chain
+    # (unplace → create_pblock → place → route). The chain must always
+    # run regardless of post-eval verdict.
     "rapidwright_execute_fanout_strategy",
 })
 

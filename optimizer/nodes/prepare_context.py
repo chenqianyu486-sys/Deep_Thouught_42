@@ -14,12 +14,18 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.compress import compress_context
+from ..pure.constants import EXECUTE_STRATEGY_TOOL_MAP
 
 logger = logging.getLogger(__name__)
 
+# Build strategy-to-tool mapping text from shared constant (single source of truth).
+_STRATEGY_MAPPING_LINES = "\n".join(
+    f"      {k} → {v}" for k, v in sorted(EXECUTE_STRATEGY_TOOL_MAP.items())
+)
+
 # FORMAT_GUARD: enforced on first iteration so the LLM reliably calls report_step_state.
 # Matches the old optimize() flow (dcp_optimizer.py:5233-5255).
-FORMAT_GUARD = """CRITICAL OUTPUT FORMAT - MUST FOLLOW:
+FORMAT_GUARD = f"""CRITICAL OUTPUT FORMAT - MUST FOLLOW:
 Every response MUST call the `report_step_state` tool (in your structured function/tool
 calls, NOT in the text body). This tool carries process control directives:
 step_id, result_status, flow_control.
@@ -52,9 +58,15 @@ observed signals) as free-form chain-of-thought reasoning.
 Process control goes in the report_step_state tool call, analysis goes in text.
 
 EXECUTE PHASE PROTOCOL:
-  - Execute the selected strategy, then call report_step_state(EXEC_DONE).
-  - Do NOT re-analyze timing data or call analysis tools in EXECUTE.
-  - Trust the auto-evaluation (WNS delta) provided by the system.
+  - Your ONLY job in EXECUTE is to call the execution tool for the selected strategy.
+  - Strategy-to-tool mapping:
+{_STRATEGY_MAPPING_LINES}
+  - Call the execution tool IMMEDIATELY on the first turn. Do NOT call
+    analysis tools (vivado_report_timing_summary, vivado_extract_critical_path_cells,
+    vivado_run_tcl, rapidwright_analyze_*) before executing.
+  - Do NOT switch to a different strategy mid-execution. If the tool returns
+    UNCHANGED or fails, call report_step_state(EXEC_DONE) and let EVALUATE decide.
+  - The system auto-evaluates WNS after execution. Trust the auto-evaluation.
 
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text

@@ -154,6 +154,10 @@ llm_tool_loop_node (调度器)
 | 28 | **vivado_run_tcl EXECUTE phase limit 5→2** | Phase rate limit 收紧，RATE LIMITED 消息引导 LLM 使用 Dashboard 数据和专用工具 |
 | 29 | **FF utilization <2% RegisterRetiming 警告** | Dashboard 和 strategy_catalog 中为 RegisterRetiming/SmartRetiming 添加 `ff_warning`，LLM 保留最终决策权 |
 | 30 | **Pre-placement logic optimization (opt_design)** | 新增第 11 个策略，通过 RapidWright skill 包装器 + `SKILL_CHAIN_ACTIONS` 自动链式执行。`validate_dcps.py --skip-structural` 允许跳过 Phase 1 结构对比 |
+| 31 | **初始 checkpoint 保存** | `init_analysis` 分析完成后无条件写 `best_checkpoint.dcp`，确保 rollback 始终可用。此前 checkpoint 仅 WNS 改善时保存，首次迭代退化时 rollback 因 `best_checkpoint_path=None` 失败（`optimizer/nodes/init_analysis.py`） |
+| 32 | **HEAVY_CHAIN_SKILLS 排除 PBLOCK** | `rapidwright_execute_pblock_strategy` 是分析型 skill，post-eval 总 UNCHANGED，导致 chain-gate 跳过实际执行链（unplace → pblock → place → route）。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`） |
+| 33 | **EXECUTE 策略强制执行** | `_call_phase_llm` 注入 `[EXECUTE CONSTRAINT]` 消息，映射策略→工具，禁止分析工具和策略切换（`optimizer/nodes/subgraphs/phase_execute.py`）|
+| 34 | **Dashboard 陈旧数据抑制** | `_build_dynamic_gradient` 仅在 EXECUTE/EVALUATE 阶段显示 `last_action_taken`，ANALYZE/SELECT_STRATEGY 清空，防止误导 LLM（`optimizer/pure/state_space.py`） |
 
 ## 3. 核心数据流
 
@@ -271,6 +275,10 @@ constraints_env:
   pvt_corner: slow_0p95v_85c
 
 # Module 6: Dynamic Gradient (Delta)
+# NOTE: last_action_taken and action_status are only populated during
+# EXECUTE_STRATEGY and EVALUATE phases. In ANALYZE/SELECT_STRATEGY
+# phases they are cleared to prevent stale iteration data from
+# misleading the LLM (see _build_dynamic_gradient in state_space.py).
 dynamic_gradient:
   delta_wns: +0.0770
   last_action_taken: PhysOpt

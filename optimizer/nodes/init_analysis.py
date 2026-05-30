@@ -371,6 +371,29 @@ async def init_analysis_node(
     state.cost.cost_hard_limit = get_worker_model_config().cost_hard_limit
     logger.info(f"[init_analysis] Cost hard limit: ${state.cost.cost_hard_limit:.2f}")
 
+    # Save initial checkpoint so rollback always has a restore point.
+    # Without this, best_checkpoint_path stays None until WNS improves,
+    # and rollback_node logs "No checkpoint at None" and skips restore.
+    if (state.control.run_dir is not None
+            and deps.vivado_session is not None
+            and state.timing.best_wns != float('-inf')):
+        try:
+            ckpt_path = state.control.run_dir / "best_checkpoint.dcp"
+            await call_tool_fn(
+                "vivado_write_checkpoint",
+                {"dcp_path": str(ckpt_path.resolve()), "force": True},
+                deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
+            )
+            state.control.best_checkpoint_path = ckpt_path
+            state.control.needs_save = False
+            logger.info(
+                f"[init_analysis] Saved initial checkpoint: "
+                f"WNS={state.timing.best_wns:.3f}ns -> {ckpt_path}"
+            )
+        except Exception as e:
+            logger.warning(f"[init_analysis] Failed to save initial checkpoint: {e}")
+
     logger.info(
         f"[init_analysis] Complete: WNS={state.timing.initial_wns}, "
         f"best_wns={state.timing.best_wns:.3f}"

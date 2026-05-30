@@ -266,19 +266,25 @@ def _build_dynamic_gradient(state: OptimizerState) -> DashboardDynamicGradient:
     # Delta congestion: needs before/after snapshots — not yet implemented
     delta_congestion = None  # TODO: store previous congestion score for comparison
 
-    # Last action from strategy state
-    last_action = state.strategy.current_strategy
-
-    # Action status from evaluation result
-    eval_result = state.strategy.evaluation_result
-    if eval_result == "IMPROVED":
-        action_status = "Success"
-    elif eval_result == "REGRESSION":
-        action_status = "Failed"
-    elif eval_result == "UNCHANGED":
-        action_status = "Success"  # No regression = success
+    # Last action from strategy state — only show during EXECUTE/EVALUATE.
+    # During ANALYZE/SELECT_STRATEGY of a new iteration, current_strategy
+    # and evaluation_result are stale from the previous iteration and
+    # mislead the LLM into thinking a strategy was already executed.
+    current_phase = state.strategy.current_phase
+    if current_phase in ("EXECUTE_STRATEGY", "EVALUATE"):
+        last_action = state.strategy.current_strategy
+        eval_result = state.strategy.evaluation_result
+        if eval_result == "IMPROVED":
+            action_status = "Success"
+        elif eval_result == "REGRESSION":
+            action_status = "Failed"
+        elif eval_result == "UNCHANGED":
+            action_status = "Success"  # No regression = success
+        else:
+            action_status = ""  # PENDING or not yet evaluated
     else:
-        action_status = ""  # PENDING or not yet evaluated
+        last_action = ""
+        action_status = ""
 
     return DashboardDynamicGradient(
         delta_wns=delta_wns if delta_wns != 0.0 else None,
@@ -302,7 +308,7 @@ def _extract_module_insights(state: OptimizerState) -> dict:
 
     Returns a dict with:
         top_modules (list[dict]): modules sorted by critical path hit count,
-            each with ``name``, ``critical_path_hits``, ``path_coverage_pct``,
+            each with ``name``, ``critical_path_hits``, ``cell_distribution_pct``,
             ``sub_modules``.
         cross_module_paths (int): number of paths spanning ≥2 modules.
         intra_module_paths (int): number of paths within a single module.
@@ -351,15 +357,6 @@ def _extract_module_insights(state: OptimizerState) -> dict:
         elif len(path_modules) == 1:
             intra_module_count += 1
 
-    if total_cells == 0:
-        return {
-            "top_modules": [],
-            "cross_module_paths": 0,
-            "intra_module_paths": 0,
-            "deepest_module": None,
-            "total_cells_analyzed": 0,
-        }
-
     # Sort modules by hit count
     sorted_modules = sorted(module_hits.items(), key=lambda x: -x[1])
 
@@ -369,7 +366,7 @@ def _extract_module_insights(state: OptimizerState) -> dict:
         top_modules.append({
             "name": name,
             "critical_path_hits": hits,
-            "path_coverage_pct": round(hits / total_cells * 100, 1),
+            "cell_distribution_pct": round(hits / total_cells * 100, 1) if total_cells else 0.0,
             "sub_modules": sub_list,
         })
 
@@ -411,7 +408,7 @@ def _build_architecture_overview(state: OptimizerState) -> DashboardArchitecture
         entries.append(DashboardModuleEntry(
             name=m["name"],
             critical_path_hits=m["critical_path_hits"],
-            path_coverage_pct=m["path_coverage_pct"],
+            cell_distribution_pct=m["cell_distribution_pct"],
             sub_modules=m["sub_modules"],
         ))
 
@@ -648,7 +645,7 @@ def format_state_space_for_llm(
             for m in ao.top_modules:
                 lines.append(f"    - name: \"{m.name}\"")
                 lines.append(f"      critical_path_hits: {m.critical_path_hits}")
-                lines.append(f"      path_coverage: {m.path_coverage_pct:.1f}%")
+                lines.append(f"      cell_distribution: {m.cell_distribution_pct:.1f}%")
                 if m.sub_modules:
                     subs = ", ".join(m.sub_modules)
                     lines.append(f"      sub_modules: [{subs}]")
@@ -843,7 +840,7 @@ def _append_architecture_hints(lines: list[str], ao: DashboardArchitectureOvervi
 
     top = ao.top_modules[0]
     top_hits = top.critical_path_hits
-    top_coverage = top.path_coverage_pct
+    top_coverage = top.cell_distribution_pct
 
     # Hint 1: Single-module dominance → targeted PBLOCK
     if top_coverage > 50.0:

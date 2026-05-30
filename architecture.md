@@ -76,6 +76,10 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **init_analysis 去 `report_*` 化**: Agent pipeline 禁用 cost 不可预测的 `report_*` 命令。`report_utilization -return_string` → 5 条 `get_cells -filter {PRIMITIVE_GROUP == ...}`（Vivado C++ filter 引擎，200K cells ~5-10s）
 - **init_analysis 原子提交 checkpoint**: 7 个步骤各自独立原子提交（`run → validate → mark_done`）。Vivado 重启后自动跳过已完成步骤
 - **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s
+- **init_analysis 初始 checkpoint 保存**: 分析完成后无条件写 `best_checkpoint.dcp` 并设 `best_checkpoint_path`。此前仅 WNS 改善时保存，导致首次迭代退化时 `best_checkpoint_path=None`，`rollback_node` 报 `[ROLLBACK] No checkpoint at None` 直接跳过恢复。修复后 rollback 总是可用的（`optimizer/nodes/init_analysis.py`）
+- **HEAVY_CHAIN_SKILLS 排除 pblock_strategy**: `rapidwright_execute_pblock_strategy` 是纯分析型 skill（仅返回 pblock_ranges），网络表实际变更由 `SKILL_CHAIN_ACTIONS` 的 chain（unplace → create_pblock → place → route）完成。post-eval 总返回 UNCHANGED，导致 chain-gate 错误跳过 chain。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`）
+- **EXECUTE 阶段策略强制执行**: `_call_phase_llm` 在 dashboard 注入后追加 `[EXECUTE CONSTRAINT]` 用户消息，强制 LLM 仅调用已选策略对应的执行工具，禁止分析工具和策略漂移。消息包含策略→工具映射表，防止 LLM 在 EXECUTE 阶段重新分析或切换策略（`optimizer/nodes/subgraphs/phase_execute.py`）
+- **Dashboard 陈旧数据抑制**: `_build_dynamic_gradient` 仅在当前 phase 为 `"EXECUTE_STRATEGY"` 或 `"EVALUATE"` 时显示 `last_action_taken` 和 `action_status`。ANALYZE/SELECT_STRATEGY 阶段清空这两个字段，防止上一迭代的策略评估结果误导 LLM（`optimizer/pure/state_space.py`）
 
 ## 2. V1→V2 迁移映射
 

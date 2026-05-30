@@ -510,7 +510,7 @@ class DashboardModuleEntry:
     """Single module with critical path statistics for Module 7."""
     name: str = ""
     critical_path_hits: int = 0
-    path_coverage_pct: float = 0.0
+    cell_distribution_pct: float = 0.0
     sub_modules: list[str] = field(default_factory=list)
 
 
