@@ -506,11 +506,36 @@ class DashboardDynamicGradient:
 
 
 @dataclass
+class DashboardModuleEntry:
+    """Single module with critical path statistics for Module 7."""
+    name: str = ""
+    critical_path_hits: int = 0
+    path_coverage_pct: float = 0.0
+    sub_modules: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DashboardArchitectureOverview:
+    """Module 7: Module-level architecture insights inferred from cell names.
+
+    Extracted from CriticalPathEntry cell names which encode hierarchy
+    (e.g. \"design_i/aes_core/sbox/LUT6\"). Zero-cost: no additional
+    Vivado Tcl or RapidWright calls required.
+    """
+    top_modules: list[DashboardModuleEntry] = field(default_factory=list)
+    cross_module_paths: int = 0       # paths spanning >=2 modules
+    intra_module_paths: int = 0       # paths within a single module
+    deepest_module: Optional[str] = None  # module with highest logic depth
+    total_cells_analyzed: int = 0
+
+
+@dataclass
 class StateSpace:
-    """Canonical 6-module dashboard state, built from OptimizerState."""
+    """Canonical 7-module dashboard state, built from OptimizerState."""
     global_state: DashboardGlobalState = field(default_factory=DashboardGlobalState)
     timing_clusters: DashboardTimingClusters = field(default_factory=DashboardTimingClusters)
     physical_congestion: DashboardPhysicalCongestion = field(default_factory=DashboardPhysicalCongestion)
     netlist_quality: DashboardNetlistQuality = field(default_factory=DashboardNetlistQuality)
     constraints_env: DashboardConstraints = field(default_factory=DashboardConstraints)
     dynamic_gradient: DashboardDynamicGradient = field(default_factory=DashboardDynamicGradient)
+    architecture_overview: DashboardArchitectureOverview = field(default_factory=DashboardArchitectureOverview)

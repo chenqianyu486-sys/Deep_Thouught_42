@@ -45,6 +45,39 @@ response_format:
     ROLLBACK: "Revert to best checkpoint"
     EXHAUSTED: "All applicable strategies exhausted"
 
+architecture_overview:
+  description: "Module 7 of the Dashboard shows which modules are timing hotspots,
+    extracted from critical path cell names (zero-cost, no extra Vivado calls)."
+  interpretation:
+    - "top_modules sorted by critical_path_hits: the module with the highest hits
+      is the primary timing bottleneck. >50% coverage → strong module-specific issue."
+    - "cross_module_paths vs intra_module_paths: high cross_module count suggests
+      inter-module routing delay — PBLOCK may need to span multiple module regions."
+    - "deepest_module: the module with highest logic depth. If >15 levels,
+      LUTCascadeFlattening or RegisterRetiming are candidates."
+  strategy_implications:
+    - "Single module dominates (>50% coverage): PBLOCK targeting that module's
+      cells is likely more precise than a generic PBLOCK around scattered endpoints."
+    - "Cross-module paths dominate: consider PhysOpt or CongestionSpreading
+      over module-local strategies."
+    - "All paths intra-module: module-local strategies (PBLOCK, register retiming)
+      may be sufficient without needing cross-module coordination."
+  example: |
+    architecture_overview:
+      top_modules:
+        - name: "aes_core"
+          critical_path_hits: 38
+          path_coverage: 52.8%
+        - name: "pcie_ctrl"
+          critical_path_hits: 21
+          path_coverage: 29.2%
+      cross_module_paths: 3
+      intra_module_paths: 6
+      deepest_module: "aes_core/sbox"
+    → "aes_core is the primary timing bottleneck (53% coverage). PBLOCK should
+      focus on aes_core cells. The deepest logic is in aes_core/sbox — check if
+      logic_levels > 15 for retiming potential."
+
 strategy_lifecycle:
   phases:
     - "ANALYZE: Gather data. Analysis tools only. Signal ANALYZE_DONE."

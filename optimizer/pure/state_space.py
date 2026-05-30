@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..state import OptimizerState
 
 from ..state import (
+    CriticalPathEntry,
     DashboardGlobalState,
     DashboardTimingPath,
     DashboardTimingClusters,
@@ -23,6 +24,8 @@ from ..state import (
     DashboardNetlistQuality,
     DashboardConstraints,
     DashboardDynamicGradient,
+    DashboardArchitectureOverview,
+    DashboardModuleEntry,
     StateSpace,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT
@@ -68,11 +71,12 @@ def _annotated_val(value, fmt: str | None = None, reason: str = "not_available")
 PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
         "global_state", "timing_clusters", "physical_congestion",
-        "netlist_quality", "dynamic_gradient",
+        "netlist_quality", "dynamic_gradient", "architecture_overview",
     }),
     LoopPhase.SELECT_STRATEGY: frozenset({
         "global_state", "timing_clusters", "physical_congestion",
         "netlist_quality", "constraints_env", "dynamic_gradient",
+        "architecture_overview",
     }),
     LoopPhase.EXECUTE: frozenset({
         "global_state", "dynamic_gradient",
@@ -86,7 +90,7 @@ PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
 # ── Public API ──────────────────────────────────────────────────────
 
 def build_state_space(state: OptimizerState) -> StateSpace:
-    """Build the canonical 6-module StateSpace from raw OptimizerState.
+    """Build the canonical 7-module StateSpace from raw OptimizerState.
 
     This is the single entry point used by both the dashboard serializer
     and the LLM context injector.
@@ -98,6 +102,7 @@ def build_state_space(state: OptimizerState) -> StateSpace:
         netlist_quality=_build_netlist_quality(state),
         constraints_env=_build_constraints_env(state),
         dynamic_gradient=_build_dynamic_gradient(state),
+        architecture_overview=_build_architecture_overview(state),
     )
 
 
@@ -281,6 +286,141 @@ def _build_dynamic_gradient(state: OptimizerState) -> DashboardDynamicGradient:
         delta_congestion=delta_congestion,
         last_action_taken=last_action,
         action_status=action_status,
+    )
+
+
+# ── Module 7: Architecture Overview ──────────────────────────────────────
+
+
+def _extract_module_insights(state: OptimizerState) -> dict:
+    """Extract module-level architecture insights from critical path cell names.
+
+    Cell names like ``design_i/aes_core/sbox/LUT6`` encode hierarchical
+    module structure.  This function parses those names to build a
+    module-level view of timing hotspots — **at zero cost**, without any
+    additional Vivado Tcl or RapidWright calls.
+
+    Returns a dict with:
+        top_modules (list[dict]): modules sorted by critical path hit count,
+            each with ``name``, ``critical_path_hits``, ``path_coverage_pct``,
+            ``sub_modules``.
+        cross_module_paths (int): number of paths spanning ≥2 modules.
+        intra_module_paths (int): number of paths within a single module.
+        deepest_module (str | None): module with the highest logic depth.
+        total_cells_analyzed (int): total leaf cells examined.
+    """
+    paths = state.timing.critical_paths
+    if not paths:
+        return {
+            "top_modules": [],
+            "cross_module_paths": 0,
+            "intra_module_paths": 0,
+            "deepest_module": None,
+            "total_cells_analyzed": 0,
+        }
+
+    # Count module prefix occurrences across all critical path cells.
+    # Cell format:  <top_inst>/<module>/<sub_module>/.../<cell_type>
+    module_hits: dict[str, int] = {}
+    module_sub_modules: dict[str, set[str]] = {}
+
+    total_cells = 0
+    cross_module_count = 0
+    intra_module_count = 0
+
+    for path in paths:
+        cells = path.cells if isinstance(path, CriticalPathEntry) else []
+        if not cells:
+            continue
+
+        path_modules: set[str] = set()
+        for cell in cells:
+            parts = cell.split("/")
+            if len(parts) >= 2:
+                module = parts[1]  # first level after top_inst
+                path_modules.add(module)
+                module_hits[module] = module_hits.get(module, 0) + 1
+                total_cells += 1
+                # Level 2: sub-module
+                if len(parts) >= 3:
+                    sub = parts[2]
+                    module_sub_modules.setdefault(module, set()).add(sub)
+
+        if len(path_modules) >= 2:
+            cross_module_count += 1
+        elif len(path_modules) == 1:
+            intra_module_count += 1
+
+    if total_cells == 0:
+        return {
+            "top_modules": [],
+            "cross_module_paths": 0,
+            "intra_module_paths": 0,
+            "deepest_module": None,
+            "total_cells_analyzed": 0,
+        }
+
+    # Sort modules by hit count
+    sorted_modules = sorted(module_hits.items(), key=lambda x: -x[1])
+
+    top_modules = []
+    for name, hits in sorted_modules[:10]:
+        sub_list = sorted(module_sub_modules.get(name, set()))[:5]
+        top_modules.append({
+            "name": name,
+            "critical_path_hits": hits,
+            "path_coverage_pct": round(hits / total_cells * 100, 1),
+            "sub_modules": sub_list,
+        })
+
+    # Find deepest module (the module contributing to the path with
+    # the highest logic_levels)
+    deepest_module: str | None = None
+    max_levels = -1
+    for path in paths:
+        if not isinstance(path, CriticalPathEntry):
+            continue
+        levels = path.levels
+        cells = path.cells
+        if levels is not None and levels > max_levels and cells:
+            max_levels = levels
+            module_counts: dict[str, int] = {}
+            for cell in cells:
+                parts = cell.split("/")
+                if len(parts) >= 2:
+                    m = parts[1]
+                    module_counts[m] = module_counts.get(m, 0) + 1
+            if module_counts:
+                deepest_module = max(module_counts, key=module_counts.get)
+
+    return {
+        "top_modules": top_modules,
+        "cross_module_paths": cross_module_count,
+        "intra_module_paths": intra_module_count,
+        "deepest_module": deepest_module,
+        "total_cells_analyzed": total_cells,
+    }
+
+
+def _build_architecture_overview(state: OptimizerState) -> DashboardArchitectureOverview:
+    """Build Module 7: architecture overview from critical path cell names."""
+    insights = _extract_module_insights(state)
+
+    entries = []
+    for m in insights["top_modules"]:
+        entries.append(DashboardModuleEntry(
+            name=m["name"],
+            critical_path_hits=m["critical_path_hits"],
+            path_coverage_pct=m["path_coverage_pct"],
+            sub_modules=m["sub_modules"],
+        ))
+
+    return DashboardArchitectureOverview(
+        top_modules=entries,
+        cross_module_paths=insights["cross_module_paths"],
+        intra_module_paths=insights["intra_module_paths"],
+        deepest_module=insights["deepest_module"],
+        total_cells_analyzed=insights["total_cells_analyzed"],
     )
 
 
@@ -498,6 +638,32 @@ def format_state_space_for_llm(
         lines.append(f"  action_status: {dg.action_status or 'PENDING'}")
         lines.append("")
 
+    # ── Module 7: Architecture Overview ─────────────────────────
+    if enabled is None or "architecture_overview" in enabled:
+        ao = space.architecture_overview
+        lines.append("# Module 7: Architecture Overview")
+        lines.append("architecture_overview:")
+        if ao.top_modules:
+            lines.append(f"  top_modules:  # {len(ao.top_modules)} modules")
+            for m in ao.top_modules:
+                lines.append(f"    - name: \"{m.name}\"")
+                lines.append(f"      critical_path_hits: {m.critical_path_hits}")
+                lines.append(f"      path_coverage: {m.path_coverage_pct:.1f}%")
+                if m.sub_modules:
+                    subs = ", ".join(m.sub_modules)
+                    lines.append(f"      sub_modules: [{subs}]")
+            lines.append(f"  cross_module_paths: {ao.cross_module_paths}")
+            lines.append(f"  intra_module_paths: {ao.intra_module_paths}")
+            if ao.deepest_module:
+                lines.append(f"  deepest_module: \"{ao.deepest_module}\"")
+            lines.append(f"  total_cells_analyzed: {ao.total_cells_analyzed}")
+            # Architecture-based strategy hints (SELECT_STRATEGY only)
+            if phase == LoopPhase.SELECT_STRATEGY and ao.top_modules:
+                _append_architecture_hints(lines, ao)
+        else:
+            lines.append("  top_modules: \"N/A(no_critical_paths)\"")
+        lines.append("")
+
     # ── Trajectory (if enabled in phase) ──────────────────────────
     if phase and "trajectory" not in PHASE_STATESPACE_MODULES.get(phase, frozenset()):
         pass  # trajectory now embedded in dynamic_gradient; skip separate section
@@ -668,3 +834,37 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
                 lines.append("  note: step_3 auto-chains open_checkpoint + route_design")
     except Exception:
         pass
+
+
+def _append_architecture_hints(lines: list[str], ao: DashboardArchitectureOverview) -> None:
+    """Append architecture-based strategy selection hints (SELECT_STRATEGY only)."""
+    if not ao.top_modules:
+        return
+
+    top = ao.top_modules[0]
+    top_hits = top.critical_path_hits
+    top_coverage = top.path_coverage_pct
+
+    # Hint 1: Single-module dominance → targeted PBLOCK
+    if top_coverage > 50.0:
+        lines.append(f"  arch_hint: Critical paths strongly concentrate in \"{top.name}\" "
+                     f"({top_coverage:.0f}% coverage) — PBLOCK targeting this module "
+                     f"is likely more effective than a generic PBLOCK around scattered cells.")
+    elif top_coverage > 30.0:
+        lines.append(f"  arch_hint: \"{top.name}\" is the primary timing hotspot "
+                     f"({top_coverage:.0f}% coverage) — consider PBLOCK or PhysOpt "
+                     f"focused on this module.")
+
+    # Hint 2: Cross-module paths → PhysOpt or Congestion strategies
+    if ao.cross_module_paths > ao.intra_module_paths and ao.cross_module_paths >= 3:
+        lines.append(f"  arch_hint: {ao.cross_module_paths}/{ao.cross_module_paths + ao.intra_module_paths} "
+                     f"paths cross module boundaries — inter-module routing delay may dominate. "
+                     f"PhysOpt or CongestionSpreading may help more than module-local PBLOCK.")
+    elif ao.cross_module_paths == 0 and ao.intra_module_paths > 0:
+        lines.append(f"  arch_hint: All critical paths are intra-module — "
+                     f"module-local PBLOCK or RegisterRetiming may be sufficient.")
+
+    # Hint 3: Deepest module
+    if ao.deepest_module:
+        lines.append(f"  arch_hint: Deepest logic is in \"{ao.deepest_module}\" — "
+                     f"RegisterRetiming or LUTCascadeFlattening may help if levels > 15.")

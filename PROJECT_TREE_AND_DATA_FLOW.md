@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（6 模块 StateSpace 构建器）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）
+│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -38,7 +38,7 @@ fpl26_optimization_contest/
 ├── dashboard/                    # Web Dashboard（aiohttp + WebSocket）
 │   ├── server.py                 # aiohttp 服务器 + DashboardStateTracer
 │   ├── serializer.py             # OptimizerState → JSON（含 state_space 键）
-│   └── static/index.html         # 自包含前端（暗色主题，19 面板：6 模块 StateSpace + 13 旧版详情）
+│   └── static/index.html         # 自包含前端（暗色主题，20 面板：7 模块 StateSpace + 13 旧版详情）
 ├── context_manager/              # 内存/压缩管理
 │   ├── manager.py                # MemoryManager 中心编排
 │   ├── estimator.py              # ContextEstimator（tiktoken cl100k_base，全局统一token估算基准）
@@ -70,7 +70,7 @@ OptimizerState (可变 dataclass，7 个子切片)
 ├── ContextState    — 压缩计数/原始工具输出缓冲/工具结果缓存/LLM 消息日志/FC 决策轨迹/失败策略记录
 ├── ControlState    — 退出条件/DCP 路径/step_state
 └── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
-+ 6 模块仪表盘容器 (纯输出 dataclass，由 state_space.py 构建): StateSpace → DashboardGlobalState / DashboardTimingClusters / DashboardPhysicalCongestion / DashboardNetlistQuality / DashboardConstraints / DashboardDynamicGradient
++ 7 模块仪表盘容器 (纯输出 dataclass，由 state_space.py 构建): StateSpace → DashboardGlobalState / DashboardTimingClusters / DashboardPhysicalCongestion / DashboardNetlistQuality / DashboardConstraints / DashboardDynamicGradient / DashboardArchitectureOverview
 ```
 
 > 完整字段定义见 [optimizer/state.py](optimizer/state.py)。
@@ -181,7 +181,7 @@ _prepare_api_messages():
 
 ### 3.1.1 init_analysis 增强数据提取
 
-`init_analysis_node` 在优化开始前一次性提取所有可获取的设计数据，填入 Dashboard 的 6 个模块，避免 LLM 在 ANALYZE 阶段浪费工具调用轮次：
+`init_analysis_node` 在优化开始前一次性提取所有可获取的设计数据，填入 Dashboard 的 7 个模块，避免 LLM 在 ANALYZE 阶段浪费工具调用轮次：
 
 ```
 Phase A (并行初始化):
@@ -214,12 +214,13 @@ Phase C (跨服务器分析):
 | Constraints (false/multicycle paths, IO delay) | M5 Constraints | 静态 |
 | PVT corner | M5 Constraints | 静态 |
 | Delta data | M6 Dynamic Gradient | 初始为空 |
+| Module-level timing hotspots (from critical path cell names) | M7 Architecture Overview | 动态（随着 critical_paths 更新） |
 
 **验证**: `make run_init_analysis DCP=<path>` 运行完整提取 + Dashboard 构建 + 字段完整性检查，无需 LLM。
 
-### 3.2 Agent 上下文 Dashboard (6 模块 StateSpace)
+### 3.2 Agent 上下文 Dashboard (7 模块 StateSpace)
 
-每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）。数据由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化的 6 模块 YAML：
+每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）。数据由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化的 7 模块 YAML：
 
 ```yaml
 [ANALYZE — Context & Dashboard]
@@ -274,9 +275,25 @@ dynamic_gradient:
   delta_wns: +0.0770
   last_action_taken: PhysOpt
   action_status: Success
+
+# Module 7: Architecture Overview
+architecture_overview:
+  top_modules:
+    - name: "aes_core"
+      critical_path_hits: 38
+      path_coverage: 52.8%
+      sub_modules: [sbox, mix_cols, key_expand]
+    - name: "pcie_ctrl"
+      critical_path_hits: 21
+      path_coverage: 29.2%
+      sub_modules: [dma, tlp]
+  cross_module_paths: 3
+  intra_module_paths: 6
+  deepest_module: "aes_core/sbox"
+  total_cells_analyzed: 72
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 5 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现），EXECUTE 阶段只看 global_state + dynamic_gradient。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M7 architecture_overview 两阶段均可见），EXECUTE 阶段只看 global_state + dynamic_gradient。
 
 **LLM 防歧义注解**: Dashboard 所有 N/A 和空列表都带有动态原因，区分"未分析"与"确实为零"：
 - `best_wns: "N/A(initial_state)"` — 首次迭代前尚未有最佳值
