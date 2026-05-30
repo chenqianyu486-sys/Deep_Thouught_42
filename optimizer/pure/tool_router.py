@@ -37,6 +37,7 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "rapidwright_flatten_lut_cascade",
     "rapidwright_replicate_critical_cells",
     "rapidwright_execute_register_retiming",
+    "rapidwright_smart_retiming",
     "vivado_opt_design",
     "rapidwright_execute_net_swapping",
     "rapidwright_optimize_cell_placement",

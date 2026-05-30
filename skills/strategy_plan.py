@@ -24,6 +24,17 @@ class StrategyStep:
     executed: bool = False             # True if already performed by the skill
     expected_duration_seconds: int = 0 # Estimated runtime hint
 
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "step_name": self.step_name,
+            "platform": self.platform,
+            "params": self.params,
+            "description": self.description,
+            "executed": self.executed,
+            "expected_duration_seconds": self.expected_duration_seconds,
+        }
+
 
 @dataclass
 class StrategyPlan:
@@ -35,3 +46,15 @@ class StrategyPlan:
     analysis_summary: dict = field(default_factory=dict)  # Key analysis findings
     steps: list[StrategyStep] = field(default_factory=list)  # Ordered execution plan
     error_details: Optional[str] = None             # Error info if status == "error"
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "strategy_name": self.strategy_name,
+            "status": self.status,
+            "message": self.message,
+            "preconditions_satisfied": self.preconditions_satisfied,
+            "analysis_summary": self.analysis_summary,
+            "steps": [s.to_dict() for s in self.steps],
+            "error_details": self.error_details,
+        }

@@ -75,6 +75,14 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_execute_congestion_spreading": "execute_congestion_spreading",
     "rapidwright_analyze_net_swapping": "analyze_net_swapping",
     "rapidwright_execute_net_swapping": "execute_net_swapping",
+    "rapidwright_optimize_pin_swapping": "pin_swapping_strategy",
+    "rapidwright_flatten_lut_cascade": "lut_cascade_flattening",
+    "rapidwright_replicate_critical_cells": "critical_path_cell_replication_strategy",
+    "rapidwright_execute_register_retiming": "execute_register_retiming",
+    "rapidwright_analyze_register_retiming": "analyze_register_retiming",
+    "rapidwright_smart_retiming": "smart_retiming",
+    "rapidwright_execute_opt_design_strategy": "opt_design_strategy",
+    "rapidwright_analyze_congestion": "analyze_congestion",
 }
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
@@ -249,6 +257,9 @@ _TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
     "rapidwright_optimize_fanout_batch": 300.0,
     "rapidwright_write_checkpoint": 300.0,
     "rapidwright_compare_design_structure": 120.0,
+    "rapidwright_smart_retiming": 300.0,
+    "rapidwright_execute_opt_design_strategy": 120.0,
+    "rapidwright_execute_physopt_strategy": 120.0,
     "vivado_opt_design": 600.0,
 }
 

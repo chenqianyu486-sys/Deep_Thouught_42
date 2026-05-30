@@ -15,7 +15,6 @@ from skills.skill_decorator import skill
 from skills.strategy_plan import StrategyPlan, StrategyStep
 
 
-# Allowed opt_design directives (safe: no retiming options exist for opt_design)
 ALLOWED_DIRECTIVES = [
     "Default", "Explore", "ExploreArea",
     "ExploreSequentialArea", "RuntimeOptimized", "AddRemap",
@@ -46,7 +45,6 @@ def generate_opt_design_plan(
             error_details="context.design is None",
         )
 
-    # Validate directive
     resolved_directive = directive if directive in ALLOWED_DIRECTIVES else "Explore"
     if directive not in ALLOWED_DIRECTIVES:
         return StrategyPlan(
@@ -98,13 +96,11 @@ def generate_opt_design_plan(
         message=f"opt_design plan generated with directive={resolved_directive}, retarget={retarget}",
         preconditions_satisfied=True,
         steps=steps,
-        execution_params={
-            "directive": resolved_directive,
-            "retarget": retarget,
-        },
         analysis_summary={
             "strategy_type": "logic_optimization",
             "target": "reduce LUT depth via logic remapping",
+            "directive": resolved_directive,
+            "retarget": retarget,
             "note": "opt_design runs BEFORE placement — safe for all design types. "
                     "No retiming risk (unlike phys_opt_design).",
         },
@@ -113,43 +109,43 @@ def generate_opt_design_plan(
 
 @skill(
     name="opt_design_strategy",
+    namespace="optimization",
+    version="1.0.0",
     display_name="Logic Optimization (opt_design)",
     description="Generate execution plan for Vivado opt_design: logic-level optimization "
                 "(retarget, remap, constant propagation). Targets LUT-depth bottlenecks "
                 "in combinational-dominated designs. Runs BEFORE placement — no retiming risk. "
                 "Use when PhysOpt (post-place) is ineffective due to pure logic depth.",
     category=SkillCategory.OPTIMIZATION,
-    parameters={
-        "directive": ParameterSpec(
-            type="string",
-            description="opt_design directive. 'Explore' is safest for UltraScale+ (xcvu3p). "
-                        "'AddRemap' is more aggressive (remaps LUT equations) but may not benefit UltraScale+.",
-            default="Explore",
-            allowed_values=ALLOWED_DIRECTIVES,
-        ),
-        "retarget": ParameterSpec(
-            type="boolean",
-            description="Retarget logic to equivalent primitives (e.g., LUT5→LUT6 merge). Safe — does not change function.",
-            default=True,
-        ),
-    },
+    idempotency="safe",
     side_effects=["netlist_modification", "cell_remapping"],
-    timeout_default_ms=600000,
-    timeout_max_ms=1800000,
+    timeout_ms=600000,
+    parameters=[
+        ParameterSpec("directive", str,
+                      "opt_design directive. 'Explore' is safest for UltraScale+ (xcvu3p). "
+                      "'AddRemap' is more aggressive (remaps LUT equations) but may not benefit UltraScale+.",
+                      default="Explore"),
+        ParameterSpec("retarget", bool,
+                      "Retarget logic to equivalent primitives (e.g., LUT5->LUT6 merge). Safe — does not change function.",
+                      default=True),
+    ],
+    required_context=["design"],
+    error_codes=["INVALID_PARAMETER", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
 )
-async def opt_design_strategy(context: SkillContext) -> SkillResult:
-    """Generate opt_design execution plan."""
-    directive = context.parameters.get("directive", "Explore")
-    retarget = context.parameters.get("retarget", True)
+class OptDesignStrategySkill(Skill):
+    """Skill for generating opt_design execution plans."""
 
-    plan = generate_opt_design_plan(
-        design=context.design,
-        directive=directive,
-        retarget=retarget,
-    )
+    def execute(self, context: SkillContext,
+                directive: str = "Explore",
+                retarget: bool = True) -> SkillResult:
+        try:
+            plan = generate_opt_design_plan(context.design, directive, retarget)
+            return SkillResult(success=(plan.status != "error"), data=plan)
+        except Exception as e:
+            return SkillResult(success=False, data=None, error=str(e))
 
-    return SkillResult(
-        success=plan.status != "error",
-        data=plan.to_dict(),
-        message=plan.to_dict().get("message", ""),
-    )
+    def validate_inputs(self, **kwargs) -> tuple[bool, str]:
+        directive = kwargs.get("directive", "Explore")
+        if directive not in ALLOWED_DIRECTIVES:
+            return False, f"Invalid directive '{directive}'. Valid: {', '.join(ALLOWED_DIRECTIVES)}"
+        return True, ""

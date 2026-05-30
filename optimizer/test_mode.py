@@ -909,6 +909,8 @@ class V2TestMode:
         {"name": "smart_retiming", "tool": "rapidwright_smart_retiming",
          "skill_name": "smart_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_smart_retiming", "auto_rollback": False},
          "needs": "critical_paths"},
+        {"name": "execute_opt_design_strategy", "tool": "rapidwright_execute_opt_design_strategy",
+         "skill_name": "opt_design_strategy", "args": {"directive": "Explore", "retarget": True}},
     ]
 
     async def _prepare_skill_test_data(self, init_data: dict) -> dict:

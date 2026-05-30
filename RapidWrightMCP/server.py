@@ -1488,12 +1488,21 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 )
 
         elif name == "analyze_congestion":
-            from skills.congestion_analysis import analyze_congestion
-            result = analyze_congestion(
-                design=rw._current_design,
-                utilization_threshold=arguments.get("utilization_threshold", 0.8),
-                top_n=arguments.get("top_n", 10),
-            )
+            from skills import SkillRegistry, SkillContext
+            skill = SkillRegistry.get("analyze_congestion")
+            if skill is None:
+                result = {"error": "Skill 'analyze_congestion' not found in registry"}
+            else:
+                context = SkillContext(design=rw._current_design, initialized=True)
+                skill_result = skill.execute_with_telemetry(
+                    context,
+                    utilization_threshold=arguments.get("utilization_threshold", 0.8),
+                    top_n=arguments.get("top_n", 10),
+                )
+                if skill_result.success:
+                    result = skill_result.data
+                else:
+                    result = {"error": skill_result.error or "Congestion analysis failed"}
 
         elif name == "analyze_congestion_spreading":
             result = rw.analyze_congestion_spreading(

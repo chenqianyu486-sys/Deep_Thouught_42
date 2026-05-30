@@ -258,7 +258,6 @@ STRATEGY_SKILL_MAP = {
     "RegisterRetiming": "execute_register_retiming",
     "SmartRetiming": "smart_retiming",
     "NetSwap": "execute_net_swapping",
-    "PhysOpt+RegisterRetiming": "physopt_register_retiming",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────

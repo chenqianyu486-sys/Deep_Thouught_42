@@ -63,6 +63,9 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_smart_region_search",
         "rapidwright_analyze_pblock_region",
         "rapidwright_optimize_lut_input_cone",
+        "rapidwright_execute_opt_design_strategy",
+        "rapidwright_smart_retiming",
+        "rapidwright_execute_physopt_strategy",
         # Vivado execution tools
         "vivado_place_design",
         "vivado_route_design",
