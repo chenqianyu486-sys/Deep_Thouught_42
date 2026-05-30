@@ -877,9 +877,9 @@ class V2TestMode:
         {"name": "smart_region_search", "tool": "rapidwright_smart_region_search",
          "skill_name": "smart_region", "args": {"target_lut_count": 50000, "target_ff_count": 50000}},
         {"name": "analyze_pblock_region", "tool": "rapidwright_analyze_pblock_region",
-         "skill_name": "pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": 1.5}},
+         "skill_name": "pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": "{adaptive_multiplier}"}},
         {"name": "execute_pblock_strategy", "tool": "rapidwright_execute_pblock_strategy",
-         "skill_name": "execute_pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": 1.2}},
+         "skill_name": "execute_pblock_strategy", "args": {"target_lut_count": 50000, "target_ff_count": 50000, "resource_multiplier": "{adaptive_multiplier}"}},
         {"name": "analyze_register_retiming", "tool": "rapidwright_analyze_register_retiming",
          "skill_name": "analyze_register_retiming", "args": {}, "needs": "critical_paths"},
         {"name": "analyze_net_swapping", "tool": "rapidwright_analyze_net_swapping",
@@ -979,6 +979,28 @@ class V2TestMode:
 
         return shared
 
+
+    def _compute_adaptive_multiplier(self, init_data: dict) -> float:
+        """Compute adaptive resource multiplier based on design size."""
+        # Get resource utilization
+        utilization = init_data.get("utilization", "")
+        target_lut = 50000  # default
+        target_ff = 50000   # default
+
+        # Parse utilization if available
+        if utilization:
+            import re
+            lut_match = re.search(r'LUTs:\s+([0-9,]+)', utilization)
+            ff_match = re.search(r'FFs:\s+([0-9,]+)', utilization)
+            if lut_match:
+                target_lut = int(lut_match.group(1).replace(",", ""))
+            if ff_match:
+                target_ff = int(ff_match.group(1).replace(",", ""))
+
+        # Compute adaptive multiplier
+        from skills.pblock_strategy import compute_adaptive_resource_multiplier
+        return compute_adaptive_resource_multiplier(target_lut, target_ff)
+
     async def run_skill_tests(self, init_data: dict) -> bool:
         """Run all skill validation tests (data-driven, covers all 16 skills).
 
@@ -1002,6 +1024,10 @@ class V2TestMode:
         else:
             print(f"[TEST] All {len(EXPECTED_SKILLS)} expected skills registered")
 
+        # Compute adaptive multiplier for pblock strategies
+        adaptive_multiplier = self._compute_adaptive_multiplier(init_data)
+        print(f"[TEST] Adaptive resource multiplier: {adaptive_multiplier:.2f}")
+
         # Prepare shared test data (pin_paths, critical_paths, cell_names, nets)
         shared = await self._prepare_skill_test_data(init_data)
 
@@ -1014,10 +1040,12 @@ class V2TestMode:
             tool = entry["tool"]
             args = dict(entry.get("args", {}))
 
-            # Replace {run_dir} placeholder
+            # Replace {run_dir} and {adaptive_multiplier} placeholders
             for k, v in args.items():
                 if isinstance(v, str) and v == "{run_dir}":
                     args[k] = str(self.run_dir)
+                elif isinstance(v, str) and v == "{adaptive_multiplier}":
+                    args[k] = adaptive_multiplier
 
             # Inject data from shared test data (needs)
             needs = entry.get("needs")

@@ -15,6 +15,47 @@ from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 
+
+
+def compute_adaptive_resource_multiplier(
+    target_lut_count: int,
+    target_ff_count: int,
+    device_lut_capacity: int = 394000,
+    device_ff_capacity: int = 788000,
+    base_multiplier: float = 1.5,
+) -> float:
+    """Compute adaptive resource multiplier based on design size.
+
+    Small designs (<10% device): use higher multiplier (1.8x) for better placement freedom
+    Medium designs (10-30% device): use default multiplier (1.5x)
+    Large designs (>30% device): use lower multiplier (1.2x) to avoid resource conflicts
+
+    Args:
+        target_lut_count: Current LUT usage
+        target_ff_count: Current FF usage
+        device_lut_capacity: Total device LUT capacity (default: xcvu3p = 394K)
+        device_ff_capacity: Total device FF capacity (default: xcvu3p = 788K)
+        base_multiplier: Base multiplier to adjust
+
+    Returns:
+        Adjusted resource multiplier
+    """
+    # Calculate utilization ratio
+    lut_ratio = target_lut_count / device_lut_capacity if device_lut_capacity > 0 else 0
+    ff_ratio = target_ff_count / device_ff_capacity if device_ff_capacity > 0 else 0
+    max_ratio = max(lut_ratio, ff_ratio)
+
+    if max_ratio < 0.10:
+        # Small design: more freedom for placement
+        return max(base_multiplier, 1.8)
+    elif max_ratio < 0.30:
+        # Medium design: use default
+        return base_multiplier
+    else:
+        # Large design: tighter constraints to avoid resource conflicts
+        return min(base_multiplier, 1.2)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,9 +195,16 @@ def generate_pblock_plan(
             },
         }
 
-    # Apply resource multiplier
-    required_lut = int(target_lut_count * resource_multiplier)
-    required_ff = int(target_ff_count * resource_multiplier)
+    # Apply adaptive resource multiplier based on design size
+    adaptive_multiplier = compute_adaptive_resource_multiplier(
+        target_lut_count, target_ff_count, base_multiplier=resource_multiplier
+    )
+    logger.info(
+        "Adaptive resource multiplier: base=%.1f, adaptive=%.1f (LUT=%d, FF=%d)",
+        resource_multiplier, adaptive_multiplier, target_lut_count, target_ff_count
+    )
+    required_lut = int(target_lut_count * adaptive_multiplier)
+    required_ff = int(target_ff_count * adaptive_multiplier)
     required_dsp = int(target_dsp_count * resource_multiplier)
     required_bram = int(target_bram_count * resource_multiplier)
 
@@ -193,7 +241,7 @@ def generate_pblock_plan(
                 "luts": required_lut, "ffs": required_ff,
                 "dsps": required_dsp, "brams": required_bram,
             },
-            "resource_multiplier": resource_multiplier,
+            "resource_multiplier": adaptive_multiplier,
         }
 
     # Step 2: Extract region — use smart_region_search's own capacity assessment
@@ -386,7 +434,7 @@ def generate_pblock_plan(
         "pblock_name": pblock_name,
         "estimated_resources": estimated,
         "target_resources": required,
-        "resource_multiplier": resource_multiplier,
+        "resource_multiplier": adaptive_multiplier,
         "capacity_ok": capacity_ok,
         "deficit": deficit,
         "advice": advice,
