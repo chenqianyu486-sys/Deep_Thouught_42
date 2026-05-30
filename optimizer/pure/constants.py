@@ -91,9 +91,9 @@ SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
 
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
-GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit
+GLOBAL_NO_IMPROVEMENT_LIMIT = 2    # Global no-improvement limit (reduced from 3 for faster exit)
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
-WNS_ROLLBACK_THRESHOLD: float = 0.030  # 30ps: trigger rollback when latest_wns falls this far below best_wns
+WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
 
 # Context thresholds (derived from model config, but we use safe defaults)
 SMALL_OUTPUT_THRESHOLD = 3000      # Bypass summarization below this
@@ -130,6 +130,7 @@ PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "rapidwright_search_cells": 3,
     "vivado_run_tcl": 2,
     "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
+    "rapidwright_analyze_net_detour": 2,  # suppress when consistently returning 0 results
 }
 
 # ── Skill chain actions ──────────────────────────────────────────
@@ -169,6 +170,17 @@ def build_llm_extra_body(
     return extra
 
 
+# ── Heavy chain skills ──────────────────────────────────────────
+# Skills whose auto-chain includes place_design + route_design (~180s).
+# When post-eval shows UNCHANGED, the chain is skipped in favor of a
+# lightweight validation (place_design without pblock). This prevents
+# wasting ~3 min on a strategy that didn't modify the netlist.
+HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset({
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_fanout_strategy",
+})
+
+
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
         {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
@@ -205,6 +217,16 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
+    # Auto-chain: phys_opt_design modifies placement, then evaluate before routing.
+    # Split from vivado_physopt_and_route to allow early termination if phys_opt
+    # doesn't improve WNS (saves ~40s of unnecessary routing per attempt).
+    "rapidwright_execute_physopt_strategy": [
+        {"tool": "vivado_phys_opt_design",
+         "args_from_skill": {"directive": "directive"}},
+        # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
+        # If UNCHANGED, chain gate (P0) skips remaining steps.
+        {"tool": "vivado_route_design", "args": {}},
     ],
 }
 

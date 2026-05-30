@@ -96,7 +96,9 @@ async def save_output_node(
         except Exception as e:
             logger.warning(f"[save_output] Hold timing check failed: {e}")
 
-    # Guard: check design is routed before saving DCP
+    # Guard: check design is routed before saving DCP.
+    # Prefer restoring from best checkpoint (routed, ~9s) over emergency
+    # place+route (~37s). The best checkpoint is always fully routed.
     if state.control.output_dcp and deps.vivado_session:
         try:
             status_result = await call_tool_fn(
@@ -105,33 +107,49 @@ async def save_output_node(
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )
-            if "Routed" not in status_result:
+            needs_routing = "Routed" not in status_result
+            if needs_routing:
+                # Try restoring from best checkpoint first (fast, ~9s)
+                if (state.control.best_checkpoint_path
+                        and state.control.best_checkpoint_path.exists()):
+                    logger.warning(
+                        f"[save_output] Design not routed (status: {status_result.strip()}). "
+                        f"Restoring best checkpoint before save."
+                    )
+                    await call_tool_fn(
+                        "vivado_open_checkpoint",
+                        {"dcp_path": str(state.control.best_checkpoint_path)},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    # Re-verify after restore
+                    status_result = await call_tool_fn(
+                        "vivado_run_tcl",
+                        {"command": "get_property STATUS [current_design]"},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    if "Routed" in status_result:
+                        logger.info("[save_output] Best checkpoint restored and routed")
+                        needs_routing = False
+
+            if needs_routing:
                 if "Placed" not in status_result:
                     logger.warning(
-                        f"[save_output] WARNING: Design is not routed (status: {status_result.strip()}). "
-                        f"Attempting place+route before save."
+                        f"[save_output] Design still not placed (status: {status_result.strip()}). "
+                        f"Running emergency place+route."
                     )
                     await call_tool_fn(
                         "vivado_place_design", {"directive": "Default", "timeout": 3600},
                         deps.rapidwright_session, deps.vivado_session,
                         design_size_factor=state.timing.design_size_factor,
                     )
-                    await call_tool_fn(
-                        "vivado_route_design", {"directive": "Default", "timeout": 3600},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
-                    logger.info("[save_output] Place+route completed for unplaced design")
-                else:
-                    logger.warning(
-                        f"[save_output] WARNING: Design is placed but not routed (status: {status_result.strip()}). "
-                        f"Attempting route before save."
-                    )
-                    await call_tool_fn(
-                        "vivado_route_design", {"directive": "Default", "timeout": 3600},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
+                await call_tool_fn(
+                    "vivado_route_design", {"directive": "Default", "timeout": 3600},
+                    deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
+                )
+                logger.info("[save_output] Emergency route completed")
         except Exception as e:
             logger.warning(f"[save_output] Design state check/repair failed: {e}")
 

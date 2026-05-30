@@ -22,7 +22,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -35,6 +35,7 @@ POST_EVAL_TOOLS = frozenset({
     "vivado_route_design",
     "rapidwright_execute_pblock_strategy",
     "vivado_physopt_and_route",  # triggers WNS eval after PhysOpt+route
+    "vivado_phys_opt_design",  # standalone phys_opt_design for split physopt chain
 })
 
 # Tools that modify the design (side-effect tools).
@@ -328,6 +329,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     state.timing.refreshed_fields |= refreshable
 
                 # Post-eval hook for critical tools
+                post_eval_verdict = None
                 if tool_name in POST_EVAL_TOOLS:
                     # For physopt_and_route, WNS is already in the JSON result
                     if tool_name == "vivado_physopt_and_route":
@@ -354,6 +356,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                     state.control.needs_save = True
                                 delta = new_wns - prev_wns if prev_wns is not None else 0.0
                                 verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
+                                post_eval_verdict = verdict
                                 eval_notice = f"[EVAL] After {tool_name}: WNS={new_wns:.3f}ns (delta={delta:+.3f}ns vs previous). {verdict}."
                                 if new_tns is not None:
                                     eval_notice += f" TNS={new_tns:.3f}ns"
@@ -362,27 +365,46 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 logger.info(f"[EXECUTE] Post-eval (from result): {tool_name} -> WNS={new_wns:.3f}ns (delta={delta:+.3f}, {verdict})")
                             else:
                                 # Fallback to full timing report if JSON doesn't have WNS
-                                await _post_eval_hook(state, deps, tool_name)
+                                post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
                         except (json.JSONDecodeError, TypeError, ValueError):
-                            await _post_eval_hook(state, deps, tool_name)
+                            post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
                     else:
                         try:
-                            await _post_eval_hook(state, deps, tool_name)
+                            post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
                         except Exception as e:
                             logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
                 await _try_save_best_checkpoint(state, deps)
 
-                # Chain actions for skills
+                # Chain actions for skills — gated by post-eval verdict.
+                # When a heavy-chain skill reports UNCHANGED, the skill produced no
+                # netlist change, so running place_design+route_design (~180s) is
+                # wasteful. Run a lightweight validation instead.
                 if tool_name in SKILL_CHAIN_ACTIONS:
-                    try:
-                        skill_data = json.loads(result) if result else {}
-                        if isinstance(skill_data, dict) and "error" in skill_data:
-                            logger.warning(f"[EXECUTE] Skill {tool_name} returned error, skipping chain: {skill_data['error']}")
-                        else:
-                            await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
-                            reached_callback = True
-                    except Exception as e:
-                        logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
+                    if (post_eval_verdict == "UNCHANGED"
+                            and tool_name in HEAVY_CHAIN_SKILLS
+                            and deps.vivado_session):
+                        logger.info(
+                            f"[EXECUTE] Post-eval UNCHANGED for {tool_name}, "
+                            f"skipping heavy chain (saves ~180s). Running lightweight validation."
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[CHAIN GATE] {tool_name}: post-eval UNCHANGED — "
+                                f"skill did not modify the netlist. Skipping "
+                                f"place+create_pblock+place+route chain. "
+                                f"Running lightweight place_design to verify."
+                            )
+                        await _lightweight_chain_validation(state, deps, tool_name, tools_called)
+                    else:
+                        try:
+                            skill_data = json.loads(result) if result else {}
+                            if isinstance(skill_data, dict) and "error" in skill_data:
+                                logger.warning(f"[EXECUTE] Skill {tool_name} returned error, skipping chain: {skill_data['error']}")
+                            else:
+                                await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
+                                reached_callback = True
+                        except Exception as e:
+                            logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
 
                 # Force exit on large WNS regression (>0.5ns below best).
                 # EVALUATE will detect regression via detect_rollback_needed()
@@ -720,8 +742,12 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
     return None
 
 
-async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str) -> None:
-    """Force WNS evaluation after critical tools."""
+async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str) -> str | None:
+    """Force WNS evaluation after critical tools.
+
+    Returns:
+        Verdict string ("IMPROVED", "UNCHANGED", "REGRESSED") or None on failure.
+    """
     prev_wns = state.timing.latest_wns
     timing_result = await call_tool_fn(
         "vivado_report_timing_summary", {},
@@ -738,7 +764,7 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     tns = timing.get("tns")
     fe = timing.get("failing_endpoints")
     if wns is None:
-        return
+        return None
 
     state.timing.latest_wns = wns
     if tns is not None:
@@ -765,6 +791,72 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     if deps.compat is not None:
         deps.compat.add_message("user", eval_notice)
     logger.info(f"[EXECUTE] Post-eval: {tool_name} -> WNS={wns:.3f}ns (delta={delta:+.3f}, {verdict})")
+    return verdict
+
+
+async def _lightweight_chain_validation(state, deps, tool_name, tools_called):
+    """Lightweight validation when a heavy-chain skill reports UNCHANGED.
+
+    Runs a single vivado_place_design (no pblock, no unplace) to confirm
+    the skill didn't change anything, then checks WNS. If WNS improves
+    (false UNCHANGED), the full chain is re-run. Otherwise we skip the
+    ~180s place+create_pblock+place+route chain.
+    """
+    logger.info(f"[chain-gate] Lightweight validation for {tool_name}: place_design only")
+    try:
+        result = await call_tool_fn(
+            "vivado_place_design", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        state.iteration.tools_used.append("vivado_place_design")
+        tools_called.append("vivado_place_design")
+        state.timing.critical_paths_stale = True
+
+        # Re-evaluate WNS
+        verdict = await _post_eval_hook(state, deps, "vivado_place_design")
+        if verdict == "IMPROVED":
+            logger.info(
+                f"[chain-gate] Lightweight validation found IMPROVED for {tool_name}, "
+                f"re-running full chain"
+            )
+            if deps.compat is not None:
+                deps.compat.add_message("user",
+                    f"[CHAIN GATE] Lightweight validation found WNS improvement after "
+                    f"{tool_name}. Running full chain (create_pblock + place + route)."
+                )
+            # Re-run the skill to get fresh data, then execute chain
+            skill_result = await call_tool_fn(
+                tool_name, {},
+                deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
+            )
+            skill_data = json.loads(skill_result) if isinstance(skill_result, str) else {}
+            await _execute_chain_actions(state, deps, tool_name,
+                                         skill_data if isinstance(skill_data, dict) else {},
+                                         tools_called)
+        else:
+            logger.info(
+                f"[chain-gate] Lightweight validation confirms UNCHANGED for {tool_name}, "
+                f"chain fully skipped"
+            )
+            if deps.compat is not None:
+                deps.compat.add_message("user",
+                    f"[CHAIN GATE] Lightweight validation confirmed UNCHANGED — "
+                    f"full chain skipped. Saved ~180s."
+                )
+    except Exception as e:
+        logger.warning(f"[chain-gate] Lightweight validation failed: {e}, falling back to full chain")
+        # If validation itself fails, run the full chain as fallback
+        skill_result = await call_tool_fn(
+            tool_name, {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        skill_data = json.loads(skill_result) if isinstance(skill_result, str) else {}
+        await _execute_chain_actions(state, deps, tool_name,
+                                     skill_data if isinstance(skill_data, dict) else {},
+                                     tools_called)
 
 
 async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tools_called):

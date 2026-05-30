@@ -84,6 +84,21 @@ async def check_exit_node(
         record_flow_signal(state, "SYSTEM_EXIT", "max_no_improvement", phase="CHECK_EXIT")
         return NodeName.CHECK_EXIT
 
+    # WNS stagnation: best WNS unchanged for 2+ iterations AND no strategy
+    # switch in the most recent iteration — design is likely at its limit.
+    if (state.iteration.global_no_improvement >= 2
+            and state.timing.best_wns_iteration is not None
+            and state.timing.best_wns_iteration < state.iteration.current - 1):
+        state.control.is_done = True
+        state.control.done_reason = "wns_stagnated"
+        logger.info(
+            f"[check_exit] WNS stagnated: best_wns={state.timing.best_wns:.3f}ns "
+            f"reached at iter {state.timing.best_wns_iteration}, "
+            f"now at iter {state.iteration.current} with {state.iteration.global_no_improvement} no-improvement iterations"
+        )
+        record_flow_signal(state, "SYSTEM_EXIT", "wns_stagnated", phase="CHECK_EXIT")
+        return NodeName.CHECK_EXIT
+
     # Cost limit
     if state.cost.total_cost >= state.cost.cost_hard_limit:
         state.control.is_done = True
