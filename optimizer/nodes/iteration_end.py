@@ -10,6 +10,7 @@ optimize() (L5229-5300).
 from __future__ import annotations
 
 import logging
+import re
 
 from ..state import OptimizerState, record_flow_signal, record_strategy_failure
 from ..deps import NodeDeps
@@ -225,24 +226,25 @@ async def iteration_end_node(
     return NodeName.CHECK_EXIT
 
 
-# Patterns indicating a tool returned empty/zero results (not a strategy failure,
+# Regexes indicating a tool returned empty/zero results (not a strategy failure,
 # but a design constraint mismatch). These should use reason="tool_error" so the
 # strategy can be retried after a 2-iteration cooldown.
-_EMPTY_RESULT_PATTERNS = (
-    "0 candidates",
-    "no candidates",
-    "no cells exceeded",
-    "no deep combinational",
-    "no actionable results",
-    "total_candidates\": 0",
-    "no high fanout",
-    '"optimized_count": 0',
-    '"cascades_found": 0',
+# Use word boundary \b to prevent "0 candidates" matching "10 candidates".
+_EMPTY_RESULT_REGEXES = [
+    re.compile(r'\b0\s+candidates'),
+    re.compile(r'\bno\s+candidates'),
+    re.compile(r'\bno\s+cells\s+exceeded'),
+    re.compile(r'\bno\s+deep\s+combinational'),
+    re.compile(r'\bno\s+actionable\s+results'),
+    re.compile(r'"total_candidates":\s*0'),
+    re.compile(r'\bno\s+high\s+fanout'),
+    re.compile(r'"optimized_count":\s*0'),
+    re.compile(r'"cascades_found":\s*0'),
     # ── opt_design empty-result patterns ──────────────────────────
-    '"status": "no_optimization"',       # opt_design JSON: explicit no-op status
-    "no optimization performed",         # Vivado opt_design partial match
-    "0 cells optimized",                 # Alternative Vivado wording
-)
+    re.compile(r'"status":\s*"no_optimization"'),  # opt_design JSON: explicit no-op status
+    re.compile(r'\bno\s+optimization\s+performed'), # Vivado opt_design partial match
+    re.compile(r'\b0\s+cells\s+optimized'),         # Alternative Vivado wording
+]
 
 
 def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str:
@@ -265,7 +267,7 @@ def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str
             if iter_num != state.iteration.current:
                 continue
             output_lower = raw_output.lower() if raw_output else ""
-            if any(pattern in output_lower for pattern in _EMPTY_RESULT_PATTERNS):
+            if any(regex.search(output_lower) for regex in _EMPTY_RESULT_REGEXES):
                 logger.info(
                     f"[iteration_end] Empty result detected in {tool_name}, "
                     f"using tool_error (retriable) instead of strategy_ineffective"

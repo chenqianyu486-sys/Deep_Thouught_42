@@ -6,6 +6,7 @@ next action: NEXT_ITERATION, SWITCH_STRATEGY, DONE, or CONTINUE.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -110,7 +111,12 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
         # Call LLM with evaluation tools
         phase_tools = filter_tools_for_phase(deps.tools, LoopPhase.EVALUATE)
-        response = await _call_phase_llm(state, deps, phase_tools)
+        try:
+            response = await _call_phase_llm(state, deps, phase_tools)
+        except Exception as e:
+            logger.error(f"[EVALUATE] LLM call failed after retries: {e}")
+            _handle_switch_strategy(state, deps, f"LLM error: {e}")
+            return LoopPhase.ANALYZE
         if response is None:
             break
 
@@ -345,10 +351,11 @@ def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -
     return False
 
 
-async def _call_phase_llm(state, deps, phase_tools):
-    """Call LLM with evaluation tools."""
+async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2.0):
+    """Call LLM with evaluation tools and retry logic."""
     if deps.openai_client is None or deps.compat is None:
         return None
+
     try:
         api_messages = deps.compat.get_formatted_for_api()
     except Exception:
@@ -365,34 +372,70 @@ async def _call_phase_llm(state, deps, phase_tools):
         state.model.planner_model, state.model.worker_model,
     )
 
-    try:
-        kwargs = dict(
-            model=model,
-            messages=api_messages,
-            tools=phase_tools if phase_tools else None,
-            timeout=600.0,
-        )
-        if extra_body:
-            kwargs["extra_body"] = extra_body
-        # Log prompt for observability
-        if deps.prompt_logger:
-            deps.prompt_logger.log_prompt(
+    last_exception = None
+    for retry in range(max_retries):
+        try:
+            kwargs = dict(
                 model=model,
                 messages=api_messages,
-                iteration=state.iteration.current,
-                job_id=state.control.run_dir.name if state.control.run_dir else ""
+                tools=phase_tools if phase_tools else None,
+                timeout=600.0,
             )
-        state.context.latest_user_prompt = (
-            api_messages[-1].get("content", "") if api_messages else ""
-        )[:2000]
-        response = await deps.openai_client.chat.completions.create(**kwargs)
-        # Log LLM call with state snapshot
-        if deps.llm_call_logger:
-            deps.llm_call_logger.log_call(
-                state, model=model, messages=api_messages, tools=phase_tools,
-                response=response, phase="EVALUATE",
-            )
-        return response
-    except Exception as e:
-        logger.error(f"[EVALUATE] LLM call failed: {e}")
-        return None
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            # Log prompt for observability
+            if deps.prompt_logger:
+                deps.prompt_logger.log_prompt(
+                    model=model,
+                    messages=api_messages,
+                    iteration=state.iteration.current,
+                    job_id=state.control.run_dir.name if state.control.run_dir else ""
+                )
+            state.context.latest_user_prompt = (
+                api_messages[-1].get("content", "") if api_messages else ""
+            )[:2000]
+            response = await deps.openai_client.chat.completions.create(**kwargs)
+            # Log LLM call with state snapshot
+            if deps.llm_call_logger:
+                deps.llm_call_logger.log_call(
+                    state, model=model, messages=api_messages, tools=phase_tools,
+                    response=response, phase="EVALUATE",
+                )
+            return response
+        except Exception as e:
+            last_exception = e
+            error_str = str(e)
+            if "429" in error_str:
+                fallback = _get_fallback_model(state, model)
+                if fallback and fallback != model:
+                    logger.warning(f"[EVALUATE] Rate limit, fallback: {model} -> {fallback}")
+                    state.model.current_model = fallback
+                    model = fallback
+                    wait_time = retry_delay * (2 ** retry)
+                    await asyncio.sleep(wait_time)
+                    continue
+            if retry < max_retries - 1:
+                wait_time = retry_delay * (2 ** retry)
+                logger.warning(f"[EVALUATE] Retry {retry+1}/{max_retries}: {e}")
+                await asyncio.sleep(wait_time)
+
+    if last_exception:
+        raise last_exception
+    return None
+
+
+def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None:
+    """Get fallback model for rate-limit recovery (mirrors ANALYZE logic)."""
+    if current_model == state.model.worker_model:
+        fallbacks = state.model.worker_fallback_models
+        idx = state.model.worker_fallback_index
+        if idx < len(fallbacks):
+            state.model.worker_fallback_index = idx + 1
+            return fallbacks[idx]
+    if current_model == state.model.planner_model:
+        fallbacks = state.model.planner_fallback_models
+        idx = state.model.planner_fallback_index
+        if idx < len(fallbacks):
+            state.model.planner_fallback_index = idx + 1
+            return fallbacks[idx]
+    return None

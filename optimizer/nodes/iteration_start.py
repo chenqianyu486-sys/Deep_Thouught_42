@@ -37,6 +37,28 @@ async def iteration_start_node(
     Returns:
         Next node name (deterministic: select_model).
     """
+    # Check max iterations BEFORE incrementing (fix C-1: off-by-one)
+    if state.iteration.current >= state.iteration.max_iterations:
+        logger.info(
+            f"[iteration_start] Max iterations reached: "
+            f"{state.iteration.current} >= {state.iteration.max_iterations}"
+        )
+        state.control.is_done = True
+        state.control.done_reason = "max_iterations_reached"
+        return NodeName.SAVE_OUTPUT
+
+    # Check wall-clock timeout BEFORE incrementing
+    if state.control.start_time is not None:
+        elapsed = time.time() - state.control.start_time
+        if elapsed > state.control.wall_clock_timeout:
+            logger.warning(
+                f"[iteration_start] Wall-clock timeout: "
+                f"{elapsed:.0f}s > {state.control.wall_clock_timeout:.0f}s"
+            )
+            state.control.is_done = True
+            state.control.done_reason = "wall_clock_timeout"
+            return NodeName.SAVE_OUTPUT
+
     # Increment iteration
     state.iteration.current += 1
     state.iteration.tool_errors.clear()
@@ -49,28 +71,6 @@ async def iteration_start_node(
         f"(best_wns={state.timing.best_wns:.3f}ns, "
         f"cost=${state.cost.total_cost:.4f})"
     ))
-
-    # Check wall-clock timeout
-    if state.control.start_time is not None:
-        elapsed = time.time() - state.control.start_time
-        if elapsed > state.control.wall_clock_timeout:
-            logger.warning(
-                f"[iteration_start] Wall-clock timeout: "
-                f"{elapsed:.0f}s > {state.control.wall_clock_timeout:.0f}s"
-            )
-            state.control.is_done = True
-            state.control.done_reason = "wall_clock_timeout"
-            return NodeName.SAVE_OUTPUT
-
-    # Check max iterations
-    if state.iteration.current > state.iteration.max_iterations:
-        logger.info(
-            f"[iteration_start] Max iterations reached: "
-            f"{state.iteration.current} > {state.iteration.max_iterations}"
-        )
-        state.control.is_done = True
-        state.control.done_reason = "max_iterations_reached"
-        return NodeName.SAVE_OUTPUT
 
     # Snapshot WNS for rollback (store prev_best_wns)
     state.timing.prev_best_wns = state.timing.best_wns

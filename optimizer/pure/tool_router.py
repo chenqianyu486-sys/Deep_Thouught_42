@@ -254,6 +254,10 @@ async def call_tool(
                 f"FAILED: Application-level timeout ({app_timeout:.0f}s), "
                 f"heartbeats={heartbeat_count}"
             )
+            # Invalidate cache — MCP server may restart with fresh state after timeout
+            if tool_cache is not None:
+                tool_cache.clear()
+                logger.info(f"[CACHE_INVALIDATED] by {tool_name} timeout (round {tool_round})")
             return json.dumps({
                 "error": f"Application-level timeout after {app_timeout:.0f}s",
                 "tool": tool_name,
@@ -265,6 +269,10 @@ async def call_tool(
                 f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                 f"FAILED: {e}, heartbeats={heartbeat_count}"
             )
+            # Invalidate cache — MCP server may restart with fresh state after failure
+            if tool_cache is not None:
+                tool_cache.clear()
+                logger.info(f"[CACHE_INVALIDATED] by {tool_name} error (round {tool_round})")
             return json.dumps({"error": str(e), "tool": tool_name})
     finally:
         heartbeat_done.set()

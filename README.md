@@ -16,7 +16,7 @@
 - **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
 - **Dual architecture.** V2 state machine for production reliability; V1 conversational loop for rapid experimentation.
 - **Real-time observability.** Web Dashboard with 20 panels — 7-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
-- **11 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, OptDesign.
+- **12 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, OptDesign.
 
 ---
 
@@ -93,7 +93,7 @@ init_analysis ──► [WNS >= 0?]
 | 5 | Separation of concerns | Worker (250K tokens, execution) vs. Planner (1M tokens, strategic decisions) |
 | 6 | Single invocation path | V2 uses native function calls only; no XML/YAML text fallback |
 | 7 | Single source of truth | Runtime data in `OptimizerState`; no shadow copies in `MemoryManager` |
-| 8 | Domain knowledge encoded | 11 strategies with trigger conditions; LLM selects autonomously |
+| 8 | Domain knowledge encoded | 12 strategies with trigger conditions; LLM selects autonomously |
 | 9 | Data trustworthiness | `DASHBOARD_REFRESH_MAP` tracks field freshness; stale data auto-annotated |
 | 10 | Information preservation | Compression markers retain key metrics (WNS/TNS/FE/delta/status) |
 | 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
@@ -139,6 +139,7 @@ init_analysis ──► [WNS >= 0?]
 | **CellReplication** | Fanout > 10 or delay > 0.3ns | RapidWright + Vivado |
 | **CongestionSpreading** | Congestion=HIGH, PBLOCK/PhysOpt ineffective | RapidWright + Vivado |
 | **RegisterRetiming** | Deep combinational chains (>2 LUTs) | RapidWright + Vivado |
+| **SmartRetiming** | WNS stuck, deep combinational chains (>2 LUTs) between pipeline registers, FF > 0 | RapidWright + Vivado |
 | **NetSwap** | Intra-SLICE routing congestion | RapidWright + Vivado |
 | **PhysOpt+RegisterRetiming** | Logic-depth limited (logic_delay > 70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | Vivado + RapidWright (atomic) |
 
@@ -244,9 +245,9 @@ Deep_Thouught_42/
 │   ├── state.py              # Typed dataclass: 7 state sub-slices
 │   ├── graph.py              # NodeGraph: execution engine
 │   ├── nodes/                # 9 node implementations + llm_tool_loop subgraph
-│   └── pure/                 # 13 stateless pure-function modules (unit-testable), incl. state_space.py (7-module StateSpace)
-├── strategy_library.py       # 11 strategies with trigger conditions
-├── skills/                   # Skill framework: 13 registered skills
+│   └── pure/                 # 14 stateless pure-function modules (unit-testable), incl. state_space.py (7-module StateSpace)
+├── strategy_library.py       # 12 strategies with trigger conditions
+├── skills/                   # Skill framework: 14 registered skills
 ├── RapidWrightMCP/           # RapidWright MCP server
 ├── VivadoMCP/                # Vivado MCP server
 ├── context_manager/          # Memory/compression management
@@ -381,7 +382,7 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
 - **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环用于快速实验。
 - **实时可观测性。** 包含 20 个面板的 Web 仪表盘 —— 7 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
-- **11 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、SmartRetiming、NetSwap、PhysOpt+RegisterRetiming、OptDesign。
+- **12 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、SmartRetiming、NetSwap、PhysOpt+RegisterRetiming、OptDesign。
 
 ---
 
@@ -458,7 +459,7 @@ init_analysis ──► [WNS >= 0?]
 | 5 | 关注点分离 | Worker（250K tokens，负责执行） vs. Planner（1M tokens，负责战略决策） |
 | 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
 | 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
-| 8 | 编码领域知识 | 11 种策略带有触发条件；LLM 自主选择 |
+| 8 | 编码领域知识 | 12 种策略带有触发条件；LLM 自主选择 |
 | 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
@@ -488,6 +489,7 @@ init_analysis ──► [WNS >= 0?]
 | **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
 | **CongestionSpreading** | 拥塞=HIGH，PBLOCK/PhysOpt 无效 | RapidWright + Vivado |
 | **RegisterRetiming** | 深层组合逻辑链（>2 个 LUT） | RapidWright + Vivado |
+| **SmartRetiming** | WNS 停滞，深层组合逻辑链（>2 个 LUT）位于流水线寄存器之间，FF > 0 | RapidWright + Vivado |
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
 | **PhysOpt+RegisterRetiming** | 逻辑深度受限（logic_delay > 70%），WNS > -2.0，深层链（>2 个 LUT），FF > 0 | Vivado + RapidWright（原子操作） |
 
@@ -593,9 +595,9 @@ Deep_Thouught_42/
 │   ├── state.py              # 类型化数据类：7 个状态子切片
 │   ├── graph.py              # NodeGraph：执行引擎
 │   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
-│   └── pure/                 # 13 个无状态纯函数模块（可单元测试），含 state_space.py（7 模块 StateSpace）
-├── strategy_library.py       # 11 种策略及触发条件
-├── skills/                   # 技能框架：13 个注册技能
+│   └── pure/                 # 14 个无状态纯函数模块（可单元测试），含 state_space.py（7 模块 StateSpace）
+├── strategy_library.py       # 12 种策略及触发条件
+├── skills/                   # 技能框架：14 个注册技能
 ├── RapidWrightMCP/           # RapidWright MCP 服务器
 ├── VivadoMCP/                # Vivado MCP 服务器
 ├── context_manager/          # 内存/压缩管理

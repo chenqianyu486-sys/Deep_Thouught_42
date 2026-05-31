@@ -55,6 +55,7 @@ SIDE_EFFECT_TOOLS = frozenset({
     "rapidwright_flatten_lut_cascade",
     "rapidwright_replicate_critical_cells",
     "rapidwright_execute_register_retiming",
+    "rapidwright_smart_retiming",
     "rapidwright_execute_net_swapping",
     "rapidwright_optimize_cell_placement",
     "rapidwright_optimize_lut_input_cone",
@@ -260,6 +261,22 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         _pending_tool_count -= 1  # Rate-limited tools count as completed
                         continue
 
+                # Save pre-unplace checkpoint BEFORE the unplace tool call,
+                # so rollback restores to the placed state (not already-unplaced).
+                if tool_name == "vivado_place_design":
+                    directive = tool_args.get("directive", "").lower()
+                    if directive == "unplace":
+                        try:
+                            pre_unplace_ckpt = Path(f"/tmp/pre_unplace_{state.iteration.current}_{tool_round}.dcp")
+                            await call_tool_fn(
+                                "vivado_write_checkpoint", {"dcp_path": str(pre_unplace_ckpt), "force": True},
+                                deps.rapidwright_session, deps.vivado_session,
+                                design_size_factor=state.timing.design_size_factor,
+                            )
+                            pre_unplace_path = pre_unplace_ckpt
+                        except Exception as e:
+                            logger.warning(f"[EXECUTE] Failed to save pre-unplace checkpoint: {e}")
+
                 tool_start = time.time()
                 logger.info(f"[EXECUTE] Calling {tool_name}")
                 result = await call_tool_fn(
@@ -321,16 +338,6 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     directive = tool_args.get("directive", "").lower()
                     if directive == "unplace":
                         unplaced_without_replace = True
-                        try:
-                            pre_unplace_ckpt = Path(f"/tmp/pre_unplace_{state.iteration.current}_{tool_round}.dcp")
-                            await call_tool_fn(
-                                "vivado_write_checkpoint", {"dcp_path": str(pre_unplace_ckpt), "force": True},
-                                deps.rapidwright_session, deps.vivado_session,
-                                design_size_factor=state.timing.design_size_factor,
-                            )
-                            pre_unplace_path = pre_unplace_ckpt
-                        except Exception as e:
-                            logger.warning(f"[EXECUTE] Failed to save pre-unplace checkpoint: {e}")
                     else:
                         unplaced_without_replace = False
 
@@ -1162,12 +1169,15 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                             deps.rapidwright_session, deps.vivado_session,
                             design_size_factor=state.timing.design_size_factor,
                         )
-                        restore_wns = parse_timing_summary(restore_result)
-                        if restore_wns is not None:
-                            state.timing.latest_wns = restore_wns
-                            logger.info(f"[chain] Post-restore WNS: {restore_wns:.3f}")
+                        restore_timing = parse_timing_summary(restore_result)
+                        if isinstance(restore_timing, dict):
+                            state.timing.latest_wns = restore_timing.get("wns")
+                            if state.timing.latest_wns is not None:
+                                logger.info(f"[chain] Post-restore WNS: {state.timing.latest_wns:.3f}")
+                            else:
+                                logger.warning("[chain] Could not parse WNS from timing after restore")
                         else:
-                            state.timing.latest_wns = None
+                            state.timing.latest_wns = restore_timing
                             logger.warning("[chain] Could not parse timing after restore")
                     except Exception as timing_err:
                         state.timing.latest_wns = None

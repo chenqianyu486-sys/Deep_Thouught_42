@@ -24,12 +24,12 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）
+│   └── pure/                     # 14 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 10 种策略库
+├── strategy_library.py           # 12 种策略库
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件
@@ -52,7 +52,7 @@ fpl26_optimization_contest/
 │   ├── descriptor.py / validate_descriptors.py
 │   ├── strategy_plan.py
 │   ├── opt_design_strategy.py       # opt_design RapidWright skill wrapper
-│   └── 15 个 Skill 实现文件 + 测试 + JSON 描述符
+│   └── 14 个 Skill 实现文件 + 测试 + JSON 描述符
 ├── docs/                         # GitHub Pages 竞赛提交文档
 └── (various config files)
 ```
@@ -131,7 +131,7 @@ llm_tool_loop_node (调度器)
 | 5 | 关注点分离 | Worker（250K）执行 vs Planner（1M）策略决策 |
 | 6 | 单一调用路径 | V2 仅原生函数调用，无 XML/YAML 回退 |
 | 7 | 单一事实来源 | 运行时数据在 OptimizerState；MemoryManager 仅存消息+执行压缩引擎；DCPOptimizerCompat 仅 V1 使用 |
-| 8 | 领域知识编码 | 10 策略含触发条件，LLM 自主选择 |
+| 8 | 领域知识编码 | 12 策略含触发条件，LLM 自主选择 |
 | 9 | 数据可信度 | DASHBOARD_REFRESH_MAP 追踪字段新鲜度 |
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
 | 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
@@ -339,7 +339,7 @@ architecture_overview:
 
 Planner（1M max）vs Worker（250K max），迭代边界切换。
 
-`compute_model_scores()` 7 维度评分（margin=1 防震荡）：
+`compute_model_scores()` 7 维度评分（margin=2 防震荡）：
 
 | 维度 | Planner | Worker |
 |------|---------|--------|
@@ -386,7 +386,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 **SKILL_CHAIN_ACTIONS 自动链式执行**：`strategy_library.py` 中的策略可通过 `SKILL_CHAIN_ACTIONS` 映射定义自动串联的工具序列。新增 opt_design 链式条目：
 ```python
 # opt_design chain: skill → opt_design → place → route → timing → critical_path_cells
-"rapidwright_opt_design_strategy": [...]
+"rapidwright_execute_opt_design_strategy": [...]
 ```
 
 ### 3.6 策略库清单（strategy_library.py）
@@ -401,9 +401,10 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 | CellReplication | fanout>10 或 delay>0.3ns | Vivado `phys_opt_design` |
 | CongestionSpreading | congestion=HIGH | `rapidwright_analyze_congestion_spreading` |
 | RegisterRetiming | 深组合逻辑链 (>2 LUTs) | `rapidwright_analyze_register_retiming` |
+| SmartRetiming | WNS 停滞，深组合逻辑链 (>2 LUTs) 位于流水线寄存器之间，FF > 0 | `rapidwright_smart_retiming` |
 | NetSwap | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
 | PhysOpt+RegisterRetiming | Logic-depth limited (>70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | `vivado_physopt_and_route` (atomic PhysOpt+route, then retiming) |
-| OptDesign | Logic-depth limited (>70% logic delay), PhysOpt ineffective | `rapidwright_opt_design_strategy` |
+| OptDesign | Logic-depth limited (>70% logic delay), PhysOpt ineffective | `rapidwright_execute_opt_design_strategy` |
 
 ### 3.7 Tool 描述增强
 

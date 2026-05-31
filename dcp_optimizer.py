@@ -900,7 +900,7 @@ class DCPOptimizer(DCPOptimizerBase):
         self._last_skill_rec_iteration: Optional[int] = None  # Dedup guard for recommendation logging
 
         # === Section 8.X: DCP Validation ===
-        self.validation_enabled = False          # Disable validation during optimization
+        self.validation_enabled = True           # Enable validation for logic equivalence
         self.checkpoint_saving_enabled = True     # Enable checkpoint saving for iteration rollback
         self._needs_save = False                  # 比赛要求: WNS 改善时标记需要持久化
         self.validation_interval = 5            # Run Phase 1 every N iterations

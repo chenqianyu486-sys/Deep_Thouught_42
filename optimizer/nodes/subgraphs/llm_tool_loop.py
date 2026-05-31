@@ -79,12 +79,41 @@ async def llm_tool_loop_node(
         try:
             next_phase = await runner(state, deps)
         except Exception as e:
-            logger.error(f"[llm_tool_loop] Phase {phase.value} failed: {e}")
-            return NodeName.ITERATION_END
+            logger.error(
+                f"[llm_tool_loop] Phase {phase.value} failed: {e}",
+                exc_info=True,
+            )
+            record_flow_signal(
+                state, "PHASE_ERROR", f"{phase.value}:{type(e).__name__}",
+                phase=phase.value,
+            )
+            # Recovery: attempt to continue via SWITCH_STRATEGY instead of
+            # silently killing the iteration.  The LLM will see the failure
+            # in the next ANALYZE round and can adapt.
+            if phase == LoopPhase.EVALUATE:
+                # EVALUATE failed — safe to restart from ANALYZE
+                next_phase = LoopPhase.ANALYZE
+            else:
+                # ANALYZE / SELECT / EXECUTE failed — force strategy switch
+                state.strategy.current_strategy = ""
+                state.strategy.current_phase = ""
+                state.control.done_reason = "phase_error"
+                next_phase = LoopPhase.EVALUATE
 
         logger.info(
             f"[llm_tool_loop] Phase transition: {phase.value} -> {next_phase.value}"
         )
+
+        # ── Validate phase results ────────────────────────────────
+        validation_issue = _validate_phase_result(phase, state)
+        if validation_issue:
+            logger.warning(
+                f"[llm_tool_loop] Phase {phase.value} validation: {validation_issue}"
+            )
+            record_flow_signal(
+                state, "PHASE_VALIDATION", validation_issue,
+                phase=phase.value,
+            )
 
         # ── After EVALUATE: check if we should exit the iteration ──
         if phase == LoopPhase.EVALUATE:
@@ -151,3 +180,21 @@ def _check_wns_target_met(state: OptimizerState) -> bool:
         and state.timing.latest_wns >= WNS_TARGET_THRESHOLD
         and is_valid_wns(state.timing.latest_wns, state.timing.clock_period, state.timing.best_wns)
     )
+
+
+def _validate_phase_result(phase: LoopPhase, state: OptimizerState) -> str:
+    """Validate that a phase produced meaningful results.
+
+    Returns an issue description string, or empty string if OK.
+    These are advisory warnings — they do NOT alter control flow.
+    """
+    if phase == LoopPhase.SELECT_STRATEGY:
+        if not state.strategy.current_strategy:
+            return "no_strategy_selected"
+    elif phase == LoopPhase.EXECUTE:
+        if not state.iteration.tools_used:
+            return "no_tools_executed"
+    elif phase == LoopPhase.ANALYZE:
+        if not state.timing.refreshed_fields:
+            return "no_dashboard_data_refreshed"
+    return ""

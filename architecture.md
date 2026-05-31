@@ -380,7 +380,7 @@ WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
 
 #### 模型选择维度（`compute_model_scores()`）
 
-评分系统（7个生效维度，加权得分高的模型胜出，margin=1防止震荡）：
+评分系统（7个生效维度，加权得分高的模型胜出，margin=2防止震荡）：
 
 | 维度 | 条件 | Planner得分 | Worker得分 |
 |------|------|-----------|-----------|

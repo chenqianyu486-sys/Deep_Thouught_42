@@ -8,8 +8,11 @@ _save_best_checkpoint_on_timeout() (L5909-5942).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 import time
+from pathlib import Path
 
 from ..state import OptimizerState
 from ..deps import NodeDeps
@@ -20,6 +23,55 @@ from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
 logger = logging.getLogger(__name__)
+
+
+def _should_skip_structural(state: OptimizerState) -> bool:
+    """Check if structural validation should be skipped.
+
+    opt_design remaps/merges LUT cells, changing cell names and counts.
+    Phase 1 (structural comparison) would incorrectly flag these changes.
+    """
+    return "vivado_opt_design" in state.iteration.tools_used
+
+
+async def _run_validation(
+    golden_dcp: Path,
+    revised_dcp: Path,
+    skip_structural: bool = False,
+    num_vectors: int = 200,
+) -> dict:
+    """Run validate_dcps.py as a subprocess.
+
+    Returns dict with 'passed' (bool) and 'error' (str or None).
+    """
+    script_path = Path(__file__).resolve().parents[2] / "validate_dcps.py"
+    if not script_path.exists():
+        return {"passed": False, "error": f"validate_dcps.py not found at {script_path}"}
+
+    cmd = [
+        sys.executable, "-u",
+        str(script_path),
+        str(golden_dcp),
+        str(revised_dcp),
+        "--vectors", str(num_vectors),
+    ]
+    if skip_structural:
+        cmd.append("--skip-structural")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=7200.0)
+        passed = proc.returncode == 0
+        error = None if passed else (stderr.decode()[-500:] if stderr else "validation failed")
+        return {"passed": passed, "error": error}
+    except asyncio.TimeoutError:
+        return {"passed": False, "error": "validation timed out after 7200s"}
+    except Exception as e:
+        return {"passed": False, "error": str(e)}
 
 
 async def save_output_node(
@@ -169,6 +221,31 @@ async def save_output_node(
                 logger.info(f"[save_output] Output DCP written successfully")
         except Exception as e:
             logger.warning(f"[save_output] Failed to write output DCP: {e}")
+
+    # Validate output DCP (logic equivalence check)
+    if (state.control.validation_enabled
+            and state.control.output_dcp
+            and state.control.input_dcp
+            and state.control.output_dcp.exists()):
+        skip_structural = _should_skip_structural(state)
+        logger.info(
+            f"[save_output] Running DCP validation "
+            f"(skip_structural={skip_structural})"
+        )
+        print("\nRunning DCP validation...")
+        validation_result = await _run_validation(
+            golden_dcp=state.control.input_dcp,
+            revised_dcp=state.control.output_dcp,
+            skip_structural=skip_structural,
+        )
+        if validation_result["passed"]:
+            print("✓ DCP validation PASSED")
+            logger.info("[save_output] DCP validation passed")
+        else:
+            print(f"✗ DCP validation FAILED: {validation_result['error']}")
+            logger.warning(
+                f"[save_output] DCP validation failed: {validation_result['error']}"
+            )
 
     # Export tracing
     if state.control.run_dir:

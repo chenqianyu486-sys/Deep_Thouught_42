@@ -103,6 +103,7 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
     "CongestionSpreading": "rapidwright_execute_congestion_spreading",
     "NetSwap": "rapidwright_execute_net_swapping",
     "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
+    "OptDesign": "rapidwright_execute_opt_design_strategy",
 }
 
 
@@ -368,4 +369,5 @@ _MCP_ERROR_PATTERNS: tuple[str, ...] = (
     "[ERROR] Multi-line script aborted",
     "[ERROR] Multi-line script validation failed",
     "[ERROR] Vivado process terminated",
+    '"error":',      # JSON error from tool_router
 )

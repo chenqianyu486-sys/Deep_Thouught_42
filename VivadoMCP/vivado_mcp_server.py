@@ -2349,10 +2349,32 @@ async def call_tool(name: str, arguments: dict):
                 "trace_id": trace_id,
             }
         )
-        return [TextContent(
-            type="text",
-            text="Error: Vivado process terminated unexpectedly. Use restart_vivado to restart."
-        )]
+        _design_open = False  # Mark design as closed — Vivado is dead
+
+        if not _restarting:  # Reentry guard
+            try:
+                _restart_and_reopen()
+                if _design_open:
+                    return [TextContent(
+                        type="text",
+                        text="[ERROR] Vivado crashed (EOF) and was auto-restarted. DCP reopened. Please retry."
+                    )]
+                else:
+                    return [TextContent(
+                        type="text",
+                        text="[ERROR] Vivado crashed (EOF) and was restarted, but DCP could not be reopened."
+                    )]
+            except Exception as restart_err:
+                logger.error("Auto-restart after EOF failed: %s", restart_err)
+                return [TextContent(
+                    type="text",
+                    text=f"[ERROR] Vivado crashed (EOF) and auto-restart failed: {restart_err}"
+                )]
+        else:
+            return [TextContent(
+                type="text",
+                text="[ERROR] Vivado crash during restart — aborting"
+            )]
     except Exception as e:
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         logger.error(

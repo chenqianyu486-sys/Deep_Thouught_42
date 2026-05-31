@@ -68,7 +68,18 @@ class NodeGraph:
                 )
 
             self._tracer.on_enter(current, state)
-            next_node = await self._nodes[current](state, deps)
+            try:
+                next_node = await self._nodes[current](state, deps)
+            except Exception as e:
+                logger.error(
+                    f"[GRAPH] Node '{current}' raised {type(e).__name__}: {e}",
+                    exc_info=True,
+                )
+                # Recovery: route to save_output so partial progress is preserved
+                state.control.is_done = True
+                state.control.done_reason = f"node_error:{current}"
+                current = "save_output"
+                continue
             self._tracer.on_exit(current, state)
 
             # Resolve edge
