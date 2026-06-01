@@ -150,8 +150,12 @@ llm_tool_loop_node (调度器)
 | 24 | **设计状态标志同步** | `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志与 Vivado 实际状态，检查 `[ERROR]`、`ERROR:` 和 `no current design` 三种错误模式 |
 | 25 | **PBLOCK 单元过滤（CLOCK/IO 排除）** | `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制 |
 | 26 | **显式管线数据流** | `init_analysis` Phase B 管线返回 `dict` 而非使用 `nonlocal` 变量。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get()` 读取 `cell_names_for_spread`，消除隐式数据流 |
-| 27 | **EXECUTE no-progress threshold 12→6** | `NO_PROGRESS_LIMIT` 减半，增加 `_pending_tool_count` 守卫（排除正在等待工具调用返回的轮次），与 `_TOOL_TIMEOUT_DEFAULTS` 联动 |
+| 27 | **EXECUTE no-progress threshold 12→4** | `NO_PROGRESS_LIMIT` 降至 4，增加 `_pending_tool_count` 守卫（排除正在等待工具调用返回的轮次），与 `_TOOL_TIMEOUT_DEFAULTS` 联动。Post-eval UNCHANGED 注入 `[GUIDANCE]` 提示 LLM 发出 `EXEC_DONE` |
 | 28 | **vivado_run_tcl EXECUTE phase limit 5→2** | Phase rate limit 收紧，RATE LIMITED 消息引导 LLM 使用 Dashboard 数据和专用工具 |
+| 35 | **空响应早期终止** | `ContextState.consecutive_empty_responses` 计数器追踪 LLM 返回空内容且无 tool calls 的情况。阈值：ANALYZE/EXECUTE/EVALUATE=3, SELECT_STRATEGY=2。达到阈值时强制 `SYSTEM_EXIT` 退出阶段，防止 ~60% 运行时间浪费。计数器在非空响应和阶段入口时重置 |
+| 36 | **收益递减自动检测** | `_check_diminishing_returns()` 检测同一策略连续 2+ 次使用且 |delta| < 0.020ns。记录为 `reason="no_improvement"`（非 `strategy_ineffective`），不永久排除策略，但在 handoff 轨迹中提示 LLM |
+| 37 | **策略别名映射** | `EXECUTE_STRATEGY_TOOL_MAP` 包含 `LogicOptimization` 作为 `OptDesign` 别名。FORMAT_GUARD 策略列表同步更新，防止 EXECUTE 阶段因策略名未映射而失败 |
+| 38 | **Dashboard 数据工具 rate limit** | ANALYZE 阶段：`vivado_report_route_status`、`rapidwright_get_design_info`、`rapidwright_get_device_topology` 限制为 1 次/phase（数据已在 init_analysis 中提取到 Dashboard），防止 LLM 重复查询 |
 | 29 | **FF utilization <2% RegisterRetiming 警告** | Dashboard 和 strategy_catalog 中为 RegisterRetiming/SmartRetiming 添加 `ff_warning`，LLM 保留最终决策权 |
 | 30 | **Pre-placement logic optimization (opt_design)** | 新增第 11 个策略，通过 RapidWright skill 包装器 + `SKILL_CHAIN_ACTIONS` 自动链式执行。`validate_dcps.py --skip-structural` 允许跳过 Phase 1 结构对比 |
 | 31 | **初始 checkpoint 保存** | `init_analysis` 分析完成后无条件写 `best_checkpoint.dcp`，确保 rollback 始终可用。此前 checkpoint 仅 WNS 改善时保存，首次迭代退化时 rollback 因 `best_checkpoint_path=None` 失败（`optimizer/nodes/init_analysis.py`） |

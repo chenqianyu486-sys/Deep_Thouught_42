@@ -52,6 +52,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
     tools_called: list[str] = []
     llm_summary = ""
     state.context.tool_phase_call_counts.clear()
+    state.context.consecutive_empty_responses = 0
 
     # Record phase entry
     phase_entry = PhaseEntry(
@@ -280,6 +281,18 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             continue
 
         # No tool calls, no decision — prompt again
+        if not assistant_content.strip() and not message.tool_calls:
+            state.context.consecutive_empty_responses += 1
+            if state.context.consecutive_empty_responses >= 3:
+                logger.warning(
+                    f"[EVALUATE] {state.context.consecutive_empty_responses} consecutive "
+                    f"empty responses, forcing SWITCH_STRATEGY"
+                )
+                _handle_switch_strategy(state, deps, "Empty responses — forcing strategy switch")
+                return LoopPhase.ANALYZE
+        else:
+            state.context.consecutive_empty_responses = 0
+
         if deps.compat is not None:
             wns = state.timing.latest_wns
             wns_str = f"{wns:.3f}ns" if wns is not None else "unknown"

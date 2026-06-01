@@ -46,6 +46,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     tools_called: list[str] = []
     llm_summary = ""
     state.context.tool_phase_call_counts.clear()
+    state.context.consecutive_empty_responses = 0
 
     while True:
         tool_round += 1
@@ -195,6 +196,20 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             state.control.is_done = True
             state.control.done_reason = "wns_target_met"
             return LoopPhase.EVALUATE
+
+        # Track consecutive empty responses (no content AND no tool calls)
+        if not assistant_content.strip() and not message.tool_calls:
+            state.context.consecutive_empty_responses += 1
+            if state.context.consecutive_empty_responses >= 3:
+                logger.warning(
+                    f"[ANALYZE] {state.context.consecutive_empty_responses} consecutive "
+                    f"empty responses, forcing ANALYZE_DONE"
+                )
+                record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
+                                   phase="ANALYZE")
+                break
+        else:
+            state.context.consecutive_empty_responses = 0
 
     # Phase exit: build handoff and transition
     llm_summary = llm_summary or assistant_content or "Analysis phase completed."

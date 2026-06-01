@@ -33,6 +33,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     """
     max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.SELECT_STRATEGY, 6)
     tool_round = 0
+    state.context.consecutive_empty_responses = 0
     tools_called: list[str] = []
     llm_summary = ""
 
@@ -155,6 +156,19 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
             continue
 
         # No tool calls, no strategy selected: prompt again
+        if not assistant_content.strip() and not message.tool_calls:
+            state.context.consecutive_empty_responses += 1
+            if state.context.consecutive_empty_responses >= 2:
+                logger.warning(
+                    f"[SELECT] {state.context.consecutive_empty_responses} consecutive "
+                    f"empty responses, forcing exit"
+                )
+                record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
+                                   phase="SELECT_STRATEGY")
+                break
+        else:
+            state.context.consecutive_empty_responses = 0
+
         if deps.compat is not None:
             deps.compat.add_message("user",
                 "[NOTE] Please select a strategy by calling report_step_state with strategy_name.")

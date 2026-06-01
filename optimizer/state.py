@@ -268,6 +268,9 @@ class ContextState:
     tool_cache: dict[str, tuple[int, str]] = field(default_factory=dict)
     # Per-phase tool call counters for rate limiting. Reset at each phase entry.
     tool_phase_call_counts: dict[str, int] = field(default_factory=dict)
+    # Consecutive empty LLM responses (no content AND no tool calls).
+    # Reset to 0 on any non-empty response. Used for early phase exit.
+    consecutive_empty_responses: int = 0
 
 
 @dataclass

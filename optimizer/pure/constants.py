@@ -104,6 +104,8 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
     "NetSwap": "rapidwright_execute_net_swapping",
     "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
     "OptDesign": "rapidwright_execute_opt_design_strategy",
+    # Aliases: LLM may use alternative names for the same strategy
+    "LogicOptimization": "rapidwright_execute_opt_design_strategy",
 }
 
 
@@ -196,6 +198,10 @@ PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "vivado_run_tcl": 2,
     "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
     "rapidwright_analyze_net_detour": 2,  # suppress when consistently returning 0 results
+    # ANALYZE phase: these tools' data is already in the Dashboard from init_analysis
+    "vivado_report_route_status": 1,
+    "rapidwright_get_design_info": 1,
+    "rapidwright_get_device_topology": 1,
 }
 
 # ── Skill chain actions ──────────────────────────────────────────

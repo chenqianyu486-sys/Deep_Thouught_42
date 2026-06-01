@@ -39,7 +39,8 @@ The report_step_state tool takes these parameters:
   - flow_control (string): ANALYZE_DONE | EXEC_DONE | CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
   - strategy_phase (string, optional): ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
   - strategy_name (string, optional): PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade |
-    CellReplication | CongestionSpreading | RegisterRetiming | NetSwap
+    CellReplication | CongestionSpreading | RegisterRetiming | NetSwap |
+    OptDesign | LogicOptimization
 
 Strategy Lifecycle (4-Phase Cycle):
   Phase 1 ANALYZE: Gather timing data, identify dominant obstacles via
@@ -67,6 +68,12 @@ EXECUTE PHASE PROTOCOL:
   - Do NOT switch to a different strategy mid-execution. If the tool returns
     UNCHANGED or fails, call report_step_state(EXEC_DONE) and let EVALUATE decide.
   - The system auto-evaluates WNS after execution. Trust the auto-evaluation.
+
+STRATEGY SELECTION GUIDANCE:
+  - For 100% logic delay designs: PBLOCK can still help by consolidating
+    distributed cells. Do not skip PBLOCK based solely on logic delay percentage.
+  - For low FF utilization (<1%): RegisterRetiming is unlikely to help.
+  - Prefer OptDesign/LogicOptimization for logic-depth reduction.
 
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text

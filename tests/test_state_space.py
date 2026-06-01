@@ -215,18 +215,21 @@ class TestBuildConstraints:
 class TestBuildDynamicGradient:
     def test_action_status_mapping_improved(self):
         state = make_state()
+        state.strategy.current_phase = "EVALUATE"
         state.strategy.evaluation_result = "IMPROVED"
         space = build_state_space(state)
         assert space.dynamic_gradient.action_status == "Success"
 
     def test_action_status_mapping_regression(self):
         state = make_state()
+        state.strategy.current_phase = "EVALUATE"
         state.strategy.evaluation_result = "REGRESSION"
         space = build_state_space(state)
         assert space.dynamic_gradient.action_status == "Failed"
 
     def test_action_status_mapping_unchanged(self):
         state = make_state()
+        state.strategy.current_phase = "EVALUATE"
         state.strategy.evaluation_result = "UNCHANGED"
         space = build_state_space(state)
         assert space.dynamic_gradient.action_status == "Success"
@@ -254,6 +257,7 @@ class TestBuildDynamicGradient:
 
     def test_current_strategy_mapped(self):
         state = make_state()
+        state.strategy.current_phase = "EXECUTE_STRATEGY"
         state.strategy.current_strategy = "PhysOpt"
         space = build_state_space(state)
         assert space.dynamic_gradient.last_action_taken == "PhysOpt"

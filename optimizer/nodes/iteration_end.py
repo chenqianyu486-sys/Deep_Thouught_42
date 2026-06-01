@@ -172,6 +172,9 @@ async def iteration_end_node(
                 )
                 logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
 
+            # Detect diminishing returns: same strategy 2+ times with |delta| < 0.020ns
+            _check_diminishing_returns(state, strategy_label)
+
     # Pre-decide next iteration's model
     msg_count = 0
     token_est = 0
@@ -276,3 +279,26 @@ def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str
         return "strategy_ineffective"
 
     return "no_improvement"
+
+
+def _check_diminishing_returns(state: OptimizerState, strategy: str) -> None:
+    """Mark strategy if same strategy used 2+ times with |delta| < 0.020ns.
+
+    Uses reason='no_improvement' (not 'strategy_ineffective') so the strategy
+    is NOT permanently blocked — it can still be retried after other strategies.
+    The diminishing returns signal appears in the handoff trajectory.
+    """
+    recent = [
+        n for n in state.iteration.narratives[-3:]
+        if n.get("strategy_label") == strategy and n.get("wns_delta") is not None
+    ]
+    if len(recent) < 2:
+        return
+    recent_deltas = [abs(n["wns_delta"]) for n in recent]
+    if all(d < 0.020 for d in recent_deltas):
+        record_strategy_failure(
+            state, strategy=strategy,
+            reason="no_improvement",
+            detail=f"Diminishing returns: last {len(recent)} attempts < 0.020ns each",
+        )
+        logger.info(f"[iteration_end] Diminishing returns detected: {strategy}")

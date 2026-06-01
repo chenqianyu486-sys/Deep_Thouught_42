@@ -65,10 +65,10 @@ SIDE_EFFECT_TOOLS = frozenset({
 #
 # Coordinated with _TOOL_TIMEOUT_DEFAULTS:
 #   - Longest read-only tool: vivado_run_tcl (120s base × design_size_factor)
-#   - 6 rounds × ~120s worst-case tool wait = ~720s before exit
+#   - 4 rounds × ~120s worst-case tool wait = ~480s before exit
 #   - Execution tools (place_design=1800s, route_design=1800s) always reset counter
-#   - LLM round-trip latency ~5-15s → ~30-90s overhead per 6-round window
-NO_PROGRESS_LIMIT = 6
+#   - LLM round-trip latency ~5-15s → ~20-60s overhead per 4-round window
+NO_PROGRESS_LIMIT = 4
 
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -85,6 +85,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     pre_unplace_path: Path | None = None
     llm_summary = ""
     state.context.tool_phase_call_counts.clear()
+    state.context.consecutive_empty_responses = 0
     reached_callback = False  # track if the strategy reached callback indicating completion
     no_progress_count = 0  # consecutive rounds without side-effect tool calls
 
@@ -404,6 +405,15 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             logger.warning(f"[EXECUTE] Post-eval hook failed for {tool_name}: {e}")
                 await _try_save_best_checkpoint(state, deps)
 
+                # Inject guidance when post-eval shows no improvement
+                if (post_eval_verdict == "UNCHANGED"
+                        and tool_name in POST_EVAL_TOOLS
+                        and deps.compat is not None):
+                    deps.compat.add_message("user",
+                        f"[GUIDANCE] {tool_name} produced no WNS improvement. "
+                        f"Consider calling report_step_state(EXEC_DONE) to let "
+                        f"EVALUATE switch strategy.")
+
                 # ── Level 1: RapidWright directional pre-check ──────────────
                 # Before paying the cost of the Vivado P&R chain (~900s), use
                 # RapidWright's timing estimator (~2.5s) to directionally check
@@ -535,6 +545,21 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
         # No tool calls — count as no-progress round
         no_progress_count += 1
+
+        # Track consecutive empty responses (no content AND no tool calls)
+        if not assistant_content.strip() and not message.tool_calls:
+            state.context.consecutive_empty_responses += 1
+            if state.context.consecutive_empty_responses >= 3:
+                logger.warning(
+                    f"[EXECUTE] {state.context.consecutive_empty_responses} consecutive "
+                    f"empty responses, forcing EXEC_DONE"
+                )
+                record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
+                                   phase="EXECUTE_STRATEGY")
+                break
+        else:
+            state.context.consecutive_empty_responses = 0
+
         if no_progress_count >= NO_PROGRESS_LIMIT:
             logger.warning(
                 f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "

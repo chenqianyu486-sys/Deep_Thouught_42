@@ -954,9 +954,10 @@ api_messages = [
 no-progress 机制踢出，浪费 ~120s + API 成本。
 
 **方案**（`optimizer/nodes/subgraphs/phase_execute.py`）：
-- `NO_PROGRESS_LIMIT`: 12 → 6
+- `NO_PROGRESS_LIMIT`: 12 → 4（进一步收紧，节省 ~20s 空转时间）
 - 新增 `_pending_tool_count` 局部变量追踪未完成的工具调用：仅在所有工具调用都返回后才计数，防止长执行工具（place_design 1800s, route_design 1800s）误触发 no-progress
-- 与 `_TOOL_TIMEOUT_DEFAULTS` 联动：6 轮 × ~10s LLM 等待 ≈ 60s window，合理覆盖 read-only 工具超时（vivado_run_tcl 120s × factor）
+- 与 `_TOOL_TIMEOUT_DEFAULTS` 联动：4 轮 × ~10s LLM 等待 ≈ 40s window，合理覆盖 read-only 工具超时（vivado_run_tcl 120s × factor）
+- Post-eval hook 返回 UNCHANGED 后注入 `[GUIDANCE]` 消息，提示 LLM 考虑发出 `EXEC_DONE` 让 EVALUATE 切换策略
 
 ## 7.2 vivado_run_tcl 速率限制强化
 
@@ -1015,6 +1016,59 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 - 所有 directive 都是纯逻辑优化（无物理层面副作用）
 - `_NO_CACHE_TOOLS` 和 `SIDE_EFFECT_TOOLS` 已注册 `vivado_opt_design`
 - `_EMPTY_RESULT_PATTERNS` 新增 3 个模式（语义匹配，不包含数值零模式以避免误判）
+
+## 7.5 空响应早期终止（Ghost Loop 防护）
+
+**问题**: DeepSeek V4 Flash 在长上下文 + 重复 Dashboard 数据注入场景下产生"沉默退化"——
+146 次 LLM 调用中约 95 次返回 0 字符（65%），浪费 60%+ 运行时间。
+
+**方案**（`optimizer/state.py` + 4 个 phase 文件）：
+- `ContextState` 新增 `consecutive_empty_responses: int = 0` 计数器
+- 各阶段在 LLM 返回无内容 AND 无 tool calls 时递增计数器
+- 阈值：ANALYZE/EXECUTE/EVALUATE = 3 次，SELECT_STRATEGY = 2 次（轮次预算仅 6，更激进）
+- 达到阈值时记录 `SYSTEM_EXIT` 信号并强制退出阶段
+- 计数器在非空响应时重置为 0，阶段入口时无条件重置
+
+**文件**：
+| 文件 | 修改 |
+|------|------|
+| `optimizer/state.py` | `ContextState` 新增 `consecutive_empty_responses` 字段 |
+| `optimizer/nodes/subgraphs/phase_analyze.py` | 空响应检测（阈值 3），阶段入口重置 |
+| `optimizer/nodes/subgraphs/phase_select_strategy.py` | 空响应检测（阈值 2），阶段入口重置 |
+| `optimizer/nodes/subgraphs/phase_execute.py` | 空响应检测（阈值 3），阶段入口重置 |
+| `optimizer/nodes/subgraphs/phase_evaluate.py` | 空响应检测（阈值 3），阶段入口重置 |
+
+## 7.6 收益递减自动检测
+
+**问题**: PhysOpt 被反复使用 4 次，收益从 +0.057ns 递减到 +0.013ns，但系统未标记为"已耗尽"。
+
+**方案**（`optimizer/nodes/iteration_end.py`）：
+- 新增 `_check_diminishing_returns()` 函数
+- 检测同一策略最近 2+ 次使用且每次 |delta| < 0.020ns
+- 记录为 `reason="no_improvement"`（非 `strategy_ineffective`）——策略不被永久排除
+- 信号出现在 handoff 轨迹中，引导 LLM 远离已耗尽的策略
+
+**设计决策**: 使用 `no_improvement` 而非 `strategy_ineffective`，因为收益递减可能只是当前参数下无效，
+换个参数或上下文可能有效。永久排除过于激进。
+
+## 7.7 策略别名映射
+
+**问题**: LLM 在 SELECT_STRATEGY 阶段选择 `LogicOptimization`，但 `EXECUTE_STRATEGY_TOOL_MAP`
+中无此映射，导致 EXECUTE 阶段 `[EXECUTE CONSTRAINT]` 注入失败（tool 为空字符串）。
+
+**方案**（`optimizer/pure/constants.py` + `optimizer/nodes/prepare_context.py`）：
+- `EXECUTE_STRATEGY_TOOL_MAP` 新增 `"LogicOptimization": "rapidwright_execute_opt_design_strategy"`
+- FORMAT_GUARD 策略列表同步添加 `LogicOptimization`
+- `_STRATEGY_MAPPING_LINES` 自动生成，FORMAT_GUARD 中的 EXECUTE PHASE PROTOCOL 自动包含新别名
+
+## 7.8 Dashboard 数据工具 rate limit
+
+**问题**: LLM 在 ANALYZE 阶段反复调用 `vivado_report_route_status`、`rapidwright_get_design_info`、
+`rapidwright_get_device_topology`，但这些数据已在 `init_analysis` 中提取并注入 Dashboard。
+
+**方案**（`optimizer/pure/constants.py`）：
+- `PHASE_TOOL_RATE_LIMITS` 新增 3 个工具，限制为 1 次/phase
+- 保留查询能力（数据过期时仍可查询），但防止无意义的重复调用
 
 ## 8. 心跳日志系统
 
