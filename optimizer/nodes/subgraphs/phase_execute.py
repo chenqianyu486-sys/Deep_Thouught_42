@@ -661,16 +661,21 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     # Strategy enforcement: constrain LLM to execute only the selected strategy.
     # Prevents drift where LLM switches strategies mid-execution (e.g., selecting
     # PhysOpt in SELECT_STRATEGY but running PBLOCK+Fanout in EXECUTE).
+    #
+    # Relaxed: after executing the strategy tool, LLM may call
+    # rapidwright_report_timing for quick feedback before signaling EXEC_DONE.
     strategy = state.strategy.current_strategy
     if strategy:
         tool = EXECUTE_STRATEGY_TOOL_MAP.get(strategy, "")
         if tool:
             constraint = (
                 f"[EXECUTE CONSTRAINT] Selected strategy: {strategy}. "
-                f"You MUST call `{tool}` now. Do NOT call any other strategy tool. "
-                f"Do NOT call analysis tools (vivado_report_timing_summary, "
-                f"vivado_extract_critical_path_cells, vivado_run_tcl). "
-                f"After `{tool}` completes, call report_step_state(EXEC_DONE)."
+                f"You MUST call `{tool}` FIRST. "
+                f"After `{tool}` completes, you MAY call `rapidwright_report_timing` "
+                f"to quickly check the effect (~2.5s vs ~14s for full Vivado timing). "
+                f"Then call report_step_state(EXEC_DONE). "
+                f"Do NOT call any other strategy tool. "
+                f"Do NOT call vivado_report_timing_summary or vivado_extract_critical_path_cells."
             )
             api_messages.append({"role": "user", "content": constraint})
 

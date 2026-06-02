@@ -78,7 +78,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s
 - **init_analysis 初始 checkpoint 保存**: 分析完成后无条件写 `best_checkpoint.dcp` 并设 `best_checkpoint_path`。此前仅 WNS 改善时保存，导致首次迭代退化时 `best_checkpoint_path=None`，`rollback_node` 报 `[ROLLBACK] No checkpoint at None` 直接跳过恢复。修复后 rollback 总是可用的（`optimizer/nodes/init_analysis.py`）
 - **HEAVY_CHAIN_SKILLS 排除 pblock_strategy**: `rapidwright_execute_pblock_strategy` 是纯分析型 skill（仅返回 pblock_ranges），网络表实际变更由 `SKILL_CHAIN_ACTIONS` 的 chain（unplace → create_pblock → place → route）完成。post-eval 总返回 UNCHANGED，导致 chain-gate 错误跳过 chain。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`）
-- **EXECUTE 阶段策略强制执行**: `_call_phase_llm` 在 dashboard 注入后追加 `[EXECUTE CONSTRAINT]` 用户消息，强制 LLM 仅调用已选策略对应的执行工具，禁止分析工具和策略漂移。消息包含策略→工具映射表，防止 LLM 在 EXECUTE 阶段重新分析或切换策略（`optimizer/nodes/subgraphs/phase_execute.py`）
+- **EXECUTE 阶段策略强制执行**: `_call_phase_llm` 在 dashboard 注入后追加 `[EXECUTE CONSTRAINT]` 用户消息，强制 LLM 仅调用已选策略对应的执行工具，禁止分析工具和策略漂移。消息包含策略→工具映射表，防止 LLM 在 EXECUTE 阶段重新分析或切换策略。**约束放宽**：执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s），然后信号 EXEC_DONE（`optimizer/nodes/subgraphs/phase_execute.py`）
 - **Dashboard 陈旧数据抑制**: `_build_dynamic_gradient` 仅在当前 phase 为 `"EXECUTE_STRATEGY"` 或 `"EVALUATE"` 时显示 `last_action_taken` 和 `action_status`。ANALYZE/SELECT_STRATEGY 阶段清空这两个字段，防止上一迭代的策略评估结果误导 LLM（`optimizer/pure/state_space.py`）
 
 ## 2. V1→V2 迁移映射
@@ -294,7 +294,7 @@ inject_context_snapshot_at_end(api_messages):
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**: 来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`
 - **`strategy_catalog`**（SELECT_STRATEGY 阶段独占）：当 `show_strategy_catalog=True` 时，在 dashboard 首部注入策略名称+触发条件
-- **`strategy_catalog` 排除机制**：已记录在 `state.context.failed_strategies` 中的策略（不限 reason 类型）自动从 catalog 中排除，避免 LLM 重复选择已知无效的策略。排除逻辑在 `inject_merged_dashboard()` → `format_state_space_for_llm(exclude_strategies=...)` → `get_strategy_catalog(exclude_strategies=...)` 链路中实现（`context_snapshot.py:392-402` → `state_space.py:266` → `strategy_library.py:412`）。与 `phase_select_strategy.py:254` 的 `_get_permanently_blocked_strategies()` 后验检查形成双重保护。
+- **`strategy_catalog` 排除机制**：已记录在 `state.context.failed_strategies` 中的策略自动从 catalog 中排除，避免 LLM 重复选择已知无效的策略。排除逻辑在 `inject_merged_dashboard()` → `format_state_space_for_llm(exclude_strategies=...)` → `get_strategy_catalog(exclude_strategies=...)` 链路中实现（`context_snapshot.py:392-402` → `state_space.py:266` → `strategy_library.py:412`）。与 `phase_select_strategy.py` 的 `_get_permanently_blocked_strategies()` 后验检查形成双重保护。**TTL 机制**：`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段），防止策略目录被永久阻止耗尽。
 - **`skill_guidance`**（EXECUTE 阶段）：当 `current_strategy` 非空时注入 primary skill 工具名 + SKILL_CHAIN_ACTIONS + 执行序列
 
 ### 3.5 动态 Critical Path 管理

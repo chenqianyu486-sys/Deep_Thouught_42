@@ -228,6 +228,29 @@ STRATEGIES = {
              "note": "Insert pipeline FFs. Auto-chains open_checkpoint + route_design"},
         ],
     },
+    "LogicResynthesis": {
+        "name": "Logic Resynthesis (synth_design -remap)",
+        "trigger": "100% logic delay, NN/datapath design with MUXF7/8 cascades, "
+                   "PBLOCK already applied, other strategies ineffective",
+        "sequence": [
+            {"step": "vivado_run_tcl", "platform": "Vivado",
+             "params": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"},
+             "note": "Re-synthesize logic with remapping. May reduce LUT levels by restructuring."},
+            {"step": "vivado_place_design", "platform": "Vivado", "params": None},
+            {"step": "vivado_route_design", "platform": "Vivado", "params": None},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+        ],
+    },
+    "PhysOptAggressive": {
+        "name": "Aggressive Physical Optimization (Explore directive)",
+        "trigger": "WNS stuck after PBLOCK, logic-depth limited, "
+                   "PhysOpt Explore not yet tried or need more aggressive optimization",
+        "sequence": [
+            {"step": "vivado_physopt_and_route", "platform": "Vivado",
+             "params": {"directive": "Explore"},
+             "note": "Aggressive PhysOpt with Explore directive. Tries multiple optimization passes."},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -244,6 +267,8 @@ STRATEGY_LABEL_MAP = {
     "NetSwap": "NetSwap",
     "SmartRetiming": "SmartRetiming",
     "PhysOpt+RegisterRetiming": "PhysOpt+RegisterRetiming",
+    "LogicResynthesis": "LogicResynthesis",
+    "PhysOptAggressive": "PhysOptAggressive",
 }
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
@@ -258,6 +283,8 @@ STRATEGY_SKILL_MAP = {
     "RegisterRetiming": "execute_register_retiming",
     "SmartRetiming": "smart_retiming",
     "NetSwap": "execute_net_swapping",
+    "LogicResynthesis": "logic_resynthesis",
+    "PhysOptAggressive": "physopt_strategy",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -471,7 +498,8 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     # ordered list matching original numbering
     ordered = ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",
                "CellReplication", "CongestionSpreading", "RegisterRetiming",
-               "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]
+               "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming",
+               "LogicResynthesis", "PhysOptAggressive"]
     for i, key in enumerate(ordered, 1):
         if key in excluded:
             continue

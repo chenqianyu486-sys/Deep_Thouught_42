@@ -16,7 +16,7 @@ from optimizer.state import OptimizerState, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, MAX_STRATEGY_CYCLES
 from optimizer.pure.timing import is_valid_wns
 from optimizer.pure.compress import compress_context
 from optimizer.color import green, yellow
@@ -55,6 +55,7 @@ async def llm_tool_loop_node(
     """
     phase = LoopPhase.ANALYZE
     total_rounds = 0
+    strategy_cycle_count = 0  # tracks how many strategies tried this iteration
 
     while True:
         total_rounds += 1
@@ -121,17 +122,37 @@ async def llm_tool_loop_node(
                 logger.info(green(f"[llm_tool_loop] Done: {state.control.done_reason}"))
                 return NodeName.ITERATION_END
 
-            if state.control.done_reason in ("switch_strategy", "iteration_success",
-                                               "flow_control_done_next_iteration", "rollback"):
+            # Multi-strategy loop: allow trying another strategy within same iteration
+            if state.control.done_reason in ("switch_strategy", "iteration_success"):
+                if strategy_cycle_count < MAX_STRATEGY_CYCLES:
+                    prev_reason = state.control.done_reason
+                    strategy_cycle_count += 1
+                    next_phase = LoopPhase.SELECT_STRATEGY
+                    state.control.done_reason = ""  # clear to avoid re-trigger
+                    logger.info(
+                        f"[llm_tool_loop] Strategy cycle {strategy_cycle_count}/{MAX_STRATEGY_CYCLES} "
+                        f"(prev={prev_reason}), looping to SELECT_STRATEGY"
+                    )
+                else:
+                    logger.info(
+                        f"[llm_tool_loop] Max strategy cycles reached ({strategy_cycle_count}), "
+                        f"exiting iteration: {state.control.done_reason}"
+                    )
+                    return NodeName.ITERATION_END
+
+            elif state.control.done_reason in ("flow_control_done_next_iteration", "rollback"):
                 logger.info(f"[llm_tool_loop] Exiting iteration: {state.control.done_reason}")
                 return NodeName.ITERATION_END
 
-            # If CONTINUE or unknown, loop back to ANALYZE for re-analysis
-            if next_phase == LoopPhase.ANALYZE:
-                logger.info("[llm_tool_loop] Looping back to ANALYZE")
             else:
-                logger.info(f"[llm_tool_loop] Unexpected post-eval phase: {next_phase}, defaulting to ANALYZE")
-                next_phase = LoopPhase.ANALYZE
+                # CONTINUE or unknown — loop back to ANALYZE for re-analysis
+                if next_phase == LoopPhase.ANALYZE:
+                    logger.info("[llm_tool_loop] Looping back to ANALYZE")
+                elif next_phase == LoopPhase.SELECT_STRATEGY:
+                    logger.info("[llm_tool_loop] Looping back to SELECT_STRATEGY")
+                else:
+                    logger.info(f"[llm_tool_loop] Unexpected post-eval phase: {next_phase}, defaulting to ANALYZE")
+                    next_phase = LoopPhase.ANALYZE
 
         # ── Check WNS target ──────────────────────────────────────
         if _check_wns_target_met(state):

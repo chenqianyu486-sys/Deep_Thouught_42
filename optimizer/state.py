@@ -241,6 +241,7 @@ class FailedStrategyRecord:
     tool: str = ""              # Tool name(s) involved
     iteration: int = 0
     detail: str = ""            # Human-readable detail (truncated to 200 chars)
+    blocked_until_iter: int = 0  # TTL: strategy unblocks when iteration.current >= this value
 
 
 @dataclass
@@ -329,7 +330,10 @@ def record_strategy_failure(
     Deduplicates by strategy name: same strategy is only recorded once.
     Replaces MemoryManager.record_failure() / DCPOptimizerCompat.record_failure()
     as the canonical V2 path.
+
+    TTL: strategy_ineffective entries auto-unblock after STRATEGY_RETRY_TTL iterations.
     """
+    STRATEGY_RETRY_TTL = 3  # iterations before a blocked strategy can be retried
     existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
     if existing:
         return
@@ -339,11 +343,12 @@ def record_strategy_failure(
         tool=tool,
         iteration=state.iteration.current,
         detail=detail[:200],
+        blocked_until_iter=state.iteration.current + STRATEGY_RETRY_TTL,
     )
     state.context.failed_strategies.append(entry)
     logger.warning(
-        "[FAILED_STRATEGY] Recorded: %s (reason=%s, tool=%s, total failed: %d)",
-        strategy, reason, tool, len(state.context.failed_strategies),
+        "[FAILED_STRATEGY] Recorded: %s (reason=%s, tool=%s, total failed: %d, unblock_iter=%d)",
+        strategy, reason, tool, len(state.context.failed_strategies), entry.blocked_until_iter,
         extra={"strategy": strategy, "reason": reason, "tool": tool,
                "failed_count": len(state.context.failed_strategies)},
     )

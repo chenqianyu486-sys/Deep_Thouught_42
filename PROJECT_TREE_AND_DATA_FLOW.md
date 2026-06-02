@@ -29,7 +29,7 @@ fpl26_optimization_contest/
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 12 种策略库
+├── strategy_library.py           # 14 种策略库（含 LogicResynthesis、PhysOptAggressive）
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件
@@ -88,13 +88,13 @@ init_analysis → [条件: timing met?]
               └─ NO  → iteration_start (循环)
 ```
 
-### 2.3 子图: llm_tool_loop（4 阶段状态机）
+### 2.3 子图: llm_tool_loop（4 阶段状态机 + 多策略循环）
 
 ```
 llm_tool_loop_node (调度器)
   │  while True:
   │    phase = PHASE_RUNNERS[phase](state, deps)
-  │    if phase==EVALUATE && done_reason: exit
+  │    if phase==EVALUATE && done_reason: exit or reselect
   │
   ├── ANALYZE ─────────→ SELECT_STRATEGY
   │  仅分析工具(~16个)   极简工具(~4个)
@@ -104,6 +104,7 @@ llm_tool_loop_node (调度器)
   ├── SELECT_STRATEGY ─→ EXECUTE
   │  策略说明+执行计划    全工具(~25个, 不含vivado_open_checkpoint)
   │                      最多30轮, SKILL_CHAIN 自动串联
+  │                      执行后可调 rapidwright_report_timing 快速反馈
   │
   ├── EXECUTE ─────────→ EVALUATE
   │  链式动作+事后评估    评估工具(~7个, 不含vivado_get_wns)
@@ -111,10 +112,14 @@ llm_tool_loop_node (调度器)
   │  PBLOCK自适应multiplier(公式C)
   │  DCP身份保护          最多30轮
   │
-  └── EVALUATE → (exit) 或 ANALYZE
-      DONE/WNS>=0 → ITERATION_END; CONTINUE → ANALYZE
-      NEXT_ITERATION/SWITCH_STRATEGY/ROLLBACK → ITERATION_END
+  └── EVALUATE → (exit) 或 SELECT_STRATEGY 或 ANALYZE
+      DONE/WNS>=0 → ITERATION_END
+      SWITCH_STRATEGY/RESELECT_STRATEGY → SELECT_STRATEGY (多策略循环, 最多3轮/迭代)
+      NEXT_ITERATION/ROLLBACK → ITERATION_END
+      CONTINUE → ANALYZE
 ```
+
+**多策略循环**: 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 或 `RESELECT_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
@@ -131,7 +136,7 @@ llm_tool_loop_node (调度器)
 | 5 | 关注点分离 | Worker（250K）执行 vs Planner（1M）策略决策 |
 | 6 | 单一调用路径 | V2 仅原生函数调用，无 XML/YAML 回退 |
 | 7 | 单一事实来源 | 运行时数据在 OptimizerState；MemoryManager 仅存消息+执行压缩引擎；DCPOptimizerCompat 仅 V1 使用 |
-| 8 | 领域知识编码 | 12 策略含触发条件，LLM 自主选择 |
+| 8 | 领域知识编码 | 14 策略含触发条件，LLM 自主选择；多策略循环 + TTL 重试 |
 | 9 | 数据可信度 | DASHBOARD_REFRESH_MAP 追踪字段新鲜度 |
 | 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
 | 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
@@ -162,6 +167,9 @@ llm_tool_loop_node (调度器)
 | 32 | **HEAVY_CHAIN_SKILLS 排除 PBLOCK** | `rapidwright_execute_pblock_strategy` 是分析型 skill，post-eval 总 UNCHANGED，导致 chain-gate 跳过实际执行链（unplace → pblock → place → route）。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`） |
 | 33 | **EXECUTE 策略强制执行** | `_call_phase_llm` 注入 `[EXECUTE CONSTRAINT]` 消息，映射策略→工具，禁止分析工具和策略切换（`optimizer/nodes/subgraphs/phase_execute.py`）|
 | 34 | **Dashboard 陈旧数据抑制** | `_build_dynamic_gradient` 仅在 EXECUTE/EVALUATE 阶段显示 `last_action_taken`，ANALYZE/SELECT_STRATEGY 清空，防止误导 LLM（`optimizer/pure/state_space.py`） |
+| 39 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY`/`RESELECT_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费（`optimizer/nodes/subgraphs/llm_tool_loop.py`） |
+| 40 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。`_get_permanently_blocked_strategies()` 检查 `current_iter < entry.blocked_until_iter`。防止策略目录被永久阻止耗尽（`optimizer/state.py`, `optimizer/nodes/subgraphs/phase_select_strategy.py`） |
+| 41 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查（`optimizer/nodes/subgraphs/phase_execute.py`） |
 
 ## 3. 核心数据流
 
@@ -409,6 +417,8 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 | NetSwap | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
 | PhysOpt+RegisterRetiming | Logic-depth limited (>70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | `vivado_physopt_and_route` (atomic PhysOpt+route, then retiming) |
 | OptDesign | Logic-depth limited (>70% logic delay), PhysOpt ineffective | `rapidwright_execute_opt_design_strategy` |
+| LogicResynthesis | 100% logic delay, NN/datapath with MUXF7/8 cascades, PBLOCK applied | `vivado_run_tcl` (synth_design -remap) |
+| PhysOptAggressive | WNS stuck after PBLOCK, need aggressive optimization | `vivado_physopt_and_route` (Explore directive) |
 
 ### 3.7 Tool 描述增强
 
@@ -438,7 +448,8 @@ WNS_TARGET_THRESHOLD = 0.0
 | `EXEC_DONE` | 切换到 EVALUATE 阶段 |
 | `DONE`, WNS<0 | 进入下一迭代 |
 | `DONE`, WNS>=0 | 退出优化 |
-| `SWITCH_STRATEGY` (EVALUATE) | 强制结束迭代 + 记录策略失败 + 下一轮从 ANALYZE 开始 |
+| `SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 3 轮/迭代） |
+| `RESELECT_STRATEGY` (EVALUATE) | 多策略循环：显式请求尝试另一策略（同 SWITCH_STRATEGY 行为） |
 | `NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 |
 | `CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段 |
 | `detect_rollback_needed()` | WNS 退化时自动恢复最佳 checkpoint |

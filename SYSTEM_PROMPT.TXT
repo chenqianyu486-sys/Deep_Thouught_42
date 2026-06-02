@@ -40,6 +40,7 @@ response_format:
     CONTINUE: "Continue in current phase (ANALYZE or EXECUTE only)"
     NEXT_ITERATION: "Good improvement, restart fresh iteration"
     SWITCH_STRATEGY: "Strategy failed to improve WNS"
+    RESELECT_STRATEGY: "Try another strategy within same iteration (multi-strategy loop)"
     DONE: "WNS >= 0"
     RETRY: "Modify params and retry"
     ROLLBACK: "Revert to best checkpoint"
@@ -83,7 +84,8 @@ strategy_lifecycle:
     - "ANALYZE: Gather data. Analysis tools only. Signal ANALYZE_DONE."
     - "SELECT_STRATEGY: Choose ONE strategy. Only report_step_state and raw-tool-output available."
     - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
-    - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
+    - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | RESELECT_STRATEGY | CONTINUE."
+  multi_strategy_loop: "Up to 3 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY or RESELECT_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy. Use RESELECT_STRATEGY when the current strategy improved WNS but you want to try combining with another strategy."
   iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY. Don't exhaust all in one iteration."
 
 strategies:
@@ -98,6 +100,8 @@ strategies:
     register_retiming: "Register Retiming (deep chains >2 LUTs between FFs, requires FF>0)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
     physopt_retiming_combined: "PhysOpt + Register Retiming (Combined) — logic-depth limited designs with deep chains. Executes PhysOpt then Retiming in one iteration."
+    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs with MUXF7/8 cascades. Re-synthesizes logic to reduce LUT levels."
+    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS stuck after PBLOCK, need more aggressive optimization than default PhysOpt."
 
   selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region, then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools."
 

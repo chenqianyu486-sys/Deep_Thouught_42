@@ -180,6 +180,16 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 state.strategy.current_strategy = ""
                 return LoopPhase.ANALYZE
 
+            elif flow_signal == "RESELECT_STRATEGY":
+                # LLM explicitly requests trying another strategy within same iteration
+                logger.info("[EVALUATE] LLM chose RESELECT_STRATEGY — returning to SELECT_STRATEGY")
+                record_flow_signal(state, "RESELECT_STRATEGY", "reselect", phase="EVALUATE",
+                                   result_status=step_state.result_status or "")
+                state.strategy.current_phase = ""
+                state.strategy.current_strategy = ""
+                state.control.done_reason = "switch_strategy"  # triggers multi-strategy loop
+                return LoopPhase.ANALYZE
+
             elif flow_signal == "EXHAUSTED":
                 _handle_exhausted(state, deps)
                 return LoopPhase.ANALYZE

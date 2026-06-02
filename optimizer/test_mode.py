@@ -911,6 +911,11 @@ class V2TestMode:
          "needs": "critical_paths"},
         {"name": "execute_opt_design_strategy", "tool": "rapidwright_execute_opt_design_strategy",
          "skill_name": "opt_design_strategy", "args": {"directive": "Explore", "retarget": True}},
+        # ── NEW STRATEGIES (v2.1) ──────────────────────────────────
+        {"name": "logic_resynthesis", "tool": "vivado_run_tcl",
+         "skill_name": "logic_resynthesis", "args": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"}},
+        {"name": "physopt_aggressive", "tool": "vivado_physopt_and_route",
+         "skill_name": "physopt_strategy", "args": {"directive": "Explore", "design_is_routed": False}},
     ]
 
     async def _prepare_skill_test_data(self, init_data: dict) -> dict:

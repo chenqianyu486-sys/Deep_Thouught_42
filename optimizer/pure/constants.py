@@ -106,6 +106,9 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
     "OptDesign": "rapidwright_execute_opt_design_strategy",
     # Aliases: LLM may use alternative names for the same strategy
     "LogicOptimization": "rapidwright_execute_opt_design_strategy",
+    # New strategies for NN/datapath designs
+    "LogicResynthesis": "vivado_run_tcl",
+    "PhysOptAggressive": "vivado_physopt_and_route",
 }
 
 
@@ -116,6 +119,7 @@ WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgra
 GLOBAL_NO_IMPROVEMENT_LIMIT = 2    # Global no-improvement limit (reduced from 3 for faster exit)
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
+MAX_STRATEGY_CYCLES = 3            # Max strategy cycles per iteration (multi-strategy loop)
 
 # ── RapidWright directional pre-check ──────────────────────────────
 # Level 1 pre-filter: before running the expensive Vivado P&R chain,

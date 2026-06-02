@@ -86,17 +86,25 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
 
             # Strategy selected: check for strategy_name
             if step_state.strategy_name:
-                # Guard: reject permanently-failed strategies
+                # Guard: reject temporarily-blocked strategies (TTL-based)
                 blocked = _get_permanently_blocked_strategies(state)
                 chosen_key = step_state.strategy_name
                 if chosen_key in blocked or (hasattr(deps, 'compat') and deps.compat and chosen_key in blocked):
+                    # Find when this strategy unblocks
+                    unblock_iter = 0
+                    for entry in state.context.failed_strategies:
+                        if entry.strategy == chosen_key and entry.reason == "strategy_ineffective":
+                            unblock_iter = entry.blocked_until_iter
+                            break
+                    remaining = max(0, unblock_iter - state.iteration.current)
                     logger.warning(yellow(
-                        f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — permanently failed, "
-                        f"prompting retry"
+                        f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — "
+                        f"temporarily ineffective, unblocks in {remaining} iterations"
                     ))
                     if deps.compat is not None:
                         deps.compat.add_message("user",
-                            f"[BLOCKED] Strategy '{chosen_key}' is permanently ineffective for this design. "
+                            f"[BLOCKED] Strategy '{chosen_key}' is temporarily blocked "
+                            f"(unblocks in {remaining} iterations). "
                             f"Please select a different strategy from the available catalog.")
                     continue
 
@@ -258,15 +266,21 @@ async def _call_phase_llm(state, deps, phase_tools):
 
 
 def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
-    """Return strategy keys that are permanently blocked (strategy_ineffective).
+    """Return strategy keys that are currently blocked (strategy_ineffective).
 
-    Only strategies with reason='strategy_ineffective' are excluded.
-    Strategies with reason='tool_error' remain selectable (retriable).
+    TTL-based: strategies with reason='strategy_ineffective' are blocked
+    until the current iteration reaches entry.blocked_until_iter.
+    After TTL expires, the strategy becomes selectable again.
+
+    Strategies with reason='tool_error' remain always selectable (retriable).
 
     Reads from state.context.failed_strategies (canonical V2 source).
     """
     blocked: set[str] = set()
+    current_iter = state.iteration.current
     for entry in state.context.failed_strategies:
         if entry.reason == "strategy_ineffective":
-            blocked.add(entry.strategy)
+            if current_iter < entry.blocked_until_iter:
+                blocked.add(entry.strategy)
+            # else: TTL expired, strategy is unblocked and can be retried
     return blocked
