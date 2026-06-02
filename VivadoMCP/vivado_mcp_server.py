@@ -662,7 +662,9 @@ def extract_critical_path_cells(
     PIN_RE = re.compile(
         r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$'
     )
-    DELAY_RE = re.compile(r'^\s*(\d+\.\d+)\s+(\d+\.\d+)\s+')
+    # Match delay columns: cumulative + incremental
+    # Supports formats: "0.000    0.225  ..." and "0    0.225  ..." (integer cumul.)
+    DELAY_RE = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+')
 
     all_paths = []
 
@@ -678,6 +680,7 @@ def extract_critical_path_cells(
         logic_delay = 0.0
         net_delay = 0.0
         levels = 0
+        last_cumulative = 0.0
         in_data_path = False
         dash_count = 0
 
@@ -699,6 +702,9 @@ def extract_critical_path_cells(
             # Parse delay values: "X.XXX  Y.YYY  cell/pin  ..."
             delay_match = DELAY_RE.match(line)
             incr_delay = float(delay_match.group(2)) if delay_match else 0.0
+            # Track last cumulative delay for net_delay fallback
+            if delay_match:
+                last_cumulative = float(delay_match.group(1))
 
             # Classify line: logic (has pin suffix) or net
             has_pin = False
@@ -720,6 +726,12 @@ def extract_critical_path_cells(
                 levels += 1
             elif stripped.startswith('net') or (delay_match and not has_pin):
                 net_delay += incr_delay
+
+        # Fallback: if net_delay is 0 but total path delay > logic delay,
+        # the DELAY_RE regex may have failed to match net lines.
+        # Use cumulative total minus logic delay as net_delay estimate.
+        if net_delay == 0.0 and logic_delay > 0.0 and last_cumulative > logic_delay:
+            net_delay = last_cumulative - logic_delay
 
         if len(cell_names) >= 2:
             all_paths.append({

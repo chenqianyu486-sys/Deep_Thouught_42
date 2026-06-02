@@ -283,6 +283,8 @@ def _compute_design_signals(
         for n in high_fanout_nets:
             if isinstance(n, dict) and "fanout" in n:
                 fanouts.append(n["fanout"])
+            elif isinstance(n, (list, tuple)) and len(n) >= 2:
+                fanouts.append(n[1])  # (net_name, fanout, path_count)
         if fanouts:
             signals["max_fanout"] = max(fanouts)
             signals["high_fanout_count"] = len(fanouts)

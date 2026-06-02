@@ -1262,7 +1262,8 @@ def analyze_critical_path_spread(
     RapidWright's device model to get accurate tile coordinates and calculate distances.
     
     Args:
-        critical_paths_data: List of paths, where each path is a list of cell names
+        critical_paths_data: List of paths, where each path is a list of cell names.
+            Also accepts list-of-dicts ({"cells": [...], ...}) for backward compatibility.
         input_file: Optional path to JSON file containing critical_paths_data
         
     Returns:
@@ -1288,7 +1289,12 @@ def analyze_critical_path_spread(
     
     if not critical_paths_data:
         return {"error": "No critical path data provided. Specify either critical_paths_data or input_file"}
-    
+
+    # Normalize: support list-of-dicts (from extract_critical_path_cells file)
+    # alongside list-of-lists (direct cell name arrays)
+    if critical_paths_data and isinstance(critical_paths_data[0], dict):
+        critical_paths_data = [p.get("cells", []) for p in critical_paths_data]
+
     try:
         design = _current_design
         device = design.getDevice()

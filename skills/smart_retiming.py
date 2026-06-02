@@ -345,7 +345,16 @@ class SmartRetimingSkill(Skill):
                                error_code=SkillErrorCode.TEMPORARILY_UNAVAILABLE)
 
         baseline_wns, timing_err = _estimate_wns(design)
-        logger.info(f"Baseline WNS (RapidWright): {baseline_wns}")
+        # Fallback: use cached WNS from Vivado if RapidWright estimation fails
+        if baseline_wns is None:
+            cached_wns = kwargs.get("cached_wns")
+            if cached_wns is not None:
+                baseline_wns = float(cached_wns)
+                logger.info(f"Baseline WNS (Vivado fallback): {baseline_wns}")
+            else:
+                logger.info(f"Baseline WNS (RapidWright): None — {timing_err}")
+        else:
+            logger.info(f"Baseline WNS (RapidWright): {baseline_wns}")
 
         # ---- Phase 2: ANALYZE & SCORE ----
         logger.info("[smart_retiming] Phase 2: ANALYZE & SCORE")

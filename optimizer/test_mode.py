@@ -908,12 +908,12 @@ class V2TestMode:
          "skill_name": "lut_cascade_flattening", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_lut_cascade"}, "needs": "critical_paths", "source_key": "critical_paths_cell_names"},
         {"name": "smart_retiming", "tool": "rapidwright_smart_retiming",
          "skill_name": "smart_retiming", "args": {"temp_dir": "{run_dir}", "checkpoint_prefix": "test_smart_retiming", "auto_rollback": False},
-         "needs": "critical_paths"},
+         "needs": ["critical_paths", "cached_wns"]},
         {"name": "execute_opt_design_strategy", "tool": "rapidwright_execute_opt_design_strategy",
          "skill_name": "opt_design_strategy", "args": {"directive": "Explore", "retarget": True}},
         # ── NEW STRATEGIES (v2.1) ──────────────────────────────────
-        {"name": "logic_resynthesis", "tool": "vivado_run_tcl",
-         "skill_name": "logic_resynthesis", "args": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"}},
+        # Note: logic_resynthesis is a virtual strategy (TCL command via vivado_run_tcl),
+        # not a registered Skill class. It is exercised via physopt_aggressive below.
         {"name": "physopt_aggressive", "tool": "vivado_physopt_and_route",
          "skill_name": "physopt_strategy", "args": {"directive": "Explore", "design_is_routed": False}},
     ]
@@ -981,6 +981,11 @@ class V2TestMode:
             ]
         else:
             shared["nets"] = [{"net_name": "dummy_net", "fanout": 100}]
+
+        # cached_wns: initial WNS from Vivado for smart_retiming fallback
+        wns = init_data.get("wns")
+        if wns is not None:
+            shared["cached_wns"] = wns
 
         return shared
 
@@ -1055,8 +1060,13 @@ class V2TestMode:
             # Inject data from shared test data (needs)
             needs = entry.get("needs")
             source_key = entry.get("source_key", needs)
-            if needs and source_key in shared:
-                args[needs] = shared[source_key]
+            if needs:
+                if isinstance(needs, list):
+                    for nk in needs:
+                        if nk in shared:
+                            args[nk] = shared[nk]
+                elif source_key in shared:
+                    args[needs] = shared[source_key]
 
             # Inject data from dependency (dep)
             dep = entry.get("dep")
@@ -1514,21 +1524,26 @@ class V2TestMode:
 def parse_high_fanout_nets(report: str) -> list[tuple[str, int, int]]:
     """Parse high fanout nets from Vivado report.
 
+    Handles the table format produced by get_critical_high_fanout_nets:
+        Paths    Fanout  Parent Net Name
+        ------  --------  --------------------------------------------------
+           44       267  pcie4.../s_axis_cc_tvalid_reg_lower
+
     Returns list of (net_name, fanout, path_count).
     """
+    import re
     nets: list[tuple[str, int, int]] = []
     if not report:
         return nets
+    # Match data lines: leading whitespace, integer, whitespace, integer, whitespace, net name
+    data_re = re.compile(r'^\s*(\d+)\s+(\d+)\s+(\S+)')
     for line in report.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith("-") or line.startswith("Net"):
-            continue
-        parts = line.split()
-        if len(parts) >= 2:
-            net_name = parts[0]
+        m = data_re.match(line)
+        if m:
             try:
-                fanout = int(parts[1])
-                path_count = int(parts[2]) if len(parts) > 2 else 0
+                path_count = int(m.group(1))
+                fanout = int(m.group(2))
+                net_name = m.group(3)
                 nets.append((net_name, fanout, path_count))
             except ValueError:
                 continue
