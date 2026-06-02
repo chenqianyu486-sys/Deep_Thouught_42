@@ -1097,12 +1097,21 @@ class V2TestMode:
                     continue
 
             # Skip if required data is missing
-            if needs and needs not in args:
-                print(f"\n{'─' * 60}")
-                print(f"SKILL {idx}: [SKIP] {name} — missing '{needs}'")
-                print(f"{'─' * 60}")
-                self.skill_test_results.append({"skill": name, "success": False, "error": f"missing required data: {needs}"})
-                continue
+            if needs:
+                if isinstance(needs, list):
+                    missing = [nk for nk in needs if nk not in args]
+                    if missing:
+                        print(f"\n{'─' * 60}")
+                        print(f"SKILL {idx}: [SKIP] {name} — missing '{missing}'")
+                        print(f"{'─' * 60}")
+                        self.skill_test_results.append({"skill": name, "success": False, "error": f"missing required data: {missing}"})
+                        continue
+                elif needs not in args:
+                    print(f"\n{'─' * 60}")
+                    print(f"SKILL {idx}: [SKIP] {name} — missing '{needs}'")
+                    print(f"{'─' * 60}")
+                    self.skill_test_results.append({"skill": name, "success": False, "error": f"missing required data: {needs}"})
+                    continue
 
             print(f"\n{'─' * 60}")
             print(f"SKILL {idx}: [TEST] {name}")
