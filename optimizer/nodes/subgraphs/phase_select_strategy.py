@@ -36,6 +36,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     state.context.consecutive_empty_responses = 0
     tools_called: list[str] = []
     llm_summary = ""
+    assistant_content = ""
 
     while True:
         tool_round += 1

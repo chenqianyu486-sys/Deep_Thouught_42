@@ -45,6 +45,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     tool_round = 0
     tools_called: list[str] = []
     llm_summary = ""
+    assistant_content = ""
     state.context.tool_phase_call_counts.clear()
     state.context.consecutive_empty_responses = 0
 
