@@ -87,75 +87,13 @@ init_analysis ──► [WNS >= 0?]
 
 ### Key Design Principles
 
-| # | Principle | Implementation |
-|---|-----------|----------------|
-| 1 | Fail-safe, not blocking | Auto-synthesize `CONTINUE` when `report_step_state` is missing |
-| 2 | Facts, not judgments | Dashboard contains raw measurements only, injected as last user message |
-| 3 | Eliminate redundancy | Dashboard is the single real-time data source; handoff passes only iteration memory |
-| 4 | Explicit over implicit | 9-node state machine + typed dataclass state slices |
-| 5 | Separation of concerns | Worker (250K tokens, execution) vs. Planner (1M tokens, strategic decisions) |
-| 6 | Single invocation path | V2 uses native function calls only; no XML/YAML text fallback |
-| 7 | Single source of truth | Runtime data in `OptimizerState`; no shadow copies in `MemoryManager` |
-| 8 | Domain knowledge encoded | 14 strategies with trigger conditions; LLM selects autonomously |
-| 9 | Data trustworthiness | `DASHBOARD_REFRESH_MAP` tracks field freshness; stale data auto-annotated |
-| 10 | Information preservation | Compression markers retain key metrics (WNS/TNS/FE/delta/status) |
-| 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
-| 12 | DCP identity integrity | `vivado_open_checkpoint` removed from LLM tool whitelist in EXECUTE phase |
-| 13 | **Critical path-aware PBLOCK** | PBLOCK region selection centers on critical-path cells (top 10 paths) via automatic `critical_path_cells` injection in EXECUTE phase. Distance weight `0.3` balances proximity vs. region tightness — configurable via `distance_weight_factor`. Principle #7: `state.timing.critical_paths` as single source of truth for cell positions. |
-| 14 | **Tool result caching** | Phase-local tool cache avoids redundant MCP calls when LLM requests the same tool+args repeatedly. Cache auto-invalidated after any side-effect execution tool (place_design, route_design, etc.) to prevent stale physical data. |
-| 15 | **Read-only tool whitelist control** | Tools redundant with Dashboard data (`get_wns`, `get_resource_counts`) removed from ANALYZE/EVALUATE whitelists. Rate limiting (max 3 calls/phase for `search_cells`, max 5 for `vivado_run_tcl`) prevents LLM from exhausting rounds on repeated queries. |
-| 16 | **Adaptive PBLOCK multiplier** | `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))` — automatically tightens PBLOCK region at low utilization, expands at high utilization. `util_local` preferred, falls back to global chip utilization. |
-| 17 | **LLM prompt caching** | Every API call sends `{"cache": {"prompt": true}}` via `extra_body`. OpenRouter caches the system prompt prefix across repeated calls in the same session, saving ~4KB per call × 44 calls ≈ 176KB per iteration. Shared `build_llm_extra_body()` in `optimizer/pure/constants.py`. |
-| 18 | **Data trustworthiness annotations** | Dashboard distinguishes `None` (not analyzed) from `[]`/`0` (analyzed but zero). Every N/A and empty list carries a machine-readable reason: `"N/A(congestion_analysis_not_supported)"`, `[]  # no_high_fanout_nets_found`. |
-| 19 | **Vivado timeout auto-restart** | Tcl timeout poisons the Vivado session. The MCP server kills, restarts, and reopens the DCP automatically, then returns a structured `[ERROR]` string (not an exception). Reentry guard `_restarting` prevents recursive restart. Agent framework detects `[ERROR]` patterns and invalidates tool cache. |
-| 20 | **Unplaced DCP save guard** | Before writing the output DCP, `save_output` queries `get_property STATUS [current_design]`. If the design is not routed, it auto-repairs via `place_design` + `route_design` before saving. Prevents saving unplaced DCPs that would fail `validate_dcps.py`. |
-| 21 | **False-positive WNS detection** | `_post_eval_hook` and `_track_wns_from_result` check `Design State` in timing reports. If not `Routed`, a warning is logged and appended to the eval notice (`[WARNING: design not routed]`), alerting the LLM that WNS may be inaccurate. |
-| 22 | **Unplace auto-rollback** | EXECUTE phase tracks `place_design -unplace` calls. If the phase exits without a subsequent `place_design` (non-unplace), the design is automatically restored from a pre-unplace checkpoint and WNS refreshed. |
-| 23 | **phys_opt_design safety guard (string bypass fix)** | `_is_truthy()` normalizes boolean-like values (`"true"`, `"1"`, `"yes"`) before checking blocked retiming options (`retime`, `interconnect_retime`). Prevents LLM from bypassing the safety guard via string-typed arguments. |
-| 24 | **MCP error response detection** | `tool_router.py` detects `[ERROR]` patterns in MCP tool responses (timeout, restart, multi-line abort). Error responses invalidate the entire tool cache (like side-effect tools) and are never cached, ensuring the agent framework correctly records failures and Dashboard `action_status` reflects errors. |
-| 25 | **Per-tool timeout with design-size scaling** | `_TOOL_TIMEOUT_DEFAULTS` maps 30+ tools to base timeouts (30s–3600s). `call_tool()` accepts `design_size_factor` parameter; final timeout = `min(base × factor, 900s)`. User-specified `timeout` argument takes priority. |
-| 26 | **Multi-line Tcl transaction safety** | `run_tcl_command` pre-checks multi-line scripts with `info complete` (skipping lines with unbalanced braces). On execution failure, returns structured `[ERROR]` string instead of raising — the agent framework can continue using the recovered session. |
-| 27 | **Design state flag synchronization** | `_sync_design_open_flag()` queries `get_property STATUS [current_design]` to synchronize the `_design_open` flag with actual Vivado state, checking `[ERROR]`, `ERROR:`, and `no current design` patterns. Called after `close_design` and DCP reopen. |
-| 28 | **PBLOCK cell filter (CLOCK/IO exclusion)** | `create_and_apply_pblock` with `apply_to="current_design"` now uses `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` to exclude clock and IO primitives. Controlled by `exclude_clocks: bool = True` parameter. |
-| 29 | **Explicit pipeline data flow** | `init_analysis` Phase B pipelines return `dict` instead of using `nonlocal` variables. `asyncio.gather()` returns `(vivado_result, rw_result)`; Phase C reads `cell_names_for_spread` from `vivado_result.get()`, eliminating implicit data flow. |
-| 30 | **EXECUTE no-progress acceleration** | `NO_PROGRESS_LIMIT` reduced from 12 → 4; pending-tool-call guard prevents counting rounds where slow execution tools (place_design, route_design) are still running. Coordinated with `_TOOL_TIMEOUT_DEFAULTS` so the 4-round window (~40s LLM time) is balanced against tool execution timeouts. Post-eval UNCHANGED injects `[GUIDANCE]` prompting LLM to signal `EXEC_DONE`. |
-| 31 | **vivado_run_tcl rate-limit enforcement** | Per-phase call limit for `vivado_run_tcl` reduced from 5 → 2 in EXECUTE phase. RATE LIMITED message now directs LLM to Dashboard data and dedicated tools (`vivado_report_timing_summary`) instead of raw Tcl. Prevents LLM "analysis paralysis" in EXECUTE phase. |
-| 38 | **Empty response early termination** | `consecutive_empty_responses` counter in `ContextState` tracks LLM returning no content AND no tool calls. Threshold: ANALYZE/EXECUTE/EVALUATE = 3, SELECT_STRATEGY = 2 (tighter budget). Forces phase exit via `SYSTEM_EXIT` signal, preventing ~60% runtime waste from "ghost loops". Counter resets on any non-empty response and at phase entry. |
-| 39 | **Diminishing returns auto-detection** | `_check_diminishing_returns()` in `iteration_end.py` detects same strategy used 2+ times with |delta| < 0.020ns. Records as `reason="no_improvement"` (not `strategy_ineffective`) — strategy is NOT permanently blocked, but the signal appears in handoff trajectory to guide LLM away from exhausted strategies. |
-| 40 | **Strategy alias mapping** | `EXECUTE_STRATEGY_TOOL_MAP` includes `LogicOptimization` as alias for `OptDesign` (`rapidwright_execute_opt_design_strategy`). FORMAT_GUARD strategy list updated. Prevents EXECUTE phase failure when LLM selects an unmapped strategy name. |
-| 41 | **Dashboard data rate limits** | ANALYZE phase: `vivado_report_route_status`, `rapidwright_get_design_info`, `rapidwright_get_device_topology` limited to 1 call/phase (data already in Dashboard from init_analysis). Prevents LLM from re-querying stale data instead of analyzing. |
-| 32 | **FF utilization-aware strategy guidance** | When FF utilization < 2%, `RegisterRetiming` and `SmartRetiming` get `⚠️ FF utilization` warnings in strategy catalog and Dashboard `ff_warning` hints. LLM retains final decision authority, but warnings ensure it accounts for physical feasibility (e.g., 0.21% FF → retiming impact minimal). |
-| 33 | **Pre-placement logic optimization (opt_design)** | New 11th strategy: Vivado `opt_design` with `SKILL_CHAIN_ACTIONS` auto-chaining (`opt_design → place_design → route_design → report_timing_summary`). Targets pure logic-depth bottlenecks (6-7 LUT levels, 100% logic delay) where PhysOpt is ineffective. `--skip-structural` flag in `validate_dcps.py` allows Phase 1 bypass when netlist is intentionally remapped. |
-| 34 | **Initial checkpoint save for rollback** | `init_analysis` now unconditionally saves `best_checkpoint.dcp` after analysis completes. Previously `best_checkpoint_path` was `None` until WNS improved, making rollback impossible when the first iteration degrades timing. The `[ROLLBACK] No checkpoint at None` error is eliminated. (`optimizer/nodes/init_analysis.py`) |
-| 35 | **Heavy chain gate excludes pblock_strategy** | `rapidwright_execute_pblock_strategy` is an analysis-only skill — it computes pblock ranges but does not modify the netlist. The actual netlist mutation happens via `SKILL_CHAIN_ACTIONS` (unplace → create_pblock → place → route). Removed from `HEAVY_CHAIN_SKILLS` so the chain always runs, preventing the chain-gate from incorrectly skipping execution. (`optimizer/pure/constants.py`) |
-| 36 | **Stale dashboard suppression in ANALYZE** | `_build_dynamic_gradient` now only populates `last_action_taken` and `action_status` during `EXECUTE_STRATEGY` or `EVALUATE` phases. In `ANALYZE`/`SELECT_STRATEGY` phases, these fields are cleared to prevent stale data from the previous iteration misleading the LLM. (`optimizer/pure/state_space.py`) |
-| 37 | **Multi-strategy loop** | Up to 3 strategies can be tried per iteration. After EVALUATE, `SWITCH_STRATEGY` signals loop back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy. `MAX_STRATEGY_CYCLES = 3` in `constants.py`. Prevents wasting entire iterations on single failed strategies. (`optimizer/nodes/subgraphs/llm_tool_loop.py`) |
-| 38 | **Context engineering: weak guidance** | System prompt and FORMAT_GUARD describe problems and constraints, not prescribe solutions. Tool filtering + auto-chain handle execution mechanics. LLM retains autonomous strategy selection and diagnostic decisions. |
-| 39 | **TTL-based strategy retry** | `FailedStrategyRecord.blocked_until_iter` adds TTL to strategy blocking. Strategies marked `strategy_ineffective` auto-unblock after `STRATEGY_RETRY_TTL = 3` iterations. `_get_permanently_blocked_strategies()` checks `current_iter < entry.blocked_until_iter`. Prevents permanent strategy exclusion from exhausting the strategy catalog. (`optimizer/state.py`, `optimizer/nodes/subgraphs/phase_select_strategy.py`) |
-| 40 | **EXECUTE phase relaxed constraint** | After executing the strategy tool, LLM may call `rapidwright_report_timing` for quick feedback (~2.5s) before signaling EXEC_DONE. Provides fast directional check without full Vivado timing (~14s). (`optimizer/nodes/subgraphs/phase_execute.py`) |
+40 principles covering fail-safety, data trustworthiness, DCP identity, tool caching, adaptive PBLOCK, LLM prompt caching, and more. See the Chinese section below (核心设计原则) for the full table.
 
----
 
 ## Optimization Strategies
 
-| Strategy | Trigger Condition | Platform |
-|----------|-------------------|----------|
-| **PBLOCK** | Distributed paths (avg_distance > 70) — region centers on critical-path cells | Vivado + RapidWright |
-| **PhysOpt** | 1–2 critical paths with spread, WNS > -2.0 | Vivado |
-| **OptDesign** | Logic-depth limited (>70% logic delay), PhysOpt ineffective, 6-7 LUT levels | Vivado (via RapidWright skill + auto-chain) |
-| **Fanout** | Fanout > 100, no spread | RapidWright + Vivado |
-| **PinSwap** | WNS stuck at ~-0.3ns, LUT pin delay variance | RapidWright + Vivado |
-| **LUTCascade** | >3 LUTs in series | RapidWright + Vivado |
-| **CellReplication** | Fanout > 10 or delay > 0.3ns | RapidWright + Vivado |
-| **CongestionSpreading** | Congestion=HIGH, PBLOCK/PhysOpt ineffective | RapidWright + Vivado |
-| **RegisterRetiming** | Deep combinational chains (>2 LUTs) | RapidWright + Vivado |
-| **SmartRetiming** | WNS stuck, deep combinational chains (>2 LUTs) between pipeline registers, FF > 0 | RapidWright + Vivado |
-| **NetSwap** | Intra-SLICE routing congestion | RapidWright + Vivado |
-| **PhysOpt+RegisterRetiming** | Logic-depth limited (logic_delay > 70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | Vivado + RapidWright (atomic) |
-| **LogicResynthesis** | 100% logic delay, NN/datapath with MUXF7/8 cascades, PBLOCK already applied | Vivado (synth_design -remap) |
-| **PhysOptAggressive** | WNS stuck after PBLOCK, need more aggressive optimization | Vivado (Explore directive) |
+14 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, LogicResynthesis, PhysOptAggressive. See the Chinese section below (优化策略) for trigger conditions and platform details.
 
----
 
 ## Prerequisites
 
@@ -214,65 +152,13 @@ make run_optimizer_dashboard DCP=input.dcp
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-The dashboard provides 20 real-time panels (7-module StateSpace + 13 legacy detail panels):
+The dashboard provides 20 real-time panels: 7-module StateSpace (Global State, Timing Clusters, Physical/Congestion, Netlist Quality, Constraints, Dynamic Gradient, Architecture Overview) + 13 legacy detail panels. See the Chinese section below (仪表盘) for the full panel listing.
 
-**7-Module StateSpace (Agent Data Input Layer):**
-
-| Module | Panel | Content |
-|--------|-------|---------|
-| **M1** | **Global State & Targets** | Stage badge, WNS/TNS/WHS/THS margins, best WNS, LUT/FF/DSP/BRAM utilization bars, cell/net count |
-| **M2** | **Timing Path Clusters** | Top-20 violating endpoints with clock groups, logic/route delay ratio, logic levels |
-| **M3** | **Physical & Congestion** | Global congestion score, hotspots (bbox + severity + module), pblock overflows |
-| **M4** | **Netlist Quality** | High fanout nets (with replication status), control sets, cross-domain paths, failed inferences |
-| **M5** | **Constraints Environment** | Clock table (name→frequency), false/multicycle path counts, IO delay coverage, PVT corner |
-| **M6** | **Dynamic Gradient (Delta)** | delta_WNS, delta_TNS, delta_congestion, last action + action status (Success/Failed/Timeout) |
-| **M7** | **Architecture Overview** | Module-level timing hotspots (critical_path_hits, path_coverage), cross/intra-module path counts, deepest logic module. Zero-cost: parsed from critical path cell names.
-
-**Legacy Detail Panels:**
-
-| Panel | Content |
-|-------|---------|
-| **Timing** | WNS / TNS / Failing Endpoints with sparkline chart |
-| **Iteration** | Counter, no-improvement tracking, strategy sequence |
-| **Strategy Lifecycle** | 4-phase indicator + current strategy/evaluation |
-| **Model** | Current model, fallback state, call count |
-| **Cost** | Total cost with progress bar, token breakdown |
-| **Control** | Runtime status, elapsed time, DCP paths |
-| **Critical Paths** | Cell lists with per-path timing detail |
-| **LLM Log** | Latest prompt/response + full call history |
-| **Transition History** | Node-to-node transitions with WNS snapshots |
-| **Tool Call Trace** | All tool invocations with timing and status |
-| **Flow Control Log** | Color-coded signal trail (DONE/SWITCH/ROLLBACK) |
-| **Phase History** | Phase transitions with timestamps |
-| **WNS Trajectory** | Cumulative improvement over iterations |
-
----
 
 ## Project Structure
 
-```
-Deep_Thouught_42/
-├── dcp_optimizer.py          # Main entry: LLM orchestration, model selection
-├── optimizer/                # V2 state machine framework
-│   ├── state.py              # Typed dataclass: 7 state sub-slices
-│   ├── graph.py              # NodeGraph: execution engine
-│   ├── nodes/                # 9 node implementations + llm_tool_loop subgraph
-│   └── pure/                 # 14 stateless pure-function modules (unit-testable), incl. state_space.py (7-module StateSpace)
-├── strategy_library.py       # 12 strategies with trigger conditions
-├── skills/                   # Skill framework: 14 registered skills
-├── RapidWrightMCP/           # RapidWright MCP server
-├── VivadoMCP/                # Vivado MCP server
-├── context_manager/          # Memory/compression management
-├── dashboard/                # Web Dashboard (aiohttp + WebSocket)
-├── architecture.md           # Implementation details (migration, compression, flow control)
-├── CONTRIBUTING.md           # Contribution workflow & sync checklist
-├── validate_dcps.py          # DCP logic equivalence validator
-├── model_config.yaml         # LLM tier & fallback configuration
-├── Makefile                  # Build automation
-└── docs/                     # Competition submission docs
-```
+See the Chinese section below (项目结构) for the full directory tree, or refer to [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md).
 
----
 
 ## Model Configuration
 
@@ -315,49 +201,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow, test modes, an
 
 ## Troubleshooting
 
-### `Vivado license not found`
+See the Chinese section below (故障排除) for common issues and solutions.
 
-```bash
-# Verify Vivado is accessible
-which vivado
-# Source Vivado settings if needed
-source /opt/Xilinx/Vivado/2024.1/settings64.sh
-```
-
-### `OPENROUTER_API_KEY not set`
-
-```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
-# Add to ~/.bashrc for persistence
-echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.bashrc
-```
-
-### `RapidWright Java error`
-
-```bash
-# Ensure Java 11+ is installed
-java -version
-# Set JAVA_HOME if needed
-export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
-```
-
-### Dashboard not loading
-
-```bash
-# Check port availability
-lsof -i :8080
-# Try alternate port
-make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
-```
-
-### WNS not improving after many iterations
-
-- The agent automatically rolls back when WNS degrades >30ps
-- Check the Flow Control Log in dashboard for `EXHAUSTED` signals
-- Try increasing `no_improvement_limit` in the state configuration
-- Verify `validate_dcps.py` passes on your baseline DCP
-
----
 
 ## License
 
@@ -489,6 +334,9 @@ init_analysis ──► [WNS >= 0?]
 | 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
 | 24 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查。 |
 | 25 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
+| 26 | **设计一致性验证工具** | 4 个验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_estimate_timing`, `rapidwright_compare_designs`）在所有阶段可用。LLM 可自主验证设计状态，确保修改后一致性。 |
+| 27 | **独立 RapidWright 工具** | 19 个 RapidWright 工具（8 个分析 + 10 个执行 + 1 个验证）暴露给 LLM，支持细粒度控制。LLM 可自主选择工具组合，而非被硬编码链限制。 |
+| 28 | **可选链验证** | `OPTIONAL_CHAIN_VALIDATION` 提供 4 个可选验证链，LLM 可选择是否在执行前后插入验证步骤。验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_compare_designs`）确保设计一致性。 |
 
 ---
 

@@ -111,6 +111,8 @@ llm_tool_loop_node (调度器)
   │  工具结果缓存(同phase内相同参数自动命中, 执行工具后自动失效)
   │  PBLOCK自适应multiplier(公式C)
   │  DCP身份保护          最多30轮
+  │  设计一致性验证工具(4个)  LLM可自主验证设计状态
+  │  独立RapidWright工具(19个)  LLM可自主选择工具组合
   │
   └── EVALUATE → (exit) 或 SELECT_STRATEGY 或 ANALYZE
       DONE/WNS>=0 → ITERATION_END
@@ -127,49 +129,7 @@ llm_tool_loop_node (调度器)
 
 ### 2.4 关键设计原则
 
-| # | 原则 | 实现 |
-|---|------|------|
-| 1 | 故障安全，不阻塞 | `report_step_state` 缺失时自动合成 `CONTINUE` |
-| 2 | 事实而非判断 | Dashboard 仅含原始测量值，作为最后一条 user 消息注入 |
-| 3 | 消除冗余 | Dashboard 是唯一实时数据源，handoff 仅传递迭代记忆 |
-| 4 | 显式优于隐式 | 9 节点状态机 + 类型化 dataclass 状态切片 |
-| 5 | 关注点分离 | Worker（250K）执行 vs Planner（1M）策略决策 |
-| 6 | 单一调用路径 | V2 仅原生函数调用，无 XML/YAML 回退 |
-| 7 | 单一事实来源 | 运行时数据在 OptimizerState；MemoryManager 仅存消息+执行压缩引擎；DCPOptimizerCompat 仅 V1 使用 |
-| 8 | 领域知识编码 | 14 策略含触发条件，LLM 自主选择；多策略循环 + TTL 重试 |
-| 9 | 数据可信度 | DASHBOARD_REFRESH_MAP 追踪字段新鲜度 |
-| 10 | 信息保留 | 压缩标记保留 WNS/TNS/FE/delta/status |
-| 11 | 逻辑等价性硬约束 | validate_dcps.py 验证（结构+功能） |
-| 12 | DCP 身份完整 | EXECUTE 阶段移除 vivado_open_checkpoint 白名单 |
-| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；执行工具（place_design, route_design 等）后自动失效缓存防止过期物理数据 |
-| 14 | **只读工具白名单控制** | 与 Dashboard 冗余的 get_wns/get_resource_counts 在 ANALYZE/EVALUATE 阶段移除白名单；search_cells 限 3 次/phase，run_tcl 限 5 次/phase |
-| 15 | **PBLOCK 自适应紧缩** | 采用公式 `M = max(1.10, 1.2 + util_local × 0.3 - 0.1×log10(N_LUT))`，低利用率自动紧缩 region |
-| 16 | **LLM 提示缓存** | 每次 LLM 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，OpenRouter 在同一会话中缓存系统提示前缀。所有阶段（ANALYZE/SELECT/EXECUTE/EVALUATE）的 `_call_phase_llm()` 均通过共享函数 `build_llm_extra_body()`（`optimizer/pure/constants.py`）统一构造 extra_body，消除4份重复代码。 |
-| 17 | **未布局 DCP 保存防护** | `save_output` 在写入输出 DCP 前查询 `get_property STATUS [current_design]`，若未布线则自动执行 `place_design` + `route_design` 修复后再保存 |
-| 18 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告 `Design State`，若非 `Routed` 则记录警告并追加 `[WARNING: design not routed]` 到评估通知 |
-| 19 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace`，若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS |
-| 20 | **phys_opt_design 安全守卫（字符串绕过修复）** | `_is_truthy()` 规范化布尔类值（`"true"`/`"1"`/`"yes"`）后再检查被阻止的 retiming 选项，防止 LLM 通过字符串类型参数绕过安全守卫 |
-| 21 | **MCP 错误响应检测** | `tool_router.py` 检测 MCP 工具返回中的 `[ERROR]` 模式（超时、重启、多行中止）。错误响应与副作用工具同等处理：清空整个工具缓存，不缓存错误结果，确保 Agent 框架正确记录失败 |
-| 22 | **工具超时分级 + 设计规模缩放** | `_TOOL_TIMEOUT_DEFAULTS` 为 30+ 工具映射基线超时（30s–3600s）。`call_tool()` 接受 `design_size_factor` 参数；最终超时 = `min(base × factor, 900s)`。用户指定 `timeout` 参数优先 |
-| 23 | **多行 Tcl 事务安全** | `run_tcl_command` 对多行脚本用 `info complete` 预检语法（跳过花括号不平衡行）。执行失败时返回结构化 `[ERROR]` 字符串而非抛异常，Agent 框架可继续使用恢复后的会话 |
-| 24 | **设计状态标志同步** | `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志与 Vivado 实际状态，检查 `[ERROR]`、`ERROR:` 和 `no current design` 三种错误模式 |
-| 25 | **PBLOCK 单元过滤（CLOCK/IO 排除）** | `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制 |
-| 26 | **显式管线数据流** | `init_analysis` Phase B 管线返回 `dict` 而非使用 `nonlocal` 变量。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get()` 读取 `cell_names_for_spread`，消除隐式数据流 |
-| 27 | **EXECUTE no-progress threshold 12→4** | `NO_PROGRESS_LIMIT` 降至 4，增加 `_pending_tool_count` 守卫（排除正在等待工具调用返回的轮次），与 `_TOOL_TIMEOUT_DEFAULTS` 联动。Post-eval UNCHANGED 注入 `[GUIDANCE]` 提示 LLM 发出 `EXEC_DONE` |
-| 28 | **vivado_run_tcl EXECUTE phase limit 5→2** | Phase rate limit 收紧，RATE LIMITED 消息引导 LLM 使用 Dashboard 数据和专用工具 |
-| 35 | **空响应早期终止** | `ContextState.consecutive_empty_responses` 计数器追踪 LLM 返回空内容且无 tool calls 的情况。阈值：ANALYZE/EXECUTE/EVALUATE=3, SELECT_STRATEGY=2。达到阈值时强制 `SYSTEM_EXIT` 退出阶段，防止 ~60% 运行时间浪费。计数器在非空响应和阶段入口时重置 |
-| 36 | **收益递减自动检测** | `_check_diminishing_returns()` 检测同一策略连续 2+ 次使用且 |delta| < 0.020ns。记录为 `reason="no_improvement"`（非 `strategy_ineffective`），不永久排除策略，但在 handoff 轨迹中提示 LLM |
-| 37 | **策略别名映射** | `EXECUTE_STRATEGY_TOOL_MAP` 包含 `LogicOptimization` 作为 `OptDesign` 别名。FORMAT_GUARD 策略列表同步更新，防止 EXECUTE 阶段因策略名未映射而失败 |
-| 38 | **Dashboard 数据工具 rate limit** | ANALYZE 阶段：`vivado_report_route_status`、`rapidwright_get_design_info`、`rapidwright_get_device_topology` 限制为 1 次/phase（数据已在 init_analysis 中提取到 Dashboard），防止 LLM 重复查询 |
-| 29 | **FF utilization <2% RegisterRetiming 警告** | Dashboard 和 strategy_catalog 中为 RegisterRetiming/SmartRetiming 添加 `ff_warning`，LLM 保留最终决策权 |
-| 30 | **Pre-placement logic optimization (opt_design)** | 新增第 11 个策略，通过 RapidWright skill 包装器 + `SKILL_CHAIN_ACTIONS` 自动链式执行。`validate_dcps.py --skip-structural` 允许跳过 Phase 1 结构对比 |
-| 31 | **初始 checkpoint 保存** | `init_analysis` 分析完成后无条件写 `best_checkpoint.dcp`，确保 rollback 始终可用。此前 checkpoint 仅 WNS 改善时保存，首次迭代退化时 rollback 因 `best_checkpoint_path=None` 失败（`optimizer/nodes/init_analysis.py`） |
-| 32 | **HEAVY_CHAIN_SKILLS 排除 PBLOCK** | `rapidwright_execute_pblock_strategy` 是分析型 skill，post-eval 总 UNCHANGED，导致 chain-gate 跳过实际执行链（unplace → pblock → place → route）。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`） |
-| 33 | **Dashboard 陈旧数据抑制** | `_build_dynamic_gradient` 仅在 EXECUTE/EVALUATE 阶段显示 `last_action_taken`，ANALYZE/SELECT_STRATEGY 清空，防止误导 LLM（`optimizer/pure/state_space.py`） |
-| 34 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费（`optimizer/nodes/subgraphs/llm_tool_loop.py`） |
-| 35 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
-| 40 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。`_get_permanently_blocked_strategies()` 检查 `current_iter < entry.blocked_until_iter`。防止策略目录被永久阻止耗尽（`optimizer/state.py`, `optimizer/nodes/subgraphs/phase_select_strategy.py`） |
-| 41 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查（`optimizer/nodes/subgraphs/phase_execute.py`） |
+> 40 条设计原则（故障安全、数据可信度、DCP 身份完整性、工具缓存、自适应 PBLOCK、LLM 提示缓存等）。完整列表见 [README.md](README.md) 中文版核心设计原则和 [architecture.md §13](architecture.md)。
 
 ## 3. 核心数据流
 
@@ -370,55 +330,11 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 
 ### 3.5 Skill 机制
 
-**已注册 Skills**（14 个分析型 + 1 个测试用）：
+> 14 个注册 Skills + SKILL_CHAIN_ACTIONS 自动链式执行 + OPTIONAL_CHAIN_VALIDATION。完整调用链、超时映射、推荐机制见 [architecture.md §4](architecture.md)。
 
-| Skill | 类型 | 说明 |
-|-------|------|------|
-| `analysis.net_detour@1.0.0` | READ-ONLY | 关键路径网络绕路分析 |
-| `placement.optimize_cell@1.0.0` | non-idempotent | 基于重心优化单元布局 |
-| `placement.smart_region@1.0.0` | READ-ONLY | 智能 PBlock 区域搜索 |
-| `optimization.pblock_strategy@1.0.0` | READ-ONLY | PBLOCK 区域分析 |
-| `optimization.execute_pblock_strategy@1.0.0` | non-idempotent | PBLOCK 全策略（分析+执行+自动串联） |
-| `optimization.physopt_strategy@1.0.0` | non-idempotent | Physical Optimization |
-| `optimization.fanout_strategy@1.0.0` | non-idempotent | 高扇出网线优化 |
-| `analysis.analyze_congestion@1.0.0` | READ-ONLY | 布线拥塞分析 |
-| `analysis.analyze_congestion_spreading@1.0.0` | READ-ONLY | 拥塞感知扩散分析 |
-| `optimization.execute_congestion_spreading@1.0.0` | non-idempotent | 拥塞感知单元扩散 |
-| `analysis.analyze_register_retiming@1.0.0` | READ-ONLY | Register Retiming 分析 |
-| `optimization.execute_register_retiming@1.0.0` | non-idempotent | Register Retiming 执行 |
-| `optimization.pin_swapping_strategy@1.0.0` | non-idempotent | 引脚交换优化 |
-| `analysis.analyze_net_swapping@1.0.0` | READ-ONLY | Net Swapping 分析 |
-| `optimization.execute_net_swapping@1.0.0` | non-idempotent | Net Swapping 执行 |
-| `optimization.lut_cascade_flattening@1.0.0` | non-idempotent | LUT 串联展平 |
-| `optimization.critical_path_cell_replication_strategy@1.0.0` | non-idempotent | 关键路径 Cell 复制 |
-| `optimization.opt_design@1.0.0` | non-idempotent | Logic-level optimization (opt_design) with auto-chain: place → route → timing |
+### 3.6 策略库清单
 
-> 完整调用链、超时映射、推荐机制见 [architecture.md §4.1](architecture.md)。
-
-**SKILL_CHAIN_ACTIONS 自动链式执行**：`strategy_library.py` 中的策略可通过 `SKILL_CHAIN_ACTIONS` 映射定义自动串联的工具序列。新增 opt_design 链式条目：
-```python
-# opt_design chain: skill → opt_design → place → route → timing → critical_path_cells
-"rapidwright_execute_opt_design_strategy": [...]
-```
-
-### 3.6 策略库清单（strategy_library.py）
-
-| 策略 | 触发条件 | 关联 Skill |
-|------|---------|-----------|
-| PBLOCK | 分布式场景 (avg_distance>70) | `rapidwright_execute_pblock_strategy` |
-| PhysOpt | 1-2 paths with spread, WNS>-2.0 | `rapidwright_execute_physopt_strategy` |
-| Fanout | fanout>100, 无 spread | `rapidwright_execute_fanout_strategy` |
-| PinSwap | WNS 卡在 ~-0.3ns | `rapidwright_analyze_net_swapping` |
-| LUTCascade | >3 级 LUT 串联 | `rapidwright_optimize_lut_input_cone` |
-| CellReplication | fanout>10 或 delay>0.3ns | Vivado `phys_opt_design` |
-| CongestionSpreading | congestion=HIGH | `rapidwright_analyze_congestion_spreading` |
-| RegisterRetiming | 深组合逻辑链 (>2 LUTs) | `rapidwright_analyze_register_retiming` |
-| SmartRetiming | WNS 停滞，深组合逻辑链 (>2 LUTs) 位于流水线寄存器之间，FF > 0 | `rapidwright_smart_retiming` |
-| NetSwap | SLICE 内布线拥塞 | `rapidwright_analyze_net_swapping` |
-| PhysOpt+RegisterRetiming | Logic-depth limited (>70%), WNS > -2.0, deep chains (>2 LUTs), FF > 0 | `vivado_physopt_and_route` (atomic PhysOpt+route, then retiming) |
-| OptDesign | Logic-depth limited (>70% logic delay), PhysOpt ineffective | `rapidwright_execute_opt_design_strategy` |
-| LogicResynthesis | 100% logic delay, NN/datapath with MUXF7/8 cascades, PBLOCK applied | `vivado_run_tcl` (synth_design -remap) |
-| PhysOptAggressive | WNS stuck after PBLOCK, need aggressive optimization | `vivado_physopt_and_route` (Explore directive) |
+> 14 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
 
 ### 3.7 Tool 描述增强
 
@@ -501,3 +417,8 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 原始日志存储在 side buffer（FIFO 50 条），LLM 可调 `vivado_get_raw_tool_output` 获取。
 
 > 完整实现细节见 [architecture.md §6](architecture.md)。
+
+## 10. 设计一致性验证工具
+
+> 4 个验证工具 + 19 个独立 RapidWright 工具 + 可选链验证。完整清单和设计一致性约束见 [architecture.md §4.2](architecture.md)。
+

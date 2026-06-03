@@ -4,6 +4,11 @@ Each phase gets a focused subset of tools to keep the LLM's attention
 on the task at hand.  The ``report_step_state`` tool schema is patched
 per-phase so the LLM only sees flow_control signals valid for the
 current phase.
+
+Design Consistency Principle:
+  - READ-ONLY tools (analyze, report, search) are always safe
+  - MODIFY tools (execute, optimize, place, route) require validation
+  - LLM should use validation tools after any design modification
 """
 
 from __future__ import annotations
@@ -17,6 +22,45 @@ class LoopPhase(str, Enum):
     SELECT_STRATEGY = "select_strategy"
     EXECUTE = "execute"
     EVALUATE = "evaluate"
+
+
+# ── Design consistency validation tools ──────────────────────────────
+# These tools help LLM verify design state without modifying it.
+# Available in all phases for autonomous validation.
+CONSISTENCY_VALIDATION_TOOLS: frozenset[str] = frozenset({
+    "vivado_check_design_status",      # Check placement/routing status
+    "vivado_validate_timing",          # Validate timing after modifications
+    "rapidwright_estimate_timing",     # Quick timing estimation (direction only)
+    "rapidwright_compare_designs",     # Compare designs for consistency
+})
+
+
+# ── Independent RapidWright tools (not part of auto-chains) ──────────
+# These tools can be called independently by LLM for fine-grained control.
+INDEPENDENT_RAPIDWRIGHT_TOOLS: frozenset[str] = frozenset({
+    # Analysis tools (READ-ONLY, safe)
+    "rapidwright_analyze_critical_path_spread",
+    "rapidwright_analyze_congestion",
+    "rapidwright_analyze_pblock_region",
+    "rapidwright_analyze_net_detour",
+    "rapidwright_report_timing",
+    "rapidwright_search_cells",
+    "rapidwright_get_design_info",
+    "rapidwright_get_device_topology",
+    # Execution tools (MODIFY design, require validation)
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_smart_retiming",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_optimize_fanout_batch",
+    # Validation tools (READ-ONLY, safe)
+    "rapidwright_compare_design_structure",
+})
 
 
 # ── Per-phase tool allowlists ──────────────────────────────────────
@@ -43,14 +87,14 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_get_raw_tool_output",
         "vivado_get_cached_high_fanout_nets",
         "report_step_state",
-    }),
+    }) | CONSISTENCY_VALIDATION_TOOLS,
 
     LoopPhase.SELECT_STRATEGY: frozenset({
         "report_step_state",
         "vivado_get_raw_tool_output",
         "vivado_get_cached_high_fanout_nets",
         "rapidwright_analyze_pblock_region",
-    }),
+    }) | CONSISTENCY_VALIDATION_TOOLS,
 
     LoopPhase.EXECUTE: frozenset({
         # Strategy execution tools
@@ -69,6 +113,14 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_execute_opt_design_strategy",
         "rapidwright_smart_retiming",
         "rapidwright_execute_physopt_strategy",
+        # Independent RapidWright tools (for fine-grained control)
+        "rapidwright_optimize_fanout_batch",
+        "rapidwright_analyze_critical_path_spread",
+        "rapidwright_analyze_congestion",
+        "rapidwright_analyze_net_detour",
+        "rapidwright_search_cells",
+        "rapidwright_get_design_info",
+        "rapidwright_get_device_topology",
         # Vivado execution tools
         "vivado_place_design",
         "vivado_route_design",
@@ -84,7 +136,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_get_cached_high_fanout_nets",
         # Internal tools
         "report_step_state",
-    }),
+    }) | CONSISTENCY_VALIDATION_TOOLS,
 
     LoopPhase.EVALUATE: frozenset({
         "vivado_report_timing_summary",
@@ -94,7 +146,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_extract_critical_path_cells",
         "report_step_state",
         "vivado_get_raw_tool_output",
-    }),
+    }) | CONSISTENCY_VALIDATION_TOOLS,
 }
 
 # ── Per-phase flow_control signals ─────────────────────────────────

@@ -1923,6 +1923,55 @@ Unlike phys_opt_design, there are no blocked directives.""",
                 "required": [],
             },
         ),
+        Tool(
+            name="check_design_status",
+            description="""Check the current design placement/routing status.
+
+            Returns JSON with:
+            - design_open: whether a design is loaded
+            - status: Vivado design status string
+            - is_placed: whether design is placed
+            - is_routed: whether design is routed
+
+            USE: Before timing checks to ensure design is in valid state.
+            USE: After design modifications to verify placement/routing status.
+
+            READ-ONLY: Does not modify design.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 30)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="validate_timing",
+            description="""Run timing summary and validate WNS/TNS.
+
+            Returns JSON with:
+            - wns: Worst Negative Slack (ns)
+            - tns: Total Negative Slack (ns)
+            - failing_endpoints: number of failing endpoints
+            - timing_met: whether WNS >= 0
+            - raw_report: raw timing report excerpt
+
+            USE: After any design modification to verify timing.
+            USE: Before submission to ensure timing convergence.
+
+            READ-ONLY: Does not modify design.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 120)"
+                    }
+                }
+            }
+        ),
     ]
 
 
@@ -2326,6 +2375,36 @@ async def call_tool(name: str, arguments: dict):
                 "vivado_output": result_text[:5000],
             }
             return [TextContent(type="text", text=json.dumps(response_data))]
+
+        elif name == "check_design_status":
+            timeout = arguments.get("timeout", 30)
+            # Check if design is placed/routed
+            status_result = run_tcl_command("get_property STATUS [current_design]", timeout=timeout)
+            design_open = _design_open
+
+            response = {
+                "design_open": design_open,
+                "status": status_result.strip() if status_result else "Unknown",
+                "is_placed": "Placed" in status_result if status_result else False,
+                "is_routed": "Routed" in status_result if status_result else False,
+            }
+            return [TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "validate_timing":
+            timeout = arguments.get("timeout", 120)
+            # Run timing summary and validate
+            run_tcl_command("puts {timing_validation_start}", timeout=5)
+            timing_report = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
+            parsed = _parse_timing_summary(timing_report)
+
+            response = {
+                "wns": parsed.get("wns"),
+                "tns": parsed.get("tns"),
+                "failing_endpoints": parsed.get("failing_endpoints"),
+                "timing_met": parsed.get("wns") is not None and parsed.get("wns") >= 0,
+                "raw_report": timing_report[:2000] if timing_report else "",
+            }
+            return [TextContent(type="text", text=json.dumps(response, indent=2))]
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]

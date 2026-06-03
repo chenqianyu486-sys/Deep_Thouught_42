@@ -34,9 +34,34 @@ Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
 Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
 
+DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
+  The competition requires STRICT design logic equivalence. Any optimization must preserve
+  functional correctness. Use validation tools to verify consistency after modifications.
+
+  Safe tools (READ-ONLY, always safe):
+    - vivado_report_timing_summary, vivado_extract_critical_path_cells
+    - rapidwright_report_timing, rapidwright_analyze_*, rapidwright_search_cells
+    - vivado_check_design_status, vivado_validate_timing
+
+  Risky tools (MODIFY design, require validation):
+    - rapidwright_optimize_*, rapidwright_execute_*, rapidwright_smart_retiming
+    - vivado_place_design, vivado_route_design, vivado_phys_opt_design
+
+  Validation workflow after ANY design modification:
+    1. vivado_check_design_status — verify design is placed/routed
+    2. vivado_validate_timing — verify WNS/TNS are acceptable
+    3. rapidwright_compare_designs — verify structural consistency
+
+  RapidWright accuracy warning for large designs (>200K cells):
+    - Cannot predict route-congestion-induced timing
+    - Absolute WNS may have 0.5ns+ error on cross-SLR paths
+    - Only directional comparison (better/worse) is reliable
+    - Always verify with Vivado for final decisions
+
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
+  - Skipping validation after design modifications
 """
 
 

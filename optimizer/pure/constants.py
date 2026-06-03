@@ -309,6 +309,95 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
 }
 
 
+# ── Optional chain actions (LLM can choose to use or skip) ──────────
+# These chains provide validation steps that LLM can insert at will.
+# Unlike SKILL_CHAIN_ACTIONS (auto-executed), these are suggestions.
+OPTIONAL_CHAIN_VALIDATION: dict[str, list[dict]] = {
+    "rapidwright_execute_pblock_strategy": {
+        "description": "PBLOCK strategy with optional validation steps",
+        "validation_before": [
+            {"tool": "vivado_check_design_status", "args": {}},
+        ],
+        "validation_after": [
+            {"tool": "vivado_validate_timing", "args": {}},
+            {"tool": "rapidwright_compare_designs", "args": {}},
+        ],
+        "optional_steps": [
+            {"tool": "rapidwright_estimate_timing", "args": {}, "skip_if": "direction_regress"},
+        ],
+    },
+    "rapidwright_execute_fanout_strategy": {
+        "description": "Fanout strategy with optional validation steps",
+        "validation_before": [
+            {"tool": "vivado_check_design_status", "args": {}},
+        ],
+        "validation_after": [
+            {"tool": "vivado_validate_timing", "args": {}},
+        ],
+    },
+    "rapidwright_optimize_cell_placement": {
+        "description": "Cell placement optimization with optional validation",
+        "validation_before": [
+            {"tool": "vivado_check_design_status", "args": {}},
+        ],
+        "validation_after": [
+            {"tool": "vivado_validate_timing", "args": {}},
+            {"tool": "rapidwright_compare_designs", "args": {}},
+        ],
+    },
+    "rapidwright_smart_retiming": {
+        "description": "Register retiming with optional validation",
+        "validation_before": [
+            {"tool": "vivado_check_design_status", "args": {}},
+        ],
+        "validation_after": [
+            {"tool": "vivado_validate_timing", "args": {}},
+            {"tool": "rapidwright_compare_designs", "args": {}},
+        ],
+    },
+}
+
+
+# ── Design consistency constraints for LLM ──────────────────────────
+# These constraints are injected into LLM context to guide tool selection.
+DESIGN_CONSISTENCY_CONSTRAINTS = """
+## Design Consistency Constraints
+
+### CRITICAL: Competition Requirements
+1. **Timing Convergence**: WNS must be ≥ 0
+2. **Logic Equivalence**: Design behavior must not change
+
+### Safe Operations (READ-ONLY, always safe):
+- vivado_report_timing_summary — read timing
+- vivado_extract_critical_path_cells — read paths
+- vivado_check_design_status — check placement/routing status
+- vivado_validate_timing — validate timing after modifications
+- rapidwright_report_timing — estimate timing (direction only)
+- rapidwright_analyze_* — analyze design structure
+- rapidwright_search_cells — search for cells
+- rapidwright_compare_designs — compare designs for consistency
+
+### Risky Operations (MAY modify design logic):
+- rapidwright_optimize_* — changes placement/optimization
+- rapidwright_smart_retiming — changes register positions
+- rapidwright_execute_* — executes strategies
+- vivado_place_design — changes placement
+- vivado_route_design — changes routing
+- vivado_phys_opt_design — changes placement optimization
+
+### Validation Requirements:
+1. After ANY risky operation, run vivado_validate_timing
+2. Before submission, run rapidwright_compare_designs
+3. Always check vivado_check_design_status before timing checks
+
+### RapidWright Accuracy Warning:
+For this design (37K+ cells, UltraScale+):
+- RapidWright timing error: up to 0.5ns+ for cross-SLR paths
+- Only directional comparison (better/worse) is reliable
+- Always verify with Vivado for final decisions
+"""
+
+
 # ── Per-tool timeout defaults (seconds) ──────────────────────────
 # Quick read-only queries use short timeouts; execution tools use long timeouts.
 # All timeouts are multiplied by design_size_factor at call time.

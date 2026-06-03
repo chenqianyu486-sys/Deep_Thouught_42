@@ -390,15 +390,19 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="compare_design_structure",
             description="""Compare structural properties of two design checkpoints for equivalence validation.
-            
+
             This is Phase 1 of design equivalence checking. Performs sanity checks to catch obvious errors:
             - Top-level module name must match
             - I/O port names, directions, and widths must match
             - Device must match
             - Cell count can increase (optimizations add cells) but not decrease or increase >50%
-            
+
             Returns PASS/FAIL status with detailed comparison report.
-            This should be run BEFORE functional simulation to quickly catch structural errors.""",
+            This should be run BEFORE functional simulation to quickly catch structural errors.
+
+            USE: After any design modification to verify structural consistency.
+            USE: Before submission to verify design integrity.
+            READ-ONLY: Does not modify design.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -465,7 +469,16 @@ async def list_tools() -> list[Tool]:
 
             After optimization, use write_checkpoint to save and Vivado to re-route
             and verify timing improvement.
-            Priority: Call this after analyze_net_detour identifies cells with detour_ratio > 2.0.""",
+            Priority: Call this after analyze_net_detour identifies cells with detour_ratio > 2.0.
+
+            ⚠️ DESIGN CONSISTENCY WARNING:
+            This tool MODIFIES the design (moves cells, changes routing).
+            After using this tool, you MUST:
+            1. Run vivado_validate_timing to verify timing
+            2. Run rapidwright_compare_designs to verify structural consistency
+            3. Verify functional equivalence before submission
+
+            MUTATING: modifies cell placement and writes checkpoint file.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1171,7 +1184,14 @@ ADVANTAGE over execute_register_retiming: verifies each insertion incrementally,
 auto-rolls back degradations, scores and deduplicates candidates.
 
 Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs)
-between pipeline registers, FF>0 required.""",
+between pipeline registers, FF>0 required.
+
+	⚠️ DESIGN CONSISTENCY WARNING:
+	This tool MODIFIES the design (creates new FFs, changes net topology).
+	After using this tool, you MUST:
+	1. Run vivado_validate_timing to verify timing
+	2. Run rapidwright_compare_designs to verify structural consistency
+	3. Verify functional equivalence before submission""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1287,6 +1307,62 @@ pre_swap_checkpoint.""",
                     }
                 },
                 "required": ["candidates"]
+            }
+        ),
+        Tool(
+            name="estimate_timing",
+            description="""Estimate timing using RapidWright's TimingGraph (~2.5s).
+
+            ⚠️ LIMITATIONS for large designs (>200K cells):
+            - Cannot predict route-congestion-induced timing
+            - Absolute WNS may have 0.5ns+ error on cross-SLR paths
+            - Only directional comparison (better/worse) is reliable
+
+            Returns JSON with:
+            - wns_ns: Estimated WNS (may be inaccurate for absolute values)
+            - direction: "improved", "regressed", or "unchanged" vs baseline
+
+            USE: Quick direction check before expensive Vivado P&R.
+            USE: Exploring multiple optimization alternatives quickly.
+            DO NOT USE: For final timing validation (use Vivado instead).
+
+            READ-ONLY: Does not modify design.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "baseline_wns": {
+                        "type": "number",
+                        "description": "Baseline WNS for directional comparison (optional)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="compare_designs",
+            description="""Compare two designs for structural equivalence.
+
+            Returns JSON with:
+            - cell_count_match: whether cell counts match
+            - net_count_match: whether net counts match
+            - differences: list of structural differences
+
+            USE: After RapidWright modifications to verify consistency.
+            USE: Before submission to verify design integrity.
+
+            READ-ONLY: Does not modify design.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dcp_path1": {
+                        "type": "string",
+                        "description": "Path to first DCP file"
+                    },
+                    "dcp_path2": {
+                        "type": "string",
+                        "description": "Path to second DCP file"
+                    }
+                },
+                "required": ["dcp_path1", "dcp_path2"]
             }
         ),
     ]
@@ -1601,6 +1677,25 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "net_swap"),
                 )
+
+        elif name == "estimate_timing":
+            baseline_wns = arguments.get("baseline_wns")
+            result = rw.report_timing()
+            if baseline_wns is not None and "wns_ns" in result:
+                current_wns = result["wns_ns"]
+                if current_wns > baseline_wns + 0.001:
+                    result["direction"] = "improved"
+                elif current_wns < baseline_wns - 0.001:
+                    result["direction"] = "regressed"
+                else:
+                    result["direction"] = "unchanged"
+                result["baseline_wns"] = baseline_wns
+                result["delta"] = current_wns - baseline_wns
+
+        elif name == "compare_designs":
+            dcp_path1 = arguments["dcp_path1"]
+            dcp_path2 = arguments["dcp_path2"]
+            result = rw.compare_design_structure(dcp_path1, dcp_path2)
 
         else:
             result = {"error": f"Unknown tool: {name}"}

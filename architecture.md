@@ -5,130 +5,19 @@
 
 ## 1. 部署与运行
 
-### 1.1 入口命令
+> 入口命令、测试模式、Dashboard 启动方式见 [README.md](README.md) Quick Start / Usage。
 
-- `make run_optimizer DCP=input.dcp` — 默认走 v2 状态机路径（自动加 `--v2`）
-- `make run_optimizer_v1 DCP=input.dcp` — 走旧 v1 消息对话路径
-- `python dcp_optimizer.py input.dcp --v2` — 命令行直接指定 v2
-- `python dcp_optimizer.py input.dcp` — 命令行走 v1（无 `--v2`）
-
-### 1.2 V2 测试模式（无 LLM）
-
-- `make run_test_v2 DCP=input.dcp` — 完整 v2 测试流程（工具+Skill+place/route）
-- `make run_skill_test_v2 DCP=input.dcp` — 仅验证 Skill 调用（快速，无 place/route）
-- `python dcp_optimizer.py input.dcp --test-v2` — 命令行直接指定
-- `python dcp_optimizer.py input.dcp --test-v2-only-skills` — 仅 Skill 测试
-
-V2 测试模式自动将所有控制台输出保存至 `run_dir/v2testmode.log`，使用 TeeLogger 实现 stdout 双写。
-
-### 1.3 V2 Web Dashboard（实时状态监控）
-
-- `python dcp_optimizer.py input.dcp --v2 --dashboard` — 启用 Web Dashboard（默认端口 8080）
-- `python dcp_optimizer.py input.dcp --v2 --dashboard --dashboard-port 9090` — 自定义端口
-
-**架构**:
-```
-NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer）
-                                    │
-                              serialize_state() → asyncio.Queue(maxsize=10)
-                                    │                              LLMCallLogger.log_call()
-                                    │                                    │
-                              aiohttp WebSocket handler       push_llm_event()（轻量）
-                                    │                              asyncio.Queue
-                                    │                                    │
-                                    └──────────┬─────────────────────────┘
-                                               │
-                                    Browser（自包含 HTML/CSS/JS 前端）
-```
-
-两种推送路径:
-1. **全状态快照**（`on_exit`）：每次 graph 节点退出时推送完整 `OptimizerState`
-2. **LLM 调用实时推送**（`push_llm_event`）：每次 LLM 调用后立即推送 LLM 调用数据
-
-**面板**: Timing（WNS/TNS/FE + sparkline）、Iteration、Strategy Lifecycle（4阶段指示器 + 当前策略/阶段/评估结果）、Model、Cost、Control、Critical Paths、LLM Log（最新 prompt/response + 完整调用历史）、Transition History（含 flow_control_signal/result_status）、Tool Call Trace、Flow Control Log（Signal/Phase/Strategy/WNS/Best/Status/Reason 颜色编码）、Phase History
-
-**依赖**: `aiohttp>=3.9.0`
-
-**LLM 消息记录**:
-- `ContextState.latest_user_prompt` / `latest_assistant_response` 在 4 个 phase 文件中每次 LLM 调用后更新（截取 2000 字符），Dashboard 通过全状态快照展示
-- `LLMCallLogger`（`optimizer/llm_call_logger.py`）在每次调用后写入 `llm_call_history.jsonl`（JSON Lines，程序解析）和 `llm_call_history.log`（人类可读），并通过 `push_llm_event()` 实时推送到 Dashboard
-- `llm_call_update` WebSocket 消息包含 phase / model / iteration / 截取的 prompt/response / WNS / cost / best_wns / strategy 等信息
-
-### 1.4 关键设计
-
-- **节点签名**: `async (state, deps) -> str`（返回下一节点名）
-- **依赖注入**: NodeDeps 容器（MCP 会话、MemoryManager），不存入状态
-- **条件边**: 纯函数 `state -> next_node_name`，系统决定转换而非 LLM
-- **状态追踪**: StateTracer 在每个节点边界记录快照，JSON 导出
-- **可变模式**: 节点原地修改 state，通过 tracing 实现可追溯性
-- **控制台退出**: `optimize_v2()` 启动 stdin 监听线程，输入 `quit` 设置 `state.control.user_exit_requested`
-- **上下文压缩**: `pure/compress.py` 封装 `compress_context()` 纯函数，token 估算统一使用 `ContextEstimator`（tiktoken cl100k_base）
-- **MemoryManager 同步**: `init_analysis_node` 调用 `set_initial_wns()`/`set_clock_period()`；`iteration_end_node` 调用 `advance_iteration()` 和 `record_failure()`
-- **DCP 身份完整性**: `state.control.current_dcp_path` 在全流程中追踪 Vivado 打开的 DCP 文件。EXECUTE 阶段从 LLM 工具白名单中移除 `vivado_open_checkpoint`
-- **Vivado Tcl 超时自动重启**: Tcl 命令超时会污染 Vivado session（`pexpect` 不返回 prompt）。MCP server 内部自动执行 `kill → restart → reopen DCP`，不尝试 `sync_after_timeout()`。移除 `_command_pending` 全局状态。超时后返回结构化 `[ERROR]` 字符串而非抛异常，`_restarting` 重入保护防止递归重启。Agent 框架通过 `_MCP_ERROR_PATTERNS` 检测错误响应并清空工具缓存（`VivadoMCP/vivado_mcp_server.py` + `optimizer/pure/tool_router.py`）
-- **phys_opt_design 安全守卫增强**: `_is_truthy()` 规范化布尔类值（`True`/`"true"`/`"1"`/`"yes"`）后再检查被阻止的 retiming 选项（`retime`/`interconnect_retime`），防止 LLM 通过字符串类型参数绕过安全守卫（`VivadoMCP/vivado_mcp_server.py`）
-- **多行 Tcl 事务安全**: `run_tcl_command` 对多行脚本执行 `info complete` 语法预检（跳过花括号不平衡行）。执行失败时返回 `[ERROR]` 结构化字符串而非 `raise`，Agent 框架可继续使用恢复后的会话（`VivadoMCP/vivado_mcp_server.py`）
-- **设计状态标志同步**: `_sync_design_open_flag()` 查询 `get_property STATUS [current_design]` 同步 `_design_open` 标志，检查 `[ERROR]`/`ERROR:`/`no current design` 三种模式。在 `close_design` 和 DCP 重开后调用（`VivadoMCP/vivado_mcp_server.py`）
-- **PBLOCK 单元过滤**: `create_and_apply_pblock` 在 `apply_to="current_design"` 时使用 `-filter {IS_PRIMITIVE == TRUE && PRIMITIVE_GROUP != CLOCK && PRIMITIVE_GROUP != IO}` 排除时钟和 IO 原语，由 `exclude_clocks: bool = True` 参数控制（`VivadoMCP/vivado_mcp_server.py`）
-- **工具超时分级 + 设计规模缩放**: `_TOOL_TIMEOUT_DEFAULTS` 为 30+ 工具映射基线超时（30s–3600s）。`call_tool()` 接受 `design_size_factor` 参数；最终超时 = `min(base × factor, 900s)`。用户指定 `timeout` 参数优先。所有 44 个调用点传入 `state.timing.design_size_factor`（`optimizer/pure/constants.py` + `optimizer/pure/tool_router.py`）
-- **MCP 错误响应检测**: `tool_router.py` 通过 `_is_mcp_error_response()` 检测 MCP 返回的 `[ERROR]` 模式（超时、重启、多行中止、进程终止）。错误响应与副作用工具同等处理：清空整个工具缓存，不缓存错误结果，确保 `tool_errors` 追踪和 Dashboard `action_status` 正确反映失败（`optimizer/pure/tool_router.py` + `optimizer/pure/constants.py`）
-- **显式管线数据流**: `init_analysis` Phase B 的 `_vivado_pipeline()` 和 `_rapidwright_pipeline()` 从 `nonlocal` 变量改为返回 `dict`。`asyncio.gather()` 返回 `(vivado_result, rw_result)`；Phase C 从 `vivado_result.get("cell_names_for_spread")` 读取数据，消除隐式数据流（`optimizer/nodes/init_analysis.py`）
-- **init_analysis 去 `report_*` 化**: Agent pipeline 禁用 cost 不可预测的 `report_*` 命令。`report_utilization -return_string` → 5 条 `get_cells -filter {PRIMITIVE_GROUP == ...}`（Vivado C++ filter 引擎，200K cells ~5-10s）
-- **init_analysis 原子提交 checkpoint**: 7 个步骤各自独立原子提交（`run → validate → mark_done`）。Vivado 重启后自动跳过已完成步骤
-- **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s
-- **init_analysis 初始 checkpoint 保存**: 分析完成后无条件写 `best_checkpoint.dcp` 并设 `best_checkpoint_path`。此前仅 WNS 改善时保存，导致首次迭代退化时 `best_checkpoint_path=None`，`rollback_node` 报 `[ROLLBACK] No checkpoint at None` 直接跳过恢复。修复后 rollback 总是可用的（`optimizer/nodes/init_analysis.py`）
-- **HEAVY_CHAIN_SKILLS 排除 pblock_strategy**: `rapidwright_execute_pblock_strategy` 是纯分析型 skill（仅返回 pblock_ranges），网络表实际变更由 `SKILL_CHAIN_ACTIONS` 的 chain（unplace → create_pblock → place → route）完成。post-eval 总返回 UNCHANGED，导致 chain-gate 错误跳过 chain。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`）
-- **EXECUTE 阶段工具过滤 + auto-chain**: `filter_tools_for_phase(EXECUTE)` 限制可用工具为已选策略的执行工具。`SKILL_CHAIN_ACTIONS` 自动处理 post-skill 工作流（checkpoint open, route, timing）。FORMAT_GUARD 描述 EXECUTE 阶段的工具映射。LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s），然后信号 EXEC_DONE（`optimizer/nodes/subgraphs/phase_execute.py`）
-- **Dashboard 陈旧数据抑制**: `_build_dynamic_gradient` 仅在当前 phase 为 `"EXECUTE_STRATEGY"` 或 `"EVALUATE"` 时显示 `last_action_taken` 和 `action_status`。ANALYZE/SELECT_STRATEGY 阶段清空这两个字段，防止上一迭代的策略评估结果误导 LLM（`optimizer/pure/state_space.py`）
 
 ## 2. V1→V2 迁移映射
 
-> V1→V2 的架构决策详见 [README.md](README.md) 设计意图第 4、5、6 条。本节仅保留代码级映射表。
+> V1→V2 的架构决策详见 [README.md](README.md) 设计意图第 4、5、6 条。
+>
+> **纯函数提取**: `_parse_timing_summary` → `pure/timing.py` | `_select_model` → `pure/model_select.py` | `_summarize_tool_result` → `pure/tool_summary.py` | `_on_iteration_end` → `pure/iteration_logic.py` | `_build_context_snapshot` → `pure/context_snapshot.py` | `call_tool` → `pure/tool_router.py`
+>
+> **状态迁移**: `DCPOptimizer` 实例属性 → `OptimizerState`（7 个 dataclass 子切片）
+>
+> **流程迁移**: `optimize()` → `NodeGraph.run()` | `get_completion()` → `llm_tool_loop` 子图 | `_perform_initial_analysis()` → `init_analysis_node` 
 
-### 2.1 纯函数提取
-
-| V1 方法 (DCPOptimizer) | V2 纯函数模块 | 说明 |
-|------------------------|--------------|------|
-| `_parse_timing_summary()` | `pure/timing.py` | 时序摘要解析、高扇出网线解析、资源利用率解析 |
-| `_select_model()` | `pure/model_select.py` | 任务分类、9维评分、模型选择 |
-| `_summarize_tool_result()` | `pure/tool_summary.py` | 工具结果YAML摘要化 |
-| `_on_iteration_end()` | `pure/iteration_logic.py` | 迭代计数器更新、策略推断、迭代叙事 |
-| `_build_context_snapshot()` | `pure/context_snapshot.py` | 数据dashboard构建与注入（V1: 首条user msg；V2: 末条user msg via `inject_context_snapshot_at_end`） |
-| `_generate_*_handoff()` | `pure/handoff.py` | 交接提示词、状态摘要、状态信号 |
-| `call_tool()` | `pure/tool_router.py` | MCP工具路由（含 phys_opt 安全守卫） |
-| `_extract_step_state()` | `pure/step_state.py` | 仅原生tool call解析 |
-| `_compress_context()` | `pure/compress.py` | ContextEstimator(tiktoken)精确token计数 + CompressionContext构建 + 阈值检查 + 同步调用 |
-| 散布的常量/枚举 | `pure/constants.py` | TaskCategory/ModelTier/阈值常量 |
-| `vivado_extract_critical_path_cells` 结果解析 | `pure/critical_path.py` | Critical path 解析/更新/格式化（V2新增） |
-
-### 2.2 状态迁移
-
-```
-DCPOptimizer 实例属性 → OptimizerState（7个dataclass子切片）
-├── self.latest_wns/best_wns/failing_endpoints → state.timing: TimingState
-├── self._iteration_count/no_improvement_count → state.iteration: IterationState
-├── self.model_worker/model_planner/fallback  → state.model: ModelState
-├── self.total_cost/total_tokens              → state.cost: CostState
-├── self._compression_count/raw_tool_outputs  → state.context: ContextState
-└── self._user_exit_requested/is_done         → state.control: ControlState
-```
-
-### 2.3 流程迁移
-
-| V1 | V2 |
-|----|-----|
-| `optimize()` 主循环 (line 5174) | `NodeGraph.run()` + 条件边 `after_check_exit` |
-| `get_completion()` LLM循环 (line 4535) | `llm_tool_loop` 子图 (`nodes/subgraphs/llm_tool_loop.py`) |
-| `_perform_initial_analysis()` | `init_analysis_node` (`nodes/init_analysis.py`) |
-| `_on_iteration_end()` | `iteration_end_node` (`nodes/iteration_end.py`) |
-| 模型选择散布在 `get_completion()` 中 | `select_model_node` (`nodes/select_model.py`) |
-| 上下文压缩散布在多处 | `prepare_context_node` (`nodes/prepare_context.py`) |
-
-### 2.4 共享组件（不迁移）
-
-- `DCPOptimizerBase`: `start_servers`, `cleanup`, `calculate_fmax`, `get_clock_period`（V2节点通过 `vivado_run_tcl` 直接查询 `clk_fpl26contest`，无需注册独立MCP工具）, `_parse_resource_utilization`, `_parse_hold_timing`, `check_hold_timing`, `_is_routing_failure`, `_start_tool_heartbeat`
-- `MemoryManager`, `EventBus`, MCP 服务器（`RapidWrightMCP/`, `VivadoMCP/`）
-- Skills 框架（`skills/`），`strategy_library.py`
 
 ## 3. 核心数据流细节
 
