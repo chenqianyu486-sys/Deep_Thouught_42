@@ -174,7 +174,7 @@ PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
 PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
     LoopPhase.ANALYZE: 12,
     LoopPhase.SELECT_STRATEGY: 6,
-    LoopPhase.EXECUTE: 30,
+    LoopPhase.EXECUTE: 5,   # Reduced from 30: EXECUTE should call tool once + signal EXEC_DONE
     LoopPhase.EVALUATE: 8,
 }
 
