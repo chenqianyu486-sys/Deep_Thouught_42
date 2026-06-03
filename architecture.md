@@ -78,7 +78,7 @@ NodeGraph.run() ──on_exit()──> DashboardStateTracer（继承 StateTracer
 - **设计规模感知自适应超时**: Phase A 后运行 `llength [get_cells -hier]` 探测 cell 数，`design_size_factor` 按 50K/150K 分档（1.0/1.5/3.0），所有后续 tool timeout 自动乘以该因子，硬上限 900s
 - **init_analysis 初始 checkpoint 保存**: 分析完成后无条件写 `best_checkpoint.dcp` 并设 `best_checkpoint_path`。此前仅 WNS 改善时保存，导致首次迭代退化时 `best_checkpoint_path=None`，`rollback_node` 报 `[ROLLBACK] No checkpoint at None` 直接跳过恢复。修复后 rollback 总是可用的（`optimizer/nodes/init_analysis.py`）
 - **HEAVY_CHAIN_SKILLS 排除 pblock_strategy**: `rapidwright_execute_pblock_strategy` 是纯分析型 skill（仅返回 pblock_ranges），网络表实际变更由 `SKILL_CHAIN_ACTIONS` 的 chain（unplace → create_pblock → place → route）完成。post-eval 总返回 UNCHANGED，导致 chain-gate 错误跳过 chain。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`）
-- **EXECUTE 阶段策略强制执行**: `_call_phase_llm` 在 dashboard 注入后追加 `[EXECUTE CONSTRAINT]` 用户消息，强制 LLM 仅调用已选策略对应的执行工具，禁止分析工具和策略漂移。消息包含策略→工具映射表，防止 LLM 在 EXECUTE 阶段重新分析或切换策略。**约束放宽**：执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s），然后信号 EXEC_DONE（`optimizer/nodes/subgraphs/phase_execute.py`）
+- **EXECUTE 阶段工具过滤 + auto-chain**: `filter_tools_for_phase(EXECUTE)` 限制可用工具为已选策略的执行工具。`SKILL_CHAIN_ACTIONS` 自动处理 post-skill 工作流（checkpoint open, route, timing）。FORMAT_GUARD 描述 EXECUTE 阶段的工具映射。LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s），然后信号 EXEC_DONE（`optimizer/nodes/subgraphs/phase_execute.py`）
 - **Dashboard 陈旧数据抑制**: `_build_dynamic_gradient` 仅在当前 phase 为 `"EXECUTE_STRATEGY"` 或 `"EVALUATE"` 时显示 `last_action_taken` 和 `action_status`。ANALYZE/SELECT_STRATEGY 阶段清空这两个字段，防止上一迭代的策略评估结果误导 LLM（`optimizer/pure/state_space.py`）
 
 ## 2. V1→V2 迁移映射
@@ -556,7 +556,7 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
 - `flow_control: DONE` = 当前迭代分析完成，需要进入下一迭代继续优化（非退出信号）
 - `flow_control: SWITCH_STRATEGY` = 当前策略已耗尽/失败，系统强制执行迭代切换
 - `flow_control: NEXT_ITERATION` = 本轮取得显著改善，进入下一轮迭代。不记录失败。
-- `flow_control: RETRY/ROLLBACK` = LLM级别指导，系统信任LLM执行。V2中 ROLLBACK 触发 checkpoint restore + 新 iteration
+- `flow_control: ROLLBACK` = LLM 主动请求回滚，触发 checkpoint restore + 新 iteration
 - 真正退出条件 = WNS >= 0 **且** DCP 逻辑等效已验证通过
 
 **行为矩阵**:
@@ -567,7 +567,7 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
 | `flow_control: DONE`，WNS=-0.538 | 进入下一迭代 |
 | `flow_control: DONE`，WNS>=0 | 退出优化 |
 | 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理） |
-| `flow_control: SWITCH_STRATEGY` (EVALUATE) | 强制结束迭代 + 记录策略失败 + 下一轮从ANALYZE开始 |
+| `flow_control: SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 3 轮/迭代） |
 | `flow_control: NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
 | `flow_control: CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段，重新分析设计 |
 | `detect_rollback_needed()` (EVALUATE入口) | latest_wns << best_wns 时自动设 done_reason=rollback |
@@ -620,7 +620,7 @@ LLM response arrives
 class StepState:
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None         # ANALYZE_DONE | EXEC_DONE | CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | RETRY | ROLLBACK | EXHAUSTED
+    flow_control: Optional[str] = None         # ANALYZE_DONE | EXEC_DONE | CONTINUE | SWITCH_STRATEGY | NEXT_ITERATION | DONE | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False
     raw_content: str = ""
     strategy_phase: Optional[str] = None       # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
@@ -704,18 +704,20 @@ class StrategyState:
 
 双重提醒机制：
 
-**提醒 1 — User Message（一次性，会话起始）**
+**提醒 1 — User Message（一次性，精简版）**
 ```
-V2 optimize_v2() 中:
-1. system_prompt → system prompt
-2. prepare_context_node 首次执行时: user(FORMAT_GUARD)  ← state.model.format_guard_injected 标志控制
+V2 prepare_context_node 首次执行时注入 FORMAT_GUARD（~12行）:
+- 行为要求: 每次响应调用 report_step_state
+- EXECUTE 阶段: 工具映射 + auto-chain 说明
+- 格式禁令: 无 XML/HTML 标签
+由 state.model.format_guard_injected 标志控制
 ```
 
-**提醒 2 — System Prompt 头部压印（每 LLM API 调用前）**
+**提醒 2 — 工具 schema 自描述**
 ```
-V2 llm_tool_loop 中 _prepare_api_messages():
-api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
-（仅在 system_content 不以 "[FORMAT:" 开头时追加，防止重复）
+report_step_state 工具定义包含完整参数描述（枚举值、说明），
+由 filter_tools_for_phase() 按阶段动态 patch flow_control enum。
+LLM 通过工具 schema 获取参数信息，无需重复文档。
 ```
 
 **`report_step_state` Tool 定义**：
@@ -725,7 +727,7 @@ api_messages[0]["content"] = FORMAT_STAMP + "\n\n" + system_content
     "parameters": {
         "step_id": {"type": "integer"},
         "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
-        "flow_control": {"enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"]},
+        "flow_control": {"enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "ROLLBACK", "EXHAUSTED"]},
         "strategy_phase": {"enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"]},
         "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]}
     },
@@ -1054,7 +1056,7 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 ## 7.7 策略别名映射
 
 **问题**: LLM 在 SELECT_STRATEGY 阶段选择 `LogicOptimization`，但 `EXECUTE_STRATEGY_TOOL_MAP`
-中无此映射，导致 EXECUTE 阶段 `[EXECUTE CONSTRAINT]` 注入失败（tool 为空字符串）。
+中无此映射，导致 EXECUTE 阶段工具过滤失败。
 
 **方案**（`optimizer/pure/constants.py` + `optimizer/nodes/prepare_context.py`）：
 - `EXECUTE_STRATEGY_TOOL_MAP` 新增 `"LogicOptimization": "rapidwright_execute_opt_design_strategy"`
@@ -1161,3 +1163,57 @@ SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", ...}
 ```
 
 **2. call_tool 入口守卫**：检查 directive 参数和 retime/interconnect_retime 布尔选项。
+
+## 13. 上下文工程：弱引导设计（2026-06 新增）
+
+**原则**: 为 LLM 提供准确、清晰但弱引导的上下文，发挥其自主决策能力。
+
+### 13.1 设计理念
+
+| 原则 | 实现 |
+|------|------|
+| 描述问题，非处方方案 | `safety_constraints` → `known_risks`（"observed" 替代 "MUST"） |
+| 信任 LLM 领域知识 | 移除 `strategy_implications`、`selection_guide`、`architecture_overview` 解释 |
+| 单一信息源 | FORMAT_GUARD 不再重复工具 schema 和 lifecycle 描述 |
+| 减少认知负担 | 信号从 9 → 7（移除 RETRY、合并 RESELECT→SWITCH） |
+| 自动化替代指令 | 移除 EXECUTE CONSTRAINT 和 post_actions（auto-chain 已覆盖） |
+
+### 13.2 上下文注入层次
+
+```
+SYSTEM_PROMPT.TXT (~90行, 静态)
+  ├── 角色定义、目标、规则
+  ├── known_risks（事实描述，非处方）
+  └── 策略目录 + lifecycle 概述
+
+FORMAT_GUARD (~12行, 一次性注入)
+  ├── 行为要求: 每次响应调用 report_step_state
+  ├── EXECUTE 工具映射 + auto-chain 说明
+  └── 格式禁令
+
+Dashboard (7模块, 每轮动态重建)
+  ├── 纯数据，无判断标签
+  ├── 相位过滤（ANALYZE 看 6 模块，EXECUTE 看 2 模块）
+  └── 作为最后一条 user 消息注入
+
+Tool schema (按阶段过滤 + flow_control enum 动态 patch)
+  └── LLM 通过工具定义获取参数信息
+
+Runtime nudge (按需注入)
+  └── 事实描述（"Current WNS: X"），非处方（"Please decide: ..."）
+```
+
+### 13.3 信号体系
+
+| 信号 | 阶段 | 语义 |
+|------|------|------|
+| `ANALYZE_DONE` | ANALYZE | 分析完成，进入策略选择 |
+| `EXEC_DONE` | EXECUTE | 执行完成，进入评估 |
+| `CONTINUE` | ANALYZE/EXECUTE | 继续当前阶段 |
+| `NEXT_ITERATION` | EVALUATE | 显著改善，进入下一轮 |
+| `SWITCH_STRATEGY` | EVALUATE | 策略失败/尝试另一策略 |
+| `DONE` | EVALUATE | WNS >= 0 |
+| `ROLLBACK` | EVALUATE | 回滚到最佳 checkpoint |
+| `EXHAUSTED` | EVALUATE | 所有策略已耗尽 |
+
+`filter_tools_for_phase()` 对 `report_step_state` 工具定义做深拷贝 + 按阶段 patch `flow_control` enum，LLM 只看到当前阶段的合法信号。

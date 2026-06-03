@@ -80,7 +80,7 @@ init_analysis ──► [WNS >= 0?]
   │       ▲                    ▲              │
   │       └────── CONTINUE ───┼──────────────┘
   │                            │
-  │       SWITCH/RESELECT ─────┘  (multi-strategy loop, max 3 per iteration)
+  │       SWITCH ─────────────┘  (multi-strategy loop, max 3 per iteration)
   │                                          │
   │       DONE / NEXT / ROLLBACK ──► iteration_start
 ```
@@ -128,9 +128,9 @@ init_analysis ──► [WNS >= 0?]
 | 33 | **Pre-placement logic optimization (opt_design)** | New 11th strategy: Vivado `opt_design` with `SKILL_CHAIN_ACTIONS` auto-chaining (`opt_design → place_design → route_design → report_timing_summary`). Targets pure logic-depth bottlenecks (6-7 LUT levels, 100% logic delay) where PhysOpt is ineffective. `--skip-structural` flag in `validate_dcps.py` allows Phase 1 bypass when netlist is intentionally remapped. |
 | 34 | **Initial checkpoint save for rollback** | `init_analysis` now unconditionally saves `best_checkpoint.dcp` after analysis completes. Previously `best_checkpoint_path` was `None` until WNS improved, making rollback impossible when the first iteration degrades timing. The `[ROLLBACK] No checkpoint at None` error is eliminated. (`optimizer/nodes/init_analysis.py`) |
 | 35 | **Heavy chain gate excludes pblock_strategy** | `rapidwright_execute_pblock_strategy` is an analysis-only skill — it computes pblock ranges but does not modify the netlist. The actual netlist mutation happens via `SKILL_CHAIN_ACTIONS` (unplace → create_pblock → place → route). Removed from `HEAVY_CHAIN_SKILLS` so the chain always runs, preventing the chain-gate from incorrectly skipping execution. (`optimizer/pure/constants.py`) |
-| 36 | **EXECUTE strategy enforcement** | After `inject_merged_dashboard`, `_call_phase_llm` appends an `[EXECUTE CONSTRAINT]` user message mapping the selected strategy to its execution tool and forbidding analysis tools or strategy switches mid-execution. Prevents LLM from re-analyzing or drifting to a different strategy. (`optimizer/nodes/subgraphs/phase_execute.py`) |
-| 37 | **Stale dashboard suppression in ANALYZE** | `_build_dynamic_gradient` now only populates `last_action_taken` and `action_status` during `EXECUTE_STRATEGY` or `EVALUATE` phases. In `ANALYZE`/`SELECT_STRATEGY` phases, these fields are cleared to prevent stale data from the previous iteration misleading the LLM. (`optimizer/pure/state_space.py`) |
-| 38 | **Multi-strategy loop** | Up to 3 strategies can be tried per iteration. After EVALUATE, `SWITCH_STRATEGY` or `RESELECT_STRATEGY` signals loop back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy. `MAX_STRATEGY_CYCLES = 3` in `constants.py`. Prevents wasting entire iterations on single failed strategies. (`optimizer/nodes/subgraphs/llm_tool_loop.py`) |
+| 36 | **Stale dashboard suppression in ANALYZE** | `_build_dynamic_gradient` now only populates `last_action_taken` and `action_status` during `EXECUTE_STRATEGY` or `EVALUATE` phases. In `ANALYZE`/`SELECT_STRATEGY` phases, these fields are cleared to prevent stale data from the previous iteration misleading the LLM. (`optimizer/pure/state_space.py`) |
+| 37 | **Multi-strategy loop** | Up to 3 strategies can be tried per iteration. After EVALUATE, `SWITCH_STRATEGY` signals loop back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy. `MAX_STRATEGY_CYCLES = 3` in `constants.py`. Prevents wasting entire iterations on single failed strategies. (`optimizer/nodes/subgraphs/llm_tool_loop.py`) |
+| 38 | **Context engineering: weak guidance** | System prompt and FORMAT_GUARD describe problems and constraints, not prescribe solutions. Tool filtering + auto-chain handle execution mechanics. LLM retains autonomous strategy selection and diagnostic decisions. |
 | 39 | **TTL-based strategy retry** | `FailedStrategyRecord.blocked_until_iter` adds TTL to strategy blocking. Strategies marked `strategy_ineffective` auto-unblock after `STRATEGY_RETRY_TTL = 3` iterations. `_get_permanently_blocked_strategies()` checks `current_iter < entry.blocked_until_iter`. Prevents permanent strategy exclusion from exhausting the strategy catalog. (`optimizer/state.py`, `optimizer/nodes/subgraphs/phase_select_strategy.py`) |
 | 40 | **EXECUTE phase relaxed constraint** | After executing the strategy tool, LLM may call `rapidwright_report_timing` for quick feedback (~2.5s) before signaling EXEC_DONE. Provides fast directional check without full Vivado timing (~14s). (`optimizer/nodes/subgraphs/phase_execute.py`) |
 
@@ -485,9 +485,10 @@ init_analysis ──► [WNS >= 0?]
 | 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`。若设计未布线，自动执行 `place_design` + `route_design` 修复后再保存。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
 | 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。 |
 | 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
-| 22 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY`/`RESELECT_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
+| 22 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
 | 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
 | 24 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查。 |
+| 25 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
 
 ---
 

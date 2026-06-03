@@ -149,7 +149,7 @@ class StepState:
     """
     step_id: Optional[int] = None
     result_status: Optional[str] = None        # SUCCESS | PARTIAL | FAIL
-    flow_control: Optional[str] = None         # CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
+    flow_control: Optional[str] = None         # CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | ROLLBACK | EXHAUSTED
     has_tool_calls: bool = False               # Whether native tool_calls were also present
     raw_content: str = ""                      # Raw content for logging/debugging
 
@@ -3604,15 +3604,14 @@ Current WNS/checkpoint/clock values are in the system prompt 'Current Optimizati
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
+                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "ROLLBACK", "EXHAUSTED"],
                             "description": (
                                 "ANALYZE_DONE: analysis phase complete, move to strategy selection; "
                                 "EXEC_DONE: execution phase complete, move to evaluation; "
                                 "CONTINUE: continue in current phase; "
                                 "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
-                                "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
+                                "SWITCH_STRATEGY: strategy failed or try another strategy; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
-                                "RETRY: modify params and retry (max 3); "
                                 "ROLLBACK: revert to best checkpoint; "
                                 "EXHAUSTED: all strategies tried, no further improvement possible"
                             )
@@ -7949,15 +7948,14 @@ async def optimize_v2(
                         },
                         "flow_control": {
                             "type": "string",
-                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "RETRY", "ROLLBACK", "EXHAUSTED"],
+                            "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "ROLLBACK", "EXHAUSTED"],
                             "description": (
                                 "ANALYZE_DONE: analysis phase complete, move to strategy selection; "
                                 "EXEC_DONE: execution phase complete, move to evaluation; "
                                 "CONTINUE: continue in current phase; "
                                 "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
-                                "SWITCH_STRATEGY: strategy exhausted but WNS<0; "
+                                "SWITCH_STRATEGY: strategy failed or try another strategy; "
                                 "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
-                                "RETRY: modify params and retry (max 3); "
                                 "ROLLBACK: revert to best checkpoint; "
                                 "EXHAUSTED: all strategies tried, no further improvement possible"
                             ),

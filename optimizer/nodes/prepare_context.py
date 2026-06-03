@@ -25,61 +25,18 @@ _STRATEGY_MAPPING_LINES = "\n".join(
 
 # FORMAT_GUARD: enforced on first iteration so the LLM reliably calls report_step_state.
 # Matches the old optimize() flow (dcp_optimizer.py:5233-5255).
-FORMAT_GUARD = f"""CRITICAL OUTPUT FORMAT - MUST FOLLOW:
-Every response MUST call the `report_step_state` tool (in your structured function/tool
-calls, NOT in the text body). This tool carries process control directives:
-step_id, result_status, flow_control.
+FORMAT_GUARD = f"""OUTPUT FORMAT — call `report_step_state` in every response as a structured tool call,
+alongside any other tool calls (or alone if making none). Process control goes in the tool
+call; analysis and reasoning go in text.
 
-Call report_step_state ALONGSIDE any other tool calls you make. If you are making no
-other tool calls, call report_step_state alone.
-
-The report_step_state tool takes these parameters:
-  - step_id (integer): incrementing per message in current strategy
-  - result_status (string): SUCCESS | PARTIAL | FAIL
-  - flow_control (string): ANALYZE_DONE | EXEC_DONE | CONTINUE | NEXT_ITERATION | SWITCH_STRATEGY | DONE | RETRY | ROLLBACK | EXHAUSTED
-  - strategy_phase (string, optional): ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
-  - strategy_name (string, optional): PBLOCK | PhysOpt | Fanout | PinSwap | LUTCascade |
-    CellReplication | CongestionSpreading | RegisterRetiming | NetSwap |
-    OptDesign | LogicOptimization
-
-Strategy Lifecycle (4-Phase Cycle):
-  Phase 1 ANALYZE: Gather timing data, identify dominant obstacles via
-    report_timing_summary, extract_critical_path_cells, analyze_congestion, etc.
-    Report strategy_phase=ANALYZE.
-  Phase 2 SELECT_STRATEGY: Based on analysis findings, choose a specific strategy.
-    Report strategy_phase=SELECT_STRATEGY and strategy_name=<chosen strategy>.
-  Phase 3 EXECUTE_STRATEGY: Execute the chosen strategy via tool calls.
-    Report strategy_phase=EXECUTE_STRATEGY.
-  Phase 4 EVALUATE: After execution completes, check WNS delta and determine if the
-    strategy helped. Report strategy_phase=EVALUATE with evaluation (IMPROVED,
-    REGRESSION, or UNCHANGED).
-
-Your text response MUST contain your analysis (hypothesis, strategy_rationale,
-observed signals) as free-form chain-of-thought reasoning.
-Process control goes in the report_step_state tool call, analysis goes in text.
-
-EXECUTE PHASE PROTOCOL:
-  - Your ONLY job in EXECUTE is to call the execution tool for the selected strategy.
-  - Strategy-to-tool mapping:
+EXECUTE phase: tool filtering restricts available tools to the selected strategy.
+Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
+Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
-  - Call the execution tool IMMEDIATELY on the first turn. Do NOT call
-    analysis tools (vivado_report_timing_summary, vivado_extract_critical_path_cells,
-    vivado_run_tcl, rapidwright_analyze_*) before executing.
-  - Do NOT switch to a different strategy mid-execution. If the tool returns
-    UNCHANGED or fails, call report_step_state(EXEC_DONE) and let EVALUATE decide.
-  - The system auto-evaluates WNS after execution. Trust the auto-evaluation.
-
-STRATEGY SELECTION GUIDANCE:
-  - For 100% logic delay designs: PBLOCK can still help by consolidating
-    distributed cells. Do not skip PBLOCK based solely on logic delay percentage.
-  - For low FF utilization (<1%): RegisterRetiming is unlikely to help.
-  - Prefer OptDesign/LogicOptimization for logic-depth reduction.
 
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
-
-Maintain this output format throughout the entire conversation.
 """
 
 

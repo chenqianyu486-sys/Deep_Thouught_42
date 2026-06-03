@@ -134,8 +134,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
             state.context.step_state_misses += 1
             if deps.compat is not None:
                 deps.compat.add_message("user",
-                    "[NOTE] report_step_state with strategy_name required. Example: "
-                    'report_step_state(strategy_phase="SELECT_STRATEGY", strategy_name="PBLOCK")')
+                    "[NOTE] report_step_state with strategy_name required.")
 
         # Execute any simple tools the LLM may have called (e.g. raw_tool_output)
         if message.tool_calls:

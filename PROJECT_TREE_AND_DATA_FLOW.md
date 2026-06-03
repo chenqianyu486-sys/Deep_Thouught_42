@@ -114,12 +114,12 @@ llm_tool_loop_node (调度器)
   │
   └── EVALUATE → (exit) 或 SELECT_STRATEGY 或 ANALYZE
       DONE/WNS>=0 → ITERATION_END
-      SWITCH_STRATEGY/RESELECT_STRATEGY → SELECT_STRATEGY (多策略循环, 最多3轮/迭代)
+      SWITCH_STRATEGY → SELECT_STRATEGY (多策略循环, 最多3轮/迭代)
       NEXT_ITERATION/ROLLBACK → ITERATION_END
       CONTINUE → ANALYZE
 ```
 
-**多策略循环**: 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 或 `RESELECT_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
+**多策略循环**: 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
@@ -165,9 +165,9 @@ llm_tool_loop_node (调度器)
 | 30 | **Pre-placement logic optimization (opt_design)** | 新增第 11 个策略，通过 RapidWright skill 包装器 + `SKILL_CHAIN_ACTIONS` 自动链式执行。`validate_dcps.py --skip-structural` 允许跳过 Phase 1 结构对比 |
 | 31 | **初始 checkpoint 保存** | `init_analysis` 分析完成后无条件写 `best_checkpoint.dcp`，确保 rollback 始终可用。此前 checkpoint 仅 WNS 改善时保存，首次迭代退化时 rollback 因 `best_checkpoint_path=None` 失败（`optimizer/nodes/init_analysis.py`） |
 | 32 | **HEAVY_CHAIN_SKILLS 排除 PBLOCK** | `rapidwright_execute_pblock_strategy` 是分析型 skill，post-eval 总 UNCHANGED，导致 chain-gate 跳过实际执行链（unplace → pblock → place → route）。从 `HEAVY_CHAIN_SKILLS` 移除后 chain 始终执行（`optimizer/pure/constants.py`） |
-| 33 | **EXECUTE 策略强制执行** | `_call_phase_llm` 注入 `[EXECUTE CONSTRAINT]` 消息，映射策略→工具，禁止分析工具和策略切换（`optimizer/nodes/subgraphs/phase_execute.py`）|
-| 34 | **Dashboard 陈旧数据抑制** | `_build_dynamic_gradient` 仅在 EXECUTE/EVALUATE 阶段显示 `last_action_taken`，ANALYZE/SELECT_STRATEGY 清空，防止误导 LLM（`optimizer/pure/state_space.py`） |
-| 39 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY`/`RESELECT_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费（`optimizer/nodes/subgraphs/llm_tool_loop.py`） |
+| 33 | **Dashboard 陈旧数据抑制** | `_build_dynamic_gradient` 仅在 EXECUTE/EVALUATE 阶段显示 `last_action_taken`，ANALYZE/SELECT_STRATEGY 清空，防止误导 LLM（`optimizer/pure/state_space.py`） |
+| 34 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费（`optimizer/nodes/subgraphs/llm_tool_loop.py`） |
+| 35 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
 | 40 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。`_get_permanently_blocked_strategies()` 检查 `current_iter < entry.blocked_until_iter`。防止策略目录被永久阻止耗尽（`optimizer/state.py`, `optimizer/nodes/subgraphs/phase_select_strategy.py`） |
 | 41 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查（`optimizer/nodes/subgraphs/phase_execute.py`） |
 
@@ -338,7 +338,7 @@ architecture_overview:
 | 失败策略 | `state.context.failed_strategies`（FailedStrategyRecord 列表）+ `record_strategy_failure()` 去重写入 |
 | 工具调用摘要 | V2: `state.iteration.tools_used` 直接追加 |
 | 最近 N 轮消息 | `preserve_role_turns=6` 保留原始 role |
-| report_step_state 格式 | 双重提醒：① 一次性 User FORMAT_GUARD ② 每调用前 System prompt 压印 |
+| report_step_state 格式 | ① 一次性 User FORMAT_GUARD（精简版：行为要求 + EXECUTE 工具映射） ② 工具 schema 自描述参数 |
 | 工具重复检测 | `_recent_tools` 滑动窗口，>=3次+delta<0.05ns → REPETITION DETECTED |
 | 工具结果缓存 | `state.context.tool_cache` — 同 phase 内相同参数工具调用自动返回 `[CACHED]`，避免重复执行；phase 切换时清空。执行工具后自动失效缓存（`tool_cache.clear()`），防止过期物理数据被误用 |
 | 工具调用频率限制 | `state.context.tool_phase_call_counts` — 只读工具超限后返回 `[RATE LIMITED]` 消息，引导 LLM 使用 Dashboard 数据或批量参数 |
@@ -449,7 +449,6 @@ WNS_TARGET_THRESHOLD = 0.0
 | `DONE`, WNS<0 | 进入下一迭代 |
 | `DONE`, WNS>=0 | 退出优化 |
 | `SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 3 轮/迭代） |
-| `RESELECT_STRATEGY` (EVALUATE) | 多策略循环：显式请求尝试另一策略（同 SWITCH_STRATEGY 行为） |
 | `NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 |
 | `CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段 |
 | `detect_rollback_needed()` | WNS 退化时自动恢复最佳 checkpoint |

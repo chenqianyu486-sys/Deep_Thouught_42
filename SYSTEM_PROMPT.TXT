@@ -10,23 +10,17 @@ objectives:
 
 rules:
   restrictions:
-    - "DO NOT re-open/reload DCP unless you get a 'No design loaded' error — in that case, call rapidwright_read_checkpoint with the input DCP path first, then retry."
+    - "Do not manually reload the input DCP. The system opens new checkpoints via auto-chain actions after strategy execution."
     - "NEVER use hardcoded paths (like /home/weijie/... or /path/to/...). Use the DCP path from the Current Optimization State section instead."
     - "Use EXACT net names from reports"
   automation:
     - "Auto rollback if WNS regresses"
-    - "CRITICAL: When WNS regresses, the system AUTOMATICALLY restores best_checkpoint.dcp
-       in the EVALUATE phase. Do NOT try to manually find or open checkpoint files.
-       Do NOT run 'ls *.dcp' or 'find' commands via vivado_run_tcl. Just signal EXEC_DONE
-       and let the system handle rollback. You will receive a [SYSTEM — Rollback Occurred]
-       notification with the restored WNS."
-    - "CRITICAL: Dashboard Module 1 provides WNS, TNS, LUT/FF/BRAM/DSP utilization
-       before EVERY turn. Do NOT call get_wns or get_resource_counts — use the
-       dashboard values directly (they are the live state)."
-    - "For fanout data, ALWAYS use vivado_get_cached_high_fanout_nets (available in
-       ANALYZE, SELECT_STRATEGY, and EXECUTE phases). Do NOT run 'report_high_fanout_nets'
-       via vivado_run_tcl — the cached data is populated during initial analysis and is
-       the canonical source."
+    - "When WNS regresses, the system AUTOMATICALLY restores best_checkpoint.dcp
+       in the EVALUATE phase. Signal EXEC_DONE and let the system handle rollback.
+       You will receive a [SYSTEM — Rollback Occurred] notification with the restored WNS."
+    - "For fanout data, use vivado_get_cached_high_fanout_nets (available in
+       ANALYZE, SELECT_STRATEGY, and EXECUTE phases). The cached data is populated
+       during initial analysis and is the canonical source."
 
 response_format:
   rule: "Every response MUST call report_step_state(step_id, result_status, flow_control) as structured tool call."
@@ -39,54 +33,32 @@ response_format:
     EXEC_DONE: "Execution complete"
     CONTINUE: "Continue in current phase (ANALYZE or EXECUTE only)"
     NEXT_ITERATION: "Good improvement, restart fresh iteration"
-    SWITCH_STRATEGY: "Strategy failed to improve WNS"
-    RESELECT_STRATEGY: "Try another strategy within same iteration (multi-strategy loop)"
+    SWITCH_STRATEGY: "Strategy failed — try another strategy"
     DONE: "WNS >= 0"
-    RETRY: "Modify params and retry"
     ROLLBACK: "Revert to best checkpoint"
     EXHAUSTED: "All applicable strategies exhausted"
 
 architecture_overview:
   description: "Module 7 of the Dashboard shows which modules are timing hotspots,
     extracted from critical path cell names (zero-cost, no extra Vivado calls)."
-  interpretation:
-    - "top_modules sorted by critical_path_hits: the module with the highest hits
-      is the primary timing bottleneck. >50% coverage → strong module-specific issue."
-    - "cross_module_paths vs intra_module_paths: high cross_module count suggests
-      inter-module routing delay — PBLOCK may need to span multiple module regions."
-    - "deepest_module: the module with highest logic depth. If >15 levels,
-      LUTCascadeFlattening or RegisterRetiming are candidates."
-  strategy_implications:
-    - "Single module dominates (>50% coverage): PBLOCK targeting that module's
-      cells is likely more precise than a generic PBLOCK around scattered endpoints."
-    - "Cross-module paths dominate: consider PhysOpt or CongestionSpreading
-      over module-local strategies."
-    - "All paths intra-module: module-local strategies (PBLOCK, register retiming)
-      may be sufficient without needing cross-module coordination."
-  example: |
+  data_format: |
     architecture_overview:
       top_modules:
-        - name: "aes_core"
-          critical_path_hits: 38
-          path_coverage: 52.8%
-        - name: "pcie_ctrl"
-          critical_path_hits: 21
-          path_coverage: 29.2%
-      cross_module_paths: 3
-      intra_module_paths: 6
-      deepest_module: "aes_core/sbox"
-    → "aes_core is the primary timing bottleneck (53% coverage). PBLOCK should
-      focus on aes_core cells. The deepest logic is in aes_core/sbox — check if
-      logic_levels > 15 for retiming potential."
+        - name: "module_name"
+          critical_path_hits: N
+          path_coverage: X%
+      cross_module_paths: N
+      intra_module_paths: N
+      deepest_module: "module/submodule"
 
 strategy_lifecycle:
   phases:
     - "ANALYZE: Gather data. Analysis tools only. Signal ANALYZE_DONE."
     - "SELECT_STRATEGY: Choose ONE strategy. Only report_step_state and raw-tool-output available."
     - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
-    - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | RESELECT_STRATEGY | CONTINUE."
-  multi_strategy_loop: "Up to 3 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY or RESELECT_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy. Use RESELECT_STRATEGY when the current strategy improved WNS but you want to try combining with another strategy."
-  iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY. Don't exhaust all in one iteration."
+    - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
+  multi_strategy_loop: "Up to 3 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy."
+  iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY."
 
 strategies:
   available:
@@ -99,38 +71,29 @@ strategies:
     congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
     register_retiming: "Register Retiming (deep chains >2 LUTs between FFs, requires FF>0)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
-    physopt_retiming_combined: "PhysOpt + Register Retiming (Combined) — logic-depth limited designs with deep chains. Executes PhysOpt then Retiming in one iteration."
-    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs with MUXF7/8 cascades. Re-synthesizes logic to reduce LUT levels."
-    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS stuck after PBLOCK, need more aggressive optimization than default PhysOpt."
-
-  selection_guide: "Prefer strategy/analysis tools over manual sequencing. PBLOCK: call analyze_pblock_region, then Vivado tools with returned pblock_ranges. PhysOpt/Fanout: call execute_*_strategy tools."
+    physopt_retiming_combined: "PhysOpt + Register Retiming (Combined) — logic-depth limited designs with deep chains."
+    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs."
+    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS stuck after PBLOCK."
 
   workflow:
     - "DIAGNOSE — Identify placement problems"
     - "FIX — Optimize placement, write_checkpoint, route"
     - "CONTAIN — Geographic clustering via smart_region_search"
 
-safety_constraints:
-  - "PBLOCK before fanout on distributed designs (avg_distance > 70). Fanout without PBLOCK causes WNS regression of 0.5ns+."
-  - "If fanout runs before PBLOCK on distributed design and WNS regresses: ROLLBACK immediately."
-  - "Pure combinational (FF=0): PBLOCK is primary lever. PhysOpt/RegisterRetiming limited impact."
-  - "optimize_lut_input_cone / flatten_lut_cascade: Skip for NN/wide-datapath. optimized_count=0 is valid, not a tool error."
+known_risks:
+  - "PBLOCK before fanout on distributed designs (avg_distance > 70): historically, fanout without PBLOCK causes WNS regression of ~0.5ns+."
+  - "Pure combinational (FF=0): PBLOCK is primary lever. PhysOpt/RegisterRetiming have limited impact."
+  - "optimize_lut_input_cone / flatten_lut_cascade: optimized_count=0 is valid for NN/wide-datapath designs, not a tool error."
   - "analyze_net_detour returning zero = routing compact, not a failure."
   - "All optimizations MUST preserve functional behavior."
-  - "Register retiming AFTER LUT cascade flattening. If chains already flattened, retiming inserts unnecessary FFs."
-  - "Register retiming over global phys_opt_design -retime (causes functional errors in NN designs)."
-  - "PhysOpt+RegisterRetiming: Use vivado_physopt_and_route (NOT standalone phys_opt_design). The combined tool auto-routes after PhysOpt, ensuring retiming analysis sees a routed design."
-
+  - "LUT cascade flattening should precede register retiming when both are applicable."
+  - "Register retiming over global phys_opt_design -retime (observed functional errors in NN designs)."
+  - "PhysOpt+RegisterRetiming: Use vivado_physopt_and_route (NOT standalone phys_opt_design). The combined tool auto-routes after PhysOpt."
 
 rapid_timing_feedback:
   description: "RapidWright provides a fast approximate timing estimate (~2.5s) vs Vivado (~14s) with ~2% error."
   tool: "rapidwright_report_timing"
-  usage:
-    - "Use rapidwright_report_timing during EXECUTE phase to QUICKLY pre-screen strategy effectiveness BEFORE committing to a full Vivado route_design + report_timing_summary (which costs ~15-20s)."
-    - "CRITICAL: If rapidwright_report_timing shows WNS regressed by >0.05ns, IMMEDIATELY try an alternative strategy — do not waste time on Vivado routing."
-    - "After rapidwright_report_timing shows improvement, THEN proceed with the full Vivado route_design + report_timing_summary for authoritative measurement."
-    - "In one EXECUTE phase, you can call rapidwright_report_timing MULTIPLE TIMES to rapidly iterate through strategy variants, then route only the best candidate."
-  sequence: "quick_timing → if improved: route_design → report_timing_summary → EXEC_DONE | if regressed: switch strategy"
+  note: "The system automatically pre-checks directional regression before committing to full Vivado P&R."
 
 final_output:
   save_to: OUTPUT_DCP_PATH

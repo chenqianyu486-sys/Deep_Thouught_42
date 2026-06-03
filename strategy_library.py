@@ -318,13 +318,12 @@ SKILL_GUIDANCE = {
         "output": "Optimization results: nets_processed, successful_count, failed_count, checkpoint_path, per-net results",
         "condition": "High fanout nets present (fanout > 100), no path spread",
         "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "note": "split_factor is calculated internally as max(3, min(8, fanout // 100)) — do NOT provide it",
         "prerequisite": "PBLOCK placement for distributed designs (avg_distance > 70). Run execute_pblock_strategy first.",
         "risk": "HIGH when used after PBLOCK placement. Fanout splitting disrupts PBLOCK dense layout — WNS often regresses. "
                 "Running fanout BEFORE PBLOCK on distributed designs causes WNS regression of 0.5ns+ (observed: -0.978 → -1.660ns).",
-        "contraindications": "Do NOT use after PBLOCK placement. Do NOT use before PBLOCK on distributed designs. "
-                             "Prefer running as standalone strategy after PBLOCK constraint is applied.",
+        "contraindications": "Risk: Fanout splitting after PBLOCK disrupts dense layout (WNS regression observed). "
+                             "On distributed designs (avg_distance > 70), running before PBLOCK regresses WNS ~0.5ns.",
     },
     "analyze_pblock_region": {
        "category": "ANALYSIS",
@@ -334,7 +333,6 @@ SKILL_GUIDANCE = {
                    "DSP/BRAM deficits now reported. IS_SOFT auto-recommended based on utilization density (>80% → soft constraint).",
        "condition": "avg_distance > 70 (distributed scenario) or recommendation == 'PBLOCK'",
        "prerequisite": "Call vivado_report_utilization_for_pblock first to get LUT/FF/DSP/BRAM counts",
-       "post_actions": "After this analysis, YOU must call: vivado_place_design -unplace, vivado_create_and_apply_pblock (is_soft from skill result), vivado_place_design, vivado_route_design, vivado_report_timing_summary",
     },
     "optimize_pin_swapping": {
         "category": "OPTIMIZATION",
@@ -342,7 +340,6 @@ SKILL_GUIDANCE = {
         "output": "swap results + checkpoint_path",
         "condition": "WNS stuck ~-0.3ns, LUT input pins have delay variation",
         "prerequisite": "Load DCP via read_checkpoint first",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "If WNS regresses > 0.05ns after reroute, rollback to pre_swap_checkpoint",
     },
     "flatten_lut_cascade": {
@@ -351,9 +348,8 @@ SKILL_GUIDANCE = {
         "output": "cascades_found, optimized_count, checkpoint_path, per-pin results",
         "condition": "Critical paths have >3 LUT levels in series (logic depth bottleneck)",
         "prerequisite": "Call vivado extract_critical_path_cells first to get path cell lists",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "LOW — saves checkpoint before mutation. If WNS regresses >0.05ns, roll back to pre-flatten checkpoint.",
-        "contraindications": "NOT suitable for neural network / wide-datapath designs where logic cones exceed 6-input LUT physical limit.",
+        "contraindications": "Ineffective on neural network / wide-datapath designs where logic cones exceed 6-input LUT physical limit — optimized_count will be 0.",
     },
     "replicate_critical_cells": {
         "category": "OPTIMIZATION",
@@ -361,7 +357,6 @@ SKILL_GUIDANCE = {
         "output": "replication results + checkpoint_path",
         "condition": "High delay cells on critical paths (fanout > 10 or delay > 0.3 ns)",
         "prerequisite": "Load DCP via read_checkpoint first",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM — cell replication increases resource usage. Limit to 10 cells max.",
     },
     "analyze_congestion_spreading": {
@@ -378,9 +373,8 @@ SKILL_GUIDANCE = {
         "output": "cells_moved, density_reduction, checkpoint_path",
         "condition": "analyze_congestion_spreading identified candidates AND congestion severity=HIGH",
         "prerequisite": "Call analyze_congestion_spreading first to understand impact",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM — moving cells can disrupt existing good placement. Limit spread_distance to avoid excessive displacement.",
-        "contraindications": "Do NOT use when congestion is LOW or MODERATE. Prefer PBLOCK for geographic constraints first.",
+        "contraindications": "Ineffective when congestion is LOW or MODERATE. PBLOCK is typically more effective for geographic constraints.",
     },
     "analyze_register_retiming": {
         "category": "ANALYSIS",
@@ -389,9 +383,8 @@ SKILL_GUIDANCE = {
         "condition": "WNS stuck, critical paths have deep combinational chains (>2 LUTs between FFs)",
         "prerequisite": "Load DCP via read_checkpoint first, call extract_critical_path_pins in Vivado",
         "interpretation": "Empty candidates = no deep chains found. Non-empty = segments where pipeline registers would help.",
-        "contraindications": "⚠️  FF utilization < 2%: register retiming may have minimal impact — "
-                             "very few FFs available as pipeline insertion targets. "
-                             "Prefer PBLOCK or PhysOpt for combinational-dominated designs.",
+        "contraindications": "Low impact when FF utilization < 2% — few FFs available as pipeline insertion targets. "
+                             "PBLOCK or PhysOpt typically more effective for combinational-dominated designs.",
     },
     "execute_register_retiming": {
         "category": "OPTIMIZATION",
@@ -399,11 +392,10 @@ SKILL_GUIDANCE = {
         "output": "retiming_ops_performed, checkpoint_path, per-candidate results",
         "condition": "analyze_register_retiming identified candidates with deep chains",
         "prerequisite": "Call analyze_register_retiming first to get candidate list",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "MEDIUM - inserting FFs changes logic depth and routing. Limit to 5 ops per call.",
-        "contraindications": "Do NOT use when Vivado global retiming (phys_opt_design -retime) has already been tried and caused functional errors. "
-                             "⚠️  FF utilization < 2%: very few sequential elements available for pipeline insertion — retiming impact will be minimal. "
-                             "This targeted approach is safer than global retiming but still modifies netlist topology.",
+        "contraindications": "Risk: If Vivado global retiming (phys_opt_design -retime) already caused functional errors, "
+                             "targeted retiming may also be problematic. Low impact when FF utilization < 2% — "
+                             "few sequential elements available for pipeline insertion.",
     },
     "analyze_net_swapping": {
         "category": "ANALYSIS",
@@ -419,7 +411,6 @@ SKILL_GUIDANCE = {
         "output": "swaps_performed, swaps_failed, checkpoint_path",
         "condition": "analyze_net_swapping identified candidates",
         "prerequisite": "Call analyze_net_swapping first to get candidate list",
-        "post_actions": "After this optimization, YOU must call: vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary",
         "risk": "LOW - swaps are within a single SLICE, limited blast radius. If WNS regresses >0.05ns, roll back to pre_swap_checkpoint.",
     },
     "opt_design_strategy": {
@@ -436,11 +427,10 @@ SKILL_GUIDANCE = {
         "risk": "LOW — opt_design has NO retiming options. Unlike phys_opt_design, "
                 "all directives are safe for functional correctness. "
                 "Netlist changes are logic-equivalent remapping (Vivado-guaranteed).",
-        "contraindications": "NOT for designs already at minimal LUT depth. "
-                             "NOT for designs where routing delay (not logic depth) is the bottleneck. "
-                             "After opt_design, validate_dcps.py Phase 1 (structural) may fail due to "
-                             "expected cell name changes — Phase 2 (functional simulation) provides "
-                             "the correctness guarantee.",
+        "contraindications": "Ineffective on designs already at minimal LUT depth, or where routing delay "
+                             "(not logic depth) is the bottleneck. Note: validate_dcps.py Phase 1 (structural) "
+                             "may fail due to expected cell name changes — Phase 2 (functional simulation) "
+                             "provides the correctness guarantee.",
     },
 }
 

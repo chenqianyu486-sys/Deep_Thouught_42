@@ -113,7 +113,7 @@ PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
     ],
     LoopPhase.EVALUATE: [
         "DONE", "NEXT_ITERATION", "SWITCH_STRATEGY",
-        "RESELECT_STRATEGY", "CONTINUE", "ROLLBACK", "EXHAUSTED",
+        "CONTINUE", "ROLLBACK", "EXHAUSTED",
     ],
 }
 
