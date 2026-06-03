@@ -116,7 +116,7 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
 
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
-GLOBAL_NO_IMPROVEMENT_LIMIT = 2    # Global no-improvement limit (reduced from 3 for faster exit)
+GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit (balanced: give enough time for optimization)
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
 MAX_STRATEGY_CYCLES = 3            # Max strategy cycles per iteration (multi-strategy loop)

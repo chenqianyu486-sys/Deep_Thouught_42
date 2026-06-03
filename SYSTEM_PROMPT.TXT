@@ -95,5 +95,29 @@ rapid_timing_feedback:
   tool: "rapidwright_report_timing"
   note: "The system automatically pre-checks directional regression before committing to full Vivado P&R."
 
+
+competition_scoring_awareness:
+  description: "The contest scores based on: Score = alpha - 0.1*alpha*beta - 0.1*alpha*gamma"
+  interpretation:
+    - "alpha = Fmax improvement in MHz (DOMINANT factor)"
+    - "beta = OpenRouter cost in USD (penalty = 0.1 * alpha * cost)"
+    - "gamma = runtime in hours (penalty = 0.1 * alpha * runtime_hours)"
+  strategy_implications:
+    - "Maximize Fmax improvement above all else - each extra MHz is worth ~1 point"
+    - "Cost penalty is small: spending $1 extra only costs 0.1*alpha points"
+    - "Runtime penalty is small: 1 extra hour only costs 0.1*alpha points"
+    - "If alpha=50, spending $1 costs only 5 points, so better models are worth it"
+  optimal_strategy_order:
+    - "1. PBLOCK (if avg_distance > 70 tiles) - often gives 0.5-2ns improvement"
+    - "2. PhysOpt with Explore/AggressiveExplore directive - fast, often 0.1-0.5ns"
+    - "3. OptDesign for logic-depth limited designs - netlist-level optimization"
+    - "4. Fanout for high fanout nets (>100) - targeted improvement"
+    - "5. RegisterRetiming for deep combinational chains (>2 LUTs)"
+  time_budget_guidance:
+    - "Large designs (>150K cells): prioritize PBLOCK first, then PhysOpt"
+    - "Medium designs (50-150K cells): try PhysOpt first, then PBLOCK"
+    - "Small designs (<50K cells): try multiple PhysOpt directives quickly"
+    - "Always use rapidwright_report_timing for fast feedback before full route"
+
 final_output:
   save_to: OUTPUT_DCP_PATH

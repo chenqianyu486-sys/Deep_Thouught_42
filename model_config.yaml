@@ -25,7 +25,7 @@ worker:
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-flash"    # Default planner model name
+  model_name: "deepseek/deepseek-v4-pro"      # Better reasoning for complex strategies
   max_tokens: 1000000
   reasoning_enabled: true                     # Enable reasoning/thinking mode for planner
   reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
@@ -42,4 +42,4 @@ planner:
   history_retrieval_min_importance: 0.3
   fallback_models:           # Fallback models for 429 rate limit (in priority order)
     - "qwen/qwen3.6-plus"
-  cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget, same as flash)
+  cost_hard_limit: 0.80      # USD limit for planner (save budget for worker calls)
