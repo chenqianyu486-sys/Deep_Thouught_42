@@ -202,10 +202,9 @@ PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "vivado_run_tcl": 2,
     "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
     "rapidwright_analyze_net_detour": 2,  # suppress when consistently returning 0 results
-    # ANALYZE phase: these tools' data is already in the Dashboard from init_analysis
-    "vivado_report_route_status": 1,
-    "rapidwright_get_design_info": 1,
-    "rapidwright_get_device_topology": 1,
+    # REMOVED: vivado_report_route_status, rapidwright_get_design_info,
+    # rapidwright_get_device_topology — removed from ANALYZE/EVALUATE
+    # allowlists entirely (data already in Dashboard from init_analysis).
 }
 
 # ── Skill chain actions ──────────────────────────────────────────

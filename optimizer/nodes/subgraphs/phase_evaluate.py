@@ -203,8 +203,13 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 state.strategy.current_strategy = ""
                 return LoopPhase.ANALYZE
 
+            elif flow_signal == "ANALYZE_DONE":
+                # LLM confused about phase — ANALYZE_DONE is only valid in ANALYZE.
+                logger.info("[EVALUATE] ANALYZE_DONE from EVALUATE (phase confusion), treating as CONTINUE")
+                return LoopPhase.ANALYZE
+
             # Unknown signal: treat as CONTINUE
-            logger.info(f"[EVALUATE] Unknown flow_signal: {flow_signal}, treating as CONTINUE")
+            logger.warning(f"[EVALUATE] Unknown flow_signal: {flow_signal}, treating as CONTINUE")
             return LoopPhase.ANALYZE
 
         else:

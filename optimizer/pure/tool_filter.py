@@ -1,11 +1,14 @@
 """Tool filtering by loop phase.
 
 Each phase gets a focused subset of tools to keep the LLM's attention
-on the task at hand.
+on the task at hand.  The ``report_step_state`` tool schema is patched
+per-phase so the LLM only sees flow_control signals valid for the
+current phase.
 """
 
 from __future__ import annotations
 
+import copy
 from enum import Enum
 
 
@@ -26,15 +29,15 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_extract_critical_path_pins",
         "vivado_get_critical_high_fanout_nets",
         "vivado_report_utilization_for_pblock",
-        "vivado_report_route_status",
+        # REMOVED: vivado_report_route_status — data already in Dashboard from init_analysis
         # RapidWright analysis tools
         "rapidwright_analyze_net_detour",
         "rapidwright_analyze_critical_path_spread",
         "rapidwright_analyze_congestion",
         "rapidwright_analyze_pblock_region",
-        "rapidwright_get_device_topology",
+        # REMOVED: rapidwright_get_device_topology — data already in Dashboard from init_analysis
         "rapidwright_report_timing",
-        "rapidwright_get_design_info",
+        # REMOVED: rapidwright_get_design_info — data already in Dashboard from init_analysis
         "rapidwright_search_cells",
         # Internal tools
         "vivado_get_raw_tool_output",
@@ -85,13 +88,33 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
 
     LoopPhase.EVALUATE: frozenset({
         "vivado_report_timing_summary",
-        "vivado_report_route_status",
+        # REMOVED: vivado_report_route_status — data already in Dashboard from init_analysis
         "rapidwright_report_timing",
         "rapidwright_compare_design_structure",
         "vivado_extract_critical_path_cells",
         "report_step_state",
         "vivado_get_raw_tool_output",
     }),
+}
+
+# ── Per-phase flow_control signals ─────────────────────────────────
+# Each phase only accepts a subset of flow_control signals.  The
+# ``report_step_state`` tool schema is patched per-phase so the LLM
+# never sees signals that are invalid in the current context.
+PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
+    LoopPhase.ANALYZE: [
+        "ANALYZE_DONE", "CONTINUE", "DONE", "EXHAUSTED",
+    ],
+    LoopPhase.SELECT_STRATEGY: [
+        "CONTINUE", "EXHAUSTED",
+    ],
+    LoopPhase.EXECUTE: [
+        "EXEC_DONE", "CONTINUE", "EXHAUSTED",
+    ],
+    LoopPhase.EVALUATE: [
+        "DONE", "NEXT_ITERATION", "SWITCH_STRATEGY",
+        "RESELECT_STRATEGY", "CONTINUE", "ROLLBACK", "EXHAUSTED",
+    ],
 }
 
 # ── Per-phase max tool rounds ──────────────────────────────────────
@@ -107,12 +130,15 @@ PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
 def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict]:
     """Return only the tools allowed for the given phase.
 
+    The ``report_step_state`` tool schema is patched so its
+    ``flow_control`` enum contains only signals valid for *phase*.
+
     Args:
         all_tools: Full list of OpenAI-format tool definitions.
         phase: Current LoopPhase.
 
     Returns:
-        Filtered list of tool definitions.
+        Filtered list of tool definitions (with patched report_step_state).
     """
     allowed = PHASE_TOOLS.get(phase)
     if allowed is None:
@@ -123,4 +149,20 @@ def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict
         name = tool.get("function", {}).get("name", "")
         if name in allowed:
             filtered.append(tool)
+
+    # Patch report_step_state with phase-specific flow_control enum
+    phase_signals = PHASE_FLOW_CONTROL.get(phase)
+    if phase_signals:
+        for i, tool in enumerate(filtered):
+            if tool.get("function", {}).get("name") == "report_step_state":
+                patched = copy.deepcopy(tool)
+                props = patched["function"]["parameters"]["properties"]
+                props["flow_control"]["enum"] = list(phase_signals)
+                props["flow_control"]["description"] = (
+                    f"Valid signals for {phase.value} phase: "
+                    + ", ".join(phase_signals)
+                )
+                filtered[i] = patched
+                break
+
     return filtered
