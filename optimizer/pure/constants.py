@@ -116,10 +116,10 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
 
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
-GLOBAL_NO_IMPROVEMENT_LIMIT = 2    # Global no-improvement limit (reduced from 3 for faster exit)
+GLOBAL_NO_IMPROVEMENT_LIMIT = 4    # Global no-improvement limit (increased from 2 for harder benchmarks)
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
-MAX_STRATEGY_CYCLES = 3            # Max strategy cycles per iteration (multi-strategy loop)
+MAX_STRATEGY_CYCLES = 5            # Max strategy cycles per iteration (increased from 3 for more strategy exploration)
 
 # ── RapidWright directional pre-check ──────────────────────────────
 # Level 1 pre-filter: before running the expensive Vivado P&R chain,
@@ -138,7 +138,7 @@ RAPIDWRIGHT_PRECHECK_ENABLED: bool = True
 # estimate falls this far below the pre-skill Vivado WNS baseline,
 # treat the change as likely harmful and skip the P&R chain.
 # Not an absolute accuracy claim — only used for direction detection.
-RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD: float = 0.050
+RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD: float = 0.080  # Widened from 50ps to 80ps to avoid rejecting strategies that help after full P&R
 
 
 # ── Vivado Place-Only intermediate check (Level 2) ─────────────────
@@ -157,7 +157,7 @@ PLACE_ONLY_CHECK_ENABLED: bool = True
 # this far below the pre-skill baseline, skip the remaining route steps.
 # Higher than RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD because place-level
 # timing has less uncertainty than RW estimation.
-PLACE_ONLY_REGRESS_THRESHOLD: float = 0.030
+PLACE_ONLY_REGRESS_THRESHOLD: float = 0.050  # Widened from 30ps to 50ps for harder designs
 
 # Skills that trigger place-only check in their chain.
 PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
@@ -268,22 +268,22 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
              "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
          }},
-        {"tool": "vivado_place_design", "args": {}},
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
     ],
     # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
     "rapidwright_execute_register_retiming": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
     ],
     # Auto-chain: open fanout checkpoint, place, then route before WNS eval.
     # Without this, post-eval sees unplaced design and reports false WNS improvement.
     "rapidwright_execute_fanout_strategy": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
-        {"tool": "vivado_place_design", "args": {}},
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
     ],
     # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
     # opt_design is called by the Vivado MCP tool vivado_opt_design, triggered
@@ -291,8 +291,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_opt_design_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {}},
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -304,7 +304,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive"}},
         # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
         # If UNCHANGED, chain gate (P0) skips remaining steps.
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
     ],
 }
 

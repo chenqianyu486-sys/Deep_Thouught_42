@@ -1222,6 +1222,8 @@ def _compute_adaptive_pblock_multiplier(state) -> float:
     Clamp: [1.10, 1.50]
 
     Uses global utilization as fallback when local utilization is unavailable.
+    When PBLOCK is retried (same iteration or previous iterations), the
+    multiplier is varied to explore different packing densities.
     """
     # Local utilization (preferred) — fallback to global if not available
     util = _get_local_pblock_utilization(state)
@@ -1235,7 +1237,22 @@ def _compute_adaptive_pblock_multiplier(state) -> float:
     size_penalty = 0.1 * math.log10(max(lut_count, 1))
 
     multiplier = 1.2 + util * 0.3 - size_penalty
-    return max(1.10, min(1.50, multiplier))
+    base = max(1.10, min(1.50, multiplier))
+
+    # Variation: add +0.1 per previous PBLOCK attempt, cycling through
+    # [base, base+0.1, base+0.2, ...] up to 1.50, then wrapping back.
+    prev = state.context.previous_pblock_multipliers
+    n_attempts = len(prev)
+    if n_attempts > 0:
+        offset = 0.1 * n_attempts
+        candidate = base + offset
+        # Wrap around if we exceed the ceiling
+        if candidate > 1.50:
+            candidate = 1.10 + (candidate - 1.10) % 0.40
+        base = max(1.10, min(1.50, candidate))
+
+    state.context.previous_pblock_multipliers.append((state.iteration.current, base))
+    return base
 
 
 def _get_local_pblock_utilization(state) -> float | None:

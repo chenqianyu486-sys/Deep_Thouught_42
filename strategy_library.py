@@ -247,7 +247,7 @@ STRATEGIES = {
                    "PhysOpt Explore not yet tried or need more aggressive optimization",
         "sequence": [
             {"step": "vivado_physopt_and_route", "platform": "Vivado",
-             "params": {"directive": "Explore"},
+             "params": {"directive": "AggressiveExplore"},
              "note": "Aggressive PhysOpt with Explore directive. Tries multiple optimization passes."},
         ],
     },

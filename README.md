@@ -189,7 +189,7 @@ Benchmarks from the `demo_corundum_25g_misses_timing` baseline (typical scenario
 | Iterations | — | 4–8 | — |
 | LLM Cost | — | ~$0.15–$0.40 | — |
 
-*Results vary by design complexity and initial timing violation severity.*
+*Results vary by design complexity and initial timing violation severity. Recent improvements: timing-aware placement/routing (Explore directives), PBLOCK multiplier variation, AggressiveExplore PhysOpt, relaxed pre-check thresholds, extended iteration budget.*
 
 ---
 
