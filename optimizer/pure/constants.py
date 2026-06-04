@@ -116,7 +116,7 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
 
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
-GLOBAL_NO_IMPROVEMENT_LIMIT = 4    # Global no-improvement limit (increased from 2 for harder benchmarks)
+GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit (balanced: give enough time for optimization)
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
 MAX_STRATEGY_CYCLES = 5            # Max strategy cycles per iteration (increased from 3 for more strategy exploration)
@@ -157,7 +157,7 @@ PLACE_ONLY_CHECK_ENABLED: bool = True
 # this far below the pre-skill baseline, skip the remaining route steps.
 # Higher than RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD because place-level
 # timing has less uncertainty than RW estimation.
-PLACE_ONLY_REGRESS_THRESHOLD: float = 0.050  # Widened from 30ps to 50ps for harder designs
+PLACE_ONLY_REGRESS_THRESHOLD: float = 0.030
 
 # Skills that trigger place-only check in their chain.
 PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
