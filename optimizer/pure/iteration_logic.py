@@ -26,11 +26,12 @@ def update_iteration_counters(
 
     Mutates state.iteration and state.model in-place.
     """
-    from .model_select import classify_task as _classify_task
-
-    # Use last tool name for task classification (current_task_type is always "")
-    last_tool = state.iteration.tools_used[-1] if state.iteration.tools_used else ""
-    is_optimization = _classify_task(last_tool) == TaskCategory.OPTIMIZATION
+    task_type = state.model.current_task_type
+    if not task_type:
+        from .model_select import classify_task as _classify_task
+        last_tool = state.iteration.tools_used[-1] if state.iteration.tools_used else ""
+        task_type = _classify_task(last_tool)
+    is_optimization = task_type == TaskCategory.OPTIMIZATION
 
     if wns_improved:
         state.model.worker_consecutive_failures = 0
@@ -53,6 +54,20 @@ def update_iteration_counters(
             if delta > -threshold and delta < 0:  # Only skip if small negative delta
                 return  # don't increment no_improvement
         state.iteration.global_no_improvement += 1
+
+
+def update_task_type_stats(
+    state: OptimizerState,
+    task_type: str,
+    success: bool,
+) -> None:
+    """Update per-task model success stats used by model selection."""
+    if not task_type or task_type == TaskCategory.UNKNOWN:
+        return
+    stats = state.model.task_type_stats.setdefault(task_type, {"total": 0, "success": 0})
+    stats["total"] = int(stats.get("total", 0)) + 1
+    if success:
+        stats["success"] = int(stats.get("success", 0)) + 1
 
 
 def infer_strategy_from_tools(tools: list[str]) -> str:

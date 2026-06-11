@@ -16,6 +16,7 @@ from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_summary import summarize_tool_result
+from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -148,6 +149,11 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     tool_args = {}
+                task_type = classify_task(tool_name, tool_args)
+                if task_type == "optimization" or (
+                    task_type != "unknown" and state.model.current_task_type != "optimization"
+                ):
+                    state.model.current_task_type = task_type
 
                 result = await call_tool_fn(
                     tool_name=tool_name, arguments=tool_args,

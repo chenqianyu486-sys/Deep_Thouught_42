@@ -20,6 +20,7 @@ from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
@@ -205,6 +206,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     tool_args = {}
+                task_type = classify_task(tool_name, tool_args)
+                if task_type == "optimization" or (
+                    task_type != "unknown" and state.model.current_task_type != "optimization"
+                ):
+                    state.model.current_task_type = task_type
 
                 # Auto-inject critical_path_cells for pblock tools
                 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):

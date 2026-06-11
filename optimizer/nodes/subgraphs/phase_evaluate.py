@@ -17,6 +17,7 @@ from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
@@ -219,6 +220,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     tool_args = {}
+                task_type = classify_task(tool_name, tool_args)
+                if task_type == "optimization" or (
+                    task_type != "unknown" and state.model.current_task_type != "optimization"
+                ):
+                    state.model.current_task_type = task_type
 
                 # Rate limiting for read-only tools
                 if tool_name in PHASE_TOOL_RATE_LIMITS:

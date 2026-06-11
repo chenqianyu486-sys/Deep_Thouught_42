@@ -17,6 +17,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.iteration_logic import (
     update_iteration_counters,
+    update_task_type_stats,
     infer_strategy_from_tools,
     build_iteration_narrative,
 )
@@ -27,6 +28,7 @@ from ..pure.model_select import (
     estimate_context_complexity,
 )
 from ..pure.tool_router import call_tool as call_tool_fn
+from ..pure.constants import TaskCategory
 from ..color import green
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,10 @@ async def iteration_end_node(
     # Update counters (skip for rollback — design will be restored)
     if not is_rollback:
         update_iteration_counters(state, wns_improved, state.model.current_model)
+        task_success = wns_improved or state.control.done_reason == "iteration_success"
+        if state.model.current_task_type == TaskCategory.INFORMATION:
+            task_success = not state.iteration.tool_errors
+        update_task_type_stats(state, state.model.current_task_type, task_success)
         # Record iteration outcome signal
         if wns_improved:
             record_flow_signal(state, "ITERATION_IMPROVED",
