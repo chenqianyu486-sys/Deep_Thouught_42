@@ -20,6 +20,38 @@ from ..color import green, yellow
 
 logger = logging.getLogger(__name__)
 
+# Contest score is dominated by Fmax improvement, but cost and wall-clock
+# penalties scale with that improvement. Late in the run, bank a verified gain
+# instead of spending the final budget on low-probability exploration.
+SCORE_GUARD_ELAPSED_FRACTION = 0.80
+SCORE_GUARD_MIN_ITERATION = 3
+SCORE_GUARD_MIN_WNS_GAIN_NS = 0.020
+
+
+def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> str:
+    """Return early-stop reason when it is better to bank the current best."""
+    timeout = state.control.wall_clock_timeout
+    if timeout <= 0 or elapsed < timeout * SCORE_GUARD_ELAPSED_FRACTION:
+        return ""
+    if state.iteration.current < SCORE_GUARD_MIN_ITERATION:
+        return ""
+    if state.timing.initial_wns is None or state.timing.best_wns == float('-inf'):
+        return ""
+    if state.timing.best_wns_iteration != state.iteration.current:
+        return ""
+
+    wns_gain = state.timing.best_wns - state.timing.initial_wns
+    if wns_gain < SCORE_GUARD_MIN_WNS_GAIN_NS:
+        return ""
+
+    remaining = max(timeout - elapsed, 0.0)
+    return (
+        "score_guard_bank_best:"
+        f"gain={wns_gain:.3f}ns,"
+        f"elapsed={elapsed / 60:.1f}min,"
+        f"remaining={remaining / 60:.1f}min"
+    )
+
 
 async def check_exit_node(
     state: OptimizerState, deps: NodeDeps
@@ -71,6 +103,19 @@ async def check_exit_node(
                   f"{state.timing.latest_wns:.3f} ns >= {WNS_TARGET_THRESHOLD:.1f} ns")
         )
         record_flow_signal(state, "DONE", "wns_target_met", phase="CHECK_EXIT")
+        return NodeName.CHECK_EXIT
+
+    # Contest scoring guard: once a strong late-run gain is banked, stop before
+    # the remaining wall-clock/cost penalties erode the score.
+    elapsed = time.time() - state.control.start_time if state.control.start_time is not None else 0.0
+    score_guard_reason = _competition_score_guard_reason(state, elapsed)
+    if score_guard_reason:
+        state.control.is_done = True
+        state.control.done_reason = "score_guard_bank_best"
+        logger.info(
+            green(f"[check_exit] Banking best result for contest score: {score_guard_reason}")
+        )
+        record_flow_signal(state, "SYSTEM_EXIT", score_guard_reason, phase="CHECK_EXIT")
         return NodeName.CHECK_EXIT
 
     # No-improvement limit

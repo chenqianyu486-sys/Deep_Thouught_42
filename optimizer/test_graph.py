@@ -18,6 +18,7 @@ from optimizer.state import OptimizerState, TimingState, IterationState, Control
 from optimizer.deps import NodeDeps
 from optimizer.graph import NodeGraph
 from optimizer.edges import NodeName, after_init, after_check_exit
+from optimizer.nodes.check_exit import _competition_score_guard_reason
 from optimizer.nodes.save_output import _classify_design_state
 from optimizer.nodes.subgraphs.phase_execute import _execute_exit_reason_after_timing_update
 from optimizer.tracing import StateTracer
@@ -186,6 +187,51 @@ class TestExecutePhaseHelpers:
             )
             == ""
         )
+
+
+class TestCheckExitHelpers:
+    def test_score_guard_banks_recent_late_gain(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        reason = _competition_score_guard_reason(state, elapsed=3050.0)
+
+        assert reason.startswith("score_guard_bank_best:")
+        assert "gain=0.543ns" in reason
+
+    def test_score_guard_does_not_stop_before_late_window(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=2400.0) == ""
+
+    def test_score_guard_requires_recent_best_iteration(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 4
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=3200.0) == ""
+
+    def test_score_guard_requires_meaningful_gain(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.970
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=3050.0) == ""
 
 
 # ── Graph tests ─────────────────────────────────────────────────
