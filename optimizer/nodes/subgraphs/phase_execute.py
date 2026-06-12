@@ -71,6 +71,24 @@ SIDE_EFFECT_TOOLS = frozenset({
 #   - LLM round-trip latency ~5-15s → ~20-60s overhead per 4-round window
 NO_PROGRESS_LIMIT = 4
 
+# Once a timing-evaluated execution tool has a clear verdict, EXECUTE has
+# produced enough signal. Hand control to EVALUATE instead of asking the LLM
+# for another execution round just to decide what the verdict already implies.
+POST_EVAL_EXIT_VERDICTS = frozenset({"IMPROVED", "UNCHANGED", "REGRESSED"})
+
+
+def _execute_exit_reason_after_timing_update(
+    tool_name: str,
+    post_eval_verdict: str | None,
+    target_met: bool,
+) -> str:
+    """Return why EXECUTE should yield after an evaluated tool, or empty string."""
+    if target_met:
+        return "wns_target_met"
+    if tool_name in POST_EVAL_TOOLS and post_eval_verdict in POST_EVAL_EXIT_VERDICTS:
+        return f"post_eval_{post_eval_verdict.lower()}"
+    return ""
+
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     """Run the EXECUTE phase: execute the chosen strategy via tool calls.
@@ -417,8 +435,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         and deps.compat is not None):
                     deps.compat.add_message("user",
                         f"[GUIDANCE] {tool_name} produced no WNS improvement. "
-                        f"Consider calling report_step_state(EXEC_DONE) to let "
-                        f"EVALUATE switch strategy.")
+                        f"EXECUTE will yield to EVALUATE for strategy selection.")
 
                 # ── Level 1: RapidWright directional pre-check ──────────────
                 # Before paying the cost of the Vivado P&R chain (~900s), use
@@ -504,6 +521,35 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         state, "SYSTEM_EXIT", "large_regression",
                         phase="EXECUTE_STRATEGY",
                     )
+                    force_exit = True
+                    break
+
+                exit_reason = _execute_exit_reason_after_timing_update(
+                    tool_name,
+                    post_eval_verdict,
+                    _check_wns_target_met(state),
+                )
+                if exit_reason:
+                    if exit_reason == "wns_target_met":
+                        logger.info(
+                            green(
+                                f"[EXECUTE] WNS target met after {tool_name}; "
+                                f"yielding immediately"
+                            )
+                        )
+                        record_flow_signal(
+                            state, "DONE", exit_reason,
+                            phase="EXECUTE_STRATEGY",
+                        )
+                    else:
+                        logger.info(
+                            f"[EXECUTE] {tool_name} verdict={post_eval_verdict}; "
+                            f"yielding to EVALUATE"
+                        )
+                        record_flow_signal(
+                            state, "EXEC_DONE", exit_reason,
+                            phase="EXECUTE_STRATEGY",
+                        )
                     force_exit = True
                     break
 
