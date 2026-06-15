@@ -1,11 +1,8 @@
-"""v2 Test Mode: validate MCP tools and skills without LLM.
+"""Test Mode: validate MCP tools and skills without LLM.
 
-Mirrors the v1 FPGAOptimizerTest class using v2 infrastructure:
-- Uses optimizer/pure/tool_router.call_tool() for MCP routing
-- Uses optimizer/pure/timing for timing parsing
-- Standalone class, no LLM dependency
-
-Reference: dcp_optimizer.py FPGAOptimizerTest (L5980-7591)
+Uses optimizer/pure/tool_router.call_tool() for MCP routing
+and optimizer/pure/timing for timing parsing.
+Standalone class, no LLM dependency.
 """
 
 from __future__ import annotations

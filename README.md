@@ -14,7 +14,7 @@
 
 - **No manual timing closure loops.** The agent autonomously analyzes critical paths, selects optimization strategies, executes them, and evaluates results.
 - **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
-- **Dual architecture.** V2 state machine for production reliability; V1 conversational loop for rapid experimentation.
+- **Dual architecture.** V2 state machine for production reliability; V1 conversational loop removed (deprecated).
 - **Real-time observability.** Web Dashboard with 20 panels — 7-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
 - **14 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, OptDesign, LogicResynthesis, PhysOptAggressive.
 - **Multi-strategy loop.** Up to 3 strategies can be tried per iteration, with TTL-based strategy retry (3 iterations). Failed strategies auto-unblock after TTL expires.
@@ -32,7 +32,7 @@ make setup
 # 2. Set your OpenRouter API key
 export OPENROUTER_API_KEY="sk-or-..."
 
-# 3. Run optimization (V2 state machine — recommended)
+# 3. Run optimization (state machine)
 make run_optimizer DCP=input.dcp
 
 # 4. With live dashboard
@@ -47,23 +47,21 @@ make run_optimizer_dashboard DCP=input.dcp
 ```
                     ┌─────────────────────────────┐
                     │     dcp_optimizer.py         │
-                    │   (main entry + v1/v2 hub)   │
+                    │   (CLI entry + V2 hub)       │
                     └──────────┬──────────────────┘
                                │
-              ┌────────────────┼────────────────┐
-              ▼                                 ▼
-   ┌──────────────────┐              ┌──────────────────┐
-   │   V1: Message     │              │   V2: State       │
-   │   Conversation    │              │   Machine (9 nodes)│
-   │   (legacy)        │              │   ← recommended    │
-   └──────────────────┘              └────────┬─────────┘
-                                              │
-                         ┌────────────────────┼────────────────────┐
-                         ▼                    ▼                    ▼
-                  ┌────────────┐      ┌────────────┐      ┌────────────┐
-                  │ Vivado MCP │      │RapidWright │      │   LLM      │
-                  │  Server    │      │ MCP Server │      │(DeepSeek)  │
-                  └────────────┘      └────────────┘      └────────────┘
+                               ▼
+                    ┌──────────────────┐
+                    │   V2: State       │
+                    │   Machine (9 nodes)│
+                    └────────┬─────────┘
+                             │
+                ┌────────────┼────────────┐
+                ▼            ▼            ▼
+         ┌────────────┐ ┌────────────┐ ┌────────────┐
+         │ Vivado MCP │ │RapidWright │ │   LLM      │
+         │  Server    │ │ MCP Server │ │(DeepSeek)  │
+         └────────────┘ └────────────┘ └────────────┘
 ```
 
 ### V2 State Machine Topology
@@ -122,14 +120,11 @@ JAVA_HOME             # Optional — Java installation path (RapidWright depende
 ### Basic Optimization
 
 ```bash
-# V2 state machine (default, recommended)
-python dcp_optimizer.py input.dcp --v2
-
-# V1 conversational loop (legacy)
+# State machine (default)
 python dcp_optimizer.py input.dcp
 
 # With 30-minute timeout and custom output
-python dcp_optimizer.py input.dcp --v2 --timeout 1800 --output output.dcp
+python dcp_optimizer.py input.dcp --timeout 1800 --output output.dcp
 ```
 
 ### Testing (No LLM)
@@ -237,7 +232,7 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
 - **无需手动时序收敛循环。** 智能体自主分析关键路径，选择优化策略，执行操作并评估结果。
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
-- **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环用于快速实验。
+- **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环已弃用并移除。
 - **实时可观测性。** 包含 20 个面板的 Web 仪表盘 —— 7 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
 - **12 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、SmartRetiming、NetSwap、PhysOpt+RegisterRetiming、OptDesign。
 
@@ -254,7 +249,7 @@ make setup
 # 2. 设置你的 OpenRouter API 密钥
 export OPENROUTER_API_KEY="sk-or-..."
 
-# 3. 运行优化（V2 状态机 —— 推荐）
+# 3. 运行优化（状态机）
 make run_optimizer DCP=input.dcp
 
 # 4. 启动实时仪表盘
@@ -269,23 +264,21 @@ make run_optimizer_dashboard DCP=input.dcp
 ```text
                     ┌─────────────────────────────┐
                     │     dcp_optimizer.py         │
-                    │   (主入口 + v1/v2 中枢)      │
+                    │   (CLI 入口 + V2 中枢)       │
                     └──────────┬──────────────────┘
                                │
-              ┌────────────────┼────────────────┐
-              ▼                                 ▼
-   ┌──────────────────┐              ┌──────────────────┐
-   │   V1: 消息        │              │   V2: 状态机      │
-   │   对话循环        │              │   (9 个节点)      │
-   │   (旧版)          │              │   ← 推荐          │
-   └──────────────────┘              └────────┬─────────┘
-                                              │
-                         ┌────────────────────┼────────────────────┐
-                         ▼                    ▼                    ▼
-                  ┌────────────┐      ┌────────────┐      ┌────────────┐
-                  │ Vivado MCP │      │RapidWright │      │   LLM      │
-                  │  Server    │      │ MCP Server │      │(DeepSeek)  │
-                  └────────────┘      └────────────┘      └────────────┘
+                               ▼
+                    ┌──────────────────┐
+                    │   V2: 状态机      │
+                    │   (9 个节点)      │
+                    └────────┬─────────┘
+                             │
+                ┌────────────┼────────────┐
+                ▼            ▼            ▼
+         ┌────────────┐ ┌────────────┐ ┌────────────┐
+         │ Vivado MCP │ │RapidWright │ │   LLM      │
+         │  Server    │ │ MCP Server │ │(DeepSeek)  │
+         └────────────┘ └────────────┘ └────────────┘
 ```
 
 ### V2 状态机拓扑
@@ -388,14 +381,11 @@ JAVA_HOME             # 可选 — Java 安装路径 (RapidWright 依赖)
 ### 基础优化
 
 ```bash
-# V2 状态机（默认，推荐）
-python dcp_optimizer.py input.dcp --v2
-
-# V1 对话循环（旧版）
+# 状态机（默认）
 python dcp_optimizer.py input.dcp
 
 # 设置 30 分钟超时并自定义输出
-python dcp_optimizer.py input.dcp --v2 --timeout 1800 --output output.dcp
+python dcp_optimizer.py input.dcp --timeout 1800 --output output.dcp
 ```
 
 ### 测试（无 LLM）
@@ -456,7 +446,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 
 ```text
 Deep_Thouught_42/
-├── dcp_optimizer.py          # 主入口：LLM 编排、模型选择
+├── dcp_optimizer.py          # 主入口：V2 状态机 CLI + 模型配置
 ├── optimizer/                # V2 状态机框架
 │   ├── state.py              # 类型化数据类：7 个状态子切片
 │   ├── graph.py              # NodeGraph：执行引擎

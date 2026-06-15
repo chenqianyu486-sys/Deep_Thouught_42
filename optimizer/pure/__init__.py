@@ -1,6 +1,5 @@
-"""Pure functions extracted from DCPOptimizer.
+"""Pure stateless functions for the optimizer.
 
-Stateless functions that take explicit parameters and return results.
 Unit-testable without MCP sessions or state.
 """
 

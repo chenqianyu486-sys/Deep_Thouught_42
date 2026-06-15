@@ -1,6 +1,6 @@
 # FPL26 优化竞赛 - 架构技术细节
 
-> 本文档包含 V1→V2 迁移映射、压缩管线、消息流、SKILL_CHAIN、flow_control 等实现级细节。
+> 本文档包含压缩管线、消息流、SKILL_CHAIN、flow_control 等实现级细节。
 > 读者：深度贡献者。高层架构概览请见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md)。
 
 ## 1. 部署与运行
@@ -8,15 +8,15 @@
 > 入口命令、测试模式、Dashboard 启动方式见 [README.md](README.md) Quick Start / Usage。
 
 
-## 2. V1→V2 迁移映射
+## 2. 架构演进（历史参考）
 
-> V1→V2 的架构决策详见 [README.md](README.md) 设计意图第 4、5、6 条。
+> V1（对话式循环）已弃用并移除。以下是 V1→V2 的迁移记录，供理解代码演进参考。
 >
 > **纯函数提取**: `_parse_timing_summary` → `pure/timing.py` | `_select_model` → `pure/model_select.py` | `_summarize_tool_result` → `pure/tool_summary.py` | `_on_iteration_end` → `pure/iteration_logic.py` | `_build_context_snapshot` → `pure/context_snapshot.py` | `call_tool` → `pure/tool_router.py`
 >
 > **状态迁移**: `DCPOptimizer` 实例属性 → `OptimizerState`（7 个 dataclass 子切片）
 >
-> **流程迁移**: `optimize()` → `NodeGraph.run()` | `get_completion()` → `llm_tool_loop` 子图 | `_perform_initial_analysis()` → `init_analysis_node` 
+> **流程迁移**: `optimize()` → `NodeGraph.run()` | `get_completion()` → `llm_tool_loop` 子图 | `_perform_initial_analysis()` → `init_analysis_node`
 
 
 ## 3. 核心数据流细节
@@ -245,7 +245,7 @@ critical_paths_stale: bool = False       # Set True after phys_opt/route_design
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
 | WNS/TNS/策略状态 | 上下文Dashboard（user message，独立于压缩系统） | 通过 `build_context_snapshot()` → `inject_context_snapshot()` 每 API 调用前注入 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在8个检测点被调用 |
-| Tool调用摘要 | V1: MemoryManager._tool_call_details / V2: state.iteration.tools_used | V2 中工具名直接追加到 state |
+| Tool调用摘要 | state.iteration.tools_used | 工具名直接追加到 state |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6 |
 | report_step_state tool call 格式 | ① User message（会话起始）+ ② System prompt 头部压印（每API调用前） | 双重提醒 |
 | Agent 上下文Dashboard | 临时 api_messages 列表（不进入 MessageStore） | V2: tool loop 每轮 LLM 调用前通过 `inject_context_snapshot_at_end()` 注入为最后一条 user 消息 |

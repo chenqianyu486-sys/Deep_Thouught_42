@@ -272,7 +272,6 @@ class ContextState:
     # Consecutive empty LLM responses (no content AND no tool calls).
     # Reset to 0 on any non-empty response. Used for early phase exit.
     consecutive_empty_responses: int = 0
-    consecutive_empty_responses: int = 0
     # PBLOCK multiplier tracking: records (iteration, multiplier) for variation
     previous_pblock_multipliers: list[tuple[int, float]] = field(default_factory=list)
 

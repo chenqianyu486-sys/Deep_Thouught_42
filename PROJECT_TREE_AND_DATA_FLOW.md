@@ -6,7 +6,7 @@
 
 ```
 fpl26_optimization_contest/
-├── dcp_optimizer.py              # 主入口：LLM 编排、模型选择、V1/V2 中枢
+├── dcp_optimizer.py              # CLI 入口：V2 状态机启动、模型配置
 ├── optimizer/                    # V2 状态机框架（LangGraph 风格）
 │   ├── state.py                  # OptimizerState + 7 个子切片 dataclass
 │   ├── deps.py                   # NodeDeps：外部依赖容器
