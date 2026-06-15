@@ -286,7 +286,10 @@ class TestPhaseAwareFiltering:
         text = format_state_space_for_llm(space=sample_space, phase=LoopPhase.EXECUTE)
         assert "Module 1: Global State" in text
         assert "Module 6: Dynamic Gradient" in text
-        assert "Module 2:" not in text
+        # EXECUTE phase now includes Module 2b: Timing Violation Summary (compact)
+        assert "timing_violation_summary:" in text
+        # But NOT the full Module 2 with detailed paths
+        assert "Module 2: Timing Path Clusters" not in text
         assert "Module 3:" not in text
         assert "Module 4:" not in text
         assert "Module 5:" not in text
@@ -295,7 +298,10 @@ class TestPhaseAwareFiltering:
         text = format_state_space_for_llm(space=sample_space, phase=LoopPhase.EVALUATE)
         assert "Module 1: Global State" in text
         assert "Module 6: Dynamic Gradient" in text
-        assert "Module 2:" not in text
+        # EVALUATE phase now includes Module 2b: Timing Violation Summary (compact)
+        assert "timing_violation_summary:" in text
+        # But NOT the full Module 2 with detailed paths
+        assert "Module 2: Timing Path Clusters" not in text
 
     def test_header_matches_phase_label(self):
         space = StateSpace()

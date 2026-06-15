@@ -26,15 +26,6 @@ from ..color import green
 logger = logging.getLogger(__name__)
 
 
-def _should_skip_structural(state: OptimizerState) -> bool:
-    """Check if structural validation should be skipped.
-
-    opt_design remaps/merges LUT cells, changing cell names and counts.
-    Phase 1 (structural comparison) would incorrectly flag these changes.
-    """
-    return "vivado_opt_design" in state.iteration.tools_used
-
-
 def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
     """Classify Vivado design state from STATUS, falling back to timing summary."""
     status = (status_text or "").strip().lower()
@@ -59,7 +50,6 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
 async def _run_validation(
     golden_dcp: Path,
     revised_dcp: Path,
-    skip_structural: bool = False,
     num_vectors: int = 200,
 ) -> dict:
     """Run validate_dcps.py as a subprocess.
@@ -77,8 +67,6 @@ async def _run_validation(
         str(revised_dcp),
         "--vectors", str(num_vectors),
     ]
-    if skip_structural:
-        cmd.append("--skip-structural")
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -274,16 +262,11 @@ async def save_output_node(
             and state.control.output_dcp
             and state.control.input_dcp
             and state.control.output_dcp.exists()):
-        skip_structural = _should_skip_structural(state)
-        logger.info(
-            f"[save_output] Running DCP validation "
-            f"(skip_structural={skip_structural})"
-        )
+        logger.info("[save_output] Running DCP validation")
         print("\nRunning DCP validation...")
         validation_result = await _run_validation(
             golden_dcp=state.control.input_dcp,
             revised_dcp=state.control.output_dcp,
-            skip_structural=skip_structural,
         )
         if validation_result["passed"]:
             print("✓ DCP validation PASSED")

@@ -206,7 +206,27 @@ class CriticalPathEntry:
 critical_paths: list[CriticalPathEntry]  # Top 10 paths sorted by length (longest first)
 critical_paths_iteration: int = 0        # Last iteration when paths were extracted
 critical_paths_stale: bool = False       # Set True after phys_opt/route_design
+violation_summary: Optional[ViolationSummary] = None  # Aggregated violation distribution
 ```
+
+**ViolationSummary** 数据结构（2026-06 新增）：
+```python
+@dataclass
+class ViolationSummary:
+    total_failing_endpoints: Optional[int] = None
+    severity_distribution: dict[str, int]     # {critical, moderate, marginal}
+    delay_profile_breakdown: dict[str, int]   # {logic_dominated, route_dominated, mixed}
+    logic_level_distribution: dict[str, int]  # {levels_1_to_5, levels_6_to_10, levels_gt_10}
+    top_violating_modules: dict[str, dict]     # {module: {endpoint_count, min_slack}}
+```
+
+在 EXECUTE/EVALUATE 阶段，LLM 不再看完整的 Timing Path Clusters（Module 2），而是看到紧凑的 **Timing Violation Summary**（Module 2b），提供：
+- `severity_distribution`: 违例严重度分布（critical < -1.0ns / moderate / marginal）
+- `delay_profile_breakdown`: 延迟类型分布（logic_dominated / route_dominated / mixed）
+- `logic_level_distribution`: 逻辑级数分布
+- `top_violating_modules`: 最违例模块及其端点数、最小 slack
+
+成本约 ~200-300 tokens，替代展开 50 条完整路径的 ~3000+ tokens。
 
 **双重更新触发**:
 ```
@@ -823,20 +843,20 @@ api_messages = [
 ```
 验证策略:
 ├── 每5次迭代: 中间 checkpoint 验证（500 向量）
-├── 完成时: 完整验证（Phase1 + Phase2, 10000 向量）
+├── 完成时: 完整验证（Phase1 + Phase2, 默认 200 向量，可通过 `--vectors` 调整）
 └── 条件: validation_enabled AND intermediate_dcp存在 AND 非完成态 AND iteration%5==0
 ```
 
 **Phase 1 — 结构对比（RapidWright）**：比较 golden 和 revised DCP 的 EDIF 网表结构。
 
-**Phase 2 — 功能仿真（Vivado xsim）**：从 golden 和 revised DCP 分别导出 Verilog 仿真模型，生成 LFSR 驱动的随机测试激励（10000 向量）。
+**Phase 2 — 功能仿真（Vivado xsim）**：从 golden 和 revised DCP 分别导出 Verilog 仿真模型，生成 LFSR 驱动的随机测试激励（默认 200 向量，可通过 `--vectors` 调整；默认先运行 100 向量的 precheck）。
 
 **安全约束**：
 - 禁止使用 `phys_opt_design` 的 retiming 指令（`AlternateFlowWithRetiming`、`AddRetime`）
 - RegisterRetiming skill 使用的局部 FF 插入比全局 retiming 更安全
 - PhysOpt+RegisterRetiming 组合策略：必须使用 `vivado_physopt_and_route`（非独立的 phys_opt_design）。组合工具在 PhysOpt 后自动布线，确保 retiming 分析在布好线的设计上进行。
 - pin swapping 和 net swapping 仅交换等效引脚，不改变逻辑函数
-- **opt_design 跳过 Phase 1 结构对比**：`opt_design` 会重新映射/合并 LUT 单元，导致 cell 名称和数量变化。`validate_dcps.py --skip-structural` 标志允许跳过 Phase 1（结构对比），仅依赖 Phase 2（功能仿真，10000 向量 LFSR 激励）保证功能等价性。在 `save_output_node` 中通过 `state.iteration.tools_used` 检测 `vivado_opt_design` 使用并传递标志。
+- **Phase 1 结构对比始终执行**：`validate_dcps.py` 不再提供 `--skip-structural` 标志；即使 `opt_design` 重新映射/合并 LUT 单元，RapidWright 结构对比仍作为第一道完整性检查运行。最终功能等价性由 Phase 2（功能仿真，LFSR 激励）保证。
 - opt_design **无 retiming 选项**（与 `phys_opt_design` 不同），无需额外安全守卫。
 
 ## 7.1 EXECUTE 阶段 no-progress 检测优化

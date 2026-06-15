@@ -178,14 +178,20 @@ def parse_route_status(report: str) -> dict:
 
     Extracts: total_nets, routed_nets, unresolved_nets, long_route_nets_count,
     and estimates avg_wirelength from route metrics when available.
+    Also extracts detailed metrics: congestion_level, total_wirelength,
+    max_wirelength, timing_violated_nets for Dashboard M3.
 
     Returns:
         dict with keys: total_nets, routed_nets, unresolved_nets,
-        long_route_nets_count, avg_wirelength (None if not available).
+        long_route_nets_count, avg_wirelength (None if not available),
+        congestion_level, total_wirelength, max_wirelength,
+        timing_violated_nets.
     """
     result: dict = {
         "total_nets": 0, "routed_nets": 0, "unresolved_nets": 0,
         "long_route_nets_count": 0, "avg_wirelength": None,
+        "congestion_level": None, "total_wirelength": None,
+        "max_wirelength": None, "timing_violated_nets": None,
     }
     lines = report.split('\n')
     for line in lines:
@@ -194,7 +200,7 @@ def parse_route_status(report: str) -> dict:
             m = re.search(r'(\d[\d,]*)', line)
             if m:
                 result["total_nets"] = int(m.group(1).replace(",", ""))
-        elif 'routed' in s and 'unrouted' not in s:
+        elif 'routed' in s and 'unrouted' not in s and 'partially' not in s:
             m = re.search(r'(\d[\d,]*)', line)
             if m and "total" not in s:
                 result["routed_nets"] = int(m.group(1).replace(",", ""))
@@ -210,6 +216,25 @@ def parse_route_status(report: str) -> dict:
             m = re.search(r'([\d.]+)', line)
             if m:
                 result["avg_wirelength"] = float(m.group(1))
+        elif 'congestion level' in s:
+            m = re.search(r'(LOW|MEDIUM|HIGH|CRITICAL)', line, re.IGNORECASE)
+            if m:
+                result["congestion_level"] = m.group(1).upper()
+        elif 'total wirelength' in s and 'average' not in s:
+            m = re.search(r'([\d,.]+)', line)
+            if m:
+                try:
+                    result["total_wirelength"] = float(m.group(1).replace(",", ""))
+                except ValueError:
+                    pass
+        elif 'max wirelength' in s or 'maximum wirelength' in s:
+            m = re.search(r'([\d.]+)', line)
+            if m:
+                result["max_wirelength"] = float(m.group(1))
+        elif 'timing violated' in s or 'violated nets' in s:
+            m = re.search(r'(\d[\d,]*)', line)
+            if m:
+                result["timing_violated_nets"] = int(m.group(1).replace(",", ""))
     return result
 
 
@@ -306,6 +331,97 @@ def parse_pvt_corner(timing_report: str) -> str:
                     if len(token) > 4:
                         return token.rstrip(',.;')
     return "slow_0p95v_85c"
+
+
+def compute_violation_summary(
+    critical_paths: list,
+    failing_endpoints: int | None = None,
+) -> dict | None:
+    """Compute aggregated violation distribution from critical paths.
+
+    Returns a dict matching ViolationSummary fields, or None if no data.
+    Pure function — can be tested independently.
+    """
+    if not critical_paths:
+        if failing_endpoints is not None and failing_endpoints > 0:
+            return {
+                "total_failing_endpoints": failing_endpoints,
+                "severity_distribution": {},
+                "delay_profile_breakdown": {},
+                "logic_level_distribution": {},
+                "top_violating_modules": {},
+            }
+        return None
+
+    severity = {"critical": 0, "moderate": 0, "marginal": 0}
+    delay_profile = {"logic_dominated": 0, "route_dominated": 0, "mixed": 0}
+    logic_levels = {"levels_1_to_5": 0, "levels_6_to_10": 0, "levels_gt_10": 0}
+    module_stats: dict[str, dict] = {}
+
+    for entry in critical_paths:
+        slack = entry.slack if hasattr(entry, 'slack') else entry.get("slack")
+        logic_pct = None
+        route_pct = None
+        levels = entry.levels if hasattr(entry, 'levels') else entry.get("levels")
+        cells = entry.cells if hasattr(entry, 'cells') else entry.get("cells", [])
+
+        if hasattr(entry, 'logic_delay') and entry.logic_delay is not None and hasattr(entry, 'net_delay') and entry.net_delay is not None:
+            total = entry.logic_delay + entry.net_delay
+            if total > 0:
+                logic_pct = entry.logic_delay / total
+                route_pct = entry.net_delay / total
+        elif hasattr(entry, 'logic_delay_pct'):
+            logic_pct = entry.logic_delay_pct
+
+        if slack is not None:
+            if slack < -1.0:
+                severity["critical"] += 1
+            elif slack < -0.3:
+                severity["moderate"] += 1
+            else:
+                severity["marginal"] += 1
+
+        if logic_pct is not None:
+            if logic_pct > 0.6:
+                delay_profile["logic_dominated"] += 1
+            elif logic_pct < 0.4:
+                delay_profile["route_dominated"] += 1
+            else:
+                delay_profile["mixed"] += 1
+
+        if levels is not None:
+            if levels <= 5:
+                logic_levels["levels_1_to_5"] += 1
+            elif levels <= 10:
+                logic_levels["levels_6_to_10"] += 1
+            else:
+                logic_levels["levels_gt_10"] += 1
+
+        for cell in cells:
+            parts = cell.split("/")
+            if len(parts) >= 2:
+                module = parts[1]
+                if module not in module_stats:
+                    module_stats[module] = {
+                        "endpoint_count": 0,
+                        "min_slack": None,
+                    }
+                module_stats[module]["endpoint_count"] += 1
+                if slack is not None:
+                    if module_stats[module]["min_slack"] is None or slack < module_stats[module]["min_slack"]:
+                        module_stats[module]["min_slack"] = round(slack, 3)
+
+    top_modules = dict(
+        sorted(module_stats.items(), key=lambda x: -x[1]["endpoint_count"])[:5]
+    )
+
+    return {
+        "total_failing_endpoints": failing_endpoints,
+        "severity_distribution": severity,
+        "delay_profile_breakdown": delay_profile,
+        "logic_level_distribution": logic_levels,
+        "top_violating_modules": top_modules,
+    }
 
 
 def parse_hold_timing(timing_text: str) -> dict:

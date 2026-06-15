@@ -26,9 +26,12 @@ from ..state import (
     DashboardDynamicGradient,
     DashboardArchitectureOverview,
     DashboardModuleEntry,
+    DashboardViolationSummary,
     StateSpace,
+    ViolationSummary,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT
+from .timing import compute_violation_summary
 from .tool_filter import LoopPhase
 
 logger = logging.getLogger(__name__)
@@ -79,10 +82,10 @@ PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
         "architecture_overview",
     }),
     LoopPhase.EXECUTE: frozenset({
-        "global_state", "dynamic_gradient",
+        "global_state", "timing_clusters_summary", "dynamic_gradient",
     }),
     LoopPhase.EVALUATE: frozenset({
-        "global_state", "dynamic_gradient",
+        "global_state", "timing_clusters_summary", "dynamic_gradient",
     }),
 }
 
@@ -157,12 +160,30 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
 # ── Module 2: Timing Path Clusters ───────────────────────────────────
 
 def _build_timing_clusters(state: OptimizerState) -> DashboardTimingClusters:
-    """Build Module 2: Top-N violating timing path endpoints."""
+    """Build Module 2: Top-N violating timing path endpoints + violation summary."""
     paths: list[DashboardTimingPath] = []
     for entry in state.timing.critical_paths[:MAX_VIOLATING_PATHS]:
         dp = _convert_critical_path(entry)
         paths.append(dp)
-    return DashboardTimingClusters(top_violating_paths=paths)
+
+    vs_data = compute_violation_summary(
+        state.timing.critical_paths,
+        failing_endpoints=state.timing.latest_failing_endpoints,
+    )
+    violation_summary = None
+    if vs_data is not None:
+        violation_summary = DashboardViolationSummary(
+            total_failing_endpoints=vs_data["total_failing_endpoints"],
+            severity_distribution=vs_data["severity_distribution"],
+            delay_profile_breakdown=vs_data["delay_profile_breakdown"],
+            logic_level_distribution=vs_data["logic_level_distribution"],
+            top_violating_modules=vs_data["top_violating_modules"],
+        )
+
+    return DashboardTimingClusters(
+        top_violating_paths=paths,
+        violation_summary=violation_summary,
+    )
 
 
 # ── Module 3: Physical & Congestion Metrics ──────────────────────────
@@ -192,6 +213,10 @@ def _build_physical_congestion(state: OptimizerState) -> DashboardPhysicalConges
         long_route_nets_count=long_route_val,
         congestion_hotspots=hotspots,
         pblock_overflow_count=cd.get("pblock_overflow_count"),
+        congestion_level=rs.get("congestion_level"),
+        total_wirelength=rs.get("total_wirelength"),
+        max_wirelength=rs.get("max_wirelength"),
+        timing_violated_nets=rs.get("timing_violated_nets"),
     )
 
 
@@ -546,6 +571,25 @@ def format_state_space_for_llm(
         else:
             ann = _annotated_list(tc.top_violating_paths, "no_violating_paths_extracted")
             lines.append(f"  top_paths: {ann}")
+        # Violation summary (compact, always shown with full Module 2)
+        if tc.violation_summary is not None:
+            lines.append("")
+            lines.append(f"  # Violation summary: {tc.violation_summary.total_failing_endpoints or '?'} failing endpoints")
+            _format_violation_summary(lines, tc.violation_summary, indent="  ")
+        lines.append("")
+
+    # ── Module 2b: Timing Violation Summary (compact, for EXECUTE/EVALUATE phases) ──
+    if enabled is not None and "timing_clusters_summary" in enabled:
+        tc = space.timing_clusters
+        vs = tc.violation_summary
+        lines.append("# Module 2: Timing Violation Summary (compact)")
+        lines.append("timing_violation_summary:")
+        if vs is not None:
+            lines.append(f"  failing_endpoints: {_annotated_val(vs.total_failing_endpoints, reason='not_analyzed')}")
+            _format_violation_summary(lines, vs, indent="  ")
+        else:
+            lines.append(f"  failing_endpoints: {_annotated_val(space.global_state.wns_setup, reason='not_analyzed')}")
+            lines.append("  # No critical path data available for violation summary")
         lines.append("")
 
     # ── Module 3: Physical & Congestion Metrics ────────────────────
@@ -554,9 +598,17 @@ def format_state_space_for_llm(
         lines.append("# Module 3: Physical & Congestion Metrics")
         lines.append("physical_congestion:")
         lines.append(f"  global_congestion_score: {_annotated_val(pc.global_congestion_score, '{:.2f}', 'congestion_analysis_not_supported')}")
+        if pc.congestion_level:
+            lines.append(f"  congestion_level: {pc.congestion_level}")
         lines.append(f"  avg_wirelength: {_annotated_val(pc.avg_wirelength, '{:.1f}', 'data_not_available')}")
         lr = _annotated_val(pc.long_route_nets_count, reason="data_not_available")
         lines.append(f"  long_route_nets_count: {lr}")
+        if pc.total_wirelength is not None:
+            lines.append(f"  total_wirelength: {pc.total_wirelength:.1f}")
+        if pc.max_wirelength is not None:
+            lines.append(f"  max_wirelength: {pc.max_wirelength:.1f}")
+        if pc.timing_violated_nets is not None:
+            lines.append(f"  timing_violated_nets: {pc.timing_violated_nets}")
         pb = _annotated_val(pc.pblock_overflow_count, reason="not_measured")
         lines.append(f"  pblock_overflow_count: {pb}")
         ann = _annotated_list(pc.congestion_hotspots, "no_congestion_hotspots")
@@ -865,3 +917,46 @@ def _append_architecture_hints(lines: list[str], ao: DashboardArchitectureOvervi
     if ao.deepest_module:
         lines.append(f"  arch_hint: Deepest logic is in \"{ao.deepest_module}\" — "
                      f"RegisterRetiming or LUTCascadeFlattening may help if levels > 15.")
+
+
+def _format_violation_summary(
+    lines: list[str],
+    vs: DashboardViolationSummary,
+    indent: str = "",
+) -> None:
+    """Format violation summary YAML lines (used by both full and compact views)."""
+    sev = vs.severity_distribution
+    if sev:
+        lines.append(f"{indent}severity_distribution:")
+        lines.append(f"{indent}  critical_slack_lt_-1.0ns: {sev.get('critical', 0)}")
+        lines.append(f"{indent}  moderate_slack_-1.0_to_-0.3ns: {sev.get('moderate', 0)}")
+        lines.append(f"{indent}  marginal_slack_-0.3_to_0ns: {sev.get('marginal', 0)}")
+
+    dp = vs.delay_profile_breakdown
+    if dp:
+        logic_d = dp.get("logic_dominated", 0)
+        route_d = dp.get("route_dominated", 0)
+        mixed = dp.get("mixed", 0)
+        lines.append(f"{indent}delay_profile_breakdown:")
+        lines.append(f"{indent}  logic_dominated_paths: {logic_d}")
+        lines.append(f"{indent}  route_dominated_paths: {route_d}")
+        lines.append(f"{indent}  mixed_paths: {mixed}")
+        if logic_d + route_d + mixed > 0:
+            dominant = "logic_dominated" if logic_d > route_d else "route_dominated" if route_d > logic_d else "mixed"
+            lines.append(f"{indent}  dominant_delay_type: {dominant}")
+
+    ll = vs.logic_level_distribution
+    if ll:
+        lines.append(f"{indent}logic_level_distribution:")
+        lines.append(f"{indent}  levels_1_to_5: {ll.get('levels_1_to_5', 0)}")
+        lines.append(f"{indent}  levels_6_to_10: {ll.get('levels_6_to_10', 0)}")
+        lines.append(f"{indent}  levels_gt_10: {ll.get('levels_gt_10', 0)}")
+
+    mod_stats = vs.top_violating_modules
+    if mod_stats:
+        lines.append(f"{indent}top_violating_modules:")
+        for mod_name, mod_data in mod_stats.items():
+            endpoints = mod_data.get("endpoint_count", 0)
+            min_slack = mod_data.get("min_slack")
+            slack_str = f", min_slack={min_slack}ns" if min_slack is not None else ""
+            lines.append(f"{indent}  {mod_name}: {endpoints} endpoints{slack_str}")

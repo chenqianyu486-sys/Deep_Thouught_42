@@ -222,6 +222,23 @@ timing_clusters:
       logic_levels: 12
       path_group: clk_fpl26contest
 
+  # Violation summary: compact aggregate (always shown with full Module 2)
+  severity_distribution:
+    critical_slack_lt_-1.0ns: 12
+    moderate_slack_-1.0_to_-0.3ns: 38
+    marginal_slack_-0.3_to_0ns: 77
+  delay_profile_breakdown:
+    logic_dominated_paths: 45
+    route_dominated_paths: 62
+    mixed_paths: 20
+    dominant_delay_type: route_dominated
+  logic_level_distribution:
+    levels_1_to_5: 15
+    levels_6_to_10: 52
+    levels_gt_10: 60
+  top_violating_modules:
+    aes_core: 38 endpoints, min_slack=-0.52ns
+
 # Module 3: Physical & Congestion Metrics
 physical_congestion:
   global_congestion_score: 0.65
@@ -273,7 +290,7 @@ architecture_overview:
   total_cells_analyzed: 72
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M7 architecture_overview 两阶段均可见），EXECUTE 阶段只看 global_state + dynamic_gradient。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M7 architecture_overview 两阶段均可见），EXECUTE/EVALUATE 阶段看 M1 + M2b (timing_violation_summary 紧凑摘要) + M6。
 
 **LLM 防歧义注解**: Dashboard 所有 N/A 和空列表都带有动态原因，区分"未分析"与"确实为零"：
 - `best_wns: "N/A(initial_state)"` — 首次迭代前尚未有最佳值
@@ -404,7 +421,7 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 
 两阶段验证（`validate_dcps.py`）：
 - **Phase 1 结构对比**（RapidWright）：EDIF 网表结构一致性
-- **Phase 2 功能仿真**（Vivado xsim）：10000 向量 LFSR 测试激励
+- **Phase 2 功能仿真**（Vivado xsim）：LFSR 随机测试激励（默认 200 向量，先运行 100 向量 precheck；可通过 `--vectors`/`--precheck-vectors` 调整）
 
 每 5 次迭代中间 checkpoint 验证（500 向量），完成时完整验证。
 

@@ -124,7 +124,7 @@ help:
 	@echo "  SKIP_EXAMPLES        - Set to 1 to skip example DCP downloads in setup"
 	@echo "  GOLDEN               - Golden (reference) DCP for validation"
 	@echo "  REVISED              - Revised (optimized) DCP for validation"
-	@echo "  VECTORS              - Number of test vectors for validation (default: 10000)"
+	@echo "  VECTORS              - Number of test vectors for validation (default: 200)"
 	@echo ""
 	@echo "Output structure:"
 	@echo "  - Optimized DCP: <input_name>_optimized-<timestamp>.dcp (next to input)"

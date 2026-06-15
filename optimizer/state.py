@@ -54,6 +54,20 @@ class CriticalPathEntry:
 
 
 @dataclass
+class ViolationSummary:
+    """Aggregated violation distribution for high-density LLM context.
+
+    Provides a structured overview of timing violations without requiring
+    per-path expansion. Populated from critical_paths + timing summary.
+    """
+    total_failing_endpoints: Optional[int] = None
+    severity_distribution: dict[str, int] = field(default_factory=dict)
+    delay_profile_breakdown: dict[str, int] = field(default_factory=dict)
+    logic_level_distribution: dict[str, int] = field(default_factory=dict)
+    top_violating_modules: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
 class WnsMilestone:
     """Verified WNS milestone with context."""
     achieved_wns: float = 0.0
@@ -133,6 +147,8 @@ class TimingState:
     # Set after initial size probe in init_analysis.
     # 1.0 for <50K cells, 1.5 for 50K-150K, 3.0 for >150K.
     design_size_factor: float = 1.0
+    # Aggregated violation distribution (populated from critical_paths + timing summary)
+    violation_summary: Optional[ViolationSummary] = None
     # Flag: whether the design is NOT routed (detected from timing report Design State).
     # True = design is unplaced/unrouted → WNS may be inaccurate (false positive).
     # Updated by _post_eval_hook / _track_wns_from_result every time a timing report is parsed.
@@ -441,6 +457,21 @@ class DashboardGlobalState:
 
 
 @dataclass
+class DashboardViolationSummary:
+    """Aggregated violation distribution for high-density LLM context.
+
+    Provides severity distribution, delay profile breakdown, logic level
+    distribution, and top violating modules — all derived from
+    TimingState.critical_paths without additional Vivado calls.
+    """
+    total_failing_endpoints: Optional[int] = None
+    severity_distribution: dict[str, int] = field(default_factory=dict)
+    delay_profile_breakdown: dict[str, int] = field(default_factory=dict)
+    logic_level_distribution: dict[str, int] = field(default_factory=dict)
+    top_violating_modules: dict[str, dict] = field(default_factory=dict)
+
+
+@dataclass
 class DashboardTimingPath:
     """Module 2: Single violating timing path endpoint entry."""
     endpoint_name: str = ""
@@ -455,8 +486,9 @@ class DashboardTimingPath:
 
 @dataclass
 class DashboardTimingClusters:
-    """Module 2 container: Top-N violating path endpoints."""
+    """Module 2 container: Top-N violating path endpoints + violation summary."""
     top_violating_paths: list[DashboardTimingPath] = field(default_factory=list)
+    violation_summary: Optional[DashboardViolationSummary] = None
 
 
 @dataclass
@@ -478,6 +510,10 @@ class DashboardPhysicalCongestion:
     long_route_nets_count: Optional[int] = None       # None=unknown, 0=analyzed+none
     congestion_hotspots: list[DashboardCongestionHotspot] = field(default_factory=list)
     pblock_overflow_count: Optional[int] = None        # None=not_measured, 0=measured+none
+    congestion_level: Optional[str] = None             # LOW|MEDIUM|HIGH|CRITICAL from report_route_status
+    total_wirelength: Optional[float] = None           # total route wirelength from report_route_status
+    max_wirelength: Optional[float] = None             # max single-net wirelength from report_route_status
+    timing_violated_nets: Optional[int] = None         # nets with timing violations from report_route_status
 
 
 @dataclass

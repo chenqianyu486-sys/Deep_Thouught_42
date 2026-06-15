@@ -187,7 +187,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_get_critical_high_fanout_nets": frozenset({"high_fanout_nets"}),
     "rapidwright_analyze_critical_path_spread": frozenset({"critical_path_spread"}),
     "vivado_extract_critical_path_pins": frozenset({"critical_path_spread"}),
-    "vivado_report_route_status": frozenset({"route_status"}),
+    "vivado_report_route_status": frozenset({"route_status", "route_status_detail"}),
     "vivado_report_timing_summary": frozenset({"timing_summary", "cdc_paths"}),
     "rapidwright_get_design_info": frozenset({"design_info"}),
 }
@@ -268,8 +268,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
              "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
          }},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
     ],
     # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
     "rapidwright_execute_register_retiming": [
@@ -282,8 +282,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_fanout_strategy": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
     ],
     # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
     # opt_design is called by the Vivado MCP tool vivado_opt_design, triggered
@@ -291,8 +291,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_opt_design_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -304,7 +304,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive"}},
         # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
         # If UNCHANGED, chain gate (P0) skips remaining steps.
-        {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
     ],
 }
 

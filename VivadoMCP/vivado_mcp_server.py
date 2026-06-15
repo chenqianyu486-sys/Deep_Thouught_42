@@ -1420,13 +1420,21 @@ async def list_tools():
         ),
         Tool(
             name="place_design",
-            description="Run placement on the current design.",
+            description="Run placement on the current design. Supports incremental placement via -incremental flag with a reference checkpoint.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "directive": {
                         "type": "string",
                         "description": "Placement directive (e.g., 'Default', 'Explore', 'Quick')"
+                    },
+                    "incremental": {
+                        "type": "boolean",
+                        "description": "Use incremental placement (-incremental) with reference_dcp. Reuses placement from reference checkpoint for unchanged logic, reducing runtime by 30-50%."
+                    },
+                    "reference_dcp": {
+                        "type": "string",
+                        "description": "Path to reference DCP checkpoint for incremental placement. Required when incremental=true."
                     },
                     "timeout": {
                         "type": "number",
@@ -1437,13 +1445,17 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design.",
+            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "directive": {
                         "type": "string",
                         "description": "Routing directive (e.g., 'Default', 'Explore', 'Quick')"
+                    },
+                    "reuse": {
+                        "type": "boolean",
+                        "description": "Reuse existing routing for unchanged nets (-reuse). Reduces routing runtime by reusing prior routing results where possible."
                     },
                     "timeout": {
                         "type": "number",
@@ -2065,10 +2077,12 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "place_design":
             directive = arguments.get("directive")
+            incremental = arguments.get("incremental", False)
+            reference_dcp = arguments.get("reference_dcp")
             timeout = arguments.get("timeout", 3600)  # 1 hour default for placement
 
             # Log unexpected parameters to help debug LLM misuse
-            expected_keys = {"directive", "timeout"}
+            expected_keys = {"directive", "timeout", "incremental", "reference_dcp"}
             unexpected = set(arguments.keys()) - expected_keys
             if unexpected:
                 logger.warning(f"place_design: ignoring unexpected parameters: {unexpected}. "
@@ -2080,16 +2094,20 @@ async def call_tool(name: str, arguments: dict):
                     cmd += " -unplace"
                 else:
                     cmd += f" -directive {directive}"
+            if incremental and reference_dcp:
+                cmd += f" -incremental {{{reference_dcp}}}"
+                logger.info(f"place_design: incremental mode with reference={reference_dcp}")
 
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Placement complete.\n\n{output}")]
         
         elif name == "route_design":
             directive = arguments.get("directive")
+            reuse = arguments.get("reuse", False)
             timeout = arguments.get("timeout", 3600)  # 1 hour default for routing
 
             # Log unexpected parameters to help debug LLM misuse
-            expected_keys = {"directive", "timeout"}
+            expected_keys = {"directive", "timeout", "reuse"}
             unexpected = set(arguments.keys()) - expected_keys
             if unexpected:
                 logger.warning(f"route_design: ignoring unexpected parameters: {unexpected}. "
@@ -2098,6 +2116,9 @@ async def call_tool(name: str, arguments: dict):
             cmd = "route_design"
             if directive:
                 cmd += f" -directive {directive}"
+            if reuse:
+                cmd += " -reuse"
+                logger.info("route_design: reuse mode enabled")
 
             output = run_tcl_command(cmd, timeout=timeout)
             return [TextContent(type="text", text=f"Routing complete.\n\n{output}")]

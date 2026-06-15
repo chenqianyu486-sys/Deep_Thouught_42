@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
-from ..state import CriticalPathEntry
+from ..state import CriticalPathEntry, ViolationSummary
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,29 @@ DISPLAY_LIMIT_HANDOFF_WORKER = 3
 
 # Maximum cell names to show per path in display
 DISPLAY_CELLS_PER_PATH = 6
+
+
+def refresh_violation_summary(state: OptimizerState) -> None:
+    """Refresh state.timing.violation_summary from current critical paths.
+
+    Called when failing_endpoints changes without a critical path extraction,
+    or whenever state timing data is updated. Safe to call repeatedly.
+    """
+    from .timing import compute_violation_summary
+    vs_data = compute_violation_summary(
+        state.timing.critical_paths,
+        failing_endpoints=state.timing.latest_failing_endpoints,
+    )
+    if vs_data is not None:
+        state.timing.violation_summary = ViolationSummary(
+            total_failing_endpoints=vs_data["total_failing_endpoints"],
+            severity_distribution=vs_data["severity_distribution"],
+            delay_profile_breakdown=vs_data["delay_profile_breakdown"],
+            logic_level_distribution=vs_data["logic_level_distribution"],
+            top_violating_modules=vs_data["top_violating_modules"],
+        )
+    else:
+        state.timing.violation_summary = None
 
 
 def parse_critical_path_cells(result: str) -> list[dict]:
@@ -95,6 +118,7 @@ def update_critical_paths(
 
     Each element should be a dict with "cells" key plus optional timing fields.
     Keeps top MAX_CRITICAL_PATHS paths sorted by length (longest first).
+    Also updates state.timing.violation_summary from the new path data.
     """
     if not cell_paths:
         return
@@ -116,6 +140,22 @@ def update_critical_paths(
     ]
     state.timing.critical_paths_iteration = iteration
     state.timing.critical_paths_stale = False
+
+    # Recompute violation summary from updated critical paths
+    from .timing import compute_violation_summary
+    vs_data = compute_violation_summary(
+        state.timing.critical_paths,
+        failing_endpoints=state.timing.latest_failing_endpoints,
+    )
+    if vs_data is not None:
+        from ..state import ViolationSummary
+        state.timing.violation_summary = ViolationSummary(
+            total_failing_endpoints=vs_data["total_failing_endpoints"],
+            severity_distribution=vs_data["severity_distribution"],
+            delay_profile_breakdown=vs_data["delay_profile_breakdown"],
+            logic_level_distribution=vs_data["logic_level_distribution"],
+            top_violating_modules=vs_data["top_violating_modules"],
+        )
 
     logger.info(
         f"[critical_path] Updated: {len(state.timing.critical_paths)} paths, "

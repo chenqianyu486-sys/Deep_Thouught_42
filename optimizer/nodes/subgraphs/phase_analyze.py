@@ -20,6 +20,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
+from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -360,6 +361,7 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
                         state.timing.latest_tns = tns
                     if fe is not None:
                         state.timing.latest_failing_endpoints = fe
+                        refresh_violation_summary(state)
                     if wns > state.timing.best_wns:
                         state.timing.best_wns = wns
                         state.timing.best_wns_iteration = state.iteration.current
@@ -380,6 +382,7 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
             state.timing.latest_tns = tns
         if fe is not None:
             state.timing.latest_failing_endpoints = fe
+            refresh_violation_summary(state)
         if wns > state.timing.best_wns:
             state.timing.best_wns = wns
             state.timing.best_wns_iteration = state.iteration.current

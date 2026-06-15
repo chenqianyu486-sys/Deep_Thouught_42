@@ -176,7 +176,9 @@ PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
     LoopPhase.SELECT_STRATEGY: 6,
     # Keep EXECUTE short: strategies should run one modifying action and signal
     # EXEC_DONE; longer loops previously wasted wall-clock time on plateaus.
-    LoopPhase.EXECUTE: 5,
+    # Increased from 5 to 10 to allow complex strategies (PBLOCK chain with
+    # corrections, multi-step retiming) to complete without premature exit.
+    LoopPhase.EXECUTE: 10,
     LoopPhase.EVALUATE: 8,
 }
 

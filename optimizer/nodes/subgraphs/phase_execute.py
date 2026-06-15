@@ -24,7 +24,7 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
-from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths
+from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
@@ -805,6 +805,7 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
             state.timing.latest_tns = tns
         if fe is not None:
             state.timing.latest_failing_endpoints = fe
+            refresh_violation_summary(state)
         if wns > state.timing.best_wns:
             state.timing.best_wns = wns
             state.timing.best_wns_iteration = state.iteration.current
@@ -1124,6 +1125,24 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 args[key] = skill_result_data[skill_key]
             elif isinstance(skill_key, bool):
                 args[key] = skill_key
+
+        # Handle incremental placement: inject reference_dcp if available
+        if args.pop("incremental", False):
+            ref = state.control.best_checkpoint_path
+            if ref and ref.exists():
+                args["incremental"] = True
+                args["reference_dcp"] = str(ref.resolve())
+                logger.info(f"[chain] Incremental place with reference={ref}")
+            else:
+                logger.info("[chain] Incremental place requested but no reference checkpoint — falling back to normal place")
+
+        # Handle route reuse: keep -reuse only if design has been routed
+        if args.pop("reuse", False):
+            if state.timing.route_status and state.timing.route_status.get("total_nets", 0) > 0:
+                args["reuse"] = True
+                logger.info("[chain] Route reuse enabled (design has prior routing)")
+            else:
+                logger.info("[chain] Route reuse requested but no prior routing — falling back to normal route")
 
         try:
             logger.info(f"[chain] Auto-executing {target_tool} after {tool_name}")

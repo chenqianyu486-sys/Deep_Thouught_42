@@ -9,6 +9,7 @@ from .timing import (
     parse_resource_utilization,
     is_valid_wns,
     compute_timing_hash,
+    compute_violation_summary,
 )
 from .constants import (
     TaskCategory,
@@ -70,7 +71,7 @@ from .trajectory import (
 __all__ = [
     # timing
     "parse_timing_summary", "parse_high_fanout_nets", "parse_resource_utilization",
-    "is_valid_wns", "compute_timing_hash",
+    "is_valid_wns", "compute_timing_hash", "compute_violation_summary",
     # constants
     "TaskCategory", "INFORMATION_PATTERNS", "OPTIMIZATION_PATTERNS",
     "ModelTier", "TOOL_MODEL_MAPPING", "ROUTING_FAILURE_PHRASES",
