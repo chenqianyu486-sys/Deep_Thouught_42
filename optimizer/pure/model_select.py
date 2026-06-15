@@ -27,6 +27,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_TCL_INFORMATION_PREFIXES = (
+    "report_",
+    "get_",
+    "list_",
+    "show_",
+    "check_",
+    "current_",
+    "all_",
+    "puts",
+    "llength",
+    "lsort",
+)
+
+_TCL_OPTIMIZATION_PREFIXES = (
+    "place_design",
+    "route_design",
+    "phys_opt_design",
+    "opt_design",
+    "set_property",
+    "reset_property",
+    "create_",
+    "delete_",
+    "resize_",
+    "add_",
+    "remove_",
+    "unplace_",
+)
+
+
+def classify_tcl_command(command: str) -> str:
+    """Classify a raw Vivado Tcl command by its first command token."""
+    first_line = str(command or "").strip().splitlines()[0:1]
+    if not first_line:
+        return TaskCategory.UNKNOWN
+    first_token = first_line[0].strip().split(maxsplit=1)[0].lower()
+    if not first_token:
+        return TaskCategory.UNKNOWN
+    if first_token.startswith(_TCL_OPTIMIZATION_PREFIXES):
+        return TaskCategory.OPTIMIZATION
+    if first_token.startswith(_TCL_INFORMATION_PREFIXES):
+        return TaskCategory.INFORMATION
+    return TaskCategory.UNKNOWN
+
+
 def classify_task(tool_name: str, arguments: dict | None = None) -> str:
     """Classify tool as INFORMATION / OPTIMIZATION / UNKNOWN."""
     if not tool_name:
@@ -34,16 +78,16 @@ def classify_task(tool_name: str, arguments: dict | None = None) -> str:
 
     name_lower = tool_name.lower()
 
+    if name_lower == "vivado_run_tcl" and arguments:
+        tcl_type = classify_tcl_command(str(arguments.get("command", "")))
+        if tcl_type != TaskCategory.UNKNOWN:
+            return tcl_type
+
     if any(p in name_lower for p in OPTIMIZATION_PATTERNS):
         return TaskCategory.OPTIMIZATION
 
     if any(p in name_lower for p in INFORMATION_PATTERNS):
         return TaskCategory.INFORMATION
-
-    if tool_name == "vivado_run_tcl" and arguments:
-        tcl_cmd = str(arguments.get("command", "")).lower()
-        if any(p in tcl_cmd for p in OPTIMIZATION_PATTERNS):
-            return TaskCategory.OPTIMIZATION
 
     return TaskCategory.UNKNOWN
 

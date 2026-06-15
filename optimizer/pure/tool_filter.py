@@ -174,7 +174,9 @@ PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
 PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
     LoopPhase.ANALYZE: 12,
     LoopPhase.SELECT_STRATEGY: 6,
-    LoopPhase.EXECUTE: 30,
+    # Keep EXECUTE short: strategies should run one modifying action and signal
+    # EXEC_DONE; longer loops previously wasted wall-clock time on plateaus.
+    LoopPhase.EXECUTE: 5,
     LoopPhase.EVALUATE: 8,
 }
 

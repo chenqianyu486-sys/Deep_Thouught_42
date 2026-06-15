@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -32,6 +33,27 @@ def _should_skip_structural(state: OptimizerState) -> bool:
     Phase 1 (structural comparison) would incorrectly flag these changes.
     """
     return "vivado_opt_design" in state.iteration.tools_used
+
+
+def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
+    """Classify Vivado design state from STATUS, falling back to timing summary."""
+    status = (status_text or "").strip().lower()
+    if "routed" in status:
+        return "routed"
+    if "placed" in status:
+        return "placed"
+
+    match = re.search(
+        r"Design\s+State\s*:\s*([A-Za-z_]+)",
+        timing_summary or "",
+        re.IGNORECASE,
+    )
+    if match:
+        state = match.group(1).lower()
+        if state in {"routed", "placed"}:
+            return state
+
+    return "unknown"
 
 
 async def _run_validation(
@@ -159,13 +181,28 @@ async def save_output_node(
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )
-            needs_routing = "Routed" not in status_result
+            design_state = _classify_design_state(status_result)
+            if design_state == "unknown":
+                timing_summary = await call_tool_fn(
+                    "vivado_report_timing_summary",
+                    {},
+                    deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
+                )
+                design_state = _classify_design_state(status_result, timing_summary)
+                if design_state != "unknown":
+                    logger.info(
+                        f"[save_output] Design state inferred from timing summary: {design_state}"
+                    )
+
+            needs_routing = design_state != "routed"
             if needs_routing:
                 # Try restoring from best checkpoint first (fast, ~9s)
                 if (state.control.best_checkpoint_path
                         and state.control.best_checkpoint_path.exists()):
                     logger.warning(
-                        f"[save_output] Design not routed (status: {status_result.strip()}). "
+                        f"[save_output] Design not routed (state: {design_state}, "
+                        f"status: {status_result.strip() or '<empty>'}). "
                         f"Restoring best checkpoint before save."
                     )
                     await call_tool_fn(
@@ -181,14 +218,24 @@ async def save_output_node(
                         deps.rapidwright_session, deps.vivado_session,
                         design_size_factor=state.timing.design_size_factor,
                     )
-                    if "Routed" in status_result:
+                    design_state = _classify_design_state(status_result)
+                    if design_state == "unknown":
+                        timing_summary = await call_tool_fn(
+                            "vivado_report_timing_summary",
+                            {},
+                            deps.rapidwright_session, deps.vivado_session,
+                            design_size_factor=state.timing.design_size_factor,
+                        )
+                        design_state = _classify_design_state(status_result, timing_summary)
+                    if design_state == "routed":
                         logger.info("[save_output] Best checkpoint restored and routed")
                         needs_routing = False
 
             if needs_routing:
-                if "Placed" not in status_result:
+                if design_state != "placed":
                     logger.warning(
-                        f"[save_output] Design still not placed (status: {status_result.strip()}). "
+                        f"[save_output] Design still not placed (state: {design_state}, "
+                        f"status: {status_result.strip() or '<empty>'}). "
                         f"Running emergency place+route."
                     )
                     await call_tool_fn(

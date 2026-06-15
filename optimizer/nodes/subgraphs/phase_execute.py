@@ -20,6 +20,7 @@ from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
@@ -69,6 +70,24 @@ SIDE_EFFECT_TOOLS = frozenset({
 #   - Execution tools (place_design=1800s, route_design=1800s) always reset counter
 #   - LLM round-trip latency ~5-15s → ~20-60s overhead per 4-round window
 NO_PROGRESS_LIMIT = 4
+
+# Once a timing-evaluated execution tool has a clear verdict, EXECUTE has
+# produced enough signal. Hand control to EVALUATE instead of asking the LLM
+# for another execution round just to decide what the verdict already implies.
+POST_EVAL_EXIT_VERDICTS = frozenset({"IMPROVED", "UNCHANGED", "REGRESSED"})
+
+
+def _execute_exit_reason_after_timing_update(
+    tool_name: str,
+    post_eval_verdict: str | None,
+    target_met: bool,
+) -> str:
+    """Return why EXECUTE should yield after an evaluated tool, or empty string."""
+    if target_met:
+        return "wns_target_met"
+    if tool_name in POST_EVAL_TOOLS and post_eval_verdict in POST_EVAL_EXIT_VERDICTS:
+        return f"post_eval_{post_eval_verdict.lower()}"
+    return ""
 
 
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -205,6 +224,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 except json.JSONDecodeError:
                     tool_args = {}
+                task_type = classify_task(tool_name, tool_args)
+                if task_type == "optimization" or (
+                    task_type != "unknown" and state.model.current_task_type != "optimization"
+                ):
+                    state.model.current_task_type = task_type
 
                 # Auto-inject critical_path_cells for pblock tools
                 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
@@ -411,8 +435,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         and deps.compat is not None):
                     deps.compat.add_message("user",
                         f"[GUIDANCE] {tool_name} produced no WNS improvement. "
-                        f"Consider calling report_step_state(EXEC_DONE) to let "
-                        f"EVALUATE switch strategy.")
+                        f"EXECUTE will yield to EVALUATE for strategy selection.")
 
                 # ── Level 1: RapidWright directional pre-check ──────────────
                 # Before paying the cost of the Vivado P&R chain (~900s), use
@@ -498,6 +521,35 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         state, "SYSTEM_EXIT", "large_regression",
                         phase="EXECUTE_STRATEGY",
                     )
+                    force_exit = True
+                    break
+
+                exit_reason = _execute_exit_reason_after_timing_update(
+                    tool_name,
+                    post_eval_verdict,
+                    _check_wns_target_met(state),
+                )
+                if exit_reason:
+                    if exit_reason == "wns_target_met":
+                        logger.info(
+                            green(
+                                f"[EXECUTE] WNS target met after {tool_name}; "
+                                f"yielding immediately"
+                            )
+                        )
+                        record_flow_signal(
+                            state, "DONE", exit_reason,
+                            phase="EXECUTE_STRATEGY",
+                        )
+                    else:
+                        logger.info(
+                            f"[EXECUTE] {tool_name} verdict={post_eval_verdict}; "
+                            f"yielding to EVALUATE"
+                        )
+                        record_flow_signal(
+                            state, "EXEC_DONE", exit_reason,
+                            phase="EXECUTE_STRATEGY",
+                        )
                     force_exit = True
                     break
 

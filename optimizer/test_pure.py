@@ -23,19 +23,32 @@ from optimizer.pure.timing import (
 from skills.pblock_strategy import compute_adaptive_resource_multiplier
 from optimizer.pure.model_select import (
     classify_task,
+    classify_tcl_command,
     compute_model_scores,
     select_model,
     estimate_context_complexity,
     get_task_capability_score,
 )
+from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS
 from optimizer.pure.iteration_logic import (
     update_iteration_counters,
+    update_task_type_stats,
     infer_strategy_from_tools,
     build_iteration_narrative,
 )
 
 
 # ── Timing tests ─────────────────────────────────────────────────
+
+class TestPhaseMaxRounds:
+    def test_execute_phase_round_limit_is_tight(self):
+        """EXECUTE must stay bounded to avoid wasting time on stalled strategies."""
+        assert PHASE_MAX_ROUNDS[LoopPhase.EXECUTE] == 5
+
+    def test_analysis_phases_keep_enough_budget(self):
+        assert PHASE_MAX_ROUNDS[LoopPhase.ANALYZE] >= PHASE_MAX_ROUNDS[LoopPhase.EXECUTE]
+        assert PHASE_MAX_ROUNDS[LoopPhase.EVALUATE] >= PHASE_MAX_ROUNDS[LoopPhase.EXECUTE]
+
 
 class TestParseTimingSummary:
     def test_standard_vivado_output(self):
@@ -204,11 +217,19 @@ class TestClassifyTask:
         assert result == "optimization"
 
     def test_vivado_run_tcl_info(self):
-        """Tool name 'report' matches, but vivado_run_tcl doesn't contain 'report'.
-        INFO patterns are only checked against tool_name, not TCL args.
-        """
         result = classify_task("vivado_run_tcl", {"command": "report_timing"})
-        assert result == "unknown"
+        assert result == "information"
+
+    def test_vivado_run_tcl_get_property_info(self):
+        result = classify_task("vivado_run_tcl", {"command": "get_property STATUS [current_design]"})
+        assert result == "information"
+
+    def test_vivado_run_tcl_set_property_optimization(self):
+        result = classify_task("vivado_run_tcl", {"command": "set_property IS_SOFT TRUE [get_pblocks p0]"})
+        assert result == "optimization"
+
+    def test_tcl_variable_assignment_unknown(self):
+        assert classify_tcl_command("set cells [get_cells *]") == "unknown"
 
     def test_empty_tool(self):
         assert classify_task("") == "unknown"
@@ -323,6 +344,26 @@ class TestUpdateIterationCounters:
         state = OptimizerState()
         update_iteration_counters(state, wns_improved=False, model_used="any")
         assert state.iteration.global_no_improvement == 1
+
+    def test_current_task_type_drives_worker_failure_tracking(self):
+        state = OptimizerState()
+        state.model.worker_model = "worker-v4"
+        state.model.current_task_type = "optimization"
+        update_iteration_counters(state, wns_improved=False, model_used="worker-v4")
+        assert state.model.worker_consecutive_failures == 1
+
+
+class TestUpdateTaskTypeStats:
+    def test_records_success_and_total(self):
+        state = OptimizerState()
+        update_task_type_stats(state, "information", success=True)
+        update_task_type_stats(state, "information", success=False)
+        assert state.model.task_type_stats["information"] == {"total": 2, "success": 1}
+
+    def test_ignores_unknown_task(self):
+        state = OptimizerState()
+        update_task_type_stats(state, "unknown", success=True)
+        assert state.model.task_type_stats == {}
 
 
 class TestInferStrategyFromTools:

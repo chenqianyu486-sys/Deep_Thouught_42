@@ -18,6 +18,9 @@ from optimizer.state import OptimizerState, TimingState, IterationState, Control
 from optimizer.deps import NodeDeps
 from optimizer.graph import NodeGraph
 from optimizer.edges import NodeName, after_init, after_check_exit
+from optimizer.nodes.check_exit import _competition_score_guard_reason
+from optimizer.nodes.save_output import _classify_design_state
+from optimizer.nodes.subgraphs.phase_execute import _execute_exit_reason_after_timing_update
 from optimizer.tracing import StateTracer
 
 
@@ -113,6 +116,122 @@ class TestEdges:
         state = OptimizerState()
         state.iteration.current = 5
         assert after_check_exit(state) == NodeName.ITERATION_START
+
+
+class TestSaveOutputHelpers:
+    def test_status_routed_takes_precedence(self):
+        assert _classify_design_state("Routed") == "routed"
+
+    def test_empty_status_uses_timing_summary_routed_state(self):
+        timing_summary = """
+        --------------------------------------------------------------------------------
+        Design Timing Summary
+        --------------------------------------------------------------------------------
+        Design State      : Routed
+        """
+        assert _classify_design_state("", timing_summary) == "routed"
+
+    def test_empty_status_uses_timing_summary_placed_state(self):
+        timing_summary = "Design State      : Placed"
+        assert _classify_design_state("", timing_summary) == "placed"
+
+    def test_unknown_when_no_state_signal_exists(self):
+        assert _classify_design_state("", "Timing unavailable") == "unknown"
+
+
+class TestExecutePhaseHelpers:
+    def test_target_met_exits_after_any_tool(self):
+        assert (
+            _execute_exit_reason_after_timing_update(
+                "rapidwright_search_cells",
+                None,
+                target_met=True,
+            )
+            == "wns_target_met"
+        )
+
+    @pytest.mark.parametrize(
+        ("verdict", "reason"),
+        [
+            ("IMPROVED", "post_eval_improved"),
+            ("UNCHANGED", "post_eval_unchanged"),
+            ("REGRESSED", "post_eval_regressed"),
+        ],
+    )
+    def test_post_eval_verdict_exits_for_evaluated_execution_tools(self, verdict, reason):
+        assert (
+            _execute_exit_reason_after_timing_update(
+                "vivado_route_design",
+                verdict,
+                target_met=False,
+            )
+            == reason
+        )
+
+    def test_unknown_verdict_does_not_exit(self):
+        assert (
+            _execute_exit_reason_after_timing_update(
+                "vivado_route_design",
+                None,
+                target_met=False,
+            )
+            == ""
+        )
+
+    def test_non_evaluated_tool_does_not_exit_without_target(self):
+        assert (
+            _execute_exit_reason_after_timing_update(
+                "rapidwright_search_cells",
+                "IMPROVED",
+                target_met=False,
+            )
+            == ""
+        )
+
+
+class TestCheckExitHelpers:
+    def test_score_guard_banks_recent_late_gain(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        reason = _competition_score_guard_reason(state, elapsed=3050.0)
+
+        assert reason.startswith("score_guard_bank_best:")
+        assert "gain=0.543ns" in reason
+
+    def test_score_guard_does_not_stop_before_late_window(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=2400.0) == ""
+
+    def test_score_guard_requires_recent_best_iteration(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 4
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=3200.0) == ""
+
+    def test_score_guard_requires_meaningful_gain(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 3
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.970
+        state.timing.best_wns_iteration = 3
+
+        assert _competition_score_guard_reason(state, elapsed=3050.0) == ""
 
 
 # ── Graph tests ─────────────────────────────────────────────────
