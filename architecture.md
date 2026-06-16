@@ -1101,9 +1101,10 @@ FORMAT_GUARD (~12行, 一次性注入)
   └── 格式禁令
 
 Dashboard (7模块, 每轮动态重建)
-  ├── 纯数据，无判断标签
-  ├── 相位过滤（ANALYZE 看 6 模块，EXECUTE 看 2 模块）
-  └── 作为最后一条 user 消息注入
+   ├── 纯数据，无判断标签
+   ├── 相位过滤（ANALYZE 看 6 模块，EXECUTE 看 2+摘要 模块）
+   ├── Module 2 含 path_clusters（路径聚类压缩）+ failing_endpoint_names（端点缓存）
+   └── 作为最后一条 user 消息注入
 
 Tool schema (按阶段过滤 + flow_control enum 动态 patch)
   └── LLM 通过工具定义获取参数信息

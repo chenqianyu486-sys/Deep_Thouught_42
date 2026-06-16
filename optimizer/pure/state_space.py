@@ -17,7 +17,9 @@ from ..state import (
     CriticalPathEntry,
     DashboardGlobalState,
     DashboardTimingPath,
+    DashboardPathCluster,
     DashboardTimingClusters,
+    DashboardViolationSummary,
     DashboardCongestionHotspot,
     DashboardPhysicalCongestion,
     DashboardHighFanoutNet,
@@ -26,9 +28,7 @@ from ..state import (
     DashboardDynamicGradient,
     DashboardArchitectureOverview,
     DashboardModuleEntry,
-    DashboardViolationSummary,
     StateSpace,
-    ViolationSummary,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT
 from .timing import compute_violation_summary
@@ -171,18 +171,39 @@ def _build_timing_clusters(state: OptimizerState) -> DashboardTimingClusters:
         failing_endpoints=state.timing.latest_failing_endpoints,
     )
     violation_summary = None
+    path_clusters: list[DashboardPathCluster] = []
     if vs_data is not None:
+        for c in vs_data.get("path_clusters", []):
+            path_clusters.append(DashboardPathCluster(
+                cluster_id=c["cluster_id"],
+                representative_path_idx=c["representative_path_idx"],
+                path_count=c["path_count"],
+                slack_range=(
+                    f"{c['worst_slack']:.3f}ns to {c['best_slack']:.3f}ns"
+                    if c["worst_slack"] is not None and c["best_slack"] is not None
+                    else "N/A"
+                ),
+                avg_logic_delay_pct=c["avg_logic_delay_pct"],
+                avg_logic_levels=c["avg_logic_levels"],
+                module=c["module"],
+            ))
         violation_summary = DashboardViolationSummary(
             total_failing_endpoints=vs_data["total_failing_endpoints"],
             severity_distribution=vs_data["severity_distribution"],
             delay_profile_breakdown=vs_data["delay_profile_breakdown"],
             logic_level_distribution=vs_data["logic_level_distribution"],
             top_violating_modules=vs_data["top_violating_modules"],
+            path_clusters=path_clusters,
         )
+
+    # Extract failing endpoint names from critical path cells (last cell = endpoint)
+    failing_endpoint_names = state.timing.failing_endpoint_names
 
     return DashboardTimingClusters(
         top_violating_paths=paths,
         violation_summary=violation_summary,
+        path_clusters=path_clusters if vs_data else [],
+        failing_endpoint_names=failing_endpoint_names,
     )
 
 
@@ -575,7 +596,11 @@ def format_state_space_for_llm(
         if tc.violation_summary is not None:
             lines.append("")
             lines.append(f"  # Violation summary: {tc.violation_summary.total_failing_endpoints or '?'} failing endpoints")
-            _format_violation_summary(lines, tc.violation_summary, indent="  ")
+            _format_violation_summary(
+                lines, tc.violation_summary, indent="  ",
+                path_clusters=tc.path_clusters,
+                failing_endpoint_names=tc.failing_endpoint_names,
+            )
         lines.append("")
 
     # ── Module 2b: Timing Violation Summary (compact, for EXECUTE/EVALUATE phases) ──
@@ -586,7 +611,11 @@ def format_state_space_for_llm(
         lines.append("timing_violation_summary:")
         if vs is not None:
             lines.append(f"  failing_endpoints: {_annotated_val(vs.total_failing_endpoints, reason='not_analyzed')}")
-            _format_violation_summary(lines, vs, indent="  ")
+            _format_violation_summary(
+                lines, vs, indent="  ",
+                path_clusters=tc.path_clusters,
+                failing_endpoint_names=tc.failing_endpoint_names,
+            )
         else:
             lines.append(f"  failing_endpoints: {_annotated_val(space.global_state.wns_setup, reason='not_analyzed')}")
             lines.append("  # No critical path data available for violation summary")
@@ -923,6 +952,8 @@ def _format_violation_summary(
     lines: list[str],
     vs: DashboardViolationSummary,
     indent: str = "",
+    path_clusters: list[DashboardPathCluster] | None = None,
+    failing_endpoint_names: list[str] | None = None,
 ) -> None:
     """Format violation summary YAML lines (used by both full and compact views)."""
     sev = vs.severity_distribution
@@ -960,3 +991,25 @@ def _format_violation_summary(
             min_slack = mod_data.get("min_slack")
             slack_str = f", min_slack={min_slack}ns" if min_slack is not None else ""
             lines.append(f"{indent}  {mod_name}: {endpoints} endpoints{slack_str}")
+
+    # Path clusters: representative path per (module, delay_profile) group
+    if path_clusters:
+        lines.append(f"{indent}path_clusters:  # Representative path per cluster")
+        for pc in path_clusters:
+            lines.append(f"{indent}  - cluster: {pc.cluster_id}")
+            lines.append(f"{indent}    path_count: {pc.path_count}")
+            lines.append(f"{indent}    slack_range: {pc.slack_range}")
+            if pc.avg_logic_delay_pct is not None:
+                lines.append(f"{indent}    avg_logic_delay_pct: {pc.avg_logic_delay_pct:.2f}")
+            if pc.avg_logic_levels is not None:
+                lines.append(f"{indent}    avg_logic_levels: {pc.avg_logic_levels:.1f}")
+            lines.append(f"{indent}    module: {pc.module}")
+
+    # Failing endpoint names (top violating path endpoints)
+    if failing_endpoint_names:
+        shown = failing_endpoint_names[:10]
+        lines.append(f"{indent}top_failing_endpoints:  # {len(failing_endpoint_names)} endpoints")
+        for ep in shown:
+            lines.append(f"{indent}  - {ep}")
+        if len(failing_endpoint_names) > 10:
+            lines.append(f"{indent}  # ... and {len(failing_endpoint_names) - 10} more")

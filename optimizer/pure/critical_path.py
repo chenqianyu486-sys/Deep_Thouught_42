@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
-from ..state import CriticalPathEntry, ViolationSummary
+from ..state import CriticalPathEntry, ViolationSummary, PathCluster
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def refresh_violation_summary(state: OptimizerState) -> None:
 
     Called when failing_endpoints changes without a critical path extraction,
     or whenever state timing data is updated. Safe to call repeatedly.
+    Also refreshes failing_endpoint_names from critical path cells.
     """
     from .timing import compute_violation_summary
     vs_data = compute_violation_summary(
@@ -43,15 +44,41 @@ def refresh_violation_summary(state: OptimizerState) -> None:
         failing_endpoints=state.timing.latest_failing_endpoints,
     )
     if vs_data is not None:
+        from ..state import ViolationSummary, PathCluster
+        path_clusters = [
+            PathCluster(
+                cluster_id=c["cluster_id"],
+                cluster_type=c["cluster_type"],
+                module=c["module"],
+                path_count=c["path_count"],
+                worst_slack=c["worst_slack"],
+                best_slack=c["best_slack"],
+                avg_logic_delay_pct=c["avg_logic_delay_pct"],
+                avg_logic_levels=c["avg_logic_levels"],
+                representative_cells=c["representative_cells"],
+            )
+            for c in vs_data.get("path_clusters", [])
+        ]
         state.timing.violation_summary = ViolationSummary(
             total_failing_endpoints=vs_data["total_failing_endpoints"],
             severity_distribution=vs_data["severity_distribution"],
             delay_profile_breakdown=vs_data["delay_profile_breakdown"],
             logic_level_distribution=vs_data["logic_level_distribution"],
             top_violating_modules=vs_data["top_violating_modules"],
+            path_clusters=path_clusters,
         )
     else:
         state.timing.violation_summary = None
+
+    # Refresh failing_endpoint_names from critical paths (last cell = endpoint)
+    if state.timing.critical_paths:
+        state.timing.failing_endpoint_names = [
+            path.cells[-1]
+            for path in state.timing.critical_paths
+            if path.cells
+        ]
+    else:
+        state.timing.failing_endpoint_names = []
 
 
 def parse_critical_path_cells(result: str) -> list[dict]:
@@ -148,14 +175,36 @@ def update_critical_paths(
         failing_endpoints=state.timing.latest_failing_endpoints,
     )
     if vs_data is not None:
-        from ..state import ViolationSummary
+        from ..state import ViolationSummary, PathCluster
+        path_clusters = [
+            PathCluster(
+                cluster_id=c["cluster_id"],
+                cluster_type=c["cluster_type"],
+                module=c["module"],
+                path_count=c["path_count"],
+                worst_slack=c["worst_slack"],
+                best_slack=c["best_slack"],
+                avg_logic_delay_pct=c["avg_logic_delay_pct"],
+                avg_logic_levels=c["avg_logic_levels"],
+                representative_cells=c["representative_cells"],
+            )
+            for c in vs_data.get("path_clusters", [])
+        ]
         state.timing.violation_summary = ViolationSummary(
             total_failing_endpoints=vs_data["total_failing_endpoints"],
             severity_distribution=vs_data["severity_distribution"],
             delay_profile_breakdown=vs_data["delay_profile_breakdown"],
             logic_level_distribution=vs_data["logic_level_distribution"],
             top_violating_modules=vs_data["top_violating_modules"],
+            path_clusters=path_clusters,
         )
+
+    # Refresh failing_endpoint_names from critical path cells (last cell = endpoint)
+    state.timing.failing_endpoint_names = [
+        path.cells[-1]
+        for path in state.timing.critical_paths
+        if path.cells
+    ]
 
     logger.info(
         f"[critical_path] Updated: {len(state.timing.critical_paths)} paths, "

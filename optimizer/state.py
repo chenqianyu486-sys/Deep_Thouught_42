@@ -54,6 +54,20 @@ class CriticalPathEntry:
 
 
 @dataclass
+class PathCluster:
+    """A cluster of similar timing paths derived from violation analysis."""
+    cluster_id: str = ""                 # e.g. "logic_deep_aes_core"
+    cluster_type: str = ""               # "logic_dominated" | "route_dominated" | "mixed"
+    module: str = ""                       # Primary module name
+    path_count: int = 0                   # Number of paths in this cluster
+    worst_slack: Optional[float] = None   # Worst slack in cluster
+    best_slack: Optional[float] = None     # Best (least negative) slack in cluster
+    avg_logic_delay_pct: Optional[float] = None
+    avg_logic_levels: Optional[float] = None
+    representative_cells: list[str] = field(default_factory=list)  # Up to 6 cells of worst path
+
+
+@dataclass
 class ViolationSummary:
     """Aggregated violation distribution for high-density LLM context.
 
@@ -65,6 +79,7 @@ class ViolationSummary:
     delay_profile_breakdown: dict[str, int] = field(default_factory=dict)
     logic_level_distribution: dict[str, int] = field(default_factory=dict)
     top_violating_modules: dict[str, dict] = field(default_factory=dict)
+    path_clusters: list[PathCluster] = field(default_factory=list)
 
 
 @dataclass
@@ -149,6 +164,8 @@ class TimingState:
     design_size_factor: float = 1.0
     # Aggregated violation distribution (populated from critical_paths + timing summary)
     violation_summary: Optional[ViolationSummary] = None
+    # Top failing endpoint names (last cell of each critical path), derived from critical_paths
+    failing_endpoint_names: list[str] = field(default_factory=list)
     # Flag: whether the design is NOT routed (detected from timing report Design State).
     # True = design is unplaced/unrouted → WNS may be inaccurate (false positive).
     # Updated by _post_eval_hook / _track_wns_from_result every time a timing report is parsed.
@@ -469,6 +486,7 @@ class DashboardViolationSummary:
     delay_profile_breakdown: dict[str, int] = field(default_factory=dict)
     logic_level_distribution: dict[str, int] = field(default_factory=dict)
     top_violating_modules: dict[str, dict] = field(default_factory=dict)
+    path_clusters: list[DashboardPathCluster] = field(default_factory=list)
 
 
 @dataclass
@@ -485,10 +503,24 @@ class DashboardTimingPath:
 
 
 @dataclass
+class DashboardPathCluster:
+    """A cluster of similar timing paths, with a representative path and statistics."""
+    cluster_id: str = ""                 # e.g. "logic_deep_aes_core"
+    representative_path_idx: int = 0      # Index into top_violating_paths
+    path_count: int = 0                   # Number of paths in this cluster
+    slack_range: str = ""                 # e.g. "-1.200ns to -0.850ns"
+    avg_logic_delay_pct: Optional[float] = None
+    avg_logic_levels: Optional[float] = None
+    module: str = ""                      # Primary module for this cluster
+
+
+@dataclass
 class DashboardTimingClusters:
     """Module 2 container: Top-N violating path endpoints + violation summary."""
     top_violating_paths: list[DashboardTimingPath] = field(default_factory=list)
     violation_summary: Optional[DashboardViolationSummary] = None
+    path_clusters: list[DashboardPathCluster] = field(default_factory=list)
+    failing_endpoint_names: list[str] = field(default_factory=list)
 
 
 @dataclass

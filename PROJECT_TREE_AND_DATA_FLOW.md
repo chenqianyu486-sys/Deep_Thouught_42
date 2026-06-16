@@ -63,7 +63,7 @@ fpl26_optimization_contest/
 
 ```
 OptimizerState (可变 dataclass，7 个子切片)
-├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT
+├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT/violation_summary(路径聚类)/failing_endpoint_names
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
@@ -238,6 +238,23 @@ timing_clusters:
     levels_gt_10: 60
   top_violating_modules:
     aes_core: 38 endpoints, min_slack=-0.52ns
+  path_clusters:  # Representative path per cluster (方案3: 路径聚类压缩)
+    - cluster: logic_dominated_aes_core
+      path_count: 12
+      slack_range: -1.200ns to -0.850ns
+      avg_logic_delay_pct: 0.82
+      avg_logic_levels: 14.0
+      module: aes_core
+    - cluster: route_dominated_pcie_ctrl
+      path_count: 25
+      slack_range: -0.600ns to -0.300ns
+      avg_logic_delay_pct: 0.25
+      avg_logic_levels: 3.5
+      module: pcie_ctrl
+  top_failing_endpoints:  # 方案6: 端点缓存
+    - top/aes_core/sbox/reg_0
+    - top/aes_core/mix_cols/reg_1
+    - top/pcie_ctrl/dma/reg_2
 
 # Module 3: Physical & Congestion Metrics
 physical_congestion:

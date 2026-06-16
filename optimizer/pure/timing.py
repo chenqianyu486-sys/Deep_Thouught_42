@@ -350,6 +350,7 @@ def compute_violation_summary(
                 "delay_profile_breakdown": {},
                 "logic_level_distribution": {},
                 "top_violating_modules": {},
+                "path_clusters": [],
             }
         return None
 
@@ -357,6 +358,9 @@ def compute_violation_summary(
     delay_profile = {"logic_dominated": 0, "route_dominated": 0, "mixed": 0}
     logic_levels = {"levels_1_to_5": 0, "levels_6_to_10": 0, "levels_gt_10": 0}
     module_stats: dict[str, dict] = {}
+
+    # Cluster accumulation: key = (module, delay_type)
+    cluster_acc: dict[tuple[str, str], list] = {}
 
     for entry in critical_paths:
         slack = entry.slack if hasattr(entry, 'slack') else entry.get("slack")
@@ -373,6 +377,7 @@ def compute_violation_summary(
         elif hasattr(entry, 'logic_delay_pct'):
             logic_pct = entry.logic_delay_pct
 
+        # Severity classification
         if slack is not None:
             if slack < -1.0:
                 severity["critical"] += 1
@@ -381,10 +386,14 @@ def compute_violation_summary(
             else:
                 severity["marginal"] += 1
 
+        # Delay profile classification
+        delay_type = "mixed"
         if logic_pct is not None:
             if logic_pct > 0.6:
+                delay_type = "logic_dominated"
                 delay_profile["logic_dominated"] += 1
             elif logic_pct < 0.4:
+                delay_type = "route_dominated"
                 delay_profile["route_dominated"] += 1
             else:
                 delay_profile["mixed"] += 1
@@ -397,6 +406,8 @@ def compute_violation_summary(
             else:
                 logic_levels["levels_gt_10"] += 1
 
+        # Module-level accumulation for endpoint stats
+        primary_module = ""
         for cell in cells:
             parts = cell.split("/")
             if len(parts) >= 2:
@@ -410,10 +421,22 @@ def compute_violation_summary(
                 if slack is not None:
                     if module_stats[module]["min_slack"] is None or slack < module_stats[module]["min_slack"]:
                         module_stats[module]["min_slack"] = round(slack, 3)
+                if not primary_module:
+                    primary_module = module
+
+        # Cluster accumulation
+        if primary_module:
+            cluster_key = (primary_module, delay_type)
+            if cluster_key not in cluster_acc:
+                cluster_acc[cluster_key] = []
+            cluster_acc[cluster_key].append(entry)
 
     top_modules = dict(
         sorted(module_stats.items(), key=lambda x: -x[1]["endpoint_count"])[:5]
     )
+
+    # Build path clusters with representatives
+    path_clusters = _build_path_clusters(cluster_acc, critical_paths)
 
     return {
         "total_failing_endpoints": failing_endpoints,
@@ -421,7 +444,81 @@ def compute_violation_summary(
         "delay_profile_breakdown": delay_profile,
         "logic_level_distribution": logic_levels,
         "top_violating_modules": top_modules,
+        "path_clusters": path_clusters,
     }
+
+
+def _build_path_clusters(
+    cluster_acc: dict[tuple[str, str], list],
+    critical_paths: list,
+) -> list[dict]:
+    """Build representative path clusters from accumulated data.
+
+    Groups paths by (module, delay_type), picks worst-slack representative,
+    and returns cluster descriptors with enough detail for LLM decision-making.
+    """
+    clusters = []
+    # Sort clusters by worst slack (most severe first)
+    sorted_keys = sorted(
+        cluster_acc.keys(),
+        key=lambda k: min(
+            (e.slack if hasattr(e, 'slack') and e.slack is not None else 0.0)
+            for e in cluster_acc[k]
+        ),
+    )
+
+    for module, delay_type in sorted_keys[:5]:  # Max 5 clusters
+        entries = cluster_acc[(module, delay_type)]
+        slacks = [
+            e.slack for e in entries
+            if hasattr(e, 'slack') and e.slack is not None
+        ]
+        levels_list = [
+            e.levels for e in entries
+            if hasattr(e, 'levels') and e.levels is not None
+        ]
+
+        # Find worst-slack path as representative
+        worst_entry = min(
+            entries,
+            key=lambda e: e.slack if hasattr(e, 'slack') and e.slack is not None else float('inf'),
+        )
+
+        # Get representative cells (up to 6)
+        rep_cells = []
+        if hasattr(worst_entry, 'cells') and worst_entry.cells:
+            rep_cells = worst_entry.cells[:6]
+
+        # Find the index of the representative path in the original critical_paths list
+        rep_idx = 0
+        for i, cp in enumerate(critical_paths):
+            if (hasattr(cp, 'cells') and hasattr(worst_entry, 'cells')
+                    and cp.cells == worst_entry.cells):
+                rep_idx = i
+                break
+
+        # Compute delay pct for representative
+        avg_logic_delay_pct = None
+        if hasattr(worst_entry, 'logic_delay') and worst_entry.logic_delay is not None:
+            total_delay = (worst_entry.logic_delay or 0) + (worst_entry.net_delay or 0)
+            if total_delay > 0:
+                avg_logic_delay_pct = round(worst_entry.logic_delay / total_delay, 4)
+
+        cluster = {
+            "cluster_id": f"{delay_type}_{module}",
+            "cluster_type": delay_type,
+            "module": module,
+            "path_count": len(entries),
+            "worst_slack": round(min(slacks), 3) if slacks else None,
+            "best_slack": round(max(slacks), 3) if slacks else None,
+            "avg_logic_delay_pct": avg_logic_delay_pct,
+            "avg_logic_levels": round(sum(levels_list) / len(levels_list), 1) if levels_list else None,
+            "representative_cells": rep_cells,
+            "representative_path_idx": rep_idx,
+        }
+        clusters.append(cluster)
+
+    return clusters
 
 
 def parse_hold_timing(timing_text: str) -> dict:
