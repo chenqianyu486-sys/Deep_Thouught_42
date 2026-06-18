@@ -25,7 +25,7 @@ import tempfile
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -862,7 +862,6 @@ proc __vd_find_clock_ports {} {
             ready_out = None
             payload_inputs = []
             valid_in = None
-            prefix = None
 
             if name.endswith('_cmd_valid'):
                 prefix = name[:-len('_cmd_valid')]
@@ -893,7 +892,6 @@ proc __vd_find_clock_ports {} {
             if not valid_in or not ready_out:
                 continue
 
-            assert prefix is not None
             iface_id = unique_iface_id(prefix)
             request_ifaces.append({
                 "id": iface_id,
@@ -1314,7 +1312,7 @@ endmodule
         
         logger.info(f"Generated testbench: {tb_path}")
     
-    async def phase2_functional_simulation(self) -> Union[bool, dict]:
+    async def phase2_functional_simulation(self) -> bool:
         """Phase 2: Functional simulation comparison."""
         print("\n" + "="*70)
         print("PHASE 2: FUNCTIONAL SIMULATION")
@@ -1463,7 +1461,7 @@ endmodule
             #
             # Lines we care about in Vivado funcsim output:
             #   "  module NAME"               -> declaration to rename
-            #   "  NAME inst_name (...)"       -> instantiation to rename
+            #   "  NAME inst_name (..."       -> instantiation to rename
             # Anything else (port lists, assigns, wires, comments, primitives
             # like LUT6/FDRE which are NOT in declared_module_names) is left alone.
             if declared_module_names:
@@ -1814,7 +1812,6 @@ endmodule
             self.phase2_skip_reason = phase2_result.get("reason", "Unknown reason")
             phase2_passed = True  # Don't fail validation if phase2 is skipped
         else:
-            assert isinstance(phase2_result, bool)
             phase2_passed = phase2_result
         
         elapsed = time.time() - start_time
