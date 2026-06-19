@@ -1601,21 +1601,13 @@ async def list_tools():
         ),
         Tool(
             name="place_design",
-            description="Run placement on the current design. Supports incremental placement via -incremental flag with a reference checkpoint.",
+            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "directive": {
                         "type": "string",
                         "description": "Placement directive (e.g., 'Default', 'Explore', 'Quick')"
-                    },
-                    "incremental": {
-                        "type": "boolean",
-                        "description": "Use incremental placement (-incremental) with reference_dcp. Reuses placement from reference checkpoint for unchanged logic, reducing runtime by 30-50%."
-                    },
-                    "reference_dcp": {
-                        "type": "string",
-                        "description": "Path to reference DCP checkpoint for incremental placement. Required when incremental=true."
                     },
                     "timeout": {
                         "type": "number",
@@ -2258,12 +2250,10 @@ async def call_tool(name: str, arguments: dict):
         
         elif name == "place_design":
             directive = arguments.get("directive")
-            incremental = arguments.get("incremental", False)
-            reference_dcp = arguments.get("reference_dcp")
             timeout = arguments.get("timeout", 3600)  # 1 hour default for placement
 
             # Log unexpected parameters to help debug LLM misuse
-            expected_keys = {"directive", "timeout", "incremental", "reference_dcp"}
+            expected_keys = {"directive", "timeout"}
             unexpected = set(arguments.keys()) - expected_keys
             if unexpected:
                 logger.warning(f"place_design: ignoring unexpected parameters: {unexpected}. "
@@ -2275,11 +2265,11 @@ async def call_tool(name: str, arguments: dict):
                     cmd += " -unplace"
                 else:
                     cmd += f" -directive {directive}"
-            if incremental and reference_dcp:
-                cmd += f" -incremental {{{reference_dcp}}}"
-                logger.info(f"place_design: incremental mode with reference={reference_dcp}")
-
             output = run_tcl_command(cmd, timeout=timeout)
+            # Detect Vivado errors — return JSON error so chain execution can detect failure
+            if re.search(r'^ERROR: \[', output, re.MULTILINE):
+                logger.error(f"place_design failed: {output[:300]}")
+                return [TextContent(type="text", text=json.dumps({"error": f"place_design failed: {output[:500]}"}))]
             return [TextContent(type="text", text=f"Placement complete.\n\n{output}")]
         
         elif name == "route_design":
@@ -2302,6 +2292,10 @@ async def call_tool(name: str, arguments: dict):
                 logger.info("route_design: reuse mode enabled")
 
             output = run_tcl_command(cmd, timeout=timeout)
+            # Detect Vivado errors — return JSON error so chain execution can detect failure
+            if re.search(r'^ERROR: \[', output, re.MULTILINE):
+                logger.error(f"route_design failed: {output[:300]}")
+                return [TextContent(type="text", text=json.dumps({"error": f"route_design failed: {output[:500]}"}))]
             return [TextContent(type="text", text=f"Routing complete.\n\n{output}")]
         
         elif name == "run_tcl":
@@ -2438,6 +2432,10 @@ async def call_tool(name: str, arguments: dict):
                     cmd += f" -path_groups {{{path_groups}}}"
             
             output = run_tcl_command(cmd, timeout=timeout)
+            # Detect Vivado errors — return JSON error so chain execution can detect failure
+            if re.search(r'^ERROR: \[', output, re.MULTILINE):
+                logger.error(f"phys_opt_design failed: {output[:300]}")
+                return [TextContent(type="text", text=json.dumps({"error": f"phys_opt_design failed: {output[:500]}"}))]
             return [TextContent(type="text", text=f"Physical optimization complete.\n\n{output}")]
 
         elif name == "physopt_and_route":
@@ -2486,6 +2484,9 @@ async def call_tool(name: str, arguments: dict):
             try:
                 cmd = f"phys_opt_design -directive {directive}"
                 physopt_output = run_tcl_command(cmd, timeout=timeout)
+                if re.search(r'^ERROR: \[', physopt_output, re.MULTILINE):
+                    error_messages.append(f"physopt_vivado_error: {physopt_output[:200]}")
+                    result["status"] = "partial"
                 result["physopt_output"] = physopt_output[:2000]
             except Exception as e:
                 error_messages.append(f"physopt_failed: {e}")
@@ -2495,6 +2496,9 @@ async def call_tool(name: str, arguments: dict):
             # Step 3: route_design
             try:
                 route_output = run_tcl_command("route_design", timeout=timeout)
+                if re.search(r'^ERROR: \[', route_output, re.MULTILINE):
+                    error_messages.append(f"route_vivado_error: {route_output[:200]}")
+                    result["status"] = "partial"
                 result["route_output"] = route_output[:2000]
             except Exception as e:
                 error_messages.append(f"route_failed: {e}")
@@ -2520,6 +2524,7 @@ async def call_tool(name: str, arguments: dict):
 
             if error_messages:
                 result["errors"] = error_messages
+                result["error"] = error_messages[0]  # Singular key for chain error detection
 
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
@@ -2549,6 +2554,11 @@ async def call_tool(name: str, arguments: dict):
                 cmd += " -retarget"
 
             result_text = run_tcl_command(cmd, timeout=timeout)
+
+            # Detect Vivado errors — return JSON error so chain execution can detect failure
+            if re.search(r'^ERROR: \[', result_text, re.MULTILINE):
+                logger.error(f"opt_design failed: {result_text[:300]}")
+                return [TextContent(type="text", text=json.dumps({"error": f"opt_design failed: {result_text[:500]}"}))]
 
             # Check for "no optimization" patterns
             no_opt_patterns = [

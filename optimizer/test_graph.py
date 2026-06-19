@@ -135,6 +135,12 @@ class TestSaveOutputHelpers:
         timing_summary = "Design State      : Placed"
         assert _classify_design_state("", timing_summary) == "placed"
 
+    def test_empty_status_uses_timing_summary_optimized_state(self):
+        # "Optimized" means the design is not yet placed (post-synthesis state).
+        # This must be recognized so save_output guard can detect unplaced designs.
+        timing_summary = "Design State      : Optimized"
+        assert _classify_design_state("", timing_summary) == "optimized"
+
     def test_unknown_when_no_state_signal_exists(self):
         assert _classify_design_state("", "Timing unavailable") == "unknown"
 

@@ -765,22 +765,30 @@ V2:
 
 ### 5.14 未布局 DCP 防护机制
 
-三层防护防止保存未布局/未布线的 DCP 作为输出：
+四层防护防止保存未布局/未布线的 DCP 作为输出：
 
 ```
 Layer 1: save_output 保存前检查
   save_output_node:
     1. 查询 get_property STATUS [current_design]
-    2. 若不含 "Routed":
-       - 若不含 "Placed": 自动执行 place_design + route_design
-       - 若含 "Placed": 自动执行 route_design
-    3. 修复后再写入输出 DCP
+    2. 回退到 report_timing_summary 的 "Design State" 字段
+       识别三种状态: routed / placed / optimized(未布局)
+    3. 若非 "routed":
+       - 尝试从 best_checkpoint 恢复(已布线, ~9s)
+       - 若仍需修复: 自动执行 place_design + route_design
+    4. 写入输出 DCP 后再次验证设计状态
+       若非 "routed": 记录 WARNING(DCP 可能损坏)
 
 Layer 2: EXECUTE 阶段虚假正 WNS 检测
   _post_eval_hook / _track_wns_from_result:
     1. 检查 report_timing_summary 输出中的 "Design State" 字段
     2. 若不含 "Routed": 记录警告 + 追加 "[WARNING: design not routed]" 到评估通知
     3. WNS 仍然更新（soft warning，不阻断 flow control）
+  Place-only WNS 检查 (phase_execute.py):
+    1. 解析 report_timing_summary 的 "Design State" 字段
+    2. 若为 "Optimized"(未布局): 跳过 WNS 检查
+       原因: 未布局设计使用估计延迟, WNS 虚假乐观
+    3. 仅在 "Placed" 或 "Routed" 状态下信任 place-only WNS
 
 Layer 3: EXECUTE 阶段 unplace 自动回滚
   run_execute_phase:
@@ -790,6 +798,17 @@ Layer 3: EXECUTE 阶段 unplace 自动回滚
     4. 阶段退出时若标志仍为 True:
        - 从 pre-unplace checkpoint 恢复
        - 刷新 WNS/TNS/FE
+
+Layer 4: Vivado 执行工具错误检测
+  VivadoMCP 服务器:
+    1. place_design / route_design / phys_opt_design / opt_design / physopt_and_route
+       在 run_tcl_command 返回后检测 ^ERROR: \[ 文本模式
+    2. 检测到错误: 返回 JSON {"error": "..."} 响应
+    3. 未检测到错误: 返回正常文本响应
+  phase_execute.py 链式执行:
+    1. 检查 JSON "error" 键(原有逻辑)
+    2. 检查文本 ^ERROR: \[ 模式(新增)
+    3. 任一检测到错误: 中止链 + 从 pre-chain checkpoint 恢复
 ```
 
 ### 5.15 429降级机制

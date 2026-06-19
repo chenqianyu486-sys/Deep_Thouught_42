@@ -268,7 +268,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
              "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
          }},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
     ],
     # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
@@ -282,7 +282,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_fanout_strategy": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
     ],
     # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
@@ -291,7 +291,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_opt_design_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore", "incremental": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},

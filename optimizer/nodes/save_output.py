@@ -41,7 +41,9 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
     )
     if match:
         state = match.group(1).lower()
-        if state in {"routed", "placed"}:
+        # "optimized" means the design is not yet placed (post-synthesis state).
+        # Recognize all known Vivado design states so we don't fall through to "unknown".
+        if state in {"routed", "placed", "optimized"}:
             return state
 
     return "unknown"
@@ -254,6 +256,29 @@ async def save_output_node(
                 logger.warning(f"[save_output] Failed to write DCP: {result}")
             else:
                 logger.info(f"[save_output] Output DCP written successfully")
+                # Verify design state after write — catch corrupt DCPs early
+                try:
+                    final_status = await call_tool_fn(
+                        "vivado_run_tcl",
+                        {"command": "get_property STATUS [current_design]"},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    final_ts = await call_tool_fn(
+                        "vivado_report_timing_summary",
+                        {},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    final_state = _classify_design_state(final_status, final_ts)
+                    if final_state not in ("routed",):
+                        logger.warning(
+                            f"[save_output] WARNING: Output DCP design state is '{final_state}' "
+                            f"(not 'routed'). The DCP may be corrupt — "
+                            f"validate_dcps.py will likely fail."
+                        )
+                except Exception as ve:
+                    logger.warning(f"[save_output] Post-write verification failed: {ve}")
         except Exception as e:
             logger.warning(f"[save_output] Failed to write output DCP: {e}")
 

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 
 from pathlib import Path
@@ -1126,16 +1127,6 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             elif isinstance(skill_key, bool):
                 args[key] = skill_key
 
-        # Handle incremental placement: inject reference_dcp if available
-        if args.pop("incremental", False):
-            ref = state.control.best_checkpoint_path
-            if ref and ref.exists():
-                args["incremental"] = True
-                args["reference_dcp"] = str(ref.resolve())
-                logger.info(f"[chain] Incremental place with reference={ref}")
-            else:
-                logger.info("[chain] Incremental place requested but no reference checkpoint — falling back to normal place")
-
         # Handle route reuse: keep -reuse only if design has been routed
         if args.pop("reuse", False):
             if state.timing.route_status and state.timing.route_status.get("total_nets", 0) > 0:
@@ -1166,6 +1157,11 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     step_failed = True
             except (json.JSONDecodeError, TypeError):
                 pass
+            # Also detect Vivado ERROR messages in plain-text tool output
+            # (place_design/route_design return text, not JSON)
+            if not step_failed and isinstance(raw_result, str):
+                if re.search(r'^ERROR: \[', raw_result, re.MULTILINE):
+                    step_failed = True
             status_label = "failed" if step_failed else "completed"
             if deps.compat is not None:
                 deps.compat.add_message("user",
@@ -1203,7 +1199,25 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     )
                     po_timing = parse_timing_summary(po_result)
                     po_wns = po_timing.get("wns")
-                    if po_wns is not None:
+                    # Guard: skip place-only WNS check if design is not actually placed.
+                    # An unplaced design (Design State: "Optimized") reports estimated
+                    # delays that are falsely optimistic.
+                    po_design_state = ""
+                    state_match = re.search(r'Design\s+State\s*:\s*(\w+)', po_result or "")
+                    if state_match:
+                        po_design_state = state_match.group(1)
+                    if po_design_state and po_design_state.lower() not in ("placed", "routed"):
+                        logger.warning(
+                            f"[PLACE-ONLY] Skipping WNS check for {tool_name}: "
+                            f"design state is '{po_design_state}' (not placed/routed). "
+                            f"WNS would be based on estimated delays."
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[PLACE-ONLY] {tool_name}: design not placed "
+                                f"(state={po_design_state}), skipping place-only WNS check."
+                            )
+                    elif po_wns is not None:
                         po_delta = po_wns - chain_baseline_wns
                         logger.info(
                             f"[PLACE-ONLY] {tool_name}: place-only WNS={po_wns:.3f}ns "

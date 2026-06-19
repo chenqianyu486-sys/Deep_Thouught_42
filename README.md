@@ -320,8 +320,9 @@ init_analysis ──► [WNS >= 0?]
 | 16 | **LLM 提示缓存** | 每次 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`。OpenRouter 在同一会话的重复调用间缓存系统提示前缀，每轮迭代节省约 4KB×44 次 ≈ 176KB tokens。共享函数 `build_llm_extra_body()` 位于 `optimizer/pure/constants.py`。 |
 | 17 | **Dashboard 数据可信度注解** | Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）。每个 N/A 和空列表携带机器可读原因: `"N/A(congestion_analysis_not_supported)"`、`[]  # no_high_fanout_nets_found`。 |
 | 18 | **Vivado 超时自动重启** | Tcl 超时会污染 Vivado session。不再使用不可靠的 `sync_after_timeout()`，改为 MCP server 内部自动 kill→restart→reopen DCP。移除 `_command_pending` 全局状态。 |
-| 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`。若设计未布线，自动执行 `place_design` + `route_design` 修复后再保存。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
-| 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。 |
+| 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`，回退到时序报告 `Design State` 字段（识别 `routed`/`placed`/`optimized` 三种状态）。若设计未布线，从 best_checkpoint 恢复或自动执行 `place_design` + `route_design` 修复后再保存。写入后再次验证设计状态，若非 `routed` 则记录警告。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
+| 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。Place-only WNS 检查也验证设计状态——若为 `Optimized`（未布局），跳过 WNS 检查避免基于估计延迟的虚假正信号。 |
+| 29 | **Vivado 执行工具错误检测** | `place_design`、`route_design`、`phys_opt_design`、`opt_design`、`physopt_and_route` 在 MCP 服务器中检测 Vivado `ERROR: [` 文本，返回 JSON `{"error": ...}` 响应。链式执行（`phase_execute.py`）同时检查 JSON `error` 键和文本 `ERROR: [` 模式，确保 Vivado 命令失败时链中止并回滚，而非静默继续。 |
 | 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
 | 22 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
 | 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
