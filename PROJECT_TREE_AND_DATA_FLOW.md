@@ -103,14 +103,14 @@ llm_tool_loop_node (调度器)
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
   │  策略说明+执行计划    全工具(~25个, 不含vivado_open_checkpoint)
-  │                      最多30轮, SKILL_CHAIN 自动串联
+  │                      默认最多5轮；复杂组合策略最多8轮；SKILL_CHAIN 自动串联
   │                      执行后可调 rapidwright_report_timing 快速反馈
   │
   ├── EXECUTE ─────────→ EVALUATE
   │  链式动作+事后评估    评估工具(~7个, 不含vivado_get_wns)
   │  工具结果缓存(同phase内相同参数自动命中, 执行工具后自动失效)
   │  PBLOCK自适应multiplier(公式C)
-  │  DCP身份保护          最多30轮
+  │  DCP身份保护          动态轮数预算（默认5，复杂策略8）
   │  设计一致性验证工具(4个)  LLM可自主验证设计状态
   │  独立RapidWright工具(19个)  LLM可自主选择工具组合
   │
@@ -465,4 +465,3 @@ EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
 ## 10. 设计一致性验证工具
 
 > 4 个验证工具 + 19 个独立 RapidWright 工具 + 可选链验证。完整清单和设计一致性约束见 [architecture.md §4.2](architecture.md)。
-

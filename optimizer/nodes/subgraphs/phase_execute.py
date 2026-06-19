@@ -18,7 +18,7 @@ from pathlib import Path
 from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal, record_strategy_failure
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
-from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
+from optimizer.pure.tool_filter import LoopPhase, filter_tools_for_phase, get_phase_max_rounds
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
@@ -97,7 +97,10 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     Returns:
         LoopPhase.EVALUATE (always, even on failure).
     """
-    max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.EXECUTE, 30)
+    max_rounds = get_phase_max_rounds(
+        LoopPhase.EXECUTE,
+        state.strategy.current_strategy,
+    )
     tool_round = 0
     tools_called: list[str] = []
     wns_before = state.timing.latest_wns

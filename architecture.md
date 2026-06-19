@@ -694,6 +694,11 @@ LLM 通过工具 schema 获取参数信息，无需重复文档。
 | EXECUTE | 全工具(~24个，不含vivado_open_checkpoint) | 执行策略工具，链式动作自动处理 | EXEC_DONE |
 | EVALUATE | 评估工具(~8个) | 对比WNS变化，决定下一步 | DONE/NEXT/SWITCH/CONTINUE |
 
+EXECUTE 阶段采用动态轮数预算：默认最多 5 轮；仅 `SmartRetiming` 和
+`PhysOpt+RegisterRetiming` 这类需要多步 LLM 协调的复杂策略放宽到 8 轮。
+PBLOCK、Fanout、RegisterRetiming、OptDesign、PhysOpt 的多步 P&R 已由
+`SKILL_CHAIN_ACTIONS` 自动完成，因此仍使用默认短预算。
+
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
 ### 5.7 工具重复检测器

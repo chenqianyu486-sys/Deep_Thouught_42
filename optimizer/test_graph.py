@@ -19,7 +19,10 @@ from optimizer.deps import NodeDeps
 from optimizer.graph import NodeGraph
 from optimizer.edges import NodeName, after_init, after_check_exit
 from optimizer.nodes.check_exit import _competition_score_guard_reason
-from optimizer.nodes.save_output import _classify_design_state
+from optimizer.nodes.save_output import (
+    _classify_design_state,
+    _restore_best_checkpoint_for_delivery,
+)
 from optimizer.nodes.subgraphs.phase_execute import _execute_exit_reason_after_timing_update
 from optimizer.tracing import StateTracer
 
@@ -143,6 +146,59 @@ class TestSaveOutputHelpers:
 
     def test_unknown_when_no_state_signal_exists(self):
         assert _classify_design_state("", "Timing unavailable") == "unknown"
+
+    def test_restore_best_checkpoint_before_delivery(self, tmp_path, monkeypatch):
+        checkpoint = tmp_path / "best_checkpoint.dcp"
+        checkpoint.touch()
+        state = OptimizerState()
+        state.control.best_checkpoint_path = checkpoint
+        state.timing.best_wns = -0.452
+        deps = NodeDeps(vivado_session=object())
+        calls = []
+
+        async def fake_call_tool(name, arguments, *args, **kwargs):
+            calls.append((name, arguments))
+            if name == "vivado_open_checkpoint":
+                return "Opened checkpoint"
+            if name == "vivado_report_timing_summary":
+                return "WNS(ns) TNS(ns) Failing Endpoints\n-0.452 -397.976 1462"
+            raise AssertionError(f"unexpected tool: {name}")
+
+        monkeypatch.setattr(
+            "optimizer.nodes.save_output.call_tool_fn", fake_call_tool
+        )
+
+        restored = run_async(_restore_best_checkpoint_for_delivery(state, deps))
+
+        assert restored is True
+        assert [name for name, _ in calls] == [
+            "vivado_open_checkpoint",
+            "vivado_report_timing_summary",
+        ]
+        assert calls[0][1]["dcp_path"] == str(checkpoint.resolve())
+        assert state.control.current_dcp_path == checkpoint.resolve()
+        assert state.timing.latest_wns == -0.452
+
+    def test_wns_mismatch_preserves_incremental_output(self, tmp_path, monkeypatch):
+        checkpoint = tmp_path / "best_checkpoint.dcp"
+        checkpoint.touch()
+        state = OptimizerState()
+        state.control.best_checkpoint_path = checkpoint
+        state.timing.best_wns = -0.452
+        deps = NodeDeps(vivado_session=object())
+
+        async def fake_call_tool(name, arguments, *args, **kwargs):
+            if name == "vivado_open_checkpoint":
+                return "Opened checkpoint"
+            return "WNS(ns) TNS(ns) Failing Endpoints\n-0.698 -500.000 1500"
+
+        monkeypatch.setattr(
+            "optimizer.nodes.save_output.call_tool_fn", fake_call_tool
+        )
+
+        restored = run_async(_restore_best_checkpoint_for_delivery(state, deps))
+
+        assert restored is False
 
 
 class TestExecutePhaseHelpers:

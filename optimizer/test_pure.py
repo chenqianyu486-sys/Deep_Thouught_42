@@ -29,7 +29,7 @@ from optimizer.pure.model_select import (
     estimate_context_complexity,
     get_task_capability_score,
 )
-from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS
+from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, get_phase_max_rounds
 from optimizer.pure.iteration_logic import (
     update_iteration_counters,
     update_task_type_stats,
@@ -48,6 +48,13 @@ class TestPhaseMaxRounds:
     def test_analysis_phases_keep_enough_budget(self):
         assert PHASE_MAX_ROUNDS[LoopPhase.ANALYZE] >= PHASE_MAX_ROUNDS[LoopPhase.EXECUTE]
         assert PHASE_MAX_ROUNDS[LoopPhase.EVALUATE] >= PHASE_MAX_ROUNDS[LoopPhase.EXECUTE]
+
+    @pytest.mark.parametrize("strategy", ["SmartRetiming", "PhysOpt+RegisterRetiming"])
+    def test_complex_execute_strategies_get_extended_budget(self, strategy):
+        assert get_phase_max_rounds(LoopPhase.EXECUTE, strategy) == 8
+
+    def test_auto_chained_strategy_keeps_tight_budget(self):
+        assert get_phase_max_rounds(LoopPhase.EXECUTE, "PBLOCK") == 5
 
 
 class TestParseTimingSummary:

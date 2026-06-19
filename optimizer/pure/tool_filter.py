@@ -176,11 +176,23 @@ PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
     LoopPhase.SELECT_STRATEGY: 6,
     # Keep EXECUTE short: strategies should run one modifying action and signal
     # EXEC_DONE; longer loops previously wasted wall-clock time on plateaus.
-    # Increased from 5 to 10 to allow complex strategies (PBLOCK chain with
-    # corrections, multi-step retiming) to complete without premature exit.
-    LoopPhase.EXECUTE: 10,
+    LoopPhase.EXECUTE: 5,
     LoopPhase.EVALUATE: 8,
 }
+
+EXTENDED_EXECUTE_MAX_ROUNDS = 8
+EXTENDED_EXECUTE_STRATEGIES: frozenset[str] = frozenset({
+    "SmartRetiming",
+    "PhysOpt+RegisterRetiming",
+})
+
+
+def get_phase_max_rounds(phase: LoopPhase, strategy: str = "") -> int:
+    """Return the round budget, extending only genuinely multi-step strategies."""
+    default = PHASE_MAX_ROUNDS.get(phase, 0)
+    if phase == LoopPhase.EXECUTE and strategy in EXTENDED_EXECUTE_STRATEGIES:
+        return max(default, EXTENDED_EXECUTE_MAX_ROUNDS)
+    return default
 
 
 def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict]:

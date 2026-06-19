@@ -19,11 +19,13 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
-from ..pure.timing import parse_hold_timing
+from ..pure.timing import parse_hold_timing, parse_timing_summary
 from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
 logger = logging.getLogger(__name__)
+
+BEST_WNS_VERIFY_TOLERANCE_NS = 0.005
 
 
 def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
@@ -47,6 +49,79 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
             return state
 
     return "unknown"
+
+
+async def _restore_best_checkpoint_for_delivery(
+    state: OptimizerState, deps: NodeDeps
+) -> bool:
+    """Restore and verify the checkpoint that owns ``best_wns``.
+
+    Returning False tells the caller to preserve the incrementally written
+    output instead of overwriting it with the current, potentially regressed,
+    Vivado design.
+    """
+    best_checkpoint = state.control.best_checkpoint_path
+    if best_checkpoint is None:
+        logger.warning(
+            "[save_output] No best checkpoint is available; delivering current design"
+        )
+        return True
+    if not best_checkpoint.exists():
+        logger.error(
+            f"[save_output] Best checkpoint is missing: {best_checkpoint}. "
+            "Preserving the incremental output DCP."
+        )
+        return False
+
+    try:
+        logger.info(f"[save_output] Restoring best checkpoint: {best_checkpoint}")
+        result = await call_tool_fn(
+            "vivado_open_checkpoint",
+            {"dcp_path": str(best_checkpoint.resolve())},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        if "error" in result.lower():
+            logger.error(
+                f"[save_output] Could not restore best checkpoint: {result[:300]}"
+            )
+            return False
+
+        timing_report = await call_tool_fn(
+            "vivado_report_timing_summary",
+            {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        verified_wns = parse_timing_summary(timing_report).get("wns")
+        if verified_wns is None:
+            logger.error(
+                "[save_output] Could not verify best checkpoint WNS; "
+                "preserving the incremental output DCP"
+            )
+            return False
+        if (state.timing.best_wns != float('-inf')
+                and abs(verified_wns - state.timing.best_wns)
+                > BEST_WNS_VERIFY_TOLERANCE_NS):
+            logger.error(
+                f"[save_output] Best checkpoint WNS mismatch: "
+                f"verified={verified_wns:.3f}ns, cached={state.timing.best_wns:.3f}ns. "
+                "Preserving the incremental output DCP."
+            )
+            return False
+
+        state.control.current_dcp_path = best_checkpoint.resolve()
+        state.timing.latest_wns = verified_wns
+        logger.info(
+            f"[save_output] Best checkpoint verified: WNS={verified_wns:.3f}ns"
+        )
+        return True
+    except Exception as e:
+        logger.error(
+            f"[save_output] Failed to restore best checkpoint: {e}. "
+            "Preserving the incremental output DCP."
+        )
+        return False
 
 
 async def _run_validation(
@@ -138,8 +213,15 @@ async def save_output_node(
     print(f"  Elapsed:       {elapsed:.1f}s ({elapsed_min:.1f}min)")
     print(f"{'='*70}\n")
 
-    # Check hold timing before final save (competition requirement)
+    # The current Vivado design may have regressed after the best result was
+    # recorded. Restore the checkpoint that actually owns best_wns before any
+    # final checks or writes.
+    delivery_ready = True
     if state.control.output_dcp and deps.vivado_session:
+        delivery_ready = await _restore_best_checkpoint_for_delivery(state, deps)
+
+    # Check hold timing on the design that will be delivered.
+    if state.control.output_dcp and deps.vivado_session and delivery_ready:
         try:
             logger.info("[save_output] Checking hold timing...")
             hold_report = await call_tool_fn(
@@ -161,9 +243,7 @@ async def save_output_node(
             logger.warning(f"[save_output] Hold timing check failed: {e}")
 
     # Guard: check design is routed before saving DCP.
-    # Prefer restoring from best checkpoint (routed, ~9s) over emergency
-    # place+route (~37s). The best checkpoint is always fully routed.
-    if state.control.output_dcp and deps.vivado_session:
+    if state.control.output_dcp and deps.vivado_session and delivery_ready:
         try:
             status_result = await call_tool_fn(
                 "vivado_run_tcl",
@@ -242,8 +322,9 @@ async def save_output_node(
         except Exception as e:
             logger.warning(f"[save_output] Design state check/repair failed: {e}")
 
-    # Write output DCP
-    if state.control.output_dcp and deps.vivado_session:
+    # Write output DCP only after the best checkpoint was restored and verified.
+    # On restore failure, the incrementally saved best output remains untouched.
+    if state.control.output_dcp and deps.vivado_session and delivery_ready:
         try:
             logger.info(f"[save_output] Writing output DCP to {state.control.output_dcp}")
             result = await call_tool_fn(
