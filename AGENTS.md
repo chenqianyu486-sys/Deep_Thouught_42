@@ -1,3 +1,9 @@
+# Project Objectives
+Implement an FPGA back-end timing closure agent that optimizes `.dcp` files, with the following requirements:  
+- Ensure that the logical equivalence of the optimized design remains unchanged.  
+- Develop a comprehensive toolchain and strategy library that covers various optimization methods for different types of designs.  
+- Employ elegant context engineering and loop engineering to provide the LLM with accurate and sufficient information for making optimization decisions.
+
 # ALWAYS:
 **ALWAYS read `README.md` & `PROJECT_TREE_AND_DATA_FLOW.md` before exploring the code.**
 **ALWAYS update `README.md`、`PROJECT_TREE_AND_DATA_FLOW.md` & `architecture.md` after task accomplished(if necessary).**
