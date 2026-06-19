@@ -15,20 +15,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
-from ..state import CriticalPathEntry, ViolationSummary, PathCluster
+from ..state import CriticalPathEntry, ViolationSummary, PathCluster, PathNode, ClockDomainInfo
 
 logger = logging.getLogger(__name__)
 
 # Maximum paths to keep in state
-MAX_CRITICAL_PATHS = 10
+MAX_CRITICAL_PATHS = 15
 
 # Maximum paths to show in context/handoff
-DISPLAY_LIMIT_SNAPSHOT = 8
+DISPLAY_LIMIT_SNAPSHOT = 10
 DISPLAY_LIMIT_HANDOFF_PLANNER = 5
 DISPLAY_LIMIT_HANDOFF_WORKER = 3
 
 # Maximum cell names to show per path in display
-DISPLAY_CELLS_PER_PATH = 6
+DISPLAY_CELLS_PER_PATH = 10
+
+# Maximum delay hotspots to show per path (D1)
+MAX_DELAY_HOTSPOTS = 5
 
 
 def refresh_violation_summary(state: OptimizerState) -> None:
@@ -117,15 +120,25 @@ def parse_critical_path_cells(result: str) -> list[dict]:
         paths = []
         for item in data:
             if isinstance(item, dict) and "cells" in item:
-                # New format: dict with cells + timing fields
+                # New format: dict with cells + timing fields + D1/D2 diagnostic fields
                 cells = [str(c) for c in item["cells"]]
                 if len(cells) >= 2:
                     paths.append({
+                        # Legacy fields
                         "cells": cells,
                         "slack": item.get("slack"),
                         "logic_delay": item.get("logic_delay"),
                         "net_delay": item.get("net_delay"),
                         "levels": item.get("levels"),
+                        # D1: per-node breakdown
+                        "nodes": item.get("nodes", []),
+                        "startpoint": item.get("startpoint", ""),
+                        "endpoint_pin": item.get("endpoint_pin", ""),
+                        "arrival_time": item.get("arrival_time"),
+                        "required_time": item.get("required_time"),
+                        "top_delay_nodes": item.get("top_delay_nodes", []),
+                        # D2: clock-domain context
+                        "clock": item.get("clock", {}),
                     })
             elif isinstance(item, list) and len(item) >= 2:
                 # Legacy format: plain list of cell names
@@ -162,6 +175,15 @@ def update_critical_paths(
             logic_delay=p.get("logic_delay"),
             net_delay=p.get("net_delay"),
             levels=p.get("levels"),
+            # D1: per-node breakdown
+            nodes=[PathNode(**n) for n in p.get("nodes", []) if isinstance(n, dict)],
+            startpoint=p.get("startpoint", ""),
+            endpoint_pin=p.get("endpoint_pin", ""),
+            arrival_time=p.get("arrival_time"),
+            required_time=p.get("required_time"),
+            top_delay_nodes=[PathNode(**n) for n in p.get("top_delay_nodes", []) if isinstance(n, dict)],
+            # D2: clock-domain context
+            clock=ClockDomainInfo(**(p.get("clock") or {})),
         )
         for p in sorted_paths
     ]
@@ -213,6 +235,31 @@ def update_critical_paths(
     )
 
 
+def derive_cells_rich(entry: CriticalPathEntry) -> list[dict]:
+    """Derive rich cell descriptors from a CriticalPathEntry's nodes.
+
+    Returns cells in the format expected by critical_path_cell_replication
+    skill: [{"name": str, "delay": float, "type": str, "fanout": int}, ...].
+    Only cell-kind nodes with a non-None incr_delay are included.
+
+    This fixes a pre-existing mismatch: the replication skill expected
+    cells:[{name,delay,type,fanout}] but extract_critical_path_cells
+    returned cells:list[str]. With D1's per-node breakdown, we can now
+    provide the rich format the skill was designed for.
+    """
+    rich = []
+    for node in entry.nodes:
+        if node.kind != "cell":
+            continue
+        rich.append({
+            "name": node.name,
+            "delay": node.incr_delay if node.incr_delay is not None else 0.0,
+            "type": node.cell_type or "unknown",
+            "fanout": node.fanout if node.fanout is not None else 0,
+        })
+    return rich
+
+
 def format_critical_paths_snapshot(
     critical_paths: list[CriticalPathEntry],
     limit: int = DISPLAY_LIMIT_SNAPSHOT,
@@ -237,6 +284,15 @@ def format_critical_paths_snapshot(
             detail_parts.append(f"net={entry.net_delay:.3f}ns")
         if entry.levels is not None:
             detail_parts.append(f"L={entry.levels}")
+        # D1/D2: diagnostic summary
+        if entry.startpoint:
+            # startpoint is cell/pin; show cell name (second-to-last path segment)
+            sp_parts = entry.startpoint.rsplit('/', 1)
+            detail_parts.append(f"src={sp_parts[0].rsplit('/', 1)[-1] if len(sp_parts) > 1 else entry.startpoint}")
+        if entry.clock.clock_skew is not None:
+            detail_parts.append(f"skew={entry.clock.clock_skew:.3f}ns")
+        if entry.clock.is_cross_clock:
+            detail_parts.append("CROSS-CLOCK")
         detail_parts.append(f"iter {entry.iteration}")
 
         lines.append(f"path{i+1}: {cells_preview} ({', '.join(detail_parts)})")
@@ -256,10 +312,14 @@ def format_critical_paths_handoff(
         cells_preview = " -> ".join(entry.cells[:DISPLAY_CELLS_PER_PATH])
         if len(entry.cells) > DISPLAY_CELLS_PER_PATH:
             cells_preview += " -> ..."
-        # Include slack if available
+        # Build detail suffix with D1/D2 diagnostics
+        detail_parts = [f"{entry.path_length} cells"]
         if entry.slack is not None:
-            lines.append(f"- Path {i+1} ({entry.path_length} cells, slack={entry.slack:.3f}ns): {cells_preview}")
-        else:
-            lines.append(f"- Path {i+1} ({entry.path_length} cells): {cells_preview}")
+            detail_parts.append(f"slack={entry.slack:.3f}ns")
+        if entry.clock.clock_skew is not None:
+            detail_parts.append(f"skew={entry.clock.clock_skew:.3f}ns")
+        if entry.clock.is_cross_clock:
+            detail_parts.append("CROSS-CLOCK")
+        lines.append(f"- Path {i+1} ({', '.join(detail_parts)}): {cells_preview}")
 
     return "\n".join(lines)

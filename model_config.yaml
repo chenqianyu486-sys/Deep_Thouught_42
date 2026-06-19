@@ -9,9 +9,9 @@ worker:
   reasoning_enabled: true                     # Enable reasoning/thinking mode for worker
   reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
   max_tokens: 250000
-  soft_threshold: 175000       # Trigger soft compression at 175K (70% of max) to leave room for current task
+  soft_threshold: 180000       # Trigger soft compression at 180K (72% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
-  token_budget: 80000        # Target compressed output ~80K tokens (32% of max)
+  token_budget: 100000        # Target compressed output ~100K tokens (40% of max) — bumped for D1/D2 timing diagnostics
   preserve_turns: 40         # Recent turns to preserve in normal mode
   preserve_turns_aggressive: 10  # Recent turns to preserve in aggressive mode
   min_importance_threshold: 0.15    # Minimum importance score (normal mode)
@@ -29,9 +29,9 @@ planner:
   max_tokens: 1000000
   reasoning_enabled: true                     # Enable reasoning/thinking mode for planner
   reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
-  soft_threshold: 200000      # Trigger soft compression at 200K (20% of max)
+  soft_threshold: 250000      # Trigger soft compression at 250K (25% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
-  token_budget: 80000        # Target compressed output ~80K tokens (8% of max)
+  token_budget: 120000        # Target compressed output ~120K tokens (12% of max) — bumped for D1/D2 timing diagnostics
   preserve_turns: 60         # Recent turns to preserve in normal mode
   preserve_turns_aggressive: 10  # Recent turns to preserve in aggressive mode
   min_importance_threshold: 0.1    # Minimum importance score (normal mode)

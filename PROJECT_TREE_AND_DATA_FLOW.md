@@ -216,11 +216,21 @@ global_state:
 timing_clusters:
   top_paths:
     - endpoint: u_core/u_alu/reg_0
+      startpoint: u_core/launch_ff/Q          # D1: launch cell/pin (was missing)
+      source_clock: clk_a                      # D2: real clock (was string-guessed)
+      dest_clock: clk_b
+      cross_clock: true                        # D2: cross-clock flag
       slack: -0.523
+      clock_skew: 0.014ns                      # D2: Clock Path Skew
+      clock_uncertainty: 0.035ns               # D2: Clock Uncertainty
       logic_delay_pct: 0.45
       route_delay_pct: 0.55
       logic_levels: 12
-      path_group: clk_fpl26contest
+      path_group: clk_a
+      delay_hotspots:  # top contributors (D1: per-node delay breakdown)
+        - u_core/lut1 [LUT6] 0.082ns (16%) @ SLICE_X2Y2
+        - u_core/launch_ff [FDRE] 0.079ns (15%) @ SLICE_X1Y1
+        - u_core/n2 [net] 0.065ns (13%)
 
   # Violation summary: compact aggregate (always shown with full Module 2)
   severity_distribution:

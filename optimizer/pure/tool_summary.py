@@ -22,8 +22,11 @@ def filter_tool_result(tool_name: str, result: str, truncate_limit: int = TOOL_R
     if len(result) <= truncate_limit:
         return result
 
-    # Timing reports: retain WNS/TNS/key path summary
-    if 'timing' in tool_name.lower():
+    # Timing reports + critical path extraction: retain WNS/TNS/key path summary.
+    # extract_critical_path_cells returns JSON that must not be mid-stream truncated
+    # (would produce invalid JSON for the LLM), so route it through the timing branch.
+    tool_lower = tool_name.lower()
+    if 'timing' in tool_lower or 'critical_path' in tool_lower:
         lines = result.split('\n')
         kept_lines = []
         for line in lines:
@@ -82,8 +85,11 @@ def summarize_tool_result(
     line_count = len(lines)
     char_count = len(raw_result)
 
-    # Bypass summarization for compact outputs
-    if char_count < SMALL_OUTPUT_THRESHOLD and 'timing' not in tool_name:
+    # Bypass summarization for compact outputs.
+    # extract_critical_path_cells excluded from bypass: even small JSON should
+    # go through the dedicated summary branch to extract D1/D2 diagnostics.
+    if char_count < SMALL_OUTPUT_THRESHOLD and 'timing' not in tool_name \
+            and tool_name != 'vivado_extract_critical_path_cells':
         indent = '\n'.join('    ' + line for line in lines)
         return (
             f"tool_result:\n"
@@ -218,6 +224,50 @@ def summarize_tool_result(
         except Exception:
             pass
 
+    elif tool_name == "vivado_extract_critical_path_cells":
+        # D1/D2: extract diagnostic summary from per-node breakdown + clock context
+        try:
+            data = json.loads(raw_result)
+            if isinstance(data, dict) and "error" in data:
+                summary_parts.append(f"Error: {data['error'][:200]}")
+                status = "error"
+            elif isinstance(data, list):
+                path_count = len(data)
+                summary_parts.append(f"Extracted {path_count} critical paths")
+                key_details["path_count"] = path_count
+                if data:
+                    worst = data[0]  # paths sorted by slack (worst first)
+                    if worst.get("slack") is not None:
+                        key_details["worst_slack"] = round(worst["slack"], 3)
+                        summary_parts.append(f"WNS: {worst['slack']:.3f}ns")
+                    if worst.get("startpoint"):
+                        key_details["worst_startpoint"] = worst["startpoint"]
+                    if worst.get("endpoint_pin"):
+                        key_details["worst_endpoint"] = worst["endpoint_pin"]
+                    clk = worst.get("clock", {})
+                    if clk.get("clock_skew") is not None:
+                        key_details["worst_clock_skew"] = round(clk["clock_skew"], 3)
+                    if clk.get("clock_uncertainty") is not None:
+                        key_details["worst_clock_uncertainty"] = round(clk["clock_uncertainty"], 3)
+                    if clk.get("is_cross_clock"):
+                        key_details["worst_is_cross_clock"] = True
+                    # Top delay hotspots from worst path
+                    top_nodes = worst.get("top_delay_nodes", [])
+                    if top_nodes:
+                        hotspots = []
+                        for n in top_nodes[:3]:
+                            hotspots.append({
+                                "name": n.get("name", ""),
+                                "type": n.get("cell_type") or n.get("kind", ""),
+                                "incr": round(n.get("incr_delay", 0), 3) if n.get("incr_delay") is not None else None,
+                            })
+                        key_details["top_delay_hotspots"] = hotspots
+                        hs_str = ", ".join(f"{h['name']}={h['incr']:.3f}ns" for h in hotspots if h.get('incr') is not None)
+                        if hs_str:
+                            summary_parts.append(f"Top hotspots: {hs_str}")
+        except (json.JSONDecodeError, Exception):
+            pass
+
     elif tool_name == "vivado_create_and_apply_pblock":
         has_validation_failure = False
         for line in lines:
@@ -306,7 +356,8 @@ def summarize_tool_result(
         was_truncated = True
     elif tool_name.startswith("rapidwright_"):
         was_truncated = False
-    elif tool_name in ("vivado_extract_critical_path_pins", "vivado_create_and_apply_pblock"):
+    elif tool_name in ("vivado_extract_critical_path_pins", "vivado_create_and_apply_pblock",
+                       "vivado_extract_critical_path_cells"):
         was_truncated = False
 
     # Fallback: generic truncation

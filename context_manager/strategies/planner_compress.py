@@ -59,8 +59,8 @@ class PlannerCompressor(YAMLStructuredCompressor):
         if ('timing' in content_lower and
             ('wns' in content_lower or 'slack' in content_lower or 'critical' in content_lower)):
             if content.count('\n') > 20:
-                return 12000
-            return 10000
+                return 16000  # bumped from 12000 for D1/D2 per-node delay breakdown
+            return 12000
 
         if 'utilization' in content_lower or 'resource' in content_lower:
             return 5000

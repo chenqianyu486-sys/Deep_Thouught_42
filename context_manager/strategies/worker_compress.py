@@ -60,8 +60,8 @@ class WorkerCompressor(YAMLStructuredCompressor):
         if ('timing' in content_lower and
             ('wns' in content_lower or 'slack' in content_lower or 'critical' in content_lower)):
             if content.count('\n') > 20:
-                return 4000
-            return 3000
+                return 8000  # bumped from 4000 for D1/D2 per-node delay breakdown
+            return 5000
 
         if 'utilization' in content_lower or 'resource' in content_lower:
             return 2000

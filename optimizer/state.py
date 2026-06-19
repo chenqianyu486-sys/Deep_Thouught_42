@@ -42,6 +42,44 @@ class PhaseEntry:
 
 
 @dataclass
+class PathNode:
+    """Single node (cell or net) on a timing path with its delay contribution.
+
+    Populated by D1: structured per-node delay breakdown extracted from
+    Vivado report_timing Data Path Delay section, replacing the old
+    aggregate-only logic_delay/net_delay summing.
+    """
+    kind: str = ""              # "cell" | "net"
+    name: str = ""              # cell name (pin suffix stripped) or net name
+    cell_type: str = ""         # cell type: LUT6/CARRY8/FDRE/MUXF7/DSP_A_B_DATA... (cell only)
+    location: str = ""          # SLICE_X91Y106 / DSP48E2_X10Y46 (cell only)
+    incr_delay: Optional[float] = None   # incremental delay (ns) — the key diagnostic field
+    cumul_delay: Optional[float] = None  # cumulative arrival time at this node (ns)
+    fanout: Optional[int] = None         # net fanout (net only, from "fo=N")
+    net_status: str = ""                 # "routed" | "unset" | "" (net only)
+
+
+@dataclass
+class ClockDomainInfo:
+    """Clock-domain context for a single timing path.
+
+    Populated by D2: extracted from report_timing header fields (Source,
+    Destination, Path Group, Clock Path Skew, Clock Uncertainty), replacing
+    the old string-guessing of clock domain from cell names.
+    """
+    source_clock: str = ""          # launch clock name
+    dest_clock: str = ""            # capture clock name
+    path_group: str = ""            # Path Group
+    path_type: str = ""             # "Setup (Max at Slow Process Corner)" etc.
+    requirement: Optional[float] = None     # clock requirement (ns)
+    clock_skew: Optional[float] = None      # Clock Path Skew (ns) = DCD - SCD + CPR
+    clock_uncertainty: Optional[float] = None  # Clock Uncertainty (ns)
+    source_clock_delay: Optional[float] = None # SCD (ns)
+    dest_clock_delay: Optional[float] = None   # DCD (ns)
+    is_cross_clock: bool = False    # source_clock != dest_clock
+
+
+@dataclass
 class CriticalPathEntry:
     """Single critical path with cell list and per-path timing detail."""
     cells: list[str] = field(default_factory=list)
@@ -51,6 +89,15 @@ class CriticalPathEntry:
     logic_delay: Optional[float] = None   # total logic delay (ns)
     net_delay: Optional[float] = None     # total net delay (ns)
     levels: Optional[int] = None          # logic levels/depth
+    # D1: per-node delay breakdown (replaces aggregate-only summing)
+    nodes: list[PathNode] = field(default_factory=list)
+    startpoint: str = ""                                     # launch cell/pin (was discarded)
+    endpoint_pin: str = ""                                   # capture cell/pin (full, not just cell name)
+    arrival_time: Optional[float] = None                     # final arrival time (ns)
+    required_time: Optional[float] = None                    # required time (ns)
+    top_delay_nodes: list[PathNode] = field(default_factory=list)  # top contributors by incr_delay
+    # D2: clock-domain context (replaces string-guessing in _convert_critical_path)
+    clock: ClockDomainInfo = field(default_factory=ClockDomainInfo)
 
 
 @dataclass
@@ -500,6 +547,13 @@ class DashboardTimingPath:
     route_delay_pct: Optional[float] = None   # 0.0~1.0
     logic_levels: Optional[int] = None
     path_group: str = ""                       # clock domain group label
+    # D1/D2: diagnostic detail (populated from CriticalPathEntry)
+    startpoint: str = ""                  # launch cell/pin (was missing)
+    clock_skew: Optional[float] = None    # D2: Clock Path Skew (ns)
+    clock_uncertainty: Optional[float] = None  # D2: Clock Uncertainty (ns)
+    is_cross_clock: bool = False          # D2: source_clock != dest_clock
+    delay_hotspots: list[dict] = field(default_factory=list)
+    # e.g. [{"name":"u/carry7","type":"CARRY8","incr":0.082,"pct_of_path":0.16,"location":"SLICE_X.."}]
 
 
 @dataclass

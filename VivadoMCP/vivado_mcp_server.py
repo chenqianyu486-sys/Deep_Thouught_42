@@ -629,11 +629,16 @@ def extract_critical_path_cells(
     timeout: float = 600.0
 ) -> str:
     """
-    Extract cell names and per-path timing data from critical timing paths.
+    Extract cell names and per-path timing data from critical timings paths.
 
     Parses timing report to get ordered list of cells on each critical path,
     along with slack, logic delay, net delay, and logic levels.
     Output is JSON format that can be passed to RapidWright's analyze_critical_path_spread.
+
+    D1/D2 enhancement: also extracts per-node delay breakdown (PathNode list),
+    clock-domain context (skew, uncertainty, source/dest clock), startpoint,
+    and top delay hotspots. The legacy `cells` field is derived from nodes
+    for backward compatibility.
 
     Args:
         num_paths: Number of critical paths to extract
@@ -654,92 +659,246 @@ def extract_critical_path_cells(
     except Exception as e:
         return json.dumps({"error": f"Error generating timing report: {str(e)}"})
 
-    # Parse paths
+    # Split into per-path sections. Each path starts with "Slack (".
     path_sections = re.split(r'Slack \(', timing_report)
 
+    # ── Header field regexes (D2: clock-domain context) ──
+    RE_SOURCE       = re.compile(r'^\s*Source:\s+(\S+)')
+    RE_DEST         = re.compile(r'^\s*Destination:\s+(\S+)')
+    RE_CLK_PAREN    = re.compile(r'clocked by (\S+)\s')
+    RE_PATH_GROUP   = re.compile(r'^\s*Path Group:\s+(\S+)')
+    RE_PATH_TYPE    = re.compile(r'^\s*Path Type:\s+(.+)')
+    RE_REQUIREMENT  = re.compile(r'^\s*Requirement:\s+([\d.]+)ns')
+    RE_DATA_PATH    = re.compile(r'Data Path Delay:\s+([\d.]+)ns\s+\(logic\s+([\d.]+)ns.*route\s+([\d.]+)ns')
+    RE_LOGIC_LEVELS = re.compile(r'^\s*Logic Levels:\s+(\d+)')
+    RE_SKEW         = re.compile(r'^\s*Clock Path Skew:\s+([\d.]+)ns')
+    RE_DCD          = re.compile(r'Destination Clock Delay \(DCD\):\s+([\d.]+)ns')
+    RE_SCD          = re.compile(r'Source Clock Delay\s+\(SCD\):\s+([\d.]+)ns')
+    RE_UNCERT       = re.compile(r'^\s*Clock Uncertainty:\s+([\d.]+)ns')
+    RE_REQ_TIME     = re.compile(r'^\s*required time\s+([\d.]+)')
+    RE_ARR_TIME     = re.compile(r'^\s*arrival time\s+(-?[\d.]+)')
+    RE_SLACK_LINE   = re.compile(r'^\s*slack\s+(-?[\d.]+)')
+
+    # ── Data path node regexes (D1: per-node delay breakdown) ──
+    # Cell line: "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)" — Location + CellType + optional (Prop_)
+    RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\)\s*$')
+    # Cell line without Prop_ (endpoint cell, pin on same line): "    DSP48E2_X10Y46  DSP_A_B_DATA  r  cell/pin"
+    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)')
+    # Delay line: "                              0.079  0.108 r  cell/pin"
+    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)')
+    # Net line: "                         net (fo=28, routed)          0.357     0.465    netname"
+    RE_NET_LINE     = re.compile(r'^\s*net\s+\(fo=(\d+),\s*(\w+)\)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\S+)')
+
+    # Pin suffixes for stripping cell names from pin references
     PIN_SUFFIXES = ('/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
                     '/I0', '/I1', '/I2', '/I3', '/I4', '/I5', '/I6')
-    PIN_RE = re.compile(
-        r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$'
-    )
-    # Match delay columns: cumulative + incremental
-    # Supports formats: "0.000    0.225  ..." and "0    0.225  ..." (integer cumul.)
-    DELAY_RE = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+')
+    PIN_RE = re.compile(r'^([\w/\[\].]+)/([I]\d|D|O|Q|C|CE|R|S|CLR|PRE)$')
 
     all_paths = []
 
-    for path_section in path_sections[1:]:  # Skip first (header)
-        # Extract slack from first line: "VIOLATED): -0.493ns" or "MET): 0.025ns"
+    for path_section in path_sections[1:]:  # Skip first (header before any path)
+        lines = path_section.split('\n')
+
+        # ── Phase 1: parse header (before first --- separator) ──
+        header = {
+            "source": "", "dest": "", "source_clock": "", "dest_clock": "",
+            "path_group": "", "path_type": "", "requirement": None,
+            "data_path_delay": None, "logic_delay_total": None, "net_delay_total": None,
+            "logic_levels": None, "clock_skew": None, "clock_uncertainty": None,
+            "source_clock_delay": None, "dest_clock_delay": None,
+            "required_time": None, "arrival_time": None, "slack": None,
+        }
+        first_dash_idx = None
+        for i, line in enumerate(lines):
+            if re.match(r'^-{3,}', line.strip()):
+                first_dash_idx = i
+                break
+            stripped = line.strip()
+            m = RE_SOURCE.match(line)
+            if m: header["source"] = m.group(1); continue
+            m = RE_DEST.match(line)
+            if m: header["dest"] = m.group(1); continue
+            m = RE_CLK_PAREN.search(line)
+            if m:
+                # First "clocked by" is source clock, second is dest clock
+                if not header["source_clock"]:
+                    header["source_clock"] = m.group(1)
+                else:
+                    header["dest_clock"] = m.group(1)
+                continue
+            m = RE_PATH_GROUP.match(line)
+            if m: header["path_group"] = m.group(1); continue
+            m = RE_PATH_TYPE.match(line)
+            if m: header["path_type"] = m.group(1).strip(); continue
+            m = RE_REQUIREMENT.match(line)
+            if m: header["requirement"] = float(m.group(1)); continue
+            m = RE_DATA_PATH.search(line)
+            if m:
+                header["data_path_delay"] = float(m.group(1))
+                header["logic_delay_total"] = float(m.group(2))
+                header["net_delay_total"] = float(m.group(3))
+                continue
+            m = RE_LOGIC_LEVELS.match(line)
+            if m: header["logic_levels"] = int(m.group(1)); continue
+            m = RE_SKEW.match(line)
+            if m: header["clock_skew"] = float(m.group(1)); continue
+            m = RE_DCD.search(line)
+            if m: header["dest_clock_delay"] = float(m.group(1)); continue
+            m = RE_SCD.search(line)
+            if m: header["source_clock_delay"] = float(m.group(1)); continue
+            m = RE_UNCERT.match(line)
+            if m: header["clock_uncertainty"] = float(m.group(1)); continue
+
+        # Slack from first line: "VIOLATED): -0.493ns" or "MET): 0.025ns"
         slack = None
-        slack_match = re.search(r'(-?\d+\.\d+)ns', path_section.split('\n')[0])
+        slack_match = re.search(r'(-?\d+\.\d+)ns', lines[0]) if lines else None
         if slack_match:
             slack = float(slack_match.group(1))
+        header["slack"] = slack
 
-        # Parse data path section (between ---2--- and ---3---)
-        cell_names = []
-        logic_delay = 0.0
-        net_delay = 0.0
-        levels = 0
-        last_cumulative = 0.0
-        in_data_path = False
+        # ── Phase 2: parse data path (between ---2 and ---3) ──
+        # Section structure: ---1 (clock launch) ---2 (data path) ---3 (clock capture + slack)
+        nodes = []
         dash_count = 0
+        pending_cell = None  # (location, cell_type) awaiting its delay line
 
-        for line in path_section.split('\n'):
+        for line in lines[first_dash_idx:] if first_dash_idx is not None else []:
             stripped = line.strip()
-
-            # Detect section boundaries (same as extract_critical_path_pins)
             if re.match(r'^-{3,}', stripped):
                 dash_count += 1
-                if dash_count <= 2:
-                    continue  # Skip clock launch (---1 to ---2)
-                elif dash_count >= 3:
-                    break  # End of data path
-
-            if dash_count < 2:
+                # If a pending cell was never followed by a delay line, emit it with incr=0
+                if pending_cell and dash_count > 2:
+                    loc, ctype = pending_cell
+                    nodes.append({
+                        "kind": "cell", "name": _strip_pin_suffix("", ""),  # no pin known
+                        "cell_type": ctype, "location": loc,
+                        "incr_delay": 0.0, "cumul_delay": None,
+                        "fanout": None, "net_status": "",
+                    })
+                    pending_cell = None
                 continue
-            in_data_path = True
+            if dash_count != 2:
+                continue  # only parse data path section
 
-            # Parse delay values: "X.XXX  Y.YYY  cell/pin  ..."
-            delay_match = DELAY_RE.match(line)
-            incr_delay = float(delay_match.group(2)) if delay_match else 0.0
-            # Track last cumulative delay for net_delay fallback
-            if delay_match:
-                last_cumulative = float(delay_match.group(1))
+            # Try net line first (most specific)
+            m = RE_NET_LINE.match(line)
+            if m:
+                fanout = int(m.group(1))
+                net_status = m.group(2)
+                incr = float(m.group(3))
+                cumul = float(m.group(4))
+                net_name = m.group(5)
+                nodes.append({
+                    "kind": "net", "name": net_name, "cell_type": "", "location": "",
+                    "incr_delay": incr, "cumul_delay": cumul,
+                    "fanout": fanout, "net_status": net_status,
+                })
+                continue
 
-            # Classify line: logic (has pin suffix) or net
-            has_pin = False
-            for part in stripped.split():
-                if PIN_RE.match(part):
-                    has_pin = True
-                    # Extract cell name (remove pin suffix)
-                    cell_path = part
-                    for suffix in PIN_SUFFIXES:
-                        if cell_path.endswith(suffix):
-                            cell_path = cell_path[:-len(suffix)]
-                            break
-                    if cell_path and cell_path not in cell_names:
-                        cell_names.append(cell_path)
-                    break
+            # Try cell line with Prop_ (sets pending_cell, delay on next line)
+            m = RE_CELL_LINE.match(line)
+            if m:
+                pending_cell = (m.group(1), m.group(2))  # (location, cell_type)
+                continue
 
-            if has_pin:
-                logic_delay += incr_delay
-                levels += 1
-            elif stripped.startswith('net') or (delay_match and not has_pin):
-                net_delay += incr_delay
+            # Try delay line (consumes pending_cell)
+            m = RE_DELAY_LINE.match(line)
+            if m:
+                incr = float(m.group(1))
+                cumul = float(m.group(2))
+                pin = m.group(4)
+                if pending_cell:
+                    loc, ctype = pending_cell
+                    cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
+                    nodes.append({
+                        "kind": "cell", "name": cell_name, "cell_type": ctype, "location": loc,
+                        "incr_delay": incr, "cumul_delay": cumul,
+                        "fanout": None, "net_status": "",
+                    })
+                    pending_cell = None
+                else:
+                    # Delay line without preceding cell line — treat as cell with unknown type
+                    cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
+                    nodes.append({
+                        "kind": "cell", "name": cell_name, "cell_type": "", "location": "",
+                        "incr_delay": incr, "cumul_delay": cumul,
+                        "fanout": None, "net_status": "",
+                    })
+                continue
 
-        # Fallback: if net_delay is 0 but total path delay > logic delay,
-        # the DELAY_RE regex may have failed to match net lines.
-        # Use cumulative total minus logic delay as net_delay estimate.
-        if net_delay == 0.0 and logic_delay > 0.0 and last_cumulative > logic_delay:
-            net_delay = last_cumulative - logic_delay
+            # Try bare cell line (endpoint cell: pin on same line, no delay)
+            m = RE_CELL_LINE_BARE.match(line)
+            if m and not pending_cell:
+                loc = m.group(1)
+                ctype = m.group(2)
+                pin = m.group(4)
+                cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
+                nodes.append({
+                    "kind": "cell", "name": cell_name, "cell_type": ctype, "location": loc,
+                    "incr_delay": 0.0, "cumul_delay": None,
+                    "fanout": None, "net_status": "",
+                })
+                continue
 
-        if len(cell_names) >= 2:
+        # ── Phase 3: parse required/arrival/slack (after ---3) ──
+        for line in lines[first_dash_idx:] if first_dash_idx is not None else []:
+            stripped = line.strip()
+            if re.match(r'^-{3,}', stripped):
+                continue
+            m = RE_REQ_TIME.match(line)
+            if m: header["required_time"] = float(m.group(1)); continue
+            m = RE_ARR_TIME.match(line)
+            if m: header["arrival_time"] = float(m.group(1)); continue
+
+        # ── Phase 4: assemble path dict ──
+        # Derive cells from nodes (M3: single source of truth)
+        cell_names = [n["name"] for n in nodes if n["kind"] == "cell" and n["name"]]
+
+        # Aggregate logic/net delay from nodes (fallback if header parse failed)
+        logic_total = header["logic_delay_total"]
+        if logic_total is None:
+            logic_total = round(sum(n["incr_delay"] or 0 for n in nodes if n["kind"] == "cell"), 4)
+        net_total = header["net_delay_total"]
+        if net_total is None:
+            net_total = round(sum(n["incr_delay"] or 0 for n in nodes if n["kind"] == "net"), 4)
+
+        # Top delay hotspots (top-3 by incr_delay)
+        top_nodes = sorted(
+            [n for n in nodes if n.get("incr_delay") is not None and n["incr_delay"] > 0],
+            key=lambda n: n["incr_delay"], reverse=True
+        )[:3]
+
+        is_cross = bool(header["source_clock"] and header["dest_clock"] and
+                        header["source_clock"] != header["dest_clock"])
+
+        if len(cell_names) >= 2 or len(nodes) >= 2:
             all_paths.append({
+                # Legacy fields (backward compat)
                 "cells": cell_names,
                 "slack": round(slack, 4) if slack is not None else None,
-                "logic_delay": round(logic_delay, 4),
-                "net_delay": round(net_delay, 4),
-                "levels": levels,
+                "logic_delay": round(logic_total, 4),
+                "net_delay": round(net_total, 4),
+                "levels": header["logic_levels"],
+                # D1: per-node breakdown
+                "nodes": nodes,
+                "startpoint": header["source"],
+                "endpoint_pin": header["dest"],
+                "arrival_time": header["arrival_time"],
+                "required_time": header["required_time"],
+                "top_delay_nodes": top_nodes,
+                # D2: clock-domain context
+                "clock": {
+                    "source_clock": header["source_clock"],
+                    "dest_clock": header["dest_clock"],
+                    "path_group": header["path_group"],
+                    "path_type": header["path_type"],
+                    "requirement": header["requirement"],
+                    "clock_skew": header["clock_skew"],
+                    "clock_uncertainty": header["clock_uncertainty"],
+                    "source_clock_delay": header["source_clock_delay"],
+                    "dest_clock_delay": header["dest_clock_delay"],
+                    "is_cross_clock": is_cross,
+                },
             })
 
     # Write to file if specified, otherwise return JSON
@@ -759,6 +918,28 @@ def extract_critical_path_cells(
             return json.dumps({"error": f"Error writing to file: {str(e)}"})
     else:
         return json.dumps(all_paths)
+
+
+def _strip_pin_suffix(pin: str, suffixes) -> str:
+    """Strip pin suffix from a cell/pin reference to get the cell name.
+
+    e.g. "u_top/lut1/I0" -> "u_top/lut1", "u_top/ff/Q" -> "u_top/ff",
+    "u_top/dsp/CEA2" -> "u_top/dsp".
+
+    Uses rsplit('/', 1) because pin names never contain '/' while cell
+    hierarchy paths do. The `suffixes` arg is kept for backward-compat
+    signature but is no longer the primary mechanism.
+
+    Returns empty string if pin is empty.
+    """
+    if not pin:
+        return ""
+    # Pin is always the last path segment after the final '/'
+    parts = pin.rsplit('/', 1)
+    if len(parts) > 1:
+        return parts[0]
+    # No '/' — return as-is (may be a bare cell name)
+    return pin
 
 
 def extract_critical_path_pins(

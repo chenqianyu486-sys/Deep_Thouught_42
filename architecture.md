@@ -191,15 +191,57 @@ inject_context_snapshot_at_end(api_messages):
 **数据结构**（`optimizer/state.py`）：
 ```python
 @dataclass
+class PathNode:
+    """D1: Single node (cell or net) on a timing path with per-node delay."""
+    kind: str = ""              # "cell" | "net"
+    name: str = ""              # cell name (pin suffix stripped) or net name
+    cell_type: str = ""         # LUT6/CARRY8/FDRE/MUXF7/DSP_A_B_DATA... (cell only)
+    location: str = ""          # SLICE_X91Y106 / DSP48E2_X10Y46 (cell only)
+    incr_delay: Optional[float] = None   # incremental delay (ns) — key diagnostic field
+    cumul_delay: Optional[float] = None  # cumulative arrival time at this node (ns)
+    fanout: Optional[int] = None         # net fanout (net only)
+    net_status: str = ""                 # "routed" | "unset" (net only)
+
+@dataclass
+class ClockDomainInfo:
+    """D2: Clock-domain context for a single timing path."""
+    source_clock: str = ""          # launch clock name
+    dest_clock: str = ""            # capture clock name
+    path_group: str = ""            # Path Group
+    path_type: str = ""             # "Setup (Max at Slow Process Corner)" etc.
+    requirement: Optional[float] = None
+    clock_skew: Optional[float] = None      # Clock Path Skew (ns)
+    clock_uncertainty: Optional[float] = None  # Clock Uncertainty (ns)
+    source_clock_delay: Optional[float] = None # SCD (ns)
+    dest_clock_delay: Optional[float] = None   # DCD (ns)
+    is_cross_clock: bool = False    # source_clock != dest_clock
+
+@dataclass
 class CriticalPathEntry:
-    cells: list[str]           # Ordered cell names on this path
-    path_length: int = 0       # Number of cells
-    iteration: int = 0         # When this path was extracted
-    slack: Optional[float] = None        # Per-path slack (ns)
-    logic_delay: Optional[float] = None   # Total logic delay (ns)
-    net_delay: Optional[float] = None     # Total net delay (ns)
-    levels: Optional[int] = None          # Logic levels/depth
+    cells: list[str]           # Ordered cell names (derived from nodes, backward compat)
+    path_length: int = 0
+    iteration: int = 0
+    slack: Optional[float] = None
+    logic_delay: Optional[float] = None   # total logic delay (ns)
+    net_delay: Optional[float] = None     # total net delay (ns)
+    levels: Optional[int] = None
+    # D1: per-node delay breakdown (replaces aggregate-only summing)
+    nodes: list[PathNode] = field(default_factory=list)
+    startpoint: str = ""                  # launch cell/pin (was discarded)
+    endpoint_pin: str = ""                # capture cell/pin (full)
+    arrival_time: Optional[float] = None
+    required_time: Optional[float] = None
+    top_delay_nodes: list[PathNode] = field(default_factory=list)  # top-3 by incr_delay
+    # D2: clock-domain context (replaces string-guessing in _convert_critical_path)
+    clock: ClockDomainInfo = field(default_factory=ClockDomainInfo)
 ```
+
+**D1/D2 上下文工程改进**（2026-06）：
+- **D1 逐点延迟分解**: `extract_critical_path_cells` 不再求和丢弃逐点增量，而是保留每 cell 的 `incr_delay`/`cell_type`/`location` 和每 net 的 `incr_delay`/`fanout`/`net_status`。LLM 可定位"12 级路径中第 7 个 CARRY8 占了 0.4ns"这类关键事实。
+- **D2 时钟域上下文**: 解析 `report_timing` header 的 `Clock Path Skew`/`Clock Uncertainty`/`Source`/`Destination`/`Path Group`，替代旧的字符串猜测时钟域（`_convert_critical_path` 不再硬编码 `clk_fpl26contest`）。
+- **延迟霸主热点**: `top_delay_nodes`（top-3 by incr_delay）+ Dashboard M2 `delay_hotspots` 字段，让 LLM 在 ANALYZE 阶段看到完整列表，EXECUTE/EVALUATE 阶段看到单行摘要。
+- **cells_rich 派生**: `derive_cells_rich()` 从 nodes 派生 `[{name,delay,type,fanout}]` 供 `critical_path_cell_replication` skill 消费（修复预存 bug：该 skill 期望 rich 格式但旧解析器只返回 `list[str]`）。
+- **向后兼容**: `cells`/`slack`/`logic_delay`/`net_delay`/`levels` 字段保留不变，所有 skills 消费者零破坏。
 
 `TimingState` 新增字段：
 ```python

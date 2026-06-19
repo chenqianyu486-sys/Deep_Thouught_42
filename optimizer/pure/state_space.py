@@ -30,7 +30,7 @@ from ..state import (
     DashboardModuleEntry,
     StateSpace,
 )
-from .critical_path import DISPLAY_LIMIT_SNAPSHOT
+from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
 from .timing import compute_violation_summary
 from .tool_filter import LoopPhase
 
@@ -577,9 +577,15 @@ def format_state_space_for_llm(
             lines.append(f"  top_paths:  # {len(tc.top_violating_paths)} paths")
             for i, p in enumerate(tc.top_violating_paths):
                 lines.append(f"    - endpoint: {p.endpoint_name}")
+                # D1: startpoint (ANALYZE/SELECT_STRATEGY only — EXECUTE/EVALUATE omit to save tokens)
+                if p.startpoint and phase in (LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, None):
+                    lines.append(f"      startpoint: {p.startpoint}")
                 if p.source_clock or p.dest_clock:
                     lines.append(f"      source_clock: {p.source_clock or '?'}")
                     lines.append(f"      dest_clock: {p.dest_clock or '?'}")
+                # D2: cross-clock flag
+                if p.is_cross_clock:
+                    lines.append(f"      cross_clock: true")
                 lines.append(f"      slack: {p.slack:.3f}" if p.slack is not None else "      slack: ?")
                 if p.logic_delay_pct is not None:
                     lines.append(f"      logic_delay_pct: {p.logic_delay_pct:.2f}")
@@ -589,6 +595,27 @@ def format_state_space_for_llm(
                     lines.append(f"      logic_levels: {p.logic_levels}")
                 if p.path_group:
                     lines.append(f"      path_group: {p.path_group}")
+                # D2: clock skew / uncertainty (ANALYZE/SELECT_STRATEGY full, EXECUTE/EVALUATE inline)
+                if p.clock_skew is not None:
+                    lines.append(f"      clock_skew: {p.clock_skew:.3f}ns")
+                if p.clock_uncertainty is not None:
+                    lines.append(f"      clock_uncertainty: {p.clock_uncertainty:.3f}ns")
+                # D1: delay hotspots — full list in ANALYZE/SELECT, single-line summary in EXECUTE/EVALUATE
+                if p.delay_hotspots:
+                    if phase in (LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, None):
+                        lines.append(f"      delay_hotspots:  # top contributors")
+                        for h in p.delay_hotspots:
+                            pct_str = f" ({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
+                            loc_str = f" @ {h['location']}" if h.get('location') else ""
+                            incr_str = f"{h['incr']:.3f}ns" if h.get('incr') is not None else "?"
+                            lines.append(f"        - {h['name']} [{h['type']}] {incr_str}{pct_str}{loc_str}")
+                    else:
+                        # EXECUTE/EVALUATE: single-line summary (oracle m5 mitigation)
+                        parts = []
+                        for h in p.delay_hotspots[:3]:
+                            pct_str = f"({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
+                            parts.append(f"{h['name']}={h['incr']:.3f}ns{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
+                        lines.append(f"      delay_hotspots: {', '.join(parts)}")
         else:
             ann = _annotated_list(tc.top_violating_paths, "no_violating_paths_extracted")
             lines.append(f"  top_paths: {ann}")
@@ -616,6 +643,19 @@ def format_state_space_for_llm(
                 path_clusters=tc.path_clusters,
                 failing_endpoint_names=tc.failing_endpoint_names,
             )
+            # D1: append top-3 path delay hotspots as single-line summaries
+            # (oracle m5: compact form for EXECUTE/EVALUATE to avoid distracting re-analysis)
+            if tc.top_violating_paths:
+                lines.append("  top_path_hotspots:")
+                for p in tc.top_violating_paths[:3]:
+                    if not p.delay_hotspots:
+                        continue
+                    parts = []
+                    for h in p.delay_hotspots[:3]:
+                        pct_str = f"({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
+                        parts.append(f"{h['name']}={h['incr']:.3f}ns{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
+                    slack_str = f"{p.slack:.3f}ns" if p.slack is not None else "?"
+                    lines.append(f"    - slack={slack_str} endpoint={p.endpoint_name}: {', '.join(parts)}")
         else:
             lines.append(f"  failing_endpoints: {_annotated_val(space.global_state.wns_setup, reason='not_analyzed')}")
             lines.append("  # No critical path data available for violation summary")
@@ -804,31 +844,26 @@ def _compute_utilization(
 
 
 def _convert_critical_path(entry) -> DashboardTimingPath:
-    """Convert a CriticalPathEntry to a DashboardTimingPath."""
+    """Convert a CriticalPathEntry to a DashboardTimingPath.
+
+    D2 fix: uses real clock-domain fields from entry.clock instead of
+    the old string-guessing that hardcoded "clk_fpl26contest".
+    D1: populates delay_hotspots from entry.top_delay_nodes.
+    """
     from ..state import CriticalPathEntry
 
     endpoint = ""
-    source_clock = ""
-    dest_clock = ""
-    path_group = ""
-
-    # Extract endpoint from last cell name (convention: cell names encode hierarchy)
     if isinstance(entry, CriticalPathEntry) and entry.cells:
-        last_cell = entry.cells[-1] if entry.cells else ""
-        endpoint = last_cell
+        endpoint = entry.cells[-1] if entry.cells else ""
 
-        # Try to extract clock domain from cell path (e.g., "clk_fpl26contest" prefix)
-        clk_keywords = ["clk_fpl26contest", "clk", "CLK"]
-        for ck in clk_keywords:
-            if ck.lower() in last_cell.lower():
-                dest_clock = ck if ck == "clk_fpl26contest" else "clk_fpl26contest"
-                path_group = "clk_fpl26contest"
-                break
-        if not dest_clock:
-            dest_clock = "clk_fpl26contest"
-            path_group = "clk_fpl26contest"
-        if not source_clock:
-            source_clock = "clk_fpl26contest"
+    # D2: real clock-domain context (no more string guessing)
+    clk = entry.clock if isinstance(entry, CriticalPathEntry) else None
+    source_clock = clk.source_clock if clk else ""
+    dest_clock = clk.dest_clock if clk else ""
+    path_group = clk.path_group if clk else ""
+    clock_skew = clk.clock_skew if clk else None
+    clock_uncertainty = clk.clock_uncertainty if clk else None
+    is_cross_clock = clk.is_cross_clock if clk else False
 
     # Compute delay percentages
     logic_delay_pct = None
@@ -841,6 +876,24 @@ def _convert_critical_path(entry) -> DashboardTimingPath:
             logic_delay_pct = round(ld / total, 4)
             route_delay_pct = round(nd / total, 4)
 
+    # D1: delay hotspots from top_delay_nodes
+    delay_hotspots = []
+    if isinstance(entry, CriticalPathEntry) and entry.top_delay_nodes:
+        total_delay = None
+        if entry.logic_delay is not None and entry.net_delay is not None:
+            total_delay = entry.logic_delay + entry.net_delay
+        for n in entry.top_delay_nodes[:MAX_DELAY_HOTSPOTS]:
+            pct = None
+            if total_delay and n.incr_delay is not None and total_delay > 0:
+                pct = round(n.incr_delay / total_delay, 4)
+            delay_hotspots.append({
+                "name": n.name,
+                "type": n.cell_type or n.kind,
+                "incr": round(n.incr_delay, 4) if n.incr_delay is not None else None,
+                "pct_of_path": pct,
+                "location": n.location,
+            })
+
     return DashboardTimingPath(
         endpoint_name=endpoint,
         source_clock=source_clock,
@@ -850,6 +903,12 @@ def _convert_critical_path(entry) -> DashboardTimingPath:
         route_delay_pct=route_delay_pct,
         logic_levels=entry.levels if isinstance(entry, CriticalPathEntry) else None,
         path_group=path_group,
+        # D1/D2
+        startpoint=entry.startpoint if isinstance(entry, CriticalPathEntry) else "",
+        clock_skew=clock_skew,
+        clock_uncertainty=clock_uncertainty,
+        is_cross_clock=is_cross_clock,
+        delay_hotspots=delay_hotspots,
     )
 
 
