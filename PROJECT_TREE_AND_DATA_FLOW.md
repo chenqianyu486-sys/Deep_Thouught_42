@@ -102,7 +102,7 @@ llm_tool_loop_node (调度器)
   │  后续迭代最多12轮
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
-  │  策略说明+执行计划    全工具(~25个, 不含vivado_open_checkpoint)
+  │  策略说明+执行计划    已知策略仅暴露映射主工具+flow-control
   │                      默认最多5轮；复杂组合策略最多8轮；SKILL_CHAIN 自动串联
   │                      执行后可调 rapidwright_report_timing 快速反馈
   │

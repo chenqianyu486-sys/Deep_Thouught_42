@@ -65,9 +65,16 @@ async def iteration_end_node(
     tools_this_iter = state.iteration.tools_used
     strategy_label = state.strategy.current_strategy or infer_strategy_from_tools(tools_this_iter)
 
-    # Update counters (skip for rollback — design will be restored)
+    # A rollback restores the design, but the attempted iteration still spent
+    # score budget without improving the best result. Count it as a plateau
+    # attempt so repeated regressions cannot bypass early-stop logic.
+    update_iteration_counters(
+        state,
+        wns_improved=False if is_rollback else wns_improved,
+        model_used=state.model.current_model,
+    )
+
     if not is_rollback:
-        update_iteration_counters(state, wns_improved, state.model.current_model)
         task_success = wns_improved or state.control.done_reason == "iteration_success"
         if state.model.current_task_type == TaskCategory.INFORMATION:
             task_success = not state.iteration.tool_errors

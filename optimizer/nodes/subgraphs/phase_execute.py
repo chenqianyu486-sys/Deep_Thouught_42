@@ -155,7 +155,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             break
 
         # Call LLM with execution tools
-        phase_tools = filter_tools_for_phase(deps.tools, LoopPhase.EXECUTE)
+        phase_tools = filter_tools_for_phase(
+            deps.tools,
+            LoopPhase.EXECUTE,
+            strategy=state.strategy.current_strategy,
+        )
         response = await _call_phase_llm(state, deps, phase_tools)
         if response is None:
             break

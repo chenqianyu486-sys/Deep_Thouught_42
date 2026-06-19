@@ -29,7 +29,12 @@ from optimizer.pure.model_select import (
     estimate_context_complexity,
     get_task_capability_score,
 )
-from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, get_phase_max_rounds
+from optimizer.pure.tool_filter import (
+    LoopPhase,
+    PHASE_MAX_ROUNDS,
+    filter_tools_for_phase,
+    get_phase_max_rounds,
+)
 from optimizer.pure.iteration_logic import (
     update_iteration_counters,
     update_task_type_stats,
@@ -55,6 +60,52 @@ class TestPhaseMaxRounds:
 
     def test_auto_chained_strategy_keeps_tight_budget(self):
         assert get_phase_max_rounds(LoopPhase.EXECUTE, "PBLOCK") == 5
+
+
+class TestStrategyToolFiltering:
+    @staticmethod
+    def _tool(name):
+        properties = {"flow_control": {"type": "string"}} if name == "report_step_state" else {}
+        return {
+            "type": "function",
+            "function": {
+                "name": name,
+                "parameters": {"type": "object", "properties": properties},
+            },
+        }
+
+    def test_known_execute_strategy_exposes_only_primary_tool(self):
+        tools = [
+            self._tool("vivado_physopt_and_route"),
+            self._tool("rapidwright_analyze_congestion"),
+            self._tool("vivado_run_tcl"),
+            self._tool("report_step_state"),
+        ]
+
+        filtered = filter_tools_for_phase(
+            tools, LoopPhase.EXECUTE, strategy="PhysOpt"
+        )
+
+        names = {tool["function"]["name"] for tool in filtered}
+        assert names == {"vivado_physopt_and_route", "report_step_state"}
+
+    def test_unknown_execute_strategy_keeps_phase_toolset(self):
+        tools = [
+            self._tool("vivado_physopt_and_route"),
+            self._tool("rapidwright_analyze_congestion"),
+            self._tool("report_step_state"),
+        ]
+
+        filtered = filter_tools_for_phase(
+            tools, LoopPhase.EXECUTE, strategy="ExperimentalStrategy"
+        )
+
+        names = {tool["function"]["name"] for tool in filtered}
+        assert names == {
+            "vivado_physopt_and_route",
+            "rapidwright_analyze_congestion",
+            "report_step_state",
+        }
 
 
 class TestParseTimingSummary:

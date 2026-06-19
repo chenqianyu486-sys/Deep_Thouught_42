@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 SCORE_GUARD_ELAPSED_FRACTION = 0.80
 SCORE_GUARD_MIN_ITERATION = 3
 SCORE_GUARD_MIN_WNS_GAIN_NS = 0.020
+SCORE_GUARD_STALL_LIMIT = 2
 
 
 def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> str:
@@ -37,7 +38,16 @@ def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> st
         return ""
     if state.timing.initial_wns is None or state.timing.best_wns == float('-inf'):
         return ""
-    if state.timing.best_wns_iteration != state.iteration.current:
+    best_iteration = state.timing.best_wns_iteration
+    if best_iteration is None:
+        return ""
+
+    improved_this_iteration = best_iteration == state.iteration.current
+    stalled_after_best = (
+        best_iteration < state.iteration.current
+        and state.iteration.global_no_improvement >= SCORE_GUARD_STALL_LIMIT
+    )
+    if not improved_this_iteration and not stalled_after_best:
         return ""
 
     wns_gain = state.timing.best_wns - state.timing.initial_wns
@@ -48,6 +58,7 @@ def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> st
     return (
         "score_guard_bank_best:"
         f"gain={wns_gain:.3f}ns,"
+        f"stalls={state.iteration.global_no_improvement},"
         f"elapsed={elapsed / 60:.1f}min,"
         f"remaining={remaining / 60:.1f}min"
     )

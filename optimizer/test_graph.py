@@ -19,6 +19,7 @@ from optimizer.deps import NodeDeps
 from optimizer.graph import NodeGraph
 from optimizer.edges import NodeName, after_init, after_check_exit
 from optimizer.nodes.check_exit import _competition_score_guard_reason
+from optimizer.nodes.iteration_end import iteration_end_node
 from optimizer.nodes.save_output import (
     _classify_design_state,
     _restore_best_checkpoint_for_delivery,
@@ -275,13 +276,28 @@ class TestCheckExitHelpers:
 
         assert _competition_score_guard_reason(state, elapsed=2400.0) == ""
 
-    def test_score_guard_requires_recent_best_iteration(self):
+    def test_score_guard_banks_stalled_older_best(self):
+        state = OptimizerState()
+        state.control.wall_clock_timeout = 3600.0
+        state.iteration.current = 5
+        state.iteration.global_no_improvement = 2
+        state.timing.initial_wns = -0.978
+        state.timing.best_wns = -0.435
+        state.timing.best_wns_iteration = 1
+
+        reason = _competition_score_guard_reason(state, elapsed=3200.0)
+
+        assert reason.startswith("score_guard_bank_best:")
+        assert "stalls=2" in reason
+
+    def test_score_guard_keeps_exploring_before_stall_limit(self):
         state = OptimizerState()
         state.control.wall_clock_timeout = 3600.0
         state.iteration.current = 4
+        state.iteration.global_no_improvement = 1
         state.timing.initial_wns = -0.978
         state.timing.best_wns = -0.435
-        state.timing.best_wns_iteration = 3
+        state.timing.best_wns_iteration = 1
 
         assert _competition_score_guard_reason(state, elapsed=3200.0) == ""
 
@@ -294,6 +310,19 @@ class TestCheckExitHelpers:
         state.timing.best_wns_iteration = 3
 
         assert _competition_score_guard_reason(state, elapsed=3050.0) == ""
+
+    def test_rollback_counts_as_no_improvement(self):
+        state = OptimizerState()
+        state.iteration.current = 2
+        state.timing.clock_period = 1.5
+        state.timing.prev_best_wns = -0.452
+        state.timing.best_wns = -0.452
+        state.timing.latest_wns = -0.543
+        state.control.done_reason = "rollback"
+
+        run_async(iteration_end_node(state, NodeDeps()))
+
+        assert state.iteration.global_no_improvement == 1
 
 
 # ── Graph tests ─────────────────────────────────────────────────

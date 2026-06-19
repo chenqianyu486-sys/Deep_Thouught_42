@@ -16,6 +16,8 @@ from __future__ import annotations
 import copy
 from enum import Enum
 
+from .constants import EXECUTE_STRATEGY_TOOL_MAP
+
 
 class LoopPhase(str, Enum):
     ANALYZE = "analyze"
@@ -195,7 +197,11 @@ def get_phase_max_rounds(phase: LoopPhase, strategy: str = "") -> int:
     return default
 
 
-def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict]:
+def filter_tools_for_phase(
+    all_tools: list[dict],
+    phase: LoopPhase,
+    strategy: str = "",
+) -> list[dict]:
     """Return only the tools allowed for the given phase.
 
     The ``report_step_state`` tool schema is patched so its
@@ -204,6 +210,8 @@ def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict
     Args:
         all_tools: Full list of OpenAI-format tool definitions.
         phase: Current LoopPhase.
+        strategy: Selected strategy. Known EXECUTE strategies expose only
+            their mapped primary tool and flow-control callback.
 
     Returns:
         Filtered list of tool definitions (with patched report_step_state).
@@ -211,6 +219,11 @@ def filter_tools_for_phase(all_tools: list[dict], phase: LoopPhase) -> list[dict
     allowed = PHASE_TOOLS.get(phase)
     if allowed is None:
         return all_tools
+
+    if phase == LoopPhase.EXECUTE and strategy:
+        primary_tool = EXECUTE_STRATEGY_TOOL_MAP.get(strategy)
+        if primary_tool:
+            allowed = frozenset({primary_tool, "report_step_state"})
 
     filtered = []
     for tool in all_tools:
