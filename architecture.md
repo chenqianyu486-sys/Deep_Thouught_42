@@ -701,6 +701,9 @@ PBLOCK、Fanout、RegisterRetiming、OptDesign、PhysOpt 的多步 P&R 已由
 对 `EXECUTE_STRATEGY_TOOL_MAP` 中的已知策略，EXECUTE 只向模型暴露映射主工具
 和 `report_step_state`，防止选定策略后继续调用无关诊断工具直到轮数耗尽；未知实验
 策略仍回退到阶段级工具集合。
+EVALUATE 切换策略时，以该次 EXECUTE 入口 WNS 与期间产生的 `best_wns` 比较；
+无提升的策略仅在当前迭代内冷却，下一迭代自动解锁，既避免同轮重复空转，也保留
+换参数重试的机会。RapidWright 预检拒绝同样触发本迭代冷却。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 

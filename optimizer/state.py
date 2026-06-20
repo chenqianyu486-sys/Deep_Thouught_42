@@ -227,6 +227,7 @@ class IterationState:
     tool_errors: list[dict] = field(default_factory=list)
     narratives: list[dict] = field(default_factory=list)
     strategy_sequence: list[str] = field(default_factory=list)
+    blocked_strategies: list[str] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)  # Tool names called this iteration
     tool_round: int = 0
     max_iterations: int = 50

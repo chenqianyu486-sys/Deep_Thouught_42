@@ -63,6 +63,7 @@ async def iteration_start_node(
     state.iteration.current += 1
     state.iteration.tool_errors.clear()
     state.iteration.tools_used.clear()
+    state.iteration.blocked_strategies.clear()
     state.iteration.tool_round = 0
     state.model.current_task_type = ""
 

@@ -88,25 +88,29 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
 
             # Strategy selected: check for strategy_name
             if step_state.strategy_name:
-                # Guard: reject temporarily-blocked strategies (TTL-based)
-                blocked = _get_permanently_blocked_strategies(state)
+                # Guard: reject persistent TTL blocks and strategies that
+                # already stalled during the current iteration.
+                iteration_blocked = set(state.iteration.blocked_strategies)
+                blocked = _get_permanently_blocked_strategies(state) | iteration_blocked
                 chosen_key = step_state.strategy_name
-                if chosen_key in blocked or (hasattr(deps, 'compat') and deps.compat and chosen_key in blocked):
-                    # Find when this strategy unblocks
-                    unblock_iter = 0
-                    for entry in state.context.failed_strategies:
-                        if entry.strategy == chosen_key and entry.reason == "strategy_ineffective":
-                            unblock_iter = entry.blocked_until_iter
-                            break
-                    remaining = max(0, unblock_iter - state.iteration.current)
+                if chosen_key in blocked:
+                    if chosen_key in iteration_blocked:
+                        reason = "already stalled in this iteration"
+                    else:
+                        unblock_iter = 0
+                        for entry in state.context.failed_strategies:
+                            if (entry.strategy == chosen_key
+                                    and entry.reason == "strategy_ineffective"):
+                                unblock_iter = entry.blocked_until_iter
+                                break
+                        remaining = max(0, unblock_iter - state.iteration.current)
+                        reason = f"temporarily ineffective; unblocks in {remaining} iterations"
                     logger.warning(yellow(
-                        f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — "
-                        f"temporarily ineffective, unblocks in {remaining} iterations"
+                        f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — {reason}"
                     ))
                     if deps.compat is not None:
                         deps.compat.add_message("user",
-                            f"[BLOCKED] Strategy '{chosen_key}' is temporarily blocked "
-                            f"(unblocks in {remaining} iterations). "
+                            f"[BLOCKED] Strategy '{chosen_key}' is unavailable: {reason}. "
                             f"Please select a different strategy from the available catalog.")
                     continue
 

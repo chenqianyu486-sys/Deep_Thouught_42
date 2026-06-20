@@ -14,17 +14,25 @@ from __future__ import annotations
 import asyncio
 import pytest
 
-from optimizer.state import OptimizerState, TimingState, IterationState, ControlState
+from optimizer.state import (
+    OptimizerState,
+    TimingState,
+    IterationState,
+    ControlState,
+    PhaseEntry,
+)
 from optimizer.deps import NodeDeps
 from optimizer.graph import NodeGraph
 from optimizer.edges import NodeName, after_init, after_check_exit
 from optimizer.nodes.check_exit import _competition_score_guard_reason
 from optimizer.nodes.iteration_end import iteration_end_node
+from optimizer.nodes.iteration_start import iteration_start_node
 from optimizer.nodes.save_output import (
     _classify_design_state,
     _restore_best_checkpoint_for_delivery,
 )
 from optimizer.nodes.subgraphs.phase_execute import _execute_exit_reason_after_timing_update
+from optimizer.nodes.subgraphs.phase_evaluate import _handle_switch_strategy
 from optimizer.tracing import StateTracer
 
 
@@ -250,6 +258,59 @@ class TestExecutePhaseHelpers:
             )
             == ""
         )
+
+
+class TestStrategyCooldown:
+    @staticmethod
+    def _state_with_strategy_delta(delta):
+        state = OptimizerState()
+        state.iteration.current = 1
+        state.iteration.tools_used = ["rapidwright_execute_pblock_strategy"]
+        state.strategy.current_strategy = "PBLOCK"
+        state.strategy.phase_history.append(PhaseEntry(
+            phase="EXECUTE_STRATEGY",
+            strategy="PBLOCK",
+            iteration=1,
+            tool_round=0,
+            wns_at_entry=-0.500,
+        ))
+        state.timing.latest_wns = -0.500 + delta
+        state.timing.best_wns = -0.500 + delta
+        return state
+
+    def test_auto_chain_best_gain_avoids_false_cooldown(self):
+        state = self._state_with_strategy_delta(0.0)
+        state.timing.latest_wns = -0.500
+        state.timing.best_wns = -0.476
+
+        _handle_switch_strategy(state, NodeDeps(), "latest timing is stale")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
+    def test_switch_cools_down_stalled_strategy(self):
+        state = self._state_with_strategy_delta(0.0)
+
+        _handle_switch_strategy(state, NodeDeps(), "no improvement")
+
+        assert state.iteration.blocked_strategies == ["PBLOCK"]
+        assert state.context.failed_strategies == []
+
+    def test_switch_keeps_improving_strategy_available(self):
+        state = self._state_with_strategy_delta(0.024)
+
+        _handle_switch_strategy(state, NodeDeps(), "try another strategy")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
+    def test_iteration_start_clears_short_cooldowns(self):
+        state = self._state_with_strategy_delta(0.0)
+        state.iteration.blocked_strategies = ["PBLOCK"]
+
+        run_async(iteration_start_node(state, NodeDeps()))
+
+        assert state.iteration.blocked_strategies == []
 
 
 class TestCheckExitHelpers:

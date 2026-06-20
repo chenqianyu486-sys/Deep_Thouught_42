@@ -11,7 +11,12 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal
+from optimizer.state import (
+    OptimizerState,
+    PhaseEntry,
+    LLMCallRecord,
+    record_flow_signal,
+)
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
@@ -28,6 +33,8 @@ from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
 
+STRATEGY_IMPROVEMENT_EPSILON_NS = 0.001
+
 
 def detect_rollback_needed(state: OptimizerState) -> bool:
     """Check if current WNS has regressed significantly from best WNS.
@@ -41,6 +48,45 @@ def detect_rollback_needed(state: OptimizerState) -> bool:
             or not state.control.best_checkpoint_path.exists()):
         return False
     return state.timing.latest_wns < state.timing.best_wns - WNS_ROLLBACK_THRESHOLD
+
+
+def _strategy_wns_delta_since_entry(state: OptimizerState) -> float | None:
+    """Return best WNS gain since the current strategy entered EXECUTE.
+
+    Auto-chains can update ``best_wns`` before ``latest_wns`` catches up, so
+    cooldown decisions must use the best result produced during the attempt.
+    """
+    strategy = state.strategy.current_strategy
+    best_wns = state.timing.best_wns
+    if not strategy or best_wns == float('-inf'):
+        return None
+
+    for entry in reversed(state.strategy.phase_history):
+        if (entry.phase == "EXECUTE_STRATEGY"
+                and entry.strategy == strategy
+                and entry.iteration == state.iteration.current
+                and entry.wns_at_entry is not None):
+            return best_wns - entry.wns_at_entry
+    return None
+
+
+def _cool_down_current_strategy_if_stalled(
+    state: OptimizerState,
+    detail: str,
+) -> bool:
+    """Block a switched strategy only when its measured WNS did not improve."""
+    strategy = state.strategy.current_strategy
+    delta = _strategy_wns_delta_since_entry(state)
+    if not strategy or delta is None or delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
+        return False
+
+    if strategy not in state.iteration.blocked_strategies:
+        state.iteration.blocked_strategies.append(strategy)
+    logger.info(
+        f"[EVALUATE] Cooling down stalled strategy '{strategy}' for this iteration "
+        f"(delta={delta:+.3f}ns; {detail})"
+    )
+    return True
 
 
 async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -78,6 +124,9 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             f"[EVALUATE] Pre-check rejected strategy '{state.strategy.current_strategy}' — "
             f"auto-switching (design state unchanged, no rollback needed)"
         )
+        strategy = state.strategy.current_strategy
+        if strategy and strategy not in state.iteration.blocked_strategies:
+            state.iteration.blocked_strategies.append(strategy)
         state.strategy.current_phase = ""
         state.strategy.current_strategy = ""
         state.control.done_reason = ""
@@ -346,6 +395,10 @@ def _handle_next_iteration(state: OptimizerState, deps, assistant_content: str) 
 def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str) -> None:
     """Handle SWITCH_STRATEGY signal — current strategy failed."""
     logger.info(yellow("[EVALUATE] LLM signaled SWITCH_STRATEGY"))
+    _cool_down_current_strategy_if_stalled(
+        state,
+        detail="EVALUATE switched away from strategy",
+    )
     state.control.done_reason = "switch_strategy"
     if deps.compat is not None:
         current_wns = state.timing.latest_wns
