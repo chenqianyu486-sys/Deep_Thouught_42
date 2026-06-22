@@ -148,6 +148,16 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 "instead of raw Tcl. For execution commands (place_design, "
                                 "route_design, phys_opt_design), use the dedicated MCP tools."
                             )
+                        elif tool_name == "vivado_get_cached_high_fanout_nets":
+                            result += (
+                                "High-fanout net data is already in Dashboard Module 4 "
+                                "(Netlist Quality). Do not re-fetch — use the Dashboard values."
+                            )
+                        elif tool_name == "vivado_check_design_status":
+                            result += (
+                                "Design placement/routing status is shown in Dashboard Module 1 "
+                                "(Global State, current_stage field). Do not re-check."
+                            )
                         if deps.compat is not None:
                             deps.compat.add_message("tool", result, {
                                 "tool_call_id": tc.id, "name": tool_name,

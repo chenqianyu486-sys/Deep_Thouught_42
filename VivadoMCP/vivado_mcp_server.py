@@ -2121,6 +2121,10 @@ Unlike phys_opt_design, there are no blocked directives.""",
             USE: Before timing checks to ensure design is in valid state.
             USE: After design modifications to verify placement/routing status.
 
+            NOTE: Design status is also shown in Dashboard Module 1 (Global State,
+            current_stage field). Avoid repeated calls — the status only changes
+            after execution tools (place_design, route_design, phys_opt_design).
+
             READ-ONLY: Does not modify design.""",
             inputSchema={
                 "type": "object",

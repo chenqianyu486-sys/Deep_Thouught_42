@@ -521,6 +521,8 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
 | `flow_control: SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 5 轮/迭代） |
 | `flow_control: NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
 | `flow_control: CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段，重新分析设计 |
+| `flow_control: ANALYZE_DONE` (EVALUATE) | 阶段混淆——映射为 SWITCH_STRATEGY（冷却停滞策略 + 多策略循环推进），而非 CONTINUE（会跳过冷却并触发完整重新分析） |
+| `flow_control: EXEC_DONE` (EVALUATE) | 阶段混淆——映射为 NEXT_ITERATION |
 | `detect_rollback_needed()` (EVALUATE入口) | latest_wns << best_wns 时自动设 done_reason=rollback |
 | `flow_control: ROLLBACK` (EVALUATE) | LLM 主动请求回滚，与自动检测共享 done_reason=rollback 机制 |
 | 连续调用 physopt 无改进 | 降级推荐 analyze_net_detour 诊断绕路问题 |
@@ -1046,10 +1048,19 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 **问题**: LLM 在 ANALYZE 阶段反复调用 `vivado_report_route_status`、`rapidwright_get_design_info`、
 `rapidwright_get_device_topology`，但这些数据已在 `init_analysis` 中提取并注入 Dashboard。
+此外，`vivado_get_cached_high_fanout_nets` 和 `vivado_check_design_status` 也被高频重复调用
+（日志分析显示单次运行中分别被调用 57 次和 73 次，返回相同数据）。
 
 **方案**（`optimizer/pure/constants.py`）：
-- `PHASE_TOOL_RATE_LIMITS` 新增 3 个工具，限制为 1 次/phase
-- 保留查询能力（数据过期时仍可查询），但防止无意义的重复调用
+- `PHASE_TOOL_RATE_LIMITS` 限制以下工具的每 phase 调用次数：
+  - `rapidwright_search_cells`: 3
+  - `vivado_run_tcl`: 2
+  - `vivado_write_checkpoint`: 3
+  - `rapidwright_analyze_net_detour`: 2
+  - `vivado_get_cached_high_fanout_nets`: 2（数据在 Dashboard M4）
+  - `vivado_check_design_status`: 3（设计状态在 Dashboard M1）
+- 超限时返回 `[RATE LIMITED]` 消息，引导 LLM 使用 Dashboard 数据
+- 工具 description 中标注 Dashboard 数据可用性，减少初始调用动机
 
 ## 8. 心跳日志系统
 

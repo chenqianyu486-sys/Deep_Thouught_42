@@ -200,6 +200,8 @@ PHASE_TOOL_RATE_LIMITS: dict[str, int] = {
     "vivado_run_tcl": 2,
     "vivado_write_checkpoint": 3,  # prevent excessive checkpoint I/O from LLM
     "rapidwright_analyze_net_detour": 2,  # suppress when consistently returning 0 results
+    "vivado_get_cached_high_fanout_nets": 2,  # data is in Dashboard M4; 2 covers verify + re-check
+    "vivado_check_design_status": 3,  # design state is in Dashboard M1; 3 covers pre/post-EXECUTE checks
     # REMOVED: vivado_report_route_status, rapidwright_get_design_info,
     # rapidwright_get_device_topology — removed from ANALYZE/EVALUATE
     # allowlists entirely (data already in Dashboard from init_analysis).
@@ -268,12 +270,14 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          }},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
     "rapidwright_execute_register_retiming": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: open fanout checkpoint, place, then route before WNS eval.
     # Without this, post-eval sees unplaced design and reports false WNS improvement.
@@ -282,6 +286,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
     # opt_design is called by the Vivado MCP tool vivado_opt_design, triggered
@@ -303,6 +308,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
         # If UNCHANGED, chain gate (P0) skips remaining steps.
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
     ],
 }
 

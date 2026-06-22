@@ -287,6 +287,16 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 "instead of raw Tcl. For execution commands (place_design, "
                                 "route_design, phys_opt_design), use the dedicated MCP tools."
                             )
+                        elif tool_name == "vivado_get_cached_high_fanout_nets":
+                            result += (
+                                "High-fanout net data is already in Dashboard Module 4 "
+                                "(Netlist Quality). Do not re-fetch — use the Dashboard values."
+                            )
+                        elif tool_name == "vivado_check_design_status":
+                            result += (
+                                "Design placement/routing status is shown in Dashboard Module 1 "
+                                "(Global State, current_stage field). Do not re-check."
+                            )
                         if deps.compat is not None:
                             deps.compat.add_message("tool", result, {
                                 "tool_call_id": tc.id, "name": tool_name,
@@ -312,6 +322,30 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 tool_start = time.time()
                 logger.info(f"[EXECUTE] Calling {tool_name}")
+
+                # Capture WNS before tool call for post-chain re-evaluation.
+                # Analysis-only skills (e.g. pblock_strategy) don't change WNS
+                # themselves — the auto-chain (place+route) does. Post-eval runs
+                # before the chain, so we need the pre-tool WNS to detect chain
+                # improvements afterwards.
+                pre_tool_wns = state.timing.latest_wns
+
+                # Capture RapidWright timing baseline for directional pre-check.
+                # The pre-check compares RW-after vs RW-before (same engine) to
+                # detect directional regression. Comparing RW vs Vivado is
+                # unreliable due to systematic timing differences between engines.
+                rw_precheck_baseline = None
+                if (RAPIDWRIGHT_PRECHECK_ENABLED
+                        and tool_name in SKILL_CHAIN_ACTIONS
+                        and tool_name != "rapidwright_execute_pblock_strategy"
+                        and deps.rapidwright_session):
+                    rw_precheck_baseline = await _get_rw_timing_estimate(state, deps)
+                    if rw_precheck_baseline is not None:
+                        logger.info(
+                            f"[PRECHECK] RW baseline (before skill): "
+                            f"WNS={rw_precheck_baseline:.3f}ns"
+                        )
+
                 result = await call_tool_fn(
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
@@ -459,7 +493,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         and tool_name != "rapidwright_execute_pblock_strategy"  # analysis-only
                         and deps.rapidwright_session
                         and state.timing.latest_wns is not None):
-                    precheck_verdict = await _rapidwright_direction_check(state, deps)
+                    precheck_verdict = await _rapidwright_direction_check(state, deps, rw_precheck_baseline)
                     if precheck_verdict == "REGRESS":
                         logger.warning(yellow(
                             f"[EXECUTE] Pre-check REGRESS for {tool_name}: "
@@ -514,6 +548,37 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 reached_callback = True
                         except Exception as e:
                             logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
+
+                # ── Post-chain verdict re-evaluation ──────────────────────
+                # Analysis-only skills (e.g. pblock_strategy) don't change WNS
+                # themselves — post-eval ran before the chain and saw no change.
+                # The auto-chain (place+route) is what actually changes WNS.
+                # Re-evaluate the verdict by comparing current WNS (updated by
+                # the chain's vivado_report_timing_summary step) against the
+                # pre-tool WNS.
+                if (tool_name in SKILL_CHAIN_ACTIONS
+                        and post_eval_verdict == "UNCHANGED"
+                        and pre_tool_wns is not None
+                        and state.timing.latest_wns is not None
+                        and abs(state.timing.latest_wns - pre_tool_wns) > 0.001):
+                    chain_delta = state.timing.latest_wns - pre_tool_wns
+                    if chain_delta > 0.001:
+                        post_eval_verdict = "IMPROVED"
+                    else:
+                        post_eval_verdict = "REGRESSED"
+                    logger.info(
+                        f"[EXECUTE] Post-chain re-eval: {tool_name} -> "
+                        f"WNS={state.timing.latest_wns:.3f}ns "
+                        f"(delta={chain_delta:+.3f}ns vs pre-tool {pre_tool_wns:.3f}ns). "
+                        f"{post_eval_verdict}."
+                    )
+                    if deps.compat is not None:
+                        deps.compat.add_message("user",
+                            f"[EVAL] After chain for {tool_name}: "
+                            f"WNS={state.timing.latest_wns:.3f}ns "
+                            f"(delta={chain_delta:+.3f}ns vs pre-tool). "
+                            f"{post_eval_verdict}."
+                        )
 
                 # Force exit on large WNS regression (>0.5ns below best).
                 # EVALUATE will detect regression via detect_rollback_needed()
@@ -872,7 +937,33 @@ def _track_cost(state: OptimizerState, response) -> None:
         logger.debug(f"[EXECUTE] Cost tracking failed: {e}")
 
 
-async def _rapidwright_direction_check(state: OptimizerState, deps: NodeDeps) -> str:
+async def _get_rw_timing_estimate(state: OptimizerState, deps: NodeDeps) -> float | None:
+    """Get RapidWright timing estimate (WNS) from the current in-memory design.
+
+    Returns the WNS as a float, or None if the estimate could not be obtained.
+    """
+    try:
+        timing_result = await call_tool_fn(
+            "rapidwright_report_timing", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        try:
+            data = json.loads(timing_result)
+            if isinstance(data, dict) and "wns_ns" in data:
+                return float(data["wns_ns"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+        timing = parse_timing_summary(timing_result)
+        return timing.get("wns")
+    except Exception as e:
+        logger.debug(f"[PRECHECK] Could not get RW timing estimate: {e}")
+        return None
+
+
+async def _rapidwright_direction_check(
+    state: OptimizerState, deps: NodeDeps, rw_baseline: float | None = None,
+) -> str:
     """Level 1 pre-check: RapidWright timing estimate for directional regression.
 
     Called AFTER a RapidWright skill has modified the in-memory design
@@ -889,6 +980,12 @@ async def _rapidwright_direction_check(state: OptimizerState, deps: NodeDeps) ->
       - Only *directional* comparison is trustworthy
     See plan at docs/plans/p-r-rollback-abundant-puffin.md for details.
 
+    Args:
+        rw_baseline: RapidWright WNS estimate captured BEFORE the skill
+            modified the design. When provided, the comparison is same-engine
+            (RW-after vs RW-before), which is reliable. When None, falls back
+            to comparing against Vivado WNS (cross-engine, less reliable).
+
     Returns:
         "IMPROVED"  — RW estimate shows WNS improvement → proceed to chain
         "REGRESS"   — RW estimate shows significant directional regression
@@ -896,30 +993,20 @@ async def _rapidwright_direction_check(state: OptimizerState, deps: NodeDeps) ->
         "UNCERTAIN" — cannot determine (no baseline, tool error, etc.)
                        → fall through to existing chain logic (conservative)
     """
-    baseline = state.timing.latest_wns
+    # Prefer same-engine baseline (RW-before) for reliable directional comparison.
+    # Fall back to Vivado WNS only if no RW baseline was captured.
+    if rw_baseline is not None:
+        baseline = rw_baseline
+        baseline_source = "RW"
+    else:
+        baseline = state.timing.latest_wns
+        baseline_source = "Vivado"
     if baseline is None:
         logger.debug("[PRECHECK] No WNS baseline available, skipping pre-check")
         return "UNCERTAIN"
 
     try:
-        timing_result = await call_tool_fn(
-            "rapidwright_report_timing", {},
-            deps.rapidwright_session, deps.vivado_session,
-            design_size_factor=state.timing.design_size_factor,
-        )
-        # RapidWright report_timing returns JSON (key "wns_ns"), NOT a
-        # Vivado-style text timing summary. Handle both formats.
-        est_wns = None
-        try:
-            data = json.loads(timing_result)
-            if isinstance(data, dict) and "wns_ns" in data:
-                est_wns = float(data["wns_ns"])
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-        if est_wns is None:
-            # Fallback: try parsing as Vivado-style text report
-            timing = parse_timing_summary(timing_result)
-            est_wns = timing.get("wns")
+        est_wns = await _get_rw_timing_estimate(state, deps)
         if est_wns is None:
             logger.warning("[PRECHECK] Could not parse RapidWright timing result")
             return "UNCERTAIN"
@@ -927,8 +1014,8 @@ async def _rapidwright_direction_check(state: OptimizerState, deps: NodeDeps) ->
         delta = est_wns - baseline
         logger.info(
             f"[PRECHECK] RapidWright direction check: "
-            f"baseline={baseline:.3f}ns, est={est_wns:.3f}ns, "
-            f"delta={delta:+.3f}ns"
+            f"baseline={baseline:.3f}ns ({baseline_source}), "
+            f"est={est_wns:.3f}ns, delta={delta:+.3f}ns"
         )
 
         if delta > 0.001:

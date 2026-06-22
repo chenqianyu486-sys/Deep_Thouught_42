@@ -264,7 +264,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
             elif flow_signal == "ANALYZE_DONE":
                 # LLM confused about phase — ANALYZE_DONE is only valid in ANALYZE.
-                logger.info("[EVALUATE] ANALYZE_DONE from EVALUATE (phase confusion), treating as CONTINUE")
+                # Map to SWITCH_STRATEGY (not CONTINUE) so the stalled strategy is
+                # cooled down and the multi-strategy loop advances. CONTINUE would
+                # skip cooldown and re-enter a full ANALYZE cycle, wasting rounds.
+                logger.info("[EVALUATE] ANALYZE_DONE from EVALUATE (phase confusion), treating as SWITCH_STRATEGY")
+                _handle_switch_strategy(state, deps, assistant_content)
                 return LoopPhase.ANALYZE
 
             # Unknown signal: treat as CONTINUE
@@ -310,6 +314,16 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                                 "Use vivado_report_timing_summary or Dashboard values directly "
                                 "instead of raw Tcl. For execution commands (place_design, "
                                 "route_design, phys_opt_design), use the dedicated MCP tools."
+                            )
+                        elif tool_name == "vivado_get_cached_high_fanout_nets":
+                            result += (
+                                "High-fanout net data is already in Dashboard Module 4 "
+                                "(Netlist Quality). Do not re-fetch — use the Dashboard values."
+                            )
+                        elif tool_name == "vivado_check_design_status":
+                            result += (
+                                "Design placement/routing status is shown in Dashboard Module 1 "
+                                "(Global State, current_stage field). Do not re-check."
                             )
                         if deps.compat is not None:
                             deps.compat.add_message("tool", result, {

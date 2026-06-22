@@ -299,7 +299,10 @@ async def optimize_v2(
                     "Retrieve cached high-fanout nets from initial analysis "
                     "(no Vivado call, no truncation risk). "
                     "Use this when vivado_get_critical_high_fanout_nets output is "
-                    "truncated or incomplete."
+                    "truncated or incomplete. "
+                    "NOTE: This data is also available in Dashboard Module 4 "
+                    "(Netlist Quality) — avoid repeated calls; the cache does not "
+                    "change within an iteration."
                 ),
                 "parameters": {
                     "type": "object",
