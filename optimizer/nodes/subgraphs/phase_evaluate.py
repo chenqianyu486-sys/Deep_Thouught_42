@@ -74,10 +74,28 @@ def _cool_down_current_strategy_if_stalled(
     state: OptimizerState,
     detail: str,
 ) -> bool:
-    """Block a switched strategy only when its measured WNS did not improve."""
+    """Block a switched strategy only when its measured WNS did not improve.
+
+    Skips cooldown when tool errors occurred during this iteration's EXECUTE
+    phase — a tool crash (e.g. MCP server exception) means the strategy never
+    got a fair execution chance, so blocking it would penalize the strategy
+    for an infrastructure failure rather than a strategy deficiency. The
+    strategy remains selectable for retry within the same iteration.
+    """
     strategy = state.strategy.current_strategy
     delta = _strategy_wns_delta_since_entry(state)
     if not strategy or delta is None or delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
+        return False
+
+    # Don't cool down if tools crashed — strategy didn't actually execute.
+    # tool_errors is cleared at iteration_start and accumulates during EXECUTE,
+    # so any entries here belong to the current strategy's execution attempt.
+    if state.iteration.tool_errors:
+        logger.info(
+            f"[EVALUATE] Skipping cooldown for '{strategy}' — "
+            f"{len(state.iteration.tool_errors)} tool error(s) detected this iteration "
+            f"(strategy did not get a fair execution chance; delta={delta:+.3f}ns)"
+        )
         return False
 
     if strategy not in state.iteration.blocked_strategies:

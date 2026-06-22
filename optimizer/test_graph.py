@@ -296,6 +296,20 @@ class TestStrategyCooldown:
         assert state.iteration.blocked_strategies == ["PBLOCK"]
         assert state.context.failed_strategies == []
 
+    def test_switch_skips_cooldown_when_tool_errors_present(self):
+        """Tool crash (e.g. MCP exception) means strategy didn't get a fair
+        execution chance — don't penalize it with iteration-level cooldown."""
+        state = self._state_with_strategy_delta(0.0)
+        state.iteration.tool_errors.append({
+            "tool": "vivado_place_design",
+            "result": "Error: UnboundLocalError: cannot access local variable 're'",
+        })
+
+        _handle_switch_strategy(state, NodeDeps(), "no improvement")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
     def test_switch_keeps_improving_strategy_available(self):
         state = self._state_with_strategy_delta(0.024)
 
