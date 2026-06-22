@@ -2237,7 +2237,6 @@ async def call_tool(name: str, arguments: dict):
             output = run_tcl_command(tcl_cmd, timeout=timeout)
             raw = output.strip()
             if raw:
-                import re
                 slack_match = re.search(r'Slack\s+\((?:VIOLATED|MET)\)\s*:\s*(-?\d+\.?\d*)', raw)
                 if slack_match:
                     parsed = float(slack_match.group(1))
