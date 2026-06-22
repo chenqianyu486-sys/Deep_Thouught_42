@@ -231,7 +231,7 @@ STRATEGIES = {
     "LogicResynthesis": {
         "name": "Logic Resynthesis (synth_design -remap)",
         "trigger": "100% logic delay, NN/datapath design with MUXF7/8 cascades, "
-                   "PBLOCK already applied, other strategies ineffective",
+                   "other strategies ineffective",
         "sequence": [
             {"step": "vivado_run_tcl", "platform": "Vivado",
              "params": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"},
@@ -270,6 +270,31 @@ STRATEGY_LABEL_MAP = {
     "LogicResynthesis": "LogicResynthesis",
     "PhysOptAggressive": "PhysOptAggressive",
 }
+
+# ── Validation Compatibility ────────────────────────────────────
+# validate_dcps.py uses cycle-exact functional simulation (compares
+# outputs every clock cycle). Strategies marked False change design
+# latency (insert new pipeline FFs), causing output misalignment →
+# MISMATCH → validation FAIL. Only latency-preserving strategies pass.
+# Exposed to the LLM via get_strategy_catalog() to prevent selecting
+# validation-incompatible strategies that would waste iterations.
+STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
+    "PBLOCK": True,               # placement only, no logic change
+    "PhysOpt": True,              # Vivado-guaranteed (retiming blocked by safety guard)
+    "OptDesign": True,            # logic-equivalent remapping (Vivado-guaranteed)
+    "Fanout": True,               # net splitting, preserves function
+    "PinSwap": True,              # pin swapping within LUT, preserves function
+    "LUTCascade": True,           # LUT merging, preserves function
+    "CellReplication": True,      # cell replication, preserves function
+    "CongestionSpreading": True,  # placement only, no logic change
+    "RegisterRetiming": False,    # INSERTS new FFs → changes latency → FAILS validation
+    "SmartRetiming": False,       # INSERTS new FFs → changes latency → FAILS validation
+    "NetSwap": True,              # net swapping within SLICE, preserves function
+    "PhysOpt+RegisterRetiming": False,  # includes register retiming → changes latency
+    "LogicResynthesis": True,     # synth_design -remap, logic-equivalent remapping
+    "PhysOptAggressive": True,    # Vivado-guaranteed (retiming blocked by safety guard)
+}
+
 # Map strategy names to registered skill identifiers
 STRATEGY_SKILL_MAP = {
     "PBLOCK": "pblock_strategy",
@@ -482,8 +507,17 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     Args:
         exclude_strategies: Strategy keys to omit from the catalog
             (e.g., strategies with reason='strategy_ineffective').
+
+    Note:
+        Strategies marked unsafe in STRATEGY_VALIDATION_SAFE are always
+        excluded — they insert pipeline FFs, change design latency, and
+        will FAIL cycle-exact validation (validate_dcps.py). Their
+        definitions and tool implementations remain in the codebase for
+        potential future use with latency-tolerant validation.
     """
     excluded = set(exclude_strategies or [])
+    # Always exclude validation-unsafe strategies (insert new FFs → change latency)
+    excluded.update(k for k, safe in STRATEGY_VALIDATION_SAFE.items() if not safe)
     parts = ["Available strategies:"]
     # ordered list matching original numbering
     ordered = ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",

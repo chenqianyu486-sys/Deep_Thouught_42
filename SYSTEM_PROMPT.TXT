@@ -64,16 +64,16 @@ strategies:
   available:
     pblock: "PBLOCK Re-placement (distributed logic, avg_distance > 70)"
     physopt: "Physical Optimization (1-2 paths with spread, WNS > -2.0)"
+    opt_design: "Logic Optimization (opt_design — logic-depth limited, >70% logic delay)"
     fanout: "High Fanout Net Optimization (fanout > 100, no spread)"
     pin_swap: "Pin Swapping (WNS stuck ~-0.3ns)"
     lut_cascade: "LUT Cascade Flattening (>3 LUT levels in series)"
     cell_replication: "Critical Path Cell Replication (fanout > 10 or delay > 0.3ns)"
     congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
-    register_retiming: "Register Retiming (deep chains >2 LUTs between FFs, requires FF>0)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
-    physopt_retiming_combined: "PhysOpt + Register Retiming (Combined) — logic-depth limited designs with deep chains."
-    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs."
+    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs with MUXF7/8 cascades."
     physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS stuck after PBLOCK."
+  validation_constraint: "validate_dcps.py uses cycle-exact simulation — all strategies MUST preserve design latency. Pipeline insertion / register retiming strategies are excluded because they change latency and would FAIL validation."
 
   workflow:
     - "DIAGNOSE — Identify placement problems"
@@ -82,13 +82,11 @@ strategies:
 
 known_risks:
   - "PBLOCK before fanout on distributed designs (avg_distance > 70): historically, fanout without PBLOCK causes WNS regression of ~0.5ns+."
-  - "Pure combinational (FF=0): PBLOCK is primary lever. PhysOpt/RegisterRetiming have limited impact."
+  - "Pure combinational (FF=0): PBLOCK is primary lever. PhysOpt has limited impact. Use OptDesign/LogicResynthesis for logic-depth reduction."
   - "optimize_lut_input_cone / flatten_lut_cascade: optimized_count=0 is valid for NN/wide-datapath designs, not a tool error."
   - "analyze_net_detour returning zero = routing compact, not a failure."
-  - "All optimizations MUST preserve functional behavior."
-  - "LUT cascade flattening should precede register retiming when both are applicable."
-  - "Register retiming over global phys_opt_design -retime (observed functional errors in NN designs)."
-  - "PhysOpt+RegisterRetiming: Use vivado_physopt_and_route (NOT standalone phys_opt_design). The combined tool auto-routes after PhysOpt."
+  - "All optimizations MUST preserve functional behavior AND design latency (cycle-exact validation)."
+  - "LUT cascade flattening should precede cell replication when both are applicable."
 
 rapid_timing_feedback:
   description: "RapidWright provides a fast approximate timing estimate (~2.5s) vs Vivado (~14s) with ~2% error."

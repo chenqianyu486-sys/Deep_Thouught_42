@@ -29,7 +29,7 @@ fpl26_optimization_contest/
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 14 种策略库（含 LogicResynthesis、PhysOptAggressive）
+├── strategy_library.py           # 11 种策略库（含 LogicResynthesis、PhysOptAggressive）
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件
@@ -117,12 +117,12 @@ llm_tool_loop_node (调度器)
   │
   └── EVALUATE → (exit) 或 SELECT_STRATEGY 或 ANALYZE
       DONE/WNS>=0 → ITERATION_END
-      SWITCH_STRATEGY → SELECT_STRATEGY (多策略循环, 最多3轮/迭代)
+      SWITCH_STRATEGY → SELECT_STRATEGY (多策略循环, 最多5轮/迭代)
       NEXT_ITERATION/ROLLBACK → ITERATION_END
       CONTINUE → ANALYZE
 ```
 
-**多策略循环**: 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
+**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
@@ -379,7 +379,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 
 ### 3.6 策略库清单
 
-> 14 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
+> 11 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
 
 ### 3.7 Tool 描述增强
 
@@ -409,7 +409,7 @@ WNS_TARGET_THRESHOLD = 0.0
 | `EXEC_DONE` | 切换到 EVALUATE 阶段 |
 | `DONE`, WNS<0 | 进入下一迭代 |
 | `DONE`, WNS>=0 | 退出优化 |
-| `SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 3 轮/迭代） |
+| `SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 5 轮/迭代） |
 | `NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 |
 | `CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段 |
 | `detect_rollback_needed()` | WNS 退化时自动恢复最佳 checkpoint |

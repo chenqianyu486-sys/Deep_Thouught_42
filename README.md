@@ -16,8 +16,8 @@
 - **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
 - **Dual architecture.** V2 state machine for production reliability; V1 conversational loop removed (deprecated).
 - **Real-time observability.** Web Dashboard with 20 panels — 7-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
-- **14 battle-tested strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, OptDesign, LogicResynthesis, PhysOptAggressive.
-- **Multi-strategy loop.** Up to 3 strategies can be tried per iteration, with TTL-based strategy retry (3 iterations). Failed strategies auto-unblock after TTL expires.
+- **11 validation-safe strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, OptDesign, LogicResynthesis, PhysOptAggressive. Strategies that insert new pipeline FFs (RegisterRetiming, SmartRetiming, PhysOpt+RegisterRetiming) are excluded from the catalog because they would fail cycle-exact functional validation.
+- **Multi-strategy loop.** Up to 5 strategies can be tried per iteration, with TTL-based strategy retry (3 iterations). Failed strategies auto-unblock after TTL expires.
 
 ---
 
@@ -90,7 +90,7 @@ init_analysis ──► [WNS >= 0?]
 
 ## Optimization Strategies
 
-14 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, RegisterRetiming, SmartRetiming, NetSwap, PhysOpt+RegisterRetiming, LogicResynthesis, PhysOptAggressive. See the Chinese section below (优化策略) for trigger conditions and platform details.
+11 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, LogicResynthesis, PhysOptAggressive. See the Chinese section below (优化策略) for trigger conditions and platform details.
 
 
 ## Prerequisites
@@ -234,7 +234,7 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
 - **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环已弃用并移除。
 - **实时可观测性。** 包含 20 个面板的 Web 仪表盘 —— 7 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
-- **12 种久经考验的策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、RegisterRetiming、SmartRetiming、NetSwap、PhysOpt+RegisterRetiming、OptDesign。
+- **11 种验证安全策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、NetSwap、OptDesign、LogicResynthesis、PhysOptAggressive。插入新流水线 FF 的策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）因会改变设计延迟、无法通过逐周期功能仿真验证，已从策略目录中排除。
 
 ---
 
@@ -309,7 +309,7 @@ init_analysis ──► [WNS >= 0?]
 | 5 | 关注点分离 | Worker（250K tokens，负责执行） vs. Planner（1M tokens，负责战略决策） |
 | 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
 | 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
-| 8 | 编码领域知识 | 12 种策略带有触发条件；LLM 自主选择 |
+| 8 | 编码领域知识 | 11 种策略带有触发条件；LLM 自主选择 |
 | 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
@@ -324,7 +324,7 @@ init_analysis ──► [WNS >= 0?]
 | 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。Place-only WNS 检查也验证设计状态——若为 `Optimized`（未布局），跳过 WNS 检查避免基于估计延迟的虚假正信号。 |
 | 29 | **Vivado 执行工具错误检测** | `place_design`、`route_design`、`phys_opt_design`、`opt_design`、`physopt_and_route` 在 MCP 服务器中检测 Vivado `ERROR: [` 文本，返回 JSON `{"error": ...}` 响应。链式执行（`phase_execute.py`）同时检查 JSON `error` 键和文本 `ERROR: [` 模式，确保 Vivado 命令失败时链中止并回滚，而非静默继续。 |
 | 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
-| 22 | **多策略循环** | 一次迭代内最多尝试 3 个策略 (`MAX_STRATEGY_CYCLES=3`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
+| 22 | **多策略循环** | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
 | 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
 | 24 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查。 |
 | 25 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
@@ -346,10 +346,7 @@ init_analysis ──► [WNS >= 0?]
 | **LUTCascade** | >3 个 LUT 串联 | RapidWright + Vivado |
 | **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
 | **CongestionSpreading** | 拥塞=HIGH，PBLOCK/PhysOpt 无效 | RapidWright + Vivado |
-| **RegisterRetiming** | 深层组合逻辑链（>2 个 LUT） | RapidWright + Vivado |
-| **SmartRetiming** | WNS 停滞，深层组合逻辑链（>2 个 LUT）位于流水线寄存器之间，FF > 0 | RapidWright + Vivado |
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
-| **PhysOpt+RegisterRetiming** | 逻辑深度受限（logic_delay > 70%），WNS > -2.0，深层链（>2 个 LUT），FF > 0 | Vivado + RapidWright（原子操作） |
 | **LogicResynthesis** | 100% 逻辑延迟，NN/数据通路设计含 MUXF7/8 级联，PBLOCK 已应用 | Vivado (synth_design -remap) |
 | **PhysOptAggressive** | WNS 在 PBLOCK 后停滞，需要更激进的优化 | Vivado (Explore 指令) |
 
@@ -453,7 +450,7 @@ Deep_Thouught_42/
 │   ├── graph.py              # NodeGraph：执行引擎
 │   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
 │   └── pure/                 # 14 个无状态纯函数模块（可单元测试），含 state_space.py（7 模块 StateSpace）
-├── strategy_library.py       # 12 种策略及触发条件
+├── strategy_library.py       # 11 种策略及触发条件
 ├── skills/                   # 技能框架：14 个注册技能
 ├── RapidWrightMCP/           # RapidWright MCP 服务器
 ├── VivadoMCP/                # Vivado MCP 服务器

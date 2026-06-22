@@ -99,10 +99,8 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
     "LUTCascade": "rapidwright_flatten_lut_cascade",
     "PinSwap": "rapidwright_optimize_pin_swapping",
     "CellReplication": "rapidwright_replicate_critical_cells",
-    "RegisterRetiming": "rapidwright_execute_register_retiming",
     "CongestionSpreading": "rapidwright_execute_congestion_spreading",
     "NetSwap": "rapidwright_execute_net_swapping",
-    "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
     "OptDesign": "rapidwright_execute_opt_design_strategy",
     # Aliases: LLM may use alternative names for the same strategy
     "LogicOptimization": "rapidwright_execute_opt_design_strategy",

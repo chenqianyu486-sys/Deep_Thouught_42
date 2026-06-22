@@ -55,8 +55,6 @@ INDEPENDENT_RAPIDWRIGHT_TOOLS: frozenset[str] = frozenset({
     "rapidwright_optimize_pin_swapping",
     "rapidwright_flatten_lut_cascade",
     "rapidwright_replicate_critical_cells",
-    "rapidwright_smart_retiming",
-    "rapidwright_execute_register_retiming",
     "rapidwright_execute_net_swapping",
     "rapidwright_execute_congestion_spreading",
     "rapidwright_optimize_fanout_batch",
@@ -106,14 +104,12 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_optimize_pin_swapping",
         "rapidwright_flatten_lut_cascade",
         "rapidwright_replicate_critical_cells",
-        "rapidwright_execute_register_retiming",
         "rapidwright_execute_net_swapping",
         "rapidwright_optimize_cell_placement",
         "rapidwright_smart_region_search",
         "rapidwright_analyze_pblock_region",
         "rapidwright_optimize_lut_input_cone",
         "rapidwright_execute_opt_design_strategy",
-        "rapidwright_smart_retiming",
         "rapidwright_execute_physopt_strategy",
         # Independent RapidWright tools (for fine-grained control)
         "rapidwright_optimize_fanout_batch",
@@ -183,17 +179,14 @@ PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
 }
 
 EXTENDED_EXECUTE_MAX_ROUNDS = 8
-EXTENDED_EXECUTE_STRATEGIES: frozenset[str] = frozenset({
-    "SmartRetiming",
-    "PhysOpt+RegisterRetiming",
-})
+# No strategies currently qualify for extended rounds — retiming strategies
+# that previously used this were removed (validation-unsafe: change latency).
+# To re-enable, add latency-preserving multi-step strategies here.
 
 
 def get_phase_max_rounds(phase: LoopPhase, strategy: str = "") -> int:
     """Return the round budget, extending only genuinely multi-step strategies."""
     default = PHASE_MAX_ROUNDS.get(phase, 0)
-    if phase == LoopPhase.EXECUTE and strategy in EXTENDED_EXECUTE_STRATEGIES:
-        return max(default, EXTENDED_EXECUTE_MAX_ROUNDS)
     return default
 
 

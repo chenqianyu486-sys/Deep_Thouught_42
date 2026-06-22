@@ -518,7 +518,7 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
 | `flow_control: DONE`，WNS=-0.538 | 进入下一迭代 |
 | `flow_control: DONE`，WNS>=0 | 退出优化 |
 | 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理） |
-| `flow_control: SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 3 轮/迭代） |
+| `flow_control: SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 5 轮/迭代） |
 | `flow_control: NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 + 自然 handoff + 进入下一轮 |
 | `flow_control: CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段，重新分析设计 |
 | `detect_rollback_needed()` (EVALUATE入口) | latest_wns << best_wns 时自动设 done_reason=rollback |
@@ -643,7 +643,6 @@ class StrategyState:
 - PhysOpt → 工具名含 `phys_opt`
 - Fanout → 工具名含 `fanout` 或 `optimize_fanout`
 - CongestionSpreading → 工具名含 `congestion_spread` 或 `execute_congestion_spreading`
-- RegisterRetiming → 工具名含 `register_retiming` 或 `register_retime`
 - PlaceRoute → 工具名含 `place_design` 或 `route_design`
 - 以上均不匹配 → Information/Unknown（不记录失败）
 
@@ -680,7 +679,7 @@ LLM 通过工具 schema 获取参数信息，无需重复文档。
         "result_status": {"enum": ["SUCCESS", "PARTIAL", "FAIL"]},
         "flow_control": {"enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "ROLLBACK", "EXHAUSTED"]},
         "strategy_phase": {"enum": ["ANALYZE", "SELECT_STRATEGY", "EXECUTE_STRATEGY", "EVALUATE"]},
-        "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "RegisterRetiming", "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming"]}
+        "strategy_name": {"enum": ["PBLOCK", "PhysOpt", "Fanout", "PinSwap", "LUTCascade", "CellReplication", "CongestionSpreading", "NetSwap"]}
     },
     "required": ["step_id", "result_status", "flow_control"]
 }
@@ -694,10 +693,9 @@ LLM 通过工具 schema 获取参数信息，无需重复文档。
 | EXECUTE | 已选策略映射的主工具 + report_step_state | 执行策略工具，链式动作自动处理 | EXEC_DONE |
 | EVALUATE | 评估工具(~8个) | 对比WNS变化，决定下一步 | DONE/NEXT/SWITCH/CONTINUE |
 
-EXECUTE 阶段采用动态轮数预算：默认最多 5 轮；仅 `SmartRetiming` 和
-`PhysOpt+RegisterRetiming` 这类需要多步 LLM 协调的复杂策略放宽到 8 轮。
-PBLOCK、Fanout、RegisterRetiming、OptDesign、PhysOpt 的多步 P&R 已由
-`SKILL_CHAIN_ACTIONS` 自动完成，因此仍使用默认短预算。
+EXECUTE 阶段采用固定轮数预算：默认最多 5 轮。
+PBLOCK、Fanout、OptDesign、PhysOpt 的多步 P&R 已由
+`SKILL_CHAIN_ACTIONS` 自动完成。
 对 `EXECUTE_STRATEGY_TOOL_MAP` 中的已知策略，EXECUTE 只向模型暴露映射主工具
 和 `report_step_state`，防止选定策略后继续调用无关诊断工具直到轮数耗尽；未知实验
 策略仍回退到阶段级工具集合。
@@ -925,8 +923,7 @@ api_messages = [
 
 **安全约束**：
 - 禁止使用 `phys_opt_design` 的 retiming 指令（`AlternateFlowWithRetiming`、`AddRetime`）
-- RegisterRetiming skill 使用的局部 FF 插入比全局 retiming 更安全
-- PhysOpt+RegisterRetiming 组合策略：必须使用 `vivado_physopt_and_route`（非独立的 phys_opt_design）。组合工具在 PhysOpt 后自动布线，确保 retiming 分析在布好线的设计上进行。
+- RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming 策略因插入新流水线 FF、改变设计延迟，会**无法通过逐周期功能仿真验证**。它们已从策略目录、工具白名单和策略→工具映射中完全排除，不再暴露给 LLM。策略定义和 RapidWright 工具实现仍保留在代码库中，以便未来在延迟容限验证场景下复用。
 - pin swapping 和 net swapping 仅交换等效引脚，不改变逻辑函数
 - **Phase 1 结构对比始终执行**：`validate_dcps.py` 不再提供 `--skip-structural` 标志；即使 `opt_design` 重新映射/合并 LUT 单元，RapidWright 结构对比仍作为第一道完整性检查运行。最终功能等价性由 Phase 2（功能仿真，LFSR 激励）保证。
 - opt_design **无 retiming 选项**（与 `phys_opt_design` 不同），无需额外安全守卫。
@@ -952,20 +949,21 @@ EXECUTE 阶段允许多达 5 次调用加剧问题。
 - RATE LIMITED 消息更新为：`"Dashboard already contains fresh timing data from init_analysis. Use vivado_report_timing_summary or Dashboard values directly instead of raw Tcl."`
 - 三个 phase 文件（`phase_execute.py`, `phase_analyze.py`, `phase_evaluate.py`）同步更新
 
-## 7.3 RegisterRetiming FF 利用率警告
+## 7.3 重定时策略排除机制（取代旧 FF 利用率警告）
 
-**问题**: RegisterRetiming 在 FF 利用率仅 0.21% 的设计上被选中 3 次但每次无效——几乎没有 FF 可作为流水线插入目标。
+**问题**: RegisterRetiming 在 FF 利用率仅 0.21% 的设计上被选中 3 次但每次无效——几乎没有 FF 可作为流水线插入目标。更重要的是，重定时策略插入新流水线 FF 会改变设计延迟，导致 `validate_dcps.py` 的逐周期功能仿真**必然失败**。
 
-**方案**（`strategy_library.py`, `optimizer/pure/state_space.py`）：
-- `STRATEGIES["RegisterRetiming"]` 新增 `ff_prerequisite` 字段：`"⚠️ REQUIRES adequate flip-flops (FF utilization >= 2%)"`
-- `get_strategy_catalog()` 将 `ff_prerequisite` 追加到策略目录行末尾
-- `state_space.py` 在 SELECT_STRATEGY 阶段注入 `ff_warning`（当 `ff_utilization < 2%` 时）
-- `SKILL_GUIDANCE["analyze_register_retiming"]` 和 `["execute_register_retiming"]` 新增 `contraindications`
-- **不硬性排除该策略**——LLM 保留最终决策权，但警告信息确保充分知情
+**方案**（`strategy_library.py`, `optimizer/pure/state_space.py`, `optimizer/pure/tool_filter.py`, `optimizer/pure/constants.py`）：
+- `strategy_library.py` 新增 `STRATEGY_VALIDATION_SAFE` 字典，每个策略映射为 True（验证安全）或 False（会改变延迟）
+- `get_strategy_catalog()` 自动排除 `STRATEGY_VALIDATION_SAFE[key] == False` 的策略
+- `optimizer/pure/tool_filter.py` 从 `INDEPENDENT_RAPIDWRIGHT_TOOLS` 和 `PHASE_TOOLS[EXECUTE]` 中移除重定时工具
+- `optimizer/pure/constants.py` 从 `EXECUTE_STRATEGY_TOOL_MAP` 中移除重定时映射
+- `state_space.py` 中的 `ff_warning` 现在解释为何排除重定时（FF 过少 + 改变延迟导致验证失败）
+- 策略定义和 RapidWright 工具实现**保留**在代码库中，仅切断 LLM 的暴露路径（4 层：静态提示词、动态目录、工具白名单、策略→工具映射）
 
 ## 7.4 Pre-placement 逻辑优化（opt_design）策略
 
-**动机**: PhysOpt 和 RegisterRetiming 对纯逻辑深度瓶颈（6-7 LUT 级数，100% logic delay）无效。
+**动机**: PhysOpt 对纯逻辑深度瓶颈（6-7 LUT 级数，100% logic delay）无效。
 需要 placement 前的逻辑级优化来直接减少 LUT 深度。
 
 **架构**:
@@ -1144,6 +1142,8 @@ SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", ...}
 ```
 
 **2. call_tool 入口守卫**：检查 directive 参数和 retime/interconnect_retime 布尔选项。
+
+**补充：RapidWright 重定时策略排除**：除了阻止 Vivado 重定时指令外，基于 RapidWright 的重定时策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）也已从策略目录中完全排除。这些策略通过 RapidWright API 插入新流水线 FF，同样会改变设计延迟，导致 `validate_dcps.py` 的逐周期功能仿真失败。排除通过 4 层机制实现：`STRATEGY_VALIDATION_SAFE` 映射（strategy_library.py）、工具白名单移除（tool_filter.py）、策略→工具映射移除（constants.py）、以及静态提示词更新（SYSTEM_PROMPT.TXT）。
 
 ## 13. 上下文工程：弱引导设计（2026-06 新增）
 

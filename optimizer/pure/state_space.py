@@ -552,7 +552,8 @@ def format_state_space_for_llm(
                 avg_logic = sum(logic_pcts) / len(logic_pcts)
                 if avg_logic > 0.7:
                     profile = "logic_delay_dominated"
-                    hint = "PBLOCK/PhysOpt/RegisterRetiming preferred; LUTCascade often ineffective for NN datapaths"
+                    hint = ("PBLOCK/PhysOpt/OptDesign/LogicResynthesis preferred; "
+                            "LUTCascade often ineffective for NN datapaths")
                 elif avg_logic < 0.3:
                     profile = "route_delay_dominated"
                     hint = "PBLOCK/CongestionSpreading/NetSwap preferred"
@@ -561,11 +562,12 @@ def format_state_space_for_llm(
                     hint = "PBLOCK first, then PhysOpt or Fanout"
                 lines.append(f"  design_delay_profile: {profile}  # avg_logic_delay_pct={avg_logic:.2f}")
                 lines.append(f"  strategy_hint: {hint}")
-                # FF utilization warning for RegisterRetiming (if applicable)
+                # FF utilization warning (informational — retiming strategies
+                # are already excluded from catalog, this explains why)
                 if gs.ff_utilization is not None and gs.ff_utilization < 0.02:
                     lines.append(f"  ff_warning: FF utilization is only {gs.ff_utilization:.2%} — "
-                                 f"register retiming strategies (RegisterRetiming, SmartRetiming) "
-                                 f"have very few pipeline targets and are UNLIKELY to help")
+                                 f"pipeline-based strategies inapplicable (too few FFs and "
+                                 f"would change latency, failing cycle-exact validation)")
         lines.append("")
 
     # ── Module 2: Timing Path Clusters ─────────────────────────────
