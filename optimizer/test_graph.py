@@ -31,7 +31,10 @@ from optimizer.nodes.save_output import (
     _classify_design_state,
     _restore_best_checkpoint_for_delivery,
 )
-from optimizer.nodes.subgraphs.phase_execute import _execute_exit_reason_after_timing_update
+from optimizer.nodes.subgraphs.phase_execute import (
+    _ensure_iteration_start_checkpoint,
+    _execute_exit_reason_after_timing_update,
+)
 from optimizer.nodes.subgraphs.phase_evaluate import _handle_switch_strategy
 from optimizer.tracing import StateTracer
 
@@ -211,6 +214,52 @@ class TestSaveOutputHelpers:
 
 
 class TestExecutePhaseHelpers:
+    def test_iteration_checkpoint_is_written_once(self, tmp_path, monkeypatch):
+        state = OptimizerState()
+        state.iteration.current = 2
+        state.control.run_dir = tmp_path
+        deps = NodeDeps(vivado_session=object())
+        calls = []
+
+        async def fake_call_tool(name, arguments, *args, **kwargs):
+            calls.append((name, arguments))
+            checkpoint = tmp_path / "iteration_2_start.dcp"
+            checkpoint.touch()
+            return "Checkpoint written"
+
+        monkeypatch.setattr(
+            "optimizer.nodes.subgraphs.phase_execute.call_tool_fn", fake_call_tool
+        )
+
+        assert run_async(_ensure_iteration_start_checkpoint(state, deps)) is True
+        assert run_async(_ensure_iteration_start_checkpoint(state, deps)) is False
+        assert [name for name, _ in calls] == ["vivado_write_checkpoint"]
+        assert state.control.iteration_checkpoints == [
+            (2, tmp_path / "iteration_2_start.dcp")
+        ]
+
+    def test_missing_iteration_checkpoint_is_rebuilt(self, tmp_path, monkeypatch):
+        state = OptimizerState()
+        state.iteration.current = 3
+        state.control.run_dir = tmp_path
+        checkpoint = tmp_path / "iteration_3_start.dcp"
+        state.control.iteration_checkpoints = [(3, checkpoint), (3, checkpoint)]
+        deps = NodeDeps(vivado_session=object())
+        calls = []
+
+        async def fake_call_tool(name, arguments, *args, **kwargs):
+            calls.append(name)
+            checkpoint.touch()
+            return "Checkpoint written"
+
+        monkeypatch.setattr(
+            "optimizer.nodes.subgraphs.phase_execute.call_tool_fn", fake_call_tool
+        )
+
+        assert run_async(_ensure_iteration_start_checkpoint(state, deps)) is True
+        assert calls == ["vivado_write_checkpoint"]
+        assert state.control.iteration_checkpoints == [(3, checkpoint)]
+
     def test_target_met_exits_after_any_tool(self):
         assert (
             _execute_exit_reason_after_timing_update(
