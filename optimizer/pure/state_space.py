@@ -480,6 +480,8 @@ def format_state_space_for_llm(
     tools_used: list[str] | None = None,
     current_strategy: str = "",
     evaluation_result: str = "",
+    blocked_this_iteration: list[str] | None = None,
+    blocked_ttl: list[str] | None = None,
 ) -> str:
     """Format the 6-module StateSpace as YAML for LLM context injection.
 
@@ -788,14 +790,18 @@ def format_state_space_for_llm(
     if phase and "trajectory" not in PHASE_STATESPACE_MODULES.get(phase, frozenset()):
         pass  # trajectory now embedded in dynamic_gradient; skip separate section
 
-    # ── Strategy lifecycle (brief, always shown) ──────────────────
-    if current_strategy or evaluation_result:
-        lines.append("strategy_lifecycle:")
-        if current_strategy:
-            lines.append(f"  current_strategy: {current_strategy}")
-        if evaluation_result and evaluation_result != "PENDING":
-            lines.append(f"  evaluation: {evaluation_result}")
-        lines.append("")
+    # ── Strategy lifecycle (always shown — blocked lists matter even
+    #    when no current_strategy is set, e.g. early in ANALYZE) ───
+    lines.append("strategy_lifecycle:")
+    if current_strategy:
+        lines.append(f"  current_strategy: {current_strategy}")
+    if evaluation_result and evaluation_result != "PENDING":
+        lines.append(f"  evaluation: {evaluation_result}")
+    if blocked_this_iteration:
+        lines.append(f"  blocked_this_iteration: {', '.join(blocked_this_iteration)}")
+    if blocked_ttl:
+        lines.append(f"  blocked_ttl: {', '.join(blocked_ttl)}")
+    lines.append("")
 
     # ── Skill guidance (EXECUTE phase) ─────────────────────────────
     if phase == LoopPhase.EXECUTE and current_strategy:

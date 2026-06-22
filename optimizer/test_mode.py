@@ -631,7 +631,7 @@ class V2TestMode:
         constraints: dict = {"false_paths_count": 0, "multicycle_paths_count": 0, "io_delay_defined_pct": None}
         try:
             fp_result = await self.call_tool("vivado_run_tcl", {
-                "command": "llength [get_false_paths -quiet]",
+                "command": "llength [get_false_path -quiet]",
             }, timeout=30.0)
             if fp_result and fp_result.strip():
                 try:
@@ -642,7 +642,7 @@ class V2TestMode:
             print(f"[TEST] ! get_false_paths failed: {e}")
         try:
             mp_result = await self.call_tool("vivado_run_tcl", {
-                "command": "llength [get_multicycle_paths -quiet]",
+                "command": "llength [get_multicycle_path -quiet]",
             }, timeout=30.0)
             if mp_result and mp_result.strip():
                 try:
@@ -693,7 +693,10 @@ class V2TestMode:
         print("-" * 60)
         try:
             cdc_result = await self.call_tool("vivado_run_tcl", {
-                "command": "report_timing -cross_clock -max_paths 100 -return_string",
+                # TODO: report_timing has no -cross_clock flag; catch swallows
+                # the error so CDC=0 for single-clock designs. Multi-clock
+                # designs need report_clock_interaction + dedicated parser.
+                "command": "set cdc {}; catch {report_timing -cross_clock -max_paths 100 -return_string} cdc; puts $cdc",
             }, timeout=120.0)
             self.cross_domain_paths_count = parse_cdc_paths(cdc_result)
             init_data["cross_domain_paths_count"] = self.cross_domain_paths_count

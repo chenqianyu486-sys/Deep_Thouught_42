@@ -573,7 +573,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
     try:
         fp_result = await call_tool_fn(
             "vivado_run_tcl",
-            {"command": "llength [get_false_paths -quiet]"},
+            {"command": "llength [get_false_path -quiet]"},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
@@ -590,7 +590,7 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
     try:
         mp_result = await call_tool_fn(
             "vivado_run_tcl",
-            {"command": "llength [get_multicycle_paths -quiet]"},
+            {"command": "llength [get_multicycle_path -quiet]"},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
@@ -652,9 +652,12 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
 async def _extract_cdc_paths(state: OptimizerState, deps: NodeDeps) -> None:
     """Count cross-clock-domain timing paths."""
     try:
+        # TODO: report_timing has no -cross_clock flag. For single-clock
+        # designs CDC=0 is correct. For multi-clock designs, replace with
+        # report_clock_interaction -return_string and a dedicated parser.
         cdc_report = await call_tool_fn(
             "vivado_run_tcl",
-            {"command": "report_timing -cross_clock -max_paths 100 -return_string"},
+            {"command": "set cdc {}; catch {report_timing -cross_clock -max_paths 100 -return_string} cdc; puts $cdc"},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )

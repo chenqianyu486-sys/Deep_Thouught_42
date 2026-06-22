@@ -331,6 +331,7 @@ init_analysis ──► [WNS >= 0?]
 | 26 | **设计一致性验证工具** | 4 个验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_estimate_timing`, `rapidwright_compare_designs`）在所有阶段可用。LLM 可自主验证设计状态，确保修改后一致性。 |
 | 27 | **独立 RapidWright 工具** | 19 个 RapidWright 工具（8 个分析 + 10 个执行 + 1 个验证）暴露给 LLM，支持细粒度控制。LLM 可自主选择工具组合，而非被硬编码链限制。 |
 | 28 | **可选链验证** | `OPTIONAL_CHAIN_VALIDATION` 提供 4 个可选验证链，LLM 可选择是否在执行前后插入验证步骤。验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_compare_designs`）确保设计一致性。 |
+| 30 | **策略阻止状态可见性** | Dashboard `strategy_lifecycle` 始终显示，包含 `blocked_this_iteration`（本迭代冷却策略）和 `blocked_ttl`（TTL 持久阻止策略及解封倒计时）。防止 LLM 在上下文压缩后丢失 `[BLOCKED]` 消息而重复选择已阻止策略。 |
 
 ---
 

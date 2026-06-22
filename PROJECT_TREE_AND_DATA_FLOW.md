@@ -350,6 +350,7 @@ architecture_overview:
 | 周期反思 | 每 8 tool_round 注入 REFLECTION CHECKPOINT |
 | DCP 身份 | EXECUTE 阶段从白名单移除 `vivado_open_checkpoint`；`current_dcp_path` 全程追踪 |
 | 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |
+| 策略阻止状态可见性 | Dashboard `strategy_lifecycle` 始终显示 `blocked_this_iteration`（本迭代冷却）和 `blocked_ttl`（TTL 持久阻止+解封倒计时），防止 LLM 在压缩后重复选择已阻止策略 |
 | 空结果模式匹配 | 工具返回 `optimized_count: 0` / `cascades_found: 0` 等空结果时归类为 `tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
 
 ### 3.4 模型选择

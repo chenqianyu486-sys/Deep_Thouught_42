@@ -411,6 +411,21 @@ def inject_merged_dashboard(
         fs.strategy for fs in state.context.failed_strategies
     ] if state.context.failed_strategies else None
 
+    # Blocked strategy lists for Dashboard strategy_lifecycle section.
+    # Per-iteration cooldown (cleared each iteration at iteration_start).
+    _blocked_this_iter = list(state.iteration.blocked_strategies) if state.iteration.blocked_strategies else None
+    # TTL-persistent blocks (strategy_ineffective, unblocks after TTL).
+    _blocked_ttl = None
+    if state.context.failed_strategies:
+        _ttl = []
+        for fs in state.context.failed_strategies:
+            if fs.reason == "strategy_ineffective":
+                remaining = max(0, fs.blocked_until_iter - state.iteration.current)
+                if remaining > 0:
+                    _ttl.append(f"{fs.strategy}(unblocks in {remaining} iter)")
+        if _ttl:
+            _blocked_ttl = _ttl
+
     snapshot = format_state_space_for_llm(
         space=space,
         phase=phase,
@@ -421,6 +436,8 @@ def inject_merged_dashboard(
         tools_used=state.iteration.tools_used,
         current_strategy=state.strategy.current_strategy,
         evaluation_result=state.strategy.evaluation_result,
+        blocked_this_iteration=_blocked_this_iter,
+        blocked_ttl=_blocked_ttl,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)
