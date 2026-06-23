@@ -55,8 +55,8 @@ class TestPhaseMaxRounds:
         assert PHASE_MAX_ROUNDS[LoopPhase.EVALUATE] >= PHASE_MAX_ROUNDS[LoopPhase.EXECUTE]
 
     @pytest.mark.parametrize("strategy", ["SmartRetiming", "PhysOpt+RegisterRetiming"])
-    def test_complex_execute_strategies_get_extended_budget(self, strategy):
-        assert get_phase_max_rounds(LoopPhase.EXECUTE, strategy) == 8
+    def test_validation_unsafe_strategies_do_not_get_extended_budget(self, strategy):
+        assert get_phase_max_rounds(LoopPhase.EXECUTE, strategy) == 5
 
     def test_auto_chained_strategy_keeps_tight_budget(self):
         assert get_phase_max_rounds(LoopPhase.EXECUTE, "PBLOCK") == 5

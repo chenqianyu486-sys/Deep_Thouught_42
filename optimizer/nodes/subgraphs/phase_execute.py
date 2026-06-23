@@ -94,6 +94,65 @@ def _execute_exit_reason_after_timing_update(
     return ""
 
 
+async def _ensure_iteration_start_checkpoint(
+    state: OptimizerState,
+    deps: NodeDeps,
+) -> bool:
+    """Persist one rollback checkpoint per optimizer iteration.
+
+    EXECUTE may be entered several times while strategies are switched within
+    one iteration. Rewriting the same path on every entry wastes Vivado time;
+    duplicate tracking entries can also make retention delete the newest file.
+    """
+    if state.control.run_dir is None or deps.vivado_session is None:
+        return False
+
+    iteration = state.iteration.current
+    tracked = state.control.iteration_checkpoints
+    existing_path = next(
+        (path for saved_iteration, path in tracked
+         if saved_iteration == iteration and path.exists()),
+        None,
+    )
+    if existing_path is not None:
+        deduplicated = []
+        seen_iterations = set()
+        for saved_iteration, path in reversed(tracked):
+            if saved_iteration in seen_iterations:
+                continue
+            seen_iterations.add(saved_iteration)
+            deduplicated.append((saved_iteration, path))
+        state.control.iteration_checkpoints = list(reversed(deduplicated))
+        logger.info(
+            f"[CHECKPOINT] Reusing iteration {iteration} start DCP: {existing_path}"
+        )
+        return False
+
+    # A stale tracking entry must not suppress reconstruction of a missing DCP.
+    state.control.iteration_checkpoints = [
+        (saved_iteration, path)
+        for saved_iteration, path in tracked
+        if saved_iteration != iteration
+    ]
+    iter_ckpt = state.control.run_dir / f"iteration_{iteration}_start.dcp"
+    await call_tool_fn(
+        "vivado_write_checkpoint",
+        {"dcp_path": str(iter_ckpt.resolve()), "force": True},
+        deps.rapidwright_session,
+        deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
+    )
+    state.control.iteration_checkpoints.append((iteration, iter_ckpt))
+    while len(state.control.iteration_checkpoints) > 3:
+        _, old_path = state.control.iteration_checkpoints.pop(0)
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    logger.info(f"[CHECKPOINT] Saved iteration {iteration} start DCP")
+    return True
+
+
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     """Run the EXECUTE phase: execute the chosen strategy via tool calls.
 
@@ -128,27 +187,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         state.strategy.phase_history = state.strategy.phase_history[-100:]
     state.strategy.current_phase = "EXECUTE_STRATEGY"
 
-    # Save iteration checkpoint for multi-granularity rollback.
-    # Keeps last 3; old ones are cleaned up.
-    if state.control.run_dir is not None and deps.vivado_session is not None:
-        try:
-            iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
-            await call_tool_fn(
-                "vivado_write_checkpoint", {"dcp_path": str(iter_ckpt.resolve()), "force": True},
-                deps.rapidwright_session, deps.vivado_session,
-                design_size_factor=state.timing.design_size_factor,
-            )
-            # Track in state (cap at 3 entries)
-            state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
-            while len(state.control.iteration_checkpoints) > 3:
-                old_it, old_path = state.control.iteration_checkpoints.pop(0)
-                try:
-                    old_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            logger.info(f"[CHECKPOINT] Saved iteration {state.iteration.current} start DCP")
-        except Exception as e:
-            logger.warning(f"[CHECKPOINT] Failed to save iteration checkpoint: {e}")
+    # Save the rollback baseline once even if this iteration switches strategy.
+    try:
+        await _ensure_iteration_start_checkpoint(state, deps)
+    except Exception as e:
+        logger.warning(f"[CHECKPOINT] Failed to save iteration checkpoint: {e}")
 
     while True:
         tool_round += 1
