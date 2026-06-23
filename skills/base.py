@@ -187,6 +187,63 @@ class SkillMetadata:
         }
 
 
+# ── Discovery Summary (Layer 1) ─────────────────────────────────
+
+
+@dataclass
+class SkillMetadataSummary:
+    """Lightweight skill summary for the discovery layer (~100 tokens).
+
+    Deserialized from descriptor JSON files without importing any
+    skill module. Used by the agent to decide which skill to activate.
+    """
+    id: str                      # "analysis.net_detour@1.0.0"
+    name: str                    # "net_detour"
+    namespace: str               # "analysis"
+    display_name: str            # "Analyze Net Detour"
+    description: str             # LLM routing signal
+    category: str = ""           # "ANALYSIS"
+    idempotency: str = "safe"
+    side_effects: list[str] = field(default_factory=list)
+    parameters: dict = field(default_factory=dict)
+    timeout_ms: int = 30000
+
+    @classmethod
+    def from_descriptor(cls, d: dict) -> "SkillMetadataSummary":
+        """Build summary from a Skill Descriptor v3 JSON dict."""
+        ns, name = (d.get("id", "").split("@")[0].split(".", 1) + [""])[:2]
+        params = d.get("parameters", {})
+        timeout = d.get("timeout", {})
+        return cls(
+            id=d.get("id", ""),
+            name=name,
+            namespace=ns,
+            display_name=d.get("displayName", ""),
+            description=d.get("description", ""),
+            category=d.get("category", ""),
+            idempotency=d.get("idempotency", "safe"),
+            side_effects=d.get("sideEffects", []),
+            parameters=params,
+            timeout_ms=timeout.get("defaultMs", 30000),
+        )
+
+    def to_prompt_block(self) -> str:
+        """Format as a ~100-token prompt block for agent system prompt."""
+        sig_parts = []
+        props = self.parameters.get("properties", {})
+        for pname, pinfo in props.items():
+            req = "(required)" if pname in self.parameters.get("required", []) else ""
+            sig_parts.append(f"{pname}: {pinfo.get('type', 'any')}{req}")
+        sig = f"{self.name}({', '.join(sig_parts)})" if sig_parts else self.name
+        lines = [
+            f"- `{self.id}`",
+            f"  Description: {self.description}",
+            f"  Signature: {sig}",
+            f"  Contract: {self.idempotency} | side-effects: {self.side_effects or 'none'}",
+        ]
+        return "\n".join(lines)
+
+
 # ── Result ──────────────────────────────────────────────────────
 
 

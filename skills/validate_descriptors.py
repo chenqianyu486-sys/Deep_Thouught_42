@@ -24,6 +24,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 from skills.registry import SkillRegistry
+from skills.lazy_loader import list_skill_names, activate
 
 
 def _collect_violations(checks: list[tuple[str, bool]], label: str) -> list[str]:
@@ -107,6 +108,10 @@ def run_all() -> int:
     Returns:
         0 if all pass, 1 if any violations found.
     """
+    # Activate all known skills so they're registered for validation
+    for name in list_skill_names():
+        activate(name)
+
     skills_list = SkillRegistry.list_all()
     if not skills_list:
         print("No skills registered.")

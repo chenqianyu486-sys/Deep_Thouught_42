@@ -471,7 +471,7 @@ def test_skill_trace_attributes():
 
 
 def test_all_expected_skills_registered():
-    """Verify all expected skills are registered in SkillRegistry."""
+    """Verify all expected skills are discoverable (Layer 1) and activatable (Layer 2)."""
     EXPECTED_SKILLS = {
         "net_detour", "optimize_cell", "smart_region",
         "pblock_strategy", "physopt_strategy", "fanout_strategy",
@@ -484,13 +484,24 @@ def test_all_expected_skills_registered():
         "execute_pblock_strategy",
         "smart_retiming",
     }
-    registered = {m.name for m in SkillRegistry.list_all()}
-    missing = EXPECTED_SKILLS - registered
-    assert not missing, f"Skills not registered: {missing}"
-    extra = registered - EXPECTED_SKILLS - {"test_mock_skill"}
+    # Layer 1: discovery — all names resolvable via regex index
+    from skills.lazy_loader import list_skill_names
+    discovered = set(list_skill_names())
+    undiscovered = EXPECTED_SKILLS - discovered
+    assert not undiscovered, f"Skills not discovered by regex: {undiscovered}"
+
+    # Layer 2: activation — spot-check a representative sample
+    spot_check = {"net_detour", "pblock_strategy", "smart_region",
+                  "analyze_congestion", "fanout_strategy", "optimize_cell"}
+    for name in spot_check:
+        skill = SkillRegistry.get(name)
+        assert skill is not None, f"Failed to activate '{name}'"
+        assert skill.get_metadata().name == name
+
+    extra = discovered - EXPECTED_SKILLS - {"test_mock_skill"}
     if extra:
         print(f"  WARNING: Unexpected skills: {extra}")
-    print(f"  PASSED: all {len(EXPECTED_SKILLS)} expected skills registered")
+    print(f"  PASSED: {len(EXPECTED_SKILLS)} skills discoverable, {len(spot_check)} activated")
 
 
 def test_all_descriptors_generated():

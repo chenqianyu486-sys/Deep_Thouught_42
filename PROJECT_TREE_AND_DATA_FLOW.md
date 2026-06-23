@@ -46,16 +46,18 @@ fpl26_optimization_contest/
 │   ├── interfaces.py / compat.py / lightyaml.py
 │   ├── stores/ + memory/         # 存储层 + 内存实现
 │   └── strategies/               # YAML 压缩策略（planner/worker）
-├── skills/                       # Skill 框架（Skill Descriptor v3）
+├── skills/                       # Skill 框架（Skill Descriptor v3 + 渐进式三层加载）
 │   ├── base.py / context.py / registry.py / skill_decorator.py
+│   ├── lazy_loader.py             # 三层加载：regex 扫描（发现层）→ 懒 import（激活层）
 │   ├── telemetry.py / errors.py / idempotency.py / tracing.py
 │   ├── descriptor.py / validate_descriptors.py
 │   ├── strategy_plan.py
+│   ├── descriptors/               # 自动导出的 JSON 描述符（发现层数据源）
 │   ├── opt_design_strategy.py       # opt_design RapidWright skill wrapper
-│   ├── combinational_rebalancing_strategy.py  # 验证安全 retiming（不插 FF，opt_design -remap 重平衡组合锥深度）
-│   ├── lut_muxf_repack_strategy.py            # LUT6+MUXF 联合重打包（opt_design -AddRemap，针对 NN 宽锥）
-│   ├── muxf_tree_reorder_strategy.py          # MUXF7/MUXF8 树重排（phys_opt_design 无 -retime，carry-reorder 对应物）
-│   └── 17 个 Skill 实现文件 + 测试 + JSON 描述符
+│   ├── combinational_rebalancing_strategy.py
+│   ├── lut_muxf_repack_strategy.py
+│   ├── muxf_tree_reorder_strategy.py
+│   └── 22 个 Skill 实现文件 + 测试 + JSON 描述符
 ├── docs/                         # GitHub Pages 竞赛提交文档
 └── (various config files)
 ```

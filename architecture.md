@@ -351,18 +351,36 @@ WORKER: 见 model_config.yaml worker.model_name（速度优化, 250K max）
 ### 4.1 Skill 调用链
 
 ```
-Agent → MCP Tool → rapidwright_tools.py wrapper → SkillRegistry.get()
-         ↓
-   SkillContext(design, call_id, idempotency_key)
-         ↓
-   Skill.execute_with_telemetry(context, **kwargs)
-     ├── 幂等性检查（idempotent/non-idempotent）
-     ├── Heartbeat daemon（30秒间隔）
-     ├── self.execute(context, **kwargs)
-     ├── 协程检测安全网：若 execute 返回协程则 asyncio.run() 兜底
-     ├── 追踪属性发射（SkillTraceAttributes）
-     ├── SkillTelemetry.record_execution(duration_ms, status, error_code)
-     └── 返回 SkillResult(success, data, error, error_code)
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 1: Discovery（启动时，~100 token/skill）                  │
+│   lazy_loader._ensure_index()                                    │
+│     └── regex 扫描 skills/*.py → name→module 映射               │
+│   SkillRegistry.discover_all()                                   │
+│     └── 读取 descriptors/*.json → SkillMetadataSummary[]         │
+│   → 提供给 LLM/Agent 做路由匹配                                  │
+├─────────────────────────────────────────────────────────────────┤
+│ Layer 2: Activation（按需 import）                               │
+│   SkillRegistry.get(name)                                        │
+│     └── lazy_loader.activate(name)                               │
+│         └── importlib.import_module("skills.{module}")           │
+│             → @skill 装饰器触发 → SkillRegistry.register()       │
+│     └── 返回 Skill 实例                                          │
+├─────────────────────────────────────────────────────────────────┤
+│ Layer 3: Execution（无变更）                                     │
+│   skill.execute_with_telemetry(context, **kwargs)                │
+│     ├── 幂等性检查（idempotent/non-idempotent）                  │
+│     ├── Heartbeat daemon（30秒间隔）                             │
+│     ├── self.execute(context, **kwargs)                          │
+│     ├── 协程检测安全网：若 execute 返回协程则 asyncio.run() 兜底│
+│     ├── 追踪属性发射（SkillTraceAttributes）                     │
+│     ├── SkillTelemetry.record_execution(...)                     │
+│     └── 返回 SkillResult(success, data, error, error_code)      │
+└─────────────────────────────────────────────────────────────────┘
+
+关键变更：
+- skills/__init__.py 不再 import 任何技能模块（启动 0 导入）
+- descriptors/*.json 仍是 @skill 装饰器自动导出（激活时写入）
+- 所有 SkillRegistry.get("name") 调用不变，内部自动触发懒加载
 ```
 
 #### Skill 超时映射（三层）

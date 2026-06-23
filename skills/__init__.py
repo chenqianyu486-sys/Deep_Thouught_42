@@ -1,24 +1,24 @@
-# Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
-# SPDX-License-Identifier: Apache 2.0
-
 """
-Skill framework for FPGA optimization.
+Skill framework for FPGA optimization — with progressive three-layer loading.
 
-This module provides a standardized skill mechanism for defining,
-registering, and invoking skills within the optimization system.
+Layers:
+  1. Discovery — startup: regex scan for name→module mapping + read JSON
+                 descriptors → lightweight SkillMetadataSummary (~100 tok each).
+  2. Activation — on demand: ``SkillRegistry.get(name)`` triggers lazy import
+                  of the specific module, firing the ``@skill`` decorator
+                  and registering the full Skill instance.
+  3. Execution — reuse existing ``Skill.execute_with_telemetry()`` unchanged.
 
-The framework follows the Skill Descriptor v3 specification:
-    - Strongly-typed parameter contracts via JSON Schema
-    - Standardized error envelopes for Agent-safe error handling
-    - Idempotency and concurrency guards
-    - Tracing and observability attributes
-    - Machine-readable JSON descriptor files for each skill
+No skill modules are imported at startup. All explicit ``from skills import ...``
+imports in ``__init__.py`` have been removed — ``__init__.py`` only loads
+framework infrastructure (base, registry, context, etc.).
 """
 
 from skills.base import (
     Skill,
     SkillCategory,
     SkillMetadata,
+    SkillMetadataSummary,
     SkillResult,
     ParameterSpec,
 )
@@ -38,30 +38,13 @@ from skills.descriptor import export_all, write_descriptor, read_descriptor
 from skills.tracing import SkillTraceAttributes
 from skills.validate_descriptors import validate_descriptor
 from skills.strategy_plan import StrategyPlan, StrategyStep
-
-# Import submodules to trigger @skill decorators
-from skills import net_detour_optimization
-from skills import smart_region_search
-from skills import pblock_strategy
-from skills import physopt_strategy
-from skills import fanout_strategy
-from skills import congestion_analysis
-from skills import congestion_spreading_strategy
-from skills import pin_swapping_optimization_strategy
-from skills import critical_path_cell_replication_strategy
-from skills import register_retiming_strategy
-from skills import smart_retiming
-from skills import net_swapping_strategy
-from skills import lut_cascade_flattening_strategy
-from skills import opt_design_strategy
-from skills import combinational_rebalancing_strategy
-from skills import lut_muxf_repack_strategy
-from skills import muxf_tree_reorder_strategy
+from skills.lazy_loader import load_all_summaries, summaries_to_prompt, list_skill_names
 
 __all__ = [
     "Skill",
     "SkillCategory",
     "SkillMetadata",
+    "SkillMetadataSummary",
     "SkillResult",
     "ParameterSpec",
     "SkillError",
@@ -83,4 +66,7 @@ __all__ = [
     "validate_descriptor",
     "StrategyPlan",
     "StrategyStep",
+    "load_all_summaries",
+    "summaries_to_prompt",
+    "list_skill_names",
 ]
