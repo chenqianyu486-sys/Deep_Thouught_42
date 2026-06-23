@@ -447,6 +447,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     latest_tns=state.timing.latest_tns,
                     latest_failing_endpoints=state.timing.latest_failing_endpoints,
                     prev_best_wns=state.timing.prev_best_wns,
+                    prev_best_tns=state.timing.prev_best_tns,
                 )
 
                 # Store raw output
@@ -1348,8 +1349,8 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 latest_tns=state.timing.latest_tns,
                 latest_failing_endpoints=state.timing.latest_failing_endpoints,
                 prev_best_wns=state.timing.prev_best_wns,
+                prev_best_tns=state.timing.prev_best_tns,
             )
-            # Determine chain step status from raw_result (JSON error check)
             step_failed = False
             try:
                 parsed = json.loads(raw_result) if isinstance(raw_result, str) else {}

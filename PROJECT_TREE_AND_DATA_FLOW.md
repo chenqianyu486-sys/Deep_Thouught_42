@@ -102,14 +102,15 @@ llm_tool_loop_node (调度器)
   │    if phase==EVALUATE && done_reason: exit or reselect
   │
   ├── ANALYZE ─────────→ SELECT_STRATEGY
-  │  仅分析工具(~16个)   极简工具(~4个)
+  │  仅分析工具(~17个，含探索性执行工具)   极简工具(~4个)
   │  首轮最多8轮(Dashboard已预填)  最多6轮
   │  后续迭代最多12轮
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
-  │  策略说明+执行计划    已知策略仅暴露映射主工具+flow-control
-  │                      默认最多5轮；复杂组合策略最多8轮；SKILL_CHAIN 自动串联
-  │                      执行后可调 rapidwright_report_timing 快速反馈
+  │  Dashboard+Handoff决策  极简工具(~4个,仅report_step_state+raw_tool_output)
+  │  raw_tool_outputs侧缓冲   可见ANALYZE/EVALUATE阶段原始工具结果
+  │  可查询                              默认最多6轮；仅纯数据描述，无策略推荐引导
+  │  Dashboard含9个模块(新增 design_structure+recent_analysis)
   │
   ├── EXECUTE ─────────→ EVALUATE
   │  链式动作+事后评估    评估工具(~7个, 不含vivado_get_wns)
@@ -192,6 +193,8 @@ Phase C (跨服务器分析):
 | Route status (wirelength, long nets) | M3 Physical Congestion | 动态 |
 | Congestion (global score) | M3 Physical Congestion | 动态 |
 | Control sets, CDC paths, cell types | M4 Netlist Quality | 静态 |
+| Cell type composition (MUXF/FF/LUT ratio) | M4b Design Structure | 静态（SELECT_STRATEGY 独占） |
+| Recent analysis tool results | M8 Recent Analysis | 动态（SELECT_STRATEGY 独占，从 raw_tool_outputs 推导） |
 | High fanout nets | M4 Netlist Quality | 动态 |
 | Constraints (false/multicycle paths, IO delay) | M5 Constraints | 静态 |
 | PVT corner | M5 Constraints | 静态 |
@@ -323,7 +326,7 @@ architecture_overview:
   total_cells_analyzed: 72
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 6 模块（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M7 architecture_overview 两阶段均可见），EXECUTE/EVALUATE 阶段看 M1 + M2b (timing_violation_summary 紧凑摘要) + M6。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 **7 模块**（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M4b `design_structure` 两阶段均可见，为 LLM 提供早期细胞组成结构信号），**SELECT_STRATEGY 看 9 模块**（新增 Module 4b `design_structure` + Module 8 `recent_analysis`），EXECUTE/EVALUATE 阶段看 M1 + M2b (timing_violation_summary 紧凑摘要) + M6。
 
 **LLM 防歧义注解**: Dashboard 所有 N/A 和空列表都带有动态原因，区分"未分析"与"确实为零"：
 - `best_wns: "N/A(initial_state)"` — 首次迭代前尚未有最佳值
@@ -336,6 +339,48 @@ architecture_overview:
 - 每次通过 `build_state_space()` 重建，不进入 MessageStore
 - 同时作为 Web 前端 `data.state_space` 通过 WebSocket 推送
 - **设计状态标注（design_not_routed）**: 当 `_post_eval_hook` / `_track_wns_from_result` 检测到 `report_timing_summary` 输出中 `Design State` 不含 `Routed` 时，设置 `state.timing.design_not_routed = True`。Dashboard M1 `current_stage` 下方显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`，防止 LLM 基于未布线设计的虚假 WNS 做出错误决策。
+
+### 3.2.1 新增模块：design_structure（Module 4b）
+
+ANALYZE + SELECT_STRATEGY 阶段均可见，从 `state.timing.design_info.top_cell_types` 推导细胞组成结构信号。零额外 MCP 开销。LLM 在 ANALYZE 阶段即可看到 LUT/MUXF/FF 构成比，为早期策略判断提供依据。
+
+```yaml
+# Module 4b: Design Structure
+design_structure:
+  cell_composition:
+    lut: 31370
+    muxf: 3983  # MUXF7=3016, MUXF8=967
+    ff: 1660
+    muxf_ratio: 10.7%
+    ff_to_lut_ratio: 0.053
+  structural_patterns: MUXF7+MUXF8_cascade, shallow_pipeline
+  dominant_cell_types: LUT6(24377) > MUXF7(3016) > LUT5(4744)
+```
+
+提供四个关键结构信号：`muxf_ratio`（MUXF 在总细胞占比）、`ff_to_lut_ratio`（FF/LUT 比例反映流水线深度）、`structural_patterns`（MUXF7+MUXF8_cascade / carry_chain / shallow_pipeline）、`dominant_cell_types`（前三大细胞类型）。
+
+### 3.2.2 新增模块：recent_analysis（Module 8）
+
+SELECT_STRATEGY 阶段独占。从 `state.context.raw_tool_outputs` 提取最近两轮迭代的分析工具摘要。零额外 MCP 开销。
+
+```yaml
+# Module 8: Recent Analysis Results
+recent_analysis:
+  - [vivado_report_timing_summary] WNS=-0.978, TNS=-835.005, failing=1529
+  - [rapidwright_analyze_critical_path_spread] avg_distance=111.86, max_distance=198
+  - [rapidwright_analyze_congestion] global_score=0.10, severity=LOW
+  - [vivado_get_cached_high_fanout_nets] 24 nets, max_fanout=259
+```
+
+覆盖 8 种分析工具：`vivado_report_timing_summary`、`rapidwright_analyze_critical_path_spread`、`rapidwright_analyze_congestion`、`vivado_get_cached_high_fanout_nets`、`rapidwright_analyze_net_detour`、`vivado_check_design_status`、`rapidwright_search_cells`、`vivado_extract_critical_path_cells`。
+
+### 3.2.3 上下文工程变更
+
+- **移除策略引导**：`design_delay_profile` 不再附带 `strategy_hint`（如 `"PBLOCK/CongestionSpreading/NetSwap preferred"`），`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述（如 `arch_insight: Critical paths concentrate in "module" (52% coverage)`），不再推荐具体策略。
+- **移除 `ff_warning` 否定引导**：FF 利用率低时仅标注 `ff_utilization: 0.21%  # low FF count`，不再说 "pipeline-based strategies inapplicable"。
+- **`design_type_note` 简化**：纯组合设计仅标注 `"no sequential elements for retiming"`。
+- **ANALYZE→SELECT_STRATEGY handoff 增强**：`PhaseHandoff` 新增 `tool_results: list[str]` 字段，ANALYZE 阶段退出时通过 `_extract_recent_tool_results()` 注入最近分析工具结果摘要。SELECT_STRATEGY 阶段 LLM 可直接从 handoff 文本中看到工具具体结果。
+- **`raw_tool_outputs` 跨阶段可查询**：SELECT_STRATEGY 阶段 `call_tool_fn()` 现在传递 `raw_tool_outputs` 参数，LLM 可调用 `vivado_get_raw_tool_output` 查询 ANALYZE/EVALUATE 阶段的原始工具输出。
 
 > 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §3.4-§3.5](architecture.md)。
 

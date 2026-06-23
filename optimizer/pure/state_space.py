@@ -75,11 +75,12 @@ PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
         "global_state", "timing_clusters", "physical_congestion",
         "netlist_quality", "dynamic_gradient", "architecture_overview",
+        "design_structure",  # cell composition (MUXF/LUT/FF ratios) for strategy-aware analysis
     }),
     LoopPhase.SELECT_STRATEGY: frozenset({
         "global_state", "timing_clusters", "physical_congestion",
         "netlist_quality", "constraints_env", "dynamic_gradient",
-        "architecture_overview",
+        "architecture_overview", "design_structure", "recent_analysis",
     }),
     LoopPhase.EXECUTE: frozenset({
         "global_state", "timing_clusters_summary", "dynamic_gradient",
@@ -482,6 +483,7 @@ def format_state_space_for_llm(
     evaluation_result: str = "",
     blocked_this_iteration: list[str] | None = None,
     blocked_ttl: list[str] | None = None,
+    state: OptimizerState | None = None,
 ) -> str:
     """Format the 6-module StateSpace as YAML for LLM context injection.
 
@@ -544,7 +546,7 @@ def format_state_space_for_llm(
         if gs.cell_count > 0:
             lines.append(f"  cell_count: {gs.cell_count}")
             lines.append(f"  net_count: {gs.net_count}")
-        # Design delay profile hint (SELECT_STRATEGY only)
+        # Design delay profile (SELECT_STRATEGY only) — pure descriptive data, no recommendations
         if phase == LoopPhase.SELECT_STRATEGY and space.timing_clusters.top_violating_paths:
             logic_pcts = [
                 p.logic_delay_pct for p in space.timing_clusters.top_violating_paths
@@ -552,24 +554,25 @@ def format_state_space_for_llm(
             ]
             if logic_pcts:
                 avg_logic = sum(logic_pcts) / len(logic_pcts)
+                # Append delay_profile_breakdown counts for richer context
+                dp_breakdown = ""
+                vs = space.timing_clusters.violation_summary
+                if vs and vs.delay_profile_breakdown:
+                    dp = vs.delay_profile_breakdown
+                    ld = dp.get("logic_dominated", 0)
+                    rd = dp.get("route_dominated", 0)
+                    mx = dp.get("mixed", 0)
+                    dp_breakdown = f", logic={ld}, route={rd}, mixed={mx}"
                 if avg_logic > 0.7:
                     profile = "logic_delay_dominated"
-                    hint = ("PBLOCK/PhysOpt/OptDesign/LogicResynthesis preferred; "
-                            "LUTCascade often ineffective for NN datapaths")
                 elif avg_logic < 0.3:
                     profile = "route_delay_dominated"
-                    hint = "PBLOCK/CongestionSpreading/NetSwap preferred"
                 else:
                     profile = "mixed"
-                    hint = "PBLOCK first, then PhysOpt or Fanout"
-                lines.append(f"  design_delay_profile: {profile}  # avg_logic_delay_pct={avg_logic:.2f}")
-                lines.append(f"  strategy_hint: {hint}")
-                # FF utilization warning (informational — retiming strategies
-                # are already excluded from catalog, this explains why)
+                lines.append(f"  design_delay_profile: {profile}"
+                             f"  # avg_logic_delay_pct={avg_logic:.2f}{dp_breakdown}")
                 if gs.ff_utilization is not None and gs.ff_utilization < 0.02:
-                    lines.append(f"  ff_warning: FF utilization is only {gs.ff_utilization:.2%} — "
-                                 f"pipeline-based strategies inapplicable (too few FFs and "
-                                 f"would change latency, failing cycle-exact validation)")
+                    lines.append(f"  ff_utilization: {gs.ff_utilization:.2%}  # low FF count")
         lines.append("")
 
     # ── Module 2: Timing Path Clusters ─────────────────────────────
@@ -724,6 +727,11 @@ def format_state_space_for_llm(
             lines.append(f"  failed_inferences: {ann}")
         lines.append("")
 
+        # ── Design Structure (SELECT_STRATEGY only) ─────────────────
+        if enabled is not None and "design_structure" in enabled and state:
+            _append_design_structure(lines, state)
+            lines.append("")
+
     # ── Module 5: Constraints Environment ──────────────────────────
     if enabled is None or "constraints_env" in enabled:
         ce = space.constraints_env
@@ -779,12 +787,17 @@ def format_state_space_for_llm(
             if ao.deepest_module:
                 lines.append(f"  deepest_module: \"{ao.deepest_module}\"")
             lines.append(f"  total_cells_analyzed: {ao.total_cells_analyzed}")
-            # Architecture-based strategy hints (SELECT_STRATEGY only)
+            # Architecture-based insights (SELECT_STRATEGY only) — pure data, no recommendations
             if phase == LoopPhase.SELECT_STRATEGY and ao.top_modules:
-                _append_architecture_hints(lines, ao)
+                _append_architecture_insights(lines, ao)
         else:
             lines.append("  top_modules: \"N/A(no_critical_paths)\"")
         lines.append("")
+
+        # ── Recent Analysis Results (SELECT_STRATEGY only) ─────────
+        if enabled is not None and "recent_analysis" in enabled and state:
+            _append_recent_analysis_results(lines, state)
+            lines.append("")
 
     # ── Trajectory (if enabled in phase) ──────────────────────────
     if phase and "trajectory" not in PHASE_STATESPACE_MODULES.get(phase, frozenset()):
@@ -981,8 +994,10 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
         pass
 
 
-def _append_architecture_hints(lines: list[str], ao: DashboardArchitectureOverview) -> None:
-    """Append architecture-based strategy selection hints (SELECT_STRATEGY only)."""
+def _append_architecture_insights(lines: list[str], ao: DashboardArchitectureOverview) -> None:
+    """Append architecture-based structural observations (SELECT_STRATEGY only).
+    Pure data descriptors — no strategy recommendations.
+    """
     if not ao.top_modules:
         return
 
@@ -990,29 +1005,181 @@ def _append_architecture_hints(lines: list[str], ao: DashboardArchitectureOvervi
     top_hits = top.critical_path_hits
     top_coverage = top.cell_distribution_pct
 
-    # Hint 1: Single-module dominance → targeted PBLOCK
+    # Insight 1: Single-module dominance
     if top_coverage > 50.0:
-        lines.append(f"  arch_hint: Critical paths strongly concentrate in \"{top.name}\" "
-                     f"({top_coverage:.0f}% coverage) — PBLOCK targeting this module "
-                     f"is likely more effective than a generic PBLOCK around scattered cells.")
+        lines.append(f"  arch_insight: Critical paths concentrate in \"{top.name}\" "
+                     f"({top_coverage:.0f}% coverage, {top_hits} hits)")
     elif top_coverage > 30.0:
-        lines.append(f"  arch_hint: \"{top.name}\" is the primary timing hotspot "
-                     f"({top_coverage:.0f}% coverage) — consider PBLOCK or PhysOpt "
-                     f"focused on this module.")
+        lines.append(f"  arch_insight: \"{top.name}\" is the primary timing hotspot "
+                     f"({top_coverage:.0f}% coverage)")
 
-    # Hint 2: Cross-module paths → PhysOpt or Congestion strategies
+    # Insight 2: Cross-module vs intra-module path ratio
+    total_paths = ao.cross_module_paths + ao.intra_module_paths
     if ao.cross_module_paths > ao.intra_module_paths and ao.cross_module_paths >= 3:
-        lines.append(f"  arch_hint: {ao.cross_module_paths}/{ao.cross_module_paths + ao.intra_module_paths} "
-                     f"paths cross module boundaries — inter-module routing delay may dominate. "
-                     f"PhysOpt or CongestionSpreading may help more than module-local PBLOCK.")
+        lines.append(f"  arch_insight: {ao.cross_module_paths}/{total_paths} "
+                     f"paths cross module boundaries — inter-module routing delay may dominate")
     elif ao.cross_module_paths == 0 and ao.intra_module_paths > 0:
-        lines.append(f"  arch_hint: All critical paths are intra-module — "
-                     f"module-local PBLOCK or RegisterRetiming may be sufficient.")
+        lines.append(f"  arch_insight: All {ao.intra_module_paths} critical paths are intra-module")
 
-    # Hint 3: Deepest module
+    # Insight 3: Deepest module
     if ao.deepest_module:
-        lines.append(f"  arch_hint: Deepest logic is in \"{ao.deepest_module}\" — "
-                     f"RegisterRetiming or LUTCascadeFlattening may help if levels > 15.")
+        lines.append(f"  arch_insight: Deepest logic is in \"{ao.deepest_module}\"")
+
+
+# ── Analysis Tools for Design Structure ────────────────────────────
+
+_ANALYSIS_TOOL_NAMES: frozenset[str] = frozenset({
+    "vivado_report_timing_summary", "vivado_extract_critical_path_cells",
+    "vivado_get_cached_high_fanout_nets", "vivado_check_design_status",
+    "rapidwright_analyze_critical_path_spread", "rapidwright_analyze_congestion",
+    "rapidwright_analyze_net_detour", "rapidwright_get_design_info",
+    "rapidwright_get_device_topology", "rapidwright_report_timing",
+    "rapidwright_search_cells", "rapidwright_analyze_pblock_region",
+    "rapidwright_flatten_lut_cascade",
+})
+
+
+def _append_design_structure(lines: list[str], state: OptimizerState) -> None:
+    """Append cell-composition structural indicators from top_cell_types.
+    Pure data — no strategy recommendations. SELECT_STRATEGY only.
+    """
+    di = state.timing.design_info or {}
+    top_types = di.get("top_cell_types", {})
+    if not top_types:
+        return
+
+    lut = top_types.get("LUT6", 0) + top_types.get("LUT5", 0) + top_types.get("LUT4", 0) \
+          + top_types.get("LUT3", 0) + top_types.get("LUT2", 0) + top_types.get("LUT1", 0)
+    muxf7 = top_types.get("MUXF7", 0)
+    muxf8 = top_types.get("MUXF8", 0)
+    muxf_total = muxf7 + muxf8
+    ff = top_types.get("FDRE", 0) + top_types.get("FDSE", 0) \
+         + top_types.get("FDCE", 0) + top_types.get("FDPE", 0)
+    carry = top_types.get("CARRY4", 0) + top_types.get("CARRY8", 0)
+    total_cells = sum(top_types.values()) if top_types else 0
+
+    lines.append("# Module 4b: Design Structure")
+    lines.append("design_structure:")
+    lines.append(f"  cell_composition:")
+    if lut:
+        lines.append(f"    lut: {lut}")
+    if muxf_total:
+        lines.append(f"    muxf: {muxf_total}  # MUXF7={muxf7}, MUXF8={muxf8}")
+    if ff:
+        lines.append(f"    ff: {ff}")
+    if carry:
+        lines.append(f"    carry: {carry}")
+    if total_cells > 0:
+        muxf_ratio = muxf_total / total_cells if muxf_total else 0.0
+        lines.append(f"    muxf_ratio: {muxf_ratio:.1%}")
+        if lut and ff:
+            ftl_ratio = ff / lut
+            lines.append(f"    ff_to_lut_ratio: {ftl_ratio:.3f}")
+
+    # Structural pattern detection
+    patterns = []
+    if muxf7 and muxf8:
+        patterns.append("MUXF7+MUXF8_cascade")
+    elif muxf7:
+        patterns.append("MUXF7_present")
+    if carry:
+        patterns.append("carry_chain")
+    if lut and ff and (ff / lut) < 0.1:
+        patterns.append("shallow_pipeline")
+    if patterns:
+        lines.append(f"  structural_patterns: {', '.join(patterns)}")
+
+    # Cell type dominance
+    if top_types:
+        sorted_types = sorted(top_types.items(), key=lambda x: -x[1])
+        top3 = [f"{k}({v})" for k, v in sorted_types[:3]]
+        lines.append(f"  dominant_cell_types: {' > '.join(top3)}")
+
+
+def _append_recent_analysis_results(lines: list[str], state: OptimizerState) -> None:
+    """Append recent analysis phase tool results as structured summaries.
+    Reads from raw_tool_outputs — no extra MCP calls. SELECT_STRATEGY only.
+    """
+    current_iter = state.iteration.current
+    entries: list[str] = []
+
+    for (it, rd), (name, raw) in sorted(state.context.raw_tool_outputs.items()):
+        if name not in _ANALYSIS_TOOL_NAMES:
+            continue
+        if it != current_iter and it != current_iter - 1:
+            continue
+
+        # Extract a compact one-line summary from the raw output
+        summary = ""
+        if name == "vivado_report_timing_summary":
+            wns = _extract_timing_value(raw, "wns")
+            tns = _extract_timing_value(raw, "tns")
+            fe = _extract_timing_value(raw, "failing_endpoints")
+            summary = f"WNS={wns}, TNS={tns}, FE={fe}"
+        elif name == "rapidwright_analyze_critical_path_spread":
+            import json
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    avg = data.get("avg_distance", data.get("avg_max_distance", "?"))
+                    mx = data.get("max_distance", "?")
+                    cnt = data.get("paths_analyzed", "?")
+                    summary = f"avg={avg}, max={mx}, paths={cnt}"
+            except (json.JSONDecodeError, TypeError):
+                summary = raw.strip()[:80]
+        elif name == "rapidwright_analyze_congestion":
+            import json
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    score = data.get("global_score", data.get("congested_ratio", "?"))
+                    sev = data.get("severity", "?")
+                    summary = f"global_score={score}, severity={sev}"
+            except (json.JSONDecodeError, TypeError):
+                summary = raw.strip()[:80]
+        elif name == "vivado_get_cached_high_fanout_nets":
+            # Count lines with fanout info
+            import re
+            matches = re.findall(r"fanout=(\d+)", raw)
+            if matches:
+                max_fo = max(int(m) for m in matches)
+                summary = f"{len(matches)} nets, max_fanout={max_fo}"
+            else:
+                summary = raw.strip()[:80]
+        elif name == "rapidwright_analyze_net_detour":
+            import json
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    summary = f"{len(data)} cells with detour > threshold"
+                elif isinstance(data, dict) and data.get("cells"):
+                    summary = f"{len(data['cells'])} cells"
+            except (json.JSONDecodeError, TypeError):
+                summary = raw.strip()[:80]
+        else:
+            # Generic: first non-empty, non-json line
+            first_line = raw.strip().split("\n")[0][:80] if raw.strip() else ""
+            summary = first_line if first_line else f"completed"
+
+        if summary:
+            entry = f"    - [{name}] {summary}"
+            if entry not in entries:
+                entries.append(entry)
+
+    if entries:
+        lines.append("# Module 8: Recent Analysis Results")
+        lines.append("recent_analysis:")
+        for e in entries[-6:]:
+            lines.append(e)
+
+
+def _extract_timing_value(raw: str, key: str) -> str:
+    """Quick regex-based timing value extraction for dashboard summaries."""
+    import re
+    # Pattern: key: value  or  key=value
+    pat = re.compile(rf'{re.escape(key)}[\s:=]+([-\d.]+)', re.IGNORECASE)
+    m = pat.search(raw)
+    return m.group(1) if m else "?"
 
 
 def _format_violation_summary(

@@ -35,6 +35,7 @@ class PhaseHandoff:
     key_findings: dict = field(default_factory=dict)
     tools_called: list[str] = field(default_factory=list)
     message_count: int = 0
+    tool_results: list[str] = field(default_factory=list)
 
     def to_phase_context_string(self) -> str:
         """Format handoff as injectable context string.
@@ -64,6 +65,10 @@ class PhaseHandoff:
                      if not isinstance(v, (list, dict)) or len(str(v)) < 100]
             if items:
                 parts.append(f"Findings: {', '.join(items[:5])}")
+        if self.tool_results:
+            parts.append("Recent Tool Results:")
+            for tr in self.tool_results[-4:]:
+                parts.append(f"  {tr}")
         return "\n".join(parts)
 
 
@@ -76,6 +81,7 @@ def build_phase_handoff(
     key_findings: dict | None = None,
     tools_called: list[str] | None = None,
     message_count: int = 0,
+    tool_results: list[str] | None = None,
 ) -> PhaseHandoff:
     """Build a PhaseHandoff from a completed phase."""
     return PhaseHandoff(
@@ -87,6 +93,7 @@ def build_phase_handoff(
         key_findings=key_findings or {},
         tools_called=tools_called or [],
         message_count=message_count,
+        tool_results=tool_results or [],
     )
 
 

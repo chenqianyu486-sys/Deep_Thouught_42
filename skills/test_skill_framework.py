@@ -483,6 +483,11 @@ def test_all_expected_skills_registered():
         "lut_cascade_flattening",
         "execute_pblock_strategy",
         "smart_retiming",
+        # v2.1 new strategies
+        "combinational_rebalancing_strategy",
+        "lut_muxf_repack_strategy",
+        "muxf_tree_reorder_strategy",
+        "opt_design_strategy",
     }
     # Layer 1: discovery — all names resolvable via regex index
     from skills.lazy_loader import list_skill_names

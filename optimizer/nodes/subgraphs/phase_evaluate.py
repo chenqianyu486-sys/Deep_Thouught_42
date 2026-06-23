@@ -344,6 +344,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     latest_tns=state.timing.latest_tns,
                     latest_failing_endpoints=state.timing.latest_failing_endpoints,
                     prev_best_wns=state.timing.prev_best_wns,
+                    prev_best_tns=state.timing.prev_best_tns,
                 )
                 if deps.compat is not None:
                     deps.compat.add_message("tool", summary, {

@@ -31,14 +31,6 @@ SCENARIO_WORKFLOW = [
     "Scenario Ranking: Rank by WNS contribution x path_count",
 ]
 
-# ── Strategy Selection ──────────────────────────────────────────
-
-STRATEGY_DECISION_TABLE = [
-    {"condition": "initial_analysis.recommendation == 'PBLOCK'", "strategy": "strategy_1"},
-    {"condition": "paths_analyzed <= 2 AND avg_distance < threshold", "strategy": "strategy_2"},
-    {"condition": "High fanout nets present, no spread", "strategy": "strategy_3"},
-]
-
 # ── Strategy Sequences ──────────────────────────────────────────
 
 STRATEGIES = {
@@ -70,7 +62,7 @@ STRATEGIES = {
     },
     "OptDesign": {
         "name": "Logic Optimization (opt_design)",
-        "trigger": "Logic-depth limited design (>70% logic delay), PhysOpt ineffective, "
+        "trigger": "Logic-depth limited design (>70% logic delay), "
                    "6-7 LUT levels on critical paths",
         "ff_prerequisite": "",
         "sequence": [
@@ -143,7 +135,7 @@ STRATEGIES = {
     },
     "CongestionSpreading": {
         "name": "Congestion-Aware Cell Spreading",
-        "trigger": "analyze_congestion severity=HIGH, PBLOCK/PhysOpt ineffective",
+        "trigger": "analyze_congestion severity=HIGH",
         "sequence": [
             {"step": "analyze_congestion", "platform": "RapidWright",
              "params": {"utilization_threshold": 0.8},
@@ -230,8 +222,8 @@ STRATEGIES = {
     },
     "LogicResynthesis": {
         "name": "Logic Resynthesis (synth_design -remap)",
-        "trigger": "100% logic delay, NN/datapath design with MUXF7/8 cascades, "
-                   "other strategies ineffective",
+        "trigger": "NN/datapath design with MUXF7/8 cascades, "
+                   "100% logic delay or deep combinational levels on critical paths",
         "sequence": [
             {"step": "vivado_run_tcl", "platform": "Vivado",
              "params": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"},
@@ -243,8 +235,8 @@ STRATEGIES = {
     },
     "PhysOptAggressive": {
         "name": "Aggressive Physical Optimization (Explore directive)",
-        "trigger": "WNS stuck after PBLOCK, logic-depth limited, "
-                   "PhysOpt Explore not yet tried or need more aggressive optimization",
+        "trigger": "WNS > -3.0, logic-depth limited design with spread, "
+                   "need more aggressive optimization than standard PhysOpt",
         "sequence": [
             {"step": "vivado_physopt_and_route", "platform": "Vivado",
              "params": {"directive": "AggressiveExplore"},
@@ -253,9 +245,8 @@ STRATEGIES = {
     },
     "CombinationalRebalance": {
         "name": "Combinational Logic Rebalancing (validation-safe retiming)",
-        "trigger": "WNS stuck, deep combinational chains (LUT6/MUXF7/MUXF8 cascades) "
-                   "between registers on critical paths, register retiming unsafe "
-                   "(cycle-exact validation required, FF insertion would change latency)",
+        "trigger": "Deep combinational chains (LUT6/MUXF7/MUXF8 cascades) "
+                   "between registers on critical paths, logic levels >= 3",
         "ff_prerequisite": "",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
@@ -278,9 +269,9 @@ STRATEGIES = {
     },
     "LUTMUXFRepack": {
         "name": "LUT6+MUXF Co-Repack (validation-safe LUT merge)",
-        "trigger": "NN/wide-datapath design, MUXF7/MUXF8 + LUT6 cascade on critical "
-                   "paths, flatten_lut_cascade returned optimized_count=0 "
-                   "(cones exceed 6-input LUT limit)",
+        "trigger": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascade on critical "
+                   "paths (flatten_lut_cascade likely returns optimized_count=0 on cones "
+                   "exceeding 6-input LUT limit — run it in ANALYZE to confirm)",
         "ff_prerequisite": "",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
@@ -303,8 +294,8 @@ STRATEGIES = {
     },
     "MUXFTreeReorder": {
         "name": "MUXF Tree Reorder (validation-safe carry-reorder analogue)",
-        "trigger": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux tree on "
-                   "critical paths, WNS stuck after PBLOCK, register retiming unsafe",
+        "trigger": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels "
+                   "on critical paths, route-dominated delay profile",
         "ff_prerequisite": "",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
@@ -523,7 +514,7 @@ SKILL_GUIDANCE = {
         "category": "OPTIMIZATION",
         "input": "directive (default: Explore), retarget (default: True)",
         "output": "execution plan with recommended opt_design parameters",
-        "condition": "Logic-depth limited design (>70% logic delay), PhysOpt ineffective, "
+        "condition": "Logic-depth limited design (>70% logic delay), "
                      "6-7 LUT levels on critical paths",
         "prerequisite": "Design must be loaded. opt_design runs BEFORE placement — "
                         "no placement/routing prerequisites needed.",
@@ -559,8 +550,8 @@ SKILL_GUIDANCE = {
         "category": "OPTIMIZATION",
         "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
         "output": "StrategyPlan with Vivado opt_design -AddRemap steps (lut_muxf_pairs, lut5_candidates)",
-        "condition": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascades on critical paths; "
-                     "flatten_lut_cascade returned optimized_count=0 (cones exceed 6-input LUT limit)",
+        "condition": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascades on critical paths. "
+                     "Tip: run flatten_lut_cascade first — if optimized_count=0, wide cones confirm LUTMUXFRepack is ideal",
         "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists",
         "post_actions": "Chain auto-executes: vivado_opt_design -> vivado_place_design -> "
                         "vivado_route_design -> vivado_report_timing_summary",
@@ -575,8 +566,8 @@ SKILL_GUIDANCE = {
         "category": "OPTIMIZATION",
         "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
         "output": "StrategyPlan with Vivado phys_opt_design steps (muxf_trees, max_depth, avg_depth)",
-        "condition": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux tree on critical paths, "
-                     "WNS stuck after PBLOCK",
+        "condition": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels on critical paths, "
+                     "route-dominated delay profile",
         "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists. "
                         "Design must be placed (phys_opt_design requires placement).",
         "post_actions": "Chain auto-executes: vivado_phys_opt_design -> vivado_route_design -> "
@@ -627,15 +618,14 @@ def get_scenario_guide() -> str:
     lines.append("Workflow:")
     for i, step in enumerate(SCENARIO_WORKFLOW, 1):
         lines.append(f"  {i}. {step}")
-    lines.append("")
-    lines.append("Decision Table:")
-    for d in STRATEGY_DECISION_TABLE:
-        lines.append(f"  - IF {d['condition']} -> {d['strategy']}")
     return "\n".join(lines)
 
 
 def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     """Compact strategy catalog for system prompt (names + purposes only).
+
+    Strategies are listed alphabetically — no implied priority. The LLM
+    should choose based on design characteristics, not list position.
 
     Args:
         exclude_strategies: Strategy keys to omit from the catalog
@@ -652,18 +642,12 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     # Always exclude validation-unsafe strategies (insert new FFs → change latency)
     excluded.update(k for k, safe in STRATEGY_VALIDATION_SAFE.items() if not safe)
     parts = ["Available strategies:"]
-    # ordered list matching original numbering
-    ordered = ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",
-               "CellReplication", "CongestionSpreading", "RegisterRetiming",
-               "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming",
-               "LogicResynthesis", "PhysOptAggressive",
-               "CombinationalRebalance", "LUTMUXFRepack", "MUXFTreeReorder"]
-    for i, key in enumerate(ordered, 1):
-        if key in excluded:
-            continue
+    # Alphabetical ordering — no implied priority
+    ordered = sorted(k for k in STRATEGIES.keys() if k not in excluded)
+    for key in ordered:
         s = STRATEGIES.get(key)
         if s:
-            line = f"  strategy_{i}: {s['name']} (trigger: {s['trigger']})"
+            line = f"  - {s['name']} (trigger: {s['trigger']})"
             if s.get('ff_prerequisite'):
                 line += f" - {s['ff_prerequisite']}"
             parts.append(line)

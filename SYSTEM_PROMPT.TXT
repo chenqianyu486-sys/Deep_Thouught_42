@@ -71,11 +71,11 @@ strategies:
     cell_replication: "Critical Path Cell Replication (fanout > 10 or delay > 0.3ns)"
     congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
     net_swap: "Net Swapping (intra-SLICE routing congestion)"
-    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — 100% logic delay, NN/datapath designs with MUXF7/8 cascades."
-    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS stuck after PBLOCK."
-    combinational_rebalance: "Combinational Logic Rebalancing (validation-safe retiming) — deep combinational chains (LUT6/MUXF7/MUXF8 cascades) between registers on critical paths, WNS stuck. Uses Vivado opt_design -remap (logic-equivalent, no FF insertion)."
-    lut_muxf_repack: "LUT6+MUXF Co-Repack (validation-safe LUT merge) — NN/wide-datapath with MUXF7/MUXF8 + LUT6 cascades on critical paths, flatten_lut_cascade returned optimized_count=0. Uses Vivado opt_design -AddRemap (logic-equivalent repacking)."
-    muxf_tree_reorder: "MUXF Tree Reorder (validation-safe carry-reorder analogue) — designs without CARRY4, MUXF7/MUXF8 mux trees on critical paths, WNS stuck after PBLOCK. Uses Vivado phys_opt_design (no -retime, logic-equivalent)."
+    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — NN/datapath designs with MUXF7/8 cascades, deep combinational levels on critical paths."
+    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS > -3.0, logic-depth limited design with spread."
+    combinational_rebalance: "Combinational Logic Rebalancing (validation-safe retiming) — deep combinational chains (LUT6/MUXF7/MUXF8 cascades, logic levels >= 3) between registers on critical paths. Uses Vivado opt_design -remap (logic-equivalent, no FF insertion)."
+    lut_muxf_repack: "LUT6+MUXF Co-Repack (validation-safe LUT merge) — NN/wide-datapath with MUXF7/MUXF8 + LUT6 cascades on critical paths. Uses Vivado opt_design -AddRemap (logic-equivalent repacking)."
+    muxf_tree_reorder: "MUXF Tree Reorder (validation-safe carry-reorder analogue) — designs without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels on critical paths, route-dominated delay profile. Uses Vivado phys_opt_design (no -retime, logic-equivalent)."
   validation_constraint: "validate_dcps.py uses cycle-exact simulation — all strategies MUST preserve design latency. Pipeline insertion / register retiming strategies are excluded because they change latency and would FAIL validation."
 
   workflow:

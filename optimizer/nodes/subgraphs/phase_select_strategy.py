@@ -164,9 +164,19 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
                     tool_cache=state.context.tool_cache,
+                    raw_tool_outputs=state.context.raw_tool_outputs,
+                    iteration=state.iteration.current,
+                    tool_round=tool_round,
                     design_size_factor=state.timing.design_size_factor,
                 )
-                summary = summarize_tool_result(tool_name, result)
+                summary = summarize_tool_result(
+                    tool_name, result,
+                    latest_wns=state.timing.latest_wns,
+                    latest_tns=state.timing.latest_tns,
+                    latest_failing_endpoints=state.timing.latest_failing_endpoints,
+                    prev_best_wns=state.timing.prev_best_wns,
+                    prev_best_tns=state.timing.prev_best_tns,
+                )
                 if deps.compat is not None:
                     deps.compat.add_message("tool", summary, {
                         "tool_call_id": tc.id, "name": tool_name,

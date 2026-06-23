@@ -128,18 +128,18 @@ init_analysis ──► [WNS >= 0?]
 |----------|-------------------|----------|
 | **PBLOCK** | Scattered paths (avg distance > 70) | Vivado + RapidWright |
 | **PhysOpt** | 1–2 scattered critical paths, WNS > -2.0 | Vivado |
-| **OptDesign** | Logic depth limited (logic_delay > 70%), PhysOpt ineffective, 6-7 LUT levels | Vivado (via RapidWright skill + auto-chain) |
+| **OptDesign** | Logic depth limited (logic_delay > 70%), 6-7 LUT levels | Vivado (via RapidWright skill + auto-chain) |
 | **Fanout** | Fanout > 100, not scattered | RapidWright + Vivado |
 | **PinSwap** | WNS stalled at ~-0.3ns, high LUT pin delay variance | RapidWright + Vivado |
 | **LUTCascade** | >3 LUTs in series | RapidWright + Vivado |
 | **CellReplication** | Fanout > 10 or delay > 0.3ns | RapidWright + Vivado |
-| **CongestionSpreading** | Congestion = HIGH, PBLOCK/PhysOpt ineffective | RapidWright + Vivado |
+| **CongestionSpreading** | Congestion = HIGH | RapidWright + Vivado |
 | **NetSwap** | Intra-SLICE routing congestion | RapidWright + Vivado |
-| **LogicResynthesis** | 100% logic delay, NN/datapath design with MUXF7/8 cascades, PBLOCK already applied | Vivado (synth_design -remap) |
-| **PhysOptAggressive** | WNS stalled after PBLOCK, needs more aggressive optimization | Vivado (Explore directives) |
-| **CombinationalRebalance** | WNS stalled, deep combinational chains between registers (LUT6/MUXF7/MUXF8 cascades), register retiming unsafe (cycle-exact validation needed) | Vivado (opt_design -remap via RapidWright targeted analysis + auto-chain) |
-| **LUTMUXFRepack** | NN/wide datapath, MUXF7/MUXF8 + LUT6 cascades, flatten_lut_cascade returns optimized_count=0 (cones >6 inputs) | Vivado (opt_design -AddRemap via RapidWright targeted analysis + auto-chain) |
-| **MUXFTreeReorder** | NN design without CARRY4, MUXF7/MUXF8 tree on critical path, WNS stalled after PBLOCK | Vivado (phys_opt_design without -retime via RapidWright targeted analysis + auto-chain) |
+| **LogicResynthesis** | NN/datapath design with MUXF7/8 cascades, deep combinational levels on critical paths | Vivado (synth_design -remap) |
+| **PhysOptAggressive** | WNS > -3.0, logic-depth limited design with spread | Vivado (Explore directives) |
+| **CombinationalRebalance** | Deep combinational chains between registers (LUT6/MUXF7/MUXF8 cascades, logic levels >= 3) | Vivado (opt_design -remap via RapidWright targeted analysis + auto-chain) |
+| **LUTMUXFRepack** | NN/wide datapath, MUXF7/MUXF8 + LUT6 cascades on critical paths | Vivado (opt_design -AddRemap via RapidWright targeted analysis + auto-chain) |
+| **MUXFTreeReorder** | NN design without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels on critical paths, route-dominated delay profile | Vivado (phys_opt_design without -retime via RapidWright targeted analysis + auto-chain) |
 
 ---
 

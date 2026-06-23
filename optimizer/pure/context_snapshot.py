@@ -157,11 +157,11 @@ def build_context_snapshot(
             for k, v in signals.items():
                 stale_tag = _stale_annotation(k, refreshed)
                 lines.append(f"  {k}: {v}{stale_tag}")
-            # Design type hint for combinational-only designs
+            # Design type note for combinational-only designs
             if signals.get("design_type") == "combinational_only":
                 lines.append("")
-                lines.append("design_type_note: Pure combinational design (no FFs). "
-                              "PBLOCK placement is the primary lever for reducing routing delay.")
+                lines.append("design_type_note: Pure combinational design (no FFs) — "
+                              "no sequential elements for retiming")
         else:
             lines.append("design_signals: {}")
         lines.append("")
@@ -441,6 +441,7 @@ def inject_merged_dashboard(
         evaluation_result=state.strategy.evaluation_result,
         blocked_this_iteration=_blocked_this_iter,
         blocked_ttl=_blocked_ttl,
+        state=state,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)

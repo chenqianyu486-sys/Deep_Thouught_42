@@ -186,6 +186,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     latest_tns=state.timing.latest_tns,
                     latest_failing_endpoints=state.timing.latest_failing_endpoints,
                     prev_best_wns=state.timing.prev_best_wns,
+                    prev_best_tns=state.timing.prev_best_tns,
                 )
 
                 # Store raw output
@@ -231,6 +232,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
     # Phase exit: build handoff and transition
     llm_summary = llm_summary or assistant_content or "Analysis phase completed."
+    recent_tool_results = _extract_recent_tool_results(state)
     handoff = build_phase_handoff(
         source_phase=LoopPhase.ANALYZE,
         llm_summary=llm_summary,
@@ -240,6 +242,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         tools_called=tools_called,
         key_findings=_extract_analyze_key_findings(state),
         message_count=tool_round,
+        tool_results=recent_tool_results,
     )
     state.strategy.analysis_summary = llm_summary
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
@@ -425,6 +428,83 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
     return None
 
 
+# ── Analysis tools used for recent-results extraction ────────────────
+_ANALYSIS_TOOL_NAMES: frozenset[str] = frozenset({
+    "vivado_report_timing_summary", "vivado_extract_critical_path_cells",
+    "vivado_get_cached_high_fanout_nets", "vivado_check_design_status",
+    "rapidwright_analyze_critical_path_spread", "rapidwright_analyze_congestion",
+    "rapidwright_analyze_net_detour", "rapidwright_get_design_info",
+    "rapidwright_get_device_topology", "rapidwright_report_timing",
+    "rapidwright_search_cells", "rapidwright_analyze_pblock_region",
+})
+
+
+def _extract_recent_tool_results(state: OptimizerState) -> list[str]:
+    """Extract compact summaries of recent analysis-phase tool calls.
+
+    Reads raw_tool_outputs for the current iteration, returns one-line
+    summaries of analysis tools. Used to populate PhaseHandoff.tool_results
+    so SELECT_STRATEGY sees concrete tool findings.
+    """
+    import re
+
+    current_iter = state.iteration.current
+    results: list[str] = []
+
+    for (it, rd), (name, raw) in sorted(state.context.raw_tool_outputs.items()):
+        if it != current_iter:
+            continue
+        if name not in _ANALYSIS_TOOL_NAMES:
+            continue
+
+        summary = ""
+        if name == "vivado_report_timing_summary":
+            wns = _extract_timing_value(raw, "wns")
+            tns = _extract_timing_value(raw, "tns")
+            fe = _extract_timing_value(raw, "failing_endpoints")
+            summary = f"[{name}] WNS={wns}, TNS={tns}, failing={fe}"
+        elif name == "rapidwright_analyze_critical_path_spread":
+            m = re.search(r'"avg_(?:max_)?distance["\s:]+([\d.]+)', raw)
+            mx = re.search(r'"max_distance["\s:]+([\d.]+)', raw)
+            avg = m.group(1) if m else "?"
+            maxd = mx.group(1) if mx else "?"
+            summary = f"[{name}] avg_distance={avg}, max_distance={maxd}"
+        elif name == "rapidwright_analyze_congestion":
+            m = re.search(r'"global_score["\s:]+([\d.]+)', raw)
+            sev = re.search(r'"severity["\s:]+"([^"]+)"', raw)
+            score = m.group(1) if m else "?"
+            sev_val = sev.group(1) if sev else "?"
+            summary = f"[{name}] score={score}, severity={sev_val}"
+        elif name == "vivado_get_cached_high_fanout_nets":
+            fo_matches = re.findall(r"fanout[=:]\s*(\d+)", raw)
+            if fo_matches:
+                max_fo = max(int(f) for f in fo_matches)
+                summary = f"[{name}] {len(fo_matches)} nets, max_fanout={max_fo}"
+        elif name == "rapidwright_analyze_net_detour":
+            summary = f"[{name}] completed"
+        elif name == "vivado_check_design_status":
+            m = re.search(r'"status["\s:]+"([^"]+)"', raw)
+            st = m.group(1) if m else "?"
+            summary = f"[{name}] status={st}"
+        elif name == "rapidwright_search_cells":
+            cells_m = re.search(r'"cell_count["\s:]+(\d+)', raw)
+            cnt = cells_m.group(1) if cells_m else "?"
+            summary = f"[{name}] {cnt} cells"
+
+        if summary and summary not in results:
+            results.append(summary)
+
+    return results
+
+
+def _extract_timing_value(raw: str, key: str) -> str:
+    """Quick regex-based timing value extraction."""
+    import re
+    pat = re.compile(rf'{re.escape(key)}[\s:=]+([-\d.]+)', re.IGNORECASE)
+    m = pat.search(raw)
+    return m.group(1) if m else "?"
+
+
 def _extract_analyze_key_findings(state: OptimizerState) -> dict:
     """Extract structured diagnostic findings from OptimizerState.
 
@@ -479,6 +559,25 @@ def _extract_analyze_key_findings(state: OptimizerState) -> dict:
     # Number of failing endpoints
     if state.timing.latest_failing_endpoints is not None:
         findings["failing_endpoints"] = state.timing.latest_failing_endpoints
+
+    # ── Structural cell type signals ──────────────────────────────
+    di = state.timing.design_info or {}
+    top_types = di.get("top_cell_types", {})
+    if top_types:
+        muxf7 = top_types.get("MUXF7", 0)
+        muxf8 = top_types.get("MUXF8", 0)
+        muxf_total = muxf7 + muxf8
+        if muxf_total:
+            findings["muxf_count"] = muxf_total
+        lut = top_types.get("LUT6", 0) + top_types.get("LUT5", 0) \
+              + top_types.get("LUT4", 0) + top_types.get("LUT3", 0) \
+              + top_types.get("LUT2", 0) + top_types.get("LUT1", 0)
+        ff = top_types.get("FDRE", 0) + top_types.get("FDSE", 0) \
+             + top_types.get("FDCE", 0) + top_types.get("FDPE", 0)
+        if lut and ff:
+            findings["ff_to_lut_ratio"] = round(ff / lut, 4)
+        if muxf_total and muxf7 and muxf8:
+            findings["has_muxf_cascade"] = True
 
     # Dominant obstacle
     findings["dominant_obstacle"] = obstacles[0] if obstacles else "unknown"

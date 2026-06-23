@@ -74,7 +74,8 @@ async def iteration_start_node(
         f"cost=${state.cost.total_cost:.4f})"
     ))
 
-    # Snapshot WNS for rollback (store prev_best_wns)
+    # Snapshot WNS/TNS for rollback (store prev_best_*)
     state.timing.prev_best_wns = state.timing.best_wns
+    state.timing.prev_best_tns = state.timing.best_wns_tns
 
     return NodeName.SELECT_MODEL

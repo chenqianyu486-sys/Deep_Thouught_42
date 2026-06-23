@@ -174,8 +174,10 @@ PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
 })
 
 # Context thresholds (derived from model config, but we use safe defaults)
-SMALL_OUTPUT_THRESHOLD = 3000      # Bypass summarization below this
-TOOL_RESULT_TRUNCATE = 30000       # Truncation limit for tool results
+SMALL_OUTPUT_THRESHOLD = 3000              # Bypass summarization below this (chars)
+TOOL_RESULT_TRUNCATE = 30000               # Truncation limit for tool results (chars)
+RAW_OUTPUT_DIRECT_THRESHOLD = 50000        # Bypass summarization for vivado_get_raw_tool_output below this (chars)
+RAW_OUTPUT_SMART_TRUNCATE = 50000          # Head+tail truncation for large raw outputs (chars)
 RECENT_TURNS_TO_KEEP = 20         # Recent messages to keep during compression
 
 # Worker context limits (from model_config.yaml, safe defaults)

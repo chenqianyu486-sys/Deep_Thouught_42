@@ -12,7 +12,12 @@ import re
 from typing import Optional
 
 from .timing import parse_timing_summary
-from .constants import SMALL_OUTPUT_THRESHOLD, TOOL_RESULT_TRUNCATE
+from .constants import (
+    RAW_OUTPUT_DIRECT_THRESHOLD,
+    RAW_OUTPUT_SMART_TRUNCATE,
+    SMALL_OUTPUT_THRESHOLD,
+    TOOL_RESULT_TRUNCATE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,7 @@ def summarize_tool_result(
     latest_tns: Optional[float] = None,
     latest_failing_endpoints: Optional[int] = None,
     prev_best_wns: Optional[float] = None,
+    prev_best_tns: Optional[float] = None,
 ) -> str:
     """Convert raw tool output to structured YAML summary for LLM consumption.
 
@@ -80,10 +86,44 @@ def summarize_tool_result(
         latest_tns: Current latest TNS.
         latest_failing_endpoints: Current failing endpoints count.
         prev_best_wns: Previous best WNS for delta calculation.
+        prev_best_tns: Previous best TNS for delta calculation.
     """
     lines = raw_result.split('\n')
     line_count = len(lines)
     char_count = len(raw_result)
+
+    # Special case: vivado_get_raw_tool_output — LLM explicitly requested full detail.
+    # Bypass summarization for moderate-sized outputs; smart-truncate for huge ones.
+    if tool_name == "vivado_get_raw_tool_output":
+        if char_count <= RAW_OUTPUT_DIRECT_THRESHOLD:
+            indent = '\n'.join('    ' + line for line in lines)
+            return (
+                f"tool_result:\n"
+                f"  tool: {tool_name}\n"
+                f'  summary: "Raw output from {lines[0] if lines else ""}"\n'
+                f"  status: completed\n"
+                f"  raw_output_truncated: false\n"
+                f"  raw_output_chars: {char_count}\n"
+                f"  raw_output: |\n{indent}"
+            )
+        else:
+            head_len = RAW_OUTPUT_SMART_TRUNCATE // 2
+            tail_len = RAW_OUTPUT_SMART_TRUNCATE // 2
+            truncated = (
+                raw_result[:head_len]
+                + f"\n...[{char_count - RAW_OUTPUT_SMART_TRUNCATE} chars truncated]...\n"
+                + raw_result[-tail_len:]
+            )
+            indent = '\n'.join('    ' + line for line in truncated.split('\n'))
+            return (
+                f"tool_result:\n"
+                f"  tool: {tool_name}\n"
+                f'  summary: "Raw output from {lines[0] if lines else ""} ({char_count} chars, truncated)"\n'
+                f"  status: completed\n"
+                f"  raw_output_truncated: true\n"
+                f"  raw_output_chars: {char_count}\n"
+                f"  raw_output: |\n{indent}"
+            )
 
     # Bypass summarization for compact outputs.
     # extract_critical_path_cells excluded from bypass: even small JSON should
@@ -138,7 +178,34 @@ def summarize_tool_result(
             if prev_best_wns is not None and prev_best_wns > float('-inf'):
                 key_details["wns_delta"] = round(wns - prev_best_wns, 3)
             key_details["tns"] = round(tns, 3) if tns is not None else None
+            if prev_best_tns is not None and tns is not None:
+                key_details["tns_delta"] = round(tns - prev_best_tns, 3)
             key_details["failing_endpoints"] = fe
+
+            # New: clock domain breakdown
+            clock_domains = timing.get("clock_domains", [])
+            if clock_domains:
+                domain_strs = []
+                for d in clock_domains:
+                    w = d.get("wns")
+                    if w is not None:
+                        domain_strs.append(f"{d['clock']}({w:.3f})")
+                    else:
+                        domain_strs.append(d["clock"])
+                if len(domain_strs) > 1:
+                    summary_parts.append(f"Clocks: {'; '.join(domain_strs)}")
+                key_details["clock_domains"] = [
+                    {"clock": d["clock"], "wns": d.get("wns"), "tns": d.get("tns"),
+                     "failing_endpoints": d.get("failing_endpoints")}
+                    for d in clock_domains
+                ]
+
+            # New: hold timing
+            hold_wns = timing.get("hold_wns")
+            if hold_wns is not None:
+                key_details["hold_wns"] = hold_wns
+                key_details["hold_tns"] = timing.get("hold_tns")
+                key_details["hold_failing"] = timing.get("hold_failing")
 
     elif tool_name == "vivado_route_design":
         route_status = ""

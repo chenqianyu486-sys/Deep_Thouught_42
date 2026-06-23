@@ -159,6 +159,7 @@ class TimingState:
     latest_tns: Optional[float] = None
     latest_failing_endpoints: Optional[int] = None
     prev_best_wns: Optional[float] = None
+    prev_best_tns: Optional[float] = None
     wns_milestones: list[WnsMilestone] = field(default_factory=list)
     last_verified_timing_info: Optional[dict] = None
     last_verified_timing_raw: Optional[str] = None

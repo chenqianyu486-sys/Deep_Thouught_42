@@ -125,18 +125,18 @@ init_analysis ──► [WNS >= 0?]
 |----------|-------------------|----------|
 | **PBLOCK** | 分散的路径（平均距离 > 70） | Vivado + RapidWright |
 | **PhysOpt** | 1–2 条分散的关键路径，WNS > -2.0 | Vivado |
-| **OptDesign** | 逻辑深度受限（logic_delay > 70%），PhysOpt 无效，6-7 级 LUT | Vivado（通过 RapidWright 技能 + 自动链式调用） |
+| **OptDesign** | 逻辑深度受限（logic_delay > 70%），6-7 级 LUT | Vivado（通过 RapidWright 技能 + 自动链式调用） |
 | **Fanout** | 扇出 > 100，无分散 | RapidWright + Vivado |
 | **PinSwap** | WNS 停滞在 ~-0.3ns，LUT 引脚延迟方差大 | RapidWright + Vivado |
 | **LUTCascade** | >3 个 LUT 串联 | RapidWright + Vivado |
 | **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
-| **CongestionSpreading** | 拥塞=HIGH，PBLOCK/PhysOpt 无效 | RapidWright + Vivado |
+| **CongestionSpreading** | 拥塞=HIGH | RapidWright + Vivado |
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
-| **LogicResynthesis** | 100% 逻辑延迟，NN/数据通路设计含 MUXF7/8 级联，PBLOCK 已应用 | Vivado (synth_design -remap) |
-| **PhysOptAggressive** | WNS 在 PBLOCK 后停滞，需要更激进的优化 | Vivado (Explore 指令) |
-| **CombinationalRebalance** | WNS 停滞，寄存器间深组合链（LUT6/MUXF7/MUXF8 级联），寄存器 retiming 不安全（需逐周期验证） | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
-| **LUTMUXFRepack** | NN/宽数据通路，MUXF7/MUXF8 + LUT6 级联，flatten_lut_cascade 返回 optimized_count=0（锥 >6 输入） | Vivado (opt_design -AddRemap，通过 RapidWright 定点分析 + 自动链式) |
-| **MUXFTreeReorder** | 无 CARRY4 的 NN 设计，MUXF7/MUXF8 树在关键路径上，PBLOCK 后 WNS 停滞 | Vivado (phys_opt_design 无 -retime，通过 RapidWright 定点分析 + 自动链式) |
+| **LogicResynthesis** | NN/数据通路设计含 MUXF7/8 级联，关键路径上组合级数深 | Vivado (synth_design -remap) |
+| **PhysOptAggressive** | WNS > -3.0，逻辑深度受限且有散布的设计 | Vivado (Explore 指令) |
+| **CombinationalRebalance** | 寄存器间深组合链（LUT6/MUXF7/MUXF8 级联，逻辑级数 >= 3） | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
+| **LUTMUXFRepack** | NN/宽数据通路，MUXF7/MUXF8 + LUT6 级联在关键路径上 | Vivado (opt_design -AddRemap，通过 RapidWright 定点分析 + 自动链式) |
+| **MUXFTreeReorder** | 无 CARRY4 的 NN 设计，MUXF7/MUXF8 树 >= 2 级在关键路径上，布线延迟主导 | Vivado (phys_opt_design 无 -retime，通过 RapidWright 定点分析 + 自动链式) |
 
 ---
 

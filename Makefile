@@ -71,7 +71,7 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup build-rapidwright run_optimizer run_optimizer_dashboard validate validate_demo validate-submission run-submission clean veryclean help
+.PHONY: setup build-rapidwright run_optimizer run_optimizer_dashboard test test-unit test-skills test-quick validate validate_demo validate-submission run-submission clean veryclean help
 
 # Default target
 help:
@@ -91,6 +91,10 @@ help:
 	@echo "  run_test_v2          - Run test mode (validate MCP tools/skills, no LLM)"
 	@echo "  run_skill_test_v2    - Run skill-only test (quick validation, no place/route)"
 	@echo "  run_init_analysis    - Run init analysis only: extract data + verify dashboard completeness (no LLM)"
+t@echo "  test                 - Run all unit tests (pytest, fast mode)"
+	@echo "  test-unit            - Run optimizer/tests/ unit tests (pytest)"
+	@echo "  test-skills          - Run all skill framework & strategy tests"
+	@echo "  test-quick           - Run only pure-function tests"
 	@echo "  validate             - Validate functional equivalence between two DCPs"
 	@echo "  validate_demo        - Run validation demo (self-check)"
 	@echo "  validate-submission  - Find and validate optimized DCP against original"
@@ -536,6 +540,43 @@ validate:
 
 # Quick validation example using demo DCPs
 validate_demo:
+
+# ── Unified test targets ────────────────────────────────────────────────
+
+# Run all unit tests (pytest + skill framework + descriptor validation)
+test:
+	@printf "\033[0;34m===== Running All Unit Tests =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" -m pytest tests/ optimizer/ -v --ignore=optimizer/test_mode.py --tb=short 2>&1 | tail -10
+	@printf "\033[0;34m===== Descriptor Validation =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" -m skills.validate_descriptors 2>&1 | tail -10
+	@printf "\033[0;34m===== Skill Framework Tests =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_skill_framework.py 2>&1 | tail -5
+	@printf "\033[0;34m===== Strategy Tests =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_pblock_strategy.py 2>&1 | tail -3
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_smart_retiming.py 2>&1 | tail -3
+
+# Run optimizer and tests/ unit tests (pytest only, fast ~3s)
+test-unit:
+	@printf "\033[0;34m===== Running Unit Tests (pytest) =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" -m pytest tests/ optimizer/ -v --ignore=optimizer/test_mode.py --tb=short 2>&1 | tail -10
+
+# Run all skill framework & strategy tests
+test-skills:
+	@printf "\033[0;34m===== Descriptor Validation =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" -m skills.validate_descriptors 2>&1 | tail -10
+	@printf "\033[0;34m===== Skill Framework Tests =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_skill_framework.py 2>&1 | tail -10
+	@printf "\033[0;34m===== Pblock Strategy =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_pblock_strategy.py 2>&1 | tail -5
+	@printf "\033[0;34m===== Smart Retiming =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_smart_retiming.py 2>&1 | tail -5
+	@printf "\033[0;34m===== Net Detour =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" skills/test_net_detour_optimization.py 2>&1 | tail -5
+
+# Run only quick pure-function tests
+test-quick:
+	@printf "\033[0;34m===== Running Quick Tests (pytest) =====\033[0m\n"
+	@cd "$(CURDIR)" && "$(PYTHON)" -m pytest tests/ optimizer/test_pure.py -v --tb=short 2>&1 | tail -10
 	@printf "$(COLOR_BLUE)╔══════════════════════════════════════════════════════════════════╗$(COLOR_RESET)\n"
 	@printf "$(COLOR_BLUE)║                  Validation Demo (Simulated)                     ║$(COLOR_RESET)\n"
 	@printf "$(COLOR_BLUE)╚══════════════════════════════════════════════════════════════════╝$(COLOR_RESET)\n"

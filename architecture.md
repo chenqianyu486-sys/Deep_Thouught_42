@@ -174,7 +174,8 @@ inject_context_snapshot_at_end(api_messages):
 - **trajectory**: 记录每轮迭代策略名、前后 WNS、delta
 - **design_signals**: 从原始数据计算的客观信号（max_fanout、critical_path_spread、资源利用率等）
 - **design_type**: 当 FF=0 时自动添加 `design_type: combinational_only`
-- **design_type_note**: 当 `design_type == "combinational_only"` 时注入策略优先级提示
+- **design_type_note**: 当 `design_type == "combinational_only"` 时标注 `"no sequential elements for retiming"`（纯数据，无策略推荐）
+- **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`（原 `"PBLOCK/CongestionSpreading/NetSwap preferred"` 等已删除），`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述。`ff_warning` 从否定性提示简化为 `ff_utilization: 0.21%  # low FF count`
 - **Dashboard 新鲜度机制**: `DASHBOARD_REFRESH_MAP`（constants.py）映射工具名→Dashboard 字段。工具执行后 `state.timing.refreshed_fields` 更新。Dashboard 展示时 `_stale_annotation()` 检查字段新鲜度并标注
 - **active_tools**: 最近使用过的工具列表（去重保序）
 - **设计状态标注（design_not_routed）**: `_post_eval_hook` 和 `_track_wns_from_result` 从 `report_timing_summary` 的 `Design State` 字段检测设计是否已布线。未布线时 `state.timing.design_not_routed = True`，通过 `_build_global_state` 传入 DashboardModule1，在 `current_stage` 下方注入 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate` 警告行。LLM 看到此警告后应避免基于虚假 WNS 做 DONE 决策。
@@ -182,9 +183,35 @@ inject_context_snapshot_at_end(api_messages):
 - **无持久化**: 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`iteration_history` 注入**: 来自 `_iteration_narratives`，格式为 `iter{N}({OUTCOME}): {before}->{after}ns({delta}) {tool_count}toks {strategy_label}`
-- **`strategy_catalog`**（SELECT_STRATEGY 阶段独占）：当 `show_strategy_catalog=True` 时，在 dashboard 首部注入策略名称+触发条件
+- **`strategy_catalog`**（SELECT_STRATEGY 阶段独占）：当 `show_strategy_catalog=True` 时，在 dashboard 首部注入策略名称+触发条件。策略按字母序排列（无优先级暗示），LLM 应基于设计特征自主选择，而非列表顺序。
 - **`strategy_catalog` 排除机制**：已记录在 `state.context.failed_strategies` 中的策略自动从 catalog 中排除，避免 LLM 重复选择已知无效的策略。排除逻辑在 `inject_merged_dashboard()` → `format_state_space_for_llm(exclude_strategies=...)` → `get_strategy_catalog(exclude_strategies=...)` 链路中实现（`context_snapshot.py:392-402` → `state_space.py:266` → `strategy_library.py:412`）。与 `phase_select_strategy.py` 的 `_get_permanently_blocked_strategies()` 后验检查形成双重保护。**TTL 机制**：`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段），防止策略目录被永久阻止耗尽。
 - **`skill_guidance`**（EXECUTE 阶段）：当 `current_strategy` 非空时注入 primary skill 工具名 + SKILL_CHAIN_ACTIONS + 执行序列
+
+- **`design_structure` 模块**（Module 4b，2026-06，ANALYZE + SELECT_STRATEGY 阶段均可见）：从 `state.timing.design_info.top_cell_types` 推导细胞组成结构信号。输出 `muxf_ratio`（MUXF 占比）、`ff_to_lut_ratio`（FF/LUT 比反映流水线深度）、`structural_patterns`（如 MUXF7+MUXF8_cascade / carry_chain）、`dominant_cell_types`（前三大细胞类型）。零额外 MCP 开销，纯 `top_cell_types` 字典计算。ANALYZE 阶段注入使 LLM 在初期即可感知设计结构特征，辅助策略选型。
+```yaml
+# Module 4b: Design Structure
+design_structure:
+  cell_composition:
+    lut: 31370
+    muxf: 3983  # MUXF7=3016, MUXF8=967
+    ff: 1660
+    muxf_ratio: 10.7%
+    ff_to_lut_ratio: 0.053
+  structural_patterns: MUXF7+MUXF8_cascade, shallow_pipeline
+  dominant_cell_types: LUT6(24377) > MUXF7(3016) > LUT5(4744)
+```
+
+- **`recent_analysis` 模块**（Module 8，2026-06，SELECT_STRATEGY 独占）：从 `state.context.raw_tool_outputs` 提取近两轮迭代的分析工具结果摘要。覆盖 8 种分析工具（timing_summary、critical_path_spread、congestion、fanout、net_detour、design_status、search_cells、critical_path_cells）。零额外 MCP 开销。
+```yaml
+# Module 8: Recent Analysis Results
+recent_analysis:
+  - [vivado_report_timing_summary] WNS=-0.978, TNS=-835.005, failing=1529
+  - [rapidwright_analyze_critical_path_spread] avg_distance=111.86, max_distance=198
+```
+
+- **PhaseHandoff 工具结果传递**（2026-06）：`PhaseHandoff` 新增 `tool_results: list[str]` 字段。ANALYZE 阶段退出时通过 `_extract_recent_tool_results()` 从 `raw_tool_outputs` 提取当前迭代的分析工具结果，注入 handoff 文本。SELECT_STRATEGY 阶段 LLM 在 `## Previous Phase Summary` 的 `Findings` 行后看到 `Recent Tool Results:` 区块，包含最多 4 条工具结果。
+
+- **SELECT_STRATEGY `raw_tool_outputs` 可查询**（2026-06）：`phase_select_strategy.py` 的 `call_tool_fn()` 调用现在传递 `raw_tool_outputs=state.context.raw_tool_outputs` 参数。LLM 在 SELECT_STRATEGY 阶段可调用 `vivado_get_raw_tool_output` 查询 ANALYZE/EVALUATE 阶段的原始工具输出（此前该参数缺失导致 `raw_tool_outputs` 为 `None`，查询报错）。
 
 ### 3.5 动态 Critical Path 管理
 

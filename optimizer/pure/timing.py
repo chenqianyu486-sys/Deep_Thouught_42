@@ -21,12 +21,14 @@ def parse_timing_summary(timing_report: str) -> dict:
     (license messages, command echoes, info/warning messages) to locate the
     timing header and data.
 
-    Returns:
-        dict with keys: wns, tns, failing_endpoints (None if parse fails).
+    Extended return dict (beyond the original 3 fields):
+        clock_domains: list of per-clock {clock, wns, tns, failing_endpoints, total_endpoints}
+        hold_wns / hold_tns / hold_failing: hold timing from parse_hold_timing()
     """
     result = {"wns": None, "tns": None, "failing_endpoints": None}
     lines = timing_report.split('\n')
 
+    # --- Existing table-format parser (backward compatible) ---
     header_idx = -1
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -44,6 +46,12 @@ def parse_timing_summary(timing_report: str) -> dict:
             header_idx = i
             break
     if header_idx == -1:
+        # Return with clock_domains + hold even if table not found
+        result["clock_domains"] = _parse_clock_domains(timing_report)
+        hold = parse_hold_timing(timing_report)
+        result["hold_wns"] = hold.get("hold_wns")
+        result["hold_tns"] = hold.get("hold_tns")
+        result["hold_failing"] = hold.get("hold_failing")
         return result
 
     for data_line in lines[header_idx + 1:]:
@@ -61,7 +69,72 @@ def parse_timing_summary(timing_report: str) -> dict:
                 break
             except (ValueError, IndexError):
                 continue
+
+    # --- New: clock domain breakdown ---
+    result["clock_domains"] = _parse_clock_domains(timing_report)
+
+    # --- New: hold timing ---
+    hold = parse_hold_timing(timing_report)
+    result["hold_wns"] = hold.get("hold_wns")
+    result["hold_tns"] = hold.get("hold_tns")
+    result["hold_failing"] = hold.get("hold_failing")
+
     return result
+
+
+def _parse_clock_domains(timing_report: str) -> list[dict]:
+    """Parse per-clock-domain timing tables from report_timing_summary output.
+
+    Vivado's report_timing_summary includes per-clock sections like::
+
+        Clock Domain: clk_name
+        WNS(ns)    TNS(ns)    Failing Endpoints    Total Endpoints
+        -0.234    -123.456    45                    2345
+
+    Returns:
+        List of {clock, wns, tns, failing_endpoints, total_endpoints} dicts,
+        one per clock domain found, or empty list if none found.
+    """
+    domains: list[dict] = []
+    lines = timing_report.split('\n')
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if 'Clock Domain:' not in stripped:
+            continue
+
+        # Extract clock name (first token after "Clock Domain:")
+        clock_name = stripped.split('Clock Domain:')[1].strip()
+        # Take only the first word (some variants include extra text)
+        clock_name = clock_name.split()[0] if clock_name else ""
+        if not clock_name:
+            continue
+
+        # Find the WNS table header within the next 10 lines
+        for j in range(i + 1, min(i + 10, len(lines))):
+            j_line = lines[j].strip()
+            if 'WNS(ns)' in j_line and 'TNS(ns)' in j_line:
+                # Read first data row (skip separator/blank lines)
+                for k in range(j + 1, min(j + 5, len(lines))):
+                    data = lines[k].strip()
+                    if not data or data.startswith('---') or data.startswith('==='):
+                        continue
+                    parts = data.split()
+                    if len(parts) >= 3:
+                        try:
+                            domain = {
+                                "clock": clock_name,
+                                "wns": float(parts[0]),
+                                "tns": float(parts[1]),
+                                "failing_endpoints": int(parts[2]),
+                                "total_endpoints": int(parts[3]) if len(parts) >= 4 else None,
+                            }
+                            domains.append(domain)
+                        except (ValueError, IndexError):
+                            pass
+                    break  # Only try first non-separator data row
+                break  # Found the table for this clock domain
+    return domains
 
 
 def parse_high_fanout_nets(report: str) -> list[tuple[str, int, int]]:

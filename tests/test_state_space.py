@@ -403,13 +403,19 @@ class TestStrategyLifecycle:
         assert "evaluation: IMPROVED" in text
 
     def test_no_strategy_lifecycle_when_empty(self, sample_space):
+        """strategy_lifecycle is ALWAYS shown (for blocked lists).
+        But empty current_strategy and evaluation_result should NOT appear.
+        """
         text = format_state_space_for_llm(
             space=sample_space,
             phase=LoopPhase.ANALYZE,
             current_strategy="",
             evaluation_result="",
         )
-        assert "strategy_lifecycle:" not in text
+        # Section header always shown, sub-items only when non-empty
+        assert "strategy_lifecycle:" in text
+        assert "current_strategy:" not in text
+        assert "evaluation:" not in text
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────

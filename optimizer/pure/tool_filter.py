@@ -81,8 +81,10 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_analyze_pblock_region",
         # REMOVED: rapidwright_get_device_topology — data already in Dashboard from init_analysis
         "rapidwright_report_timing",
-        # REMOVED: rapidwright_get_design_info — data already in Dashboard from init_analysis
+        "rapidwright_get_design_info",
         "rapidwright_search_cells",
+        # Execution tools (LOW risk, useful as probes during analysis)
+        "rapidwright_flatten_lut_cascade",  # probe LUT cascade depth; low risk, saves checkpoint before mutation
         # Internal tools
         "vivado_get_raw_tool_output",
         "vivado_get_cached_high_fanout_nets",
