@@ -181,9 +181,9 @@ RAW_OUTPUT_SMART_TRUNCATE = 50000          # Head+tail truncation for large raw 
 RECENT_TURNS_TO_KEEP = 20         # Recent messages to keep during compression
 
 # Worker context limits (from model_config.yaml, safe defaults)
-# These are 60% and 80% of the worker model's max_tokens
-WORKER_CONTEXT_WARN_TOKENS = 120_000   # 60% of 200K
-WORKER_CONTEXT_FORCE_TOKENS = 160_000  # 80% of 200K
+# Used for worker→planner upgrade decisions (not compression thresholds)
+WORKER_CONTEXT_WARN_TOKENS = 180_000   # ~72% of 250K max_tokens (planner promotion when context is full)
+WORKER_CONTEXT_FORCE_TOKENS = 200_000  # ~80% of 250K max_tokens (force planner at hard limit)
 
 
 # ── Dashboard freshness tracking ──────────────────────────────

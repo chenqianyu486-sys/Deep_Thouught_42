@@ -158,16 +158,47 @@ def generate_lut_muxf_repack_plan(
     lut5_candidates = _find_lut5_lut6_merge_candidates(design, critical_paths)
 
     if not pairs and not lut5_candidates:
+        # Analyze input cell types for diagnostics — helps EVALUATE distinguish
+        # "strategy is wrong fit" from "input data quality issue".
+        cell_types: dict[str, int] = {}
+        total_cells = 0
+        for path in critical_paths:
+            for cell_name in path:
+                total_cells += 1
+                ctype = _cell_type(design, cell_name)
+                cell_types[ctype] = cell_types.get(ctype, 0) + 1
+        sorted_types = dict(sorted(cell_types.items(), key=lambda x: -x[1])[:10])
+        lut_muxf_count = sum(
+            v for k, v in cell_types.items()
+            if k in _LUT_TYPES or k in _MUXF_TYPES
+        )
+        if lut_muxf_count == 0:
+            quality_note = (
+                "INPUT DATA QUALITY ISSUE: No LUT or MUXF cells found in provided paths "
+                f"(cell types: {sorted_types}). Ensure critical_paths are extracted "
+                "via vivado_extract_critical_path_cells, not raw TCL."
+            )
+        else:
+            quality_note = (
+                f"LUT/MUXF cells found ({lut_muxf_count}) but none form adjacent "
+                f"LUT<->MUXF pairs or LUT5 merge candidates. Cell types: {sorted_types}."
+            )
+
         return StrategyPlan(
             strategy_name="LUTMUXFRepack",
             status="skipped",
             message=("No LUT<->MUXF adjacency pairs or LUT5 merge candidates found "
-                     "on critical paths. Structure is not amenable to co-repacking."),
+                     f"on critical paths. Cell type distribution: {sorted_types} "
+                     f"({total_cells} total cells). {quality_note}"),
             preconditions_satisfied=False,
             analysis_summary={
                 "lut_muxf_pairs": 0,
                 "lut5_candidates": 0,
-                "note": "No LUT6/MUXF co-repack targets on these paths.",
+                "cell_type_distribution": dict(sorted(cell_types.items(), key=lambda x: -x[1])),
+                "total_cells_analyzed": total_cells,
+                "lut_muxf_cells_found": lut_muxf_count,
+                "diagnosis": "input_data_quality" if lut_muxf_count == 0 else "no_adjacent_pairs",
+                "note": quality_note,
             },
         )
 

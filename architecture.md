@@ -324,6 +324,7 @@ class ViolationSummary:
 - `update_critical_paths(state, cell_paths, iteration)`
 - `format_critical_paths_snapshot(critical_paths, limit)` — YAML 格式化
 - `format_critical_paths_handoff(critical_paths, limit)` — 纯文本格式化
+- `validate_critical_path_data(paths, reference_paths)` — 输入数据质量验证，检测 fanout 污染/低重叠/缺 FF 等问题（2026-06 新增）
 
 **节流**：仅在 `critical_paths_stale == True` 时触发 auto-refresh。
 
@@ -518,14 +519,15 @@ llm_tool_loop._execute_chain_actions()
 3. **评分函数**: `_score(width, dist) = width + dist * distance_weight_factor`（默认 `distance_weight_factor=0.3`）
 4. **参考点优先级**: 关键路径 cell 质心 > 显式传入坐标 > 全局 cell 质心
 
-**自动注入逻辑**:
+**自动注入逻辑（始终覆盖）**:
 ```python
 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
-    if not arguments.get("critical_path_cells") and state.timing.critical_paths:
+    if state.timing.critical_paths:  # 始终覆盖 LLM 提供的数据
         for cp in state.timing.critical_paths[:10]:
             for cell_name in cp.cells:
                 ...  # 去重后注入
 ```
+> **数据完整性保护（2026-06）**: LLM 可能通过 `vivado_run_tcl` 执行错误的 TCL（如 `get_cells -of [get_nets -of $ep]`）提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。
 
 ## 5. 迭代控制细节
 
@@ -1128,8 +1130,8 @@ tool call 入口:
 # Worker: 速度优化, 250K max
 worker:
   model_name: "<见 model_config.yaml>"
-  soft_threshold: 175K, hard_limit: 200K
-  token_budget: 80K
+  soft_threshold: 200K, hard_limit: 220K
+  token_budget: 200K
   preserve_turns: 40, preserve_turns_aggressive: 10
   min_importance: 0.15, min_importance_aggressive: 0.7
   preserve_turns_hard_limit: 25, min_importance_threshold_hard_limit: 0.35
@@ -1142,8 +1144,8 @@ worker:
 # Planner: 推理优化, 1M max
 planner:
   model_name: "<见 model_config.yaml>"
-  soft_threshold: 200K, hard_limit: 300K
-  token_budget: 80K
+  soft_threshold: 500K, hard_limit: 600K
+  token_budget: 500K
   preserve_turns: 60, preserve_turns_aggressive: 10
   min_importance: 0.1, min_importance_aggressive: 0.7
   preserve_turns_hard_limit: 40, min_importance_threshold_hard_limit: 0.25
@@ -1157,8 +1159,8 @@ planner:
 ## 10. 重要常量
 
 ```python
-WORKER_HARD_LIMIT = 200K, WORKER_TOKEN_BUDGET = 80K
-PLANNER_HARD_LIMIT = 300K, PLANNER_TOKEN_BUDGET = 80K
+WORKER_HARD_LIMIT = 220K, WORKER_TOKEN_BUDGET = 200K
+PLANNER_HARD_LIMIT = 600K, PLANNER_TOKEN_BUDGET = 500K
 
 # Dashboard 新鲜度追踪 (工具→影响字段映射)
 DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {

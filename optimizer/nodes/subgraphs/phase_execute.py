@@ -285,8 +285,11 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     state.model.current_task_type = task_type
 
                 # Auto-inject critical_path_cells for pblock tools
+                # NOTE: always overrides LLM-provided data with verified state data
+                # to prevent data quality issues from raw TCL extraction.
                 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
-                    if not tool_args.get("critical_path_cells") and state.timing.critical_paths:
+                    had_llm_data = bool(tool_args.get("critical_path_cells"))
+                    if state.timing.critical_paths:
                         cells = []
                         seen = set()
                         filtered_count = 0
@@ -320,6 +323,17 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 f"{[cp.cells[:5] for cp in state.timing.critical_paths[:3]]}"
                             )
                         if cells:
+                            if had_llm_data:
+                                logger.warning(
+                                    f"[EXECUTE] Overriding LLM-provided critical_path_cells "
+                                    f"with verified state data ({len(cells)} cells) for {tool_name}"
+                                )
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user",
+                                        f"[DATA INTEGRITY] Overriding LLM-provided critical_path_cells "
+                                        f"with {len(cells)} verified cells from state for {tool_name}. "
+                                        f"State data is extracted via the verified "
+                                        f"vivado_extract_critical_path_cells tool.")
                             tool_args["critical_path_cells"] = cells
                             logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
 
@@ -330,23 +344,47 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         logger.info(f"[EXECUTE] Adaptive resource_multiplier: {tool_args['resource_multiplier']:.2f}")
 
                 # Auto-inject critical_paths for LUT cascade tool
+                # NOTE: always overrides LLM-provided data — see pblock section above.
                 if tool_name == "rapidwright_flatten_lut_cascade":
-                    if not tool_args.get("critical_paths") and state.timing.critical_paths:
+                    had_llm_data = bool(tool_args.get("critical_paths"))
+                    if state.timing.critical_paths:
                         paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
                         if paths:
+                            if had_llm_data:
+                                logger.warning(
+                                    f"[EXECUTE] Overriding LLM-provided critical_paths "
+                                    f"with verified state data ({len(paths)} paths) for {tool_name}"
+                                )
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user",
+                                        f"[DATA INTEGRITY] Overriding LLM-provided critical_paths "
+                                        f"with {len(paths)} verified paths from state for {tool_name}. "
+                                        f"State data is extracted via vivado_extract_critical_path_cells.")
                             tool_args["critical_paths"] = paths
                             logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
 
                 # Auto-inject critical_paths for validation-safe combinational strategies
                 # (CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder)
+                # NOTE: always overrides LLM-provided data — see pblock section above.
                 if tool_name in (
                     "rapidwright_execute_combinational_rebalancing_strategy",
                     "rapidwright_execute_lut_muxf_repack_strategy",
                     "rapidwright_execute_muxf_tree_reorder_strategy",
                 ):
-                    if not tool_args.get("critical_paths") and state.timing.critical_paths:
+                    had_llm_data = bool(tool_args.get("critical_paths"))
+                    if state.timing.critical_paths:
                         paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
                         if paths:
+                            if had_llm_data:
+                                logger.warning(
+                                    f"[EXECUTE] Overriding LLM-provided critical_paths "
+                                    f"with verified state data ({len(paths)} paths) for {tool_name}"
+                                )
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user",
+                                        f"[DATA INTEGRITY] Overriding LLM-provided critical_paths "
+                                        f"with {len(paths)} verified paths from state for {tool_name}. "
+                                        f"State data is extracted via vivado_extract_critical_path_cells.")
                             tool_args["critical_paths"] = paths
                             logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
 

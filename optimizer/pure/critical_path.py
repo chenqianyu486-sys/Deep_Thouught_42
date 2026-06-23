@@ -33,6 +33,172 @@ DISPLAY_CELLS_PER_PATH = 10
 # Maximum delay hotspots to show per path (D1)
 MAX_DELAY_HOTSPOTS = 5
 
+# Cell types expected on well-formed sequential timing paths
+# (LUTs, flip-flops, MUXFs, carry chains — NOT fanout-inflated intermediates)
+_VALID_PATH_CELL_PREFIXES = (
+    "LUT", "FDRE", "FDCE", "FDPE", "FDSE", "FDRSE",
+    "MUXF7", "MUXF8", "MUXF9", "MUXFX",
+    "CARRY4", "CARRY8",
+    "DSP", "DSP48",
+    "RAM", "RAMB", "URAM",
+    "SRL", "SRLC", "SHIFT",
+)
+
+
+def validate_critical_path_data(
+    paths: list[list[str]],
+    reference_paths: list[list[str]] | None = None,
+) -> dict:
+    """Validate and diagnose critical path data quality.
+
+    Checks whether the provided paths look like well-formed sequential
+    timing paths. Detects common data quality issues such as:
+    - Paths containing mostly LUT leaf cells (fanout-contaminated extraction)
+    - Missing expected cell types (MUXF, FF, etc.)
+    - Paths that are too short (< 2 cells)
+    - Empty or malformed input
+
+    Args:
+        paths: List of paths, each a list of cell names
+        reference_paths: Optional reference paths (e.g. from state) to compare against.
+            When provided, computes overlap and structural similarity metrics.
+
+    Returns:
+        dict with keys:
+            - is_valid: bool — whether the data passes basic quality checks
+            - issues: list[str] — human-readable issue descriptions
+            - cell_type_stats: dict[str, int] — cell type distribution across all paths
+            - overlap_with_reference: float (0-1) — fraction of cells matching reference
+              (only if reference_paths is provided)
+            - diagnosis: str — shorthand diagnosis tag
+    """
+    issues: list[str] = []
+    cell_types: dict[str, int] = {}
+    total_cells = 0
+    reference_cell_set: set[str] | None = None
+
+    if reference_paths is not None:
+        reference_cell_set = {c for p in reference_paths if p for c in p}
+
+    if not paths:
+        return {
+            "is_valid": False,
+            "issues": ["No critical path data provided"],
+            "cell_type_stats": {},
+            "overlap_with_reference": 0.0 if reference_cell_set else None,
+            "diagnosis": "empty",
+        }
+
+    for path_idx, path in enumerate(paths):
+        if not path or len(path) < 2:
+            issues.append(f"Path {path_idx}: too short ({len(path) if path else 0} cells, need >= 2)")
+
+    # Skip cell type analysis if design context is unavailable
+    # (cell type strings are extracted from cell names heuristically when
+    # RapidWright design is not accessible)
+    for path in paths:
+        for cell_name in path:
+            total_cells += 1
+            # Extract cell type from name heuristically:
+            #   "data_out[76]_i_19" / "data_out_reg[76]_i_1" -> type from prefix
+            #   Full cell names like "layer0_inst/layer0_N25_inst/LUT6_inst"
+            #   typically have the type embedded or end with _i_N (LUT) / _reg (FF)
+            parts = cell_name.split("/")
+            short_name = parts[-1] if parts else cell_name
+            ctype = _heuristic_cell_type(short_name)
+            cell_types[ctype] = cell_types.get(ctype, 0) + 1
+
+    # Data quality heuristics
+    total_types = sum(cell_types.values())
+    if total_types > 0:
+        # If >70% of cells are generic LUT-like (no clear type marker),
+        # the data may be fanout-contaminated
+        unknown_ratio = cell_types.get("unknown", 0) / total_types
+        if unknown_ratio > 0.7:
+            issues.append(
+                f"High ratio of untyped cells ({unknown_ratio:.0%}): "
+                f"paths may contain fanout-contaminated intermediate cells "
+                f"from incorrect TCL extraction"
+            )
+
+        # Check for expected sequential elements
+        ff_count = sum(v for k, v in cell_types.items() if k.startswith("FD") or k in ("FDPE", "FDCE"))
+        if ff_count == 0 and total_types > 10:
+            issues.append(
+                "No flip-flop cells found in any path — paths may not be "
+                "valid sequential timing paths"
+            )
+
+    # Overlap analysis with reference data
+    overlap = None
+    if reference_cell_set and total_cells > 0:
+        path_cell_set = {c for p in paths if p for c in p}
+        if reference_cell_set:
+            intersection = path_cell_set & reference_cell_set
+            overlap = len(intersection) / max(len(reference_cell_set), 1)
+            if overlap < 0.3:
+                issues.append(
+                    f"Low overlap ({overlap:.0%}) with reference critical path data — "
+                    f"LLM-extracted paths differ significantly from verified state data"
+                )
+
+    # Determine diagnosis
+    if not issues:
+        diagnosis = "ok"
+    elif any("fanout" in i.lower() or "contaminated" in i.lower() for i in issues):
+        diagnosis = "probable_bad_extraction"
+    elif any("Overlap" in i or "overlap" in i for i in issues):
+        diagnosis = "low_reference_overlap"
+    elif any("flip-flop" in i or "FF" in i for i in issues):
+        diagnosis = "missing_sequential_cells"
+    else:
+        diagnosis = "quality_warning"
+
+    return {
+        "is_valid": len(issues) == 0,
+        "issues": issues,
+        "cell_type_stats": dict(sorted(cell_types.items(), key=lambda x: -x[1])),
+        "total_cells_analyzed": total_cells,
+        "overlap_with_reference": overlap,
+        "diagnosis": diagnosis,
+    }
+
+
+def _heuristic_cell_type(short_name: str) -> str:
+    """Heuristically determine cell type from a short cell name.
+
+    Uses naming conventions from Vivado synthesis:
+    - "*_i_*" or "*_i*" -> LUT cell
+    - "*_reg*" or "*_rep*" -> FF/register cell
+    - "MUXF*" -> MUXF cell
+    - "CARRY*" -> carry chain cell
+    - "DSP*" -> DSP cell
+    - "RAM*", "URAM*" -> memory cell
+    - "SRL*" -> shift register
+
+    Returns a type label or "unknown".
+    """
+    name = short_name.upper()
+    if any(name.startswith(p) for p in ("MUXF7", "MUXF8", "MUXF9", "MUXFX")):
+        return "MUXF"
+    if name.startswith("CARRY"):
+        return "CARRY"
+    if name.startswith("DSP"):
+        return "DSP"
+    if name.startswith("RAM") or name.startswith("URAM"):
+        return "RAM"
+    if name.startswith("SRL"):
+        return "SRL"
+    # _i_ prefix is Vivado's naming for LUT cells
+    if "_I_" in name:
+        return "LUT"
+    # Common cell type markers in names
+    if "_REG" in name:
+        return "FF"
+    if "_REP" in name:
+        return "FF_REPLICA"
+    return "unknown"
+
 
 def refresh_violation_summary(state: OptimizerState) -> None:
     """Refresh state.timing.violation_summary from current critical paths.

@@ -151,16 +151,46 @@ def generate_muxf_tree_reorder_plan(
     trees = [t for t in trees if t["depth"] >= min_tree_depth]
 
     if not trees:
+        # Analyze input cell types for diagnostics — helps EVALUATE distinguish
+        # "strategy is wrong fit" from "input data quality issue" (e.g. paths
+        # extracted via buggy raw TCL contain mostly LUT cells, not MUXF).
+        cell_types: dict[str, int] = {}
+        total_cells = 0
+        for path in critical_paths:
+            for cell_name in path:
+                total_cells += 1
+                ctype = _cell_type(design, cell_name)
+                cell_types[ctype] = cell_types.get(ctype, 0) + 1
+        sorted_types = dict(sorted(cell_types.items(), key=lambda x: -x[1])[:10])
+        muxf_count = sum(v for k, v in cell_types.items() if k in _MUXF_TYPES)
+
+        if muxf_count == 0:
+            quality_note = (
+                "INPUT DATA QUALITY ISSUE: No MUXF cells found in provided paths "
+                f"(cell types: {sorted_types}). Ensure critical_paths are extracted "
+                "via vivado_extract_critical_path_cells, not raw TCL."
+            )
+        else:
+            quality_note = (
+                f"MUXF cells found ({muxf_count}) but none form a run of "
+                f"{min_tree_depth}+ consecutive cells. Cell types: {sorted_types}."
+            )
+
         return StrategyPlan(
             strategy_name="MUXFTreeReorder",
             status="skipped",
             message=(f"No MUXF tree runs with depth >= {min_tree_depth} found. "
-                     "Critical paths do not traverse deep mux trees."),
+                     f"Cell type distribution in input: {sorted_types} "
+                     f"({total_cells} total cells). {quality_note}"),
             preconditions_satisfied=False,
             analysis_summary={
                 "muxf_trees": 0,
                 "min_tree_depth": min_tree_depth,
-                "note": "No MUXF tree reorder targets on these paths.",
+                "cell_type_distribution": dict(sorted(cell_types.items(), key=lambda x: -x[1])),
+                "total_cells_analyzed": total_cells,
+                "muxf_cells_found": muxf_count,
+                "diagnosis": "input_data_quality" if muxf_count == 0 else "no_deep_trees",
+                "note": quality_note,
             },
         )
 

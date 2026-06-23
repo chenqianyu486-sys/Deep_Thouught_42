@@ -97,7 +97,7 @@ init_analysis ──► [WNS >= 0?]
 | 6 | Single calling path | V2 uses native function calls only; no XML/YAML text fallback |
 | 7 | Single source of truth | Runtime data stored in `OptimizerState`; no shadow copies in `MemoryManager` |
 | 8 | Encode domain knowledge | 14 strategies with trigger conditions; LLM selects autonomously |
-| 9 | Data trustworthiness | `DASHBOARD_REFRESH_MAP` tracks field freshness; auto-annotates stale data |
+| 9 | Data trustworthiness | `DASHBOARD_REFRESH_MAP` tracks field freshness; auto-annotates stale data; EXECUTE phase auto-overrides LLM-provided `critical_paths`/`critical_path_cells` with verified state data to block incorrect TCL-extraction pollution |
 | 10 | Information retention | Compression markers retain key metrics (WNS/TNS/FE/delta/status) |
 | 11 | Logic equivalence hard constraint | All optimizations verified by `validate_dcps.py` (structural + functional) |
 | 12 | DCP identity integrity | `vivado_open_checkpoint` removed from LLM tool whitelist during EXECUTE |

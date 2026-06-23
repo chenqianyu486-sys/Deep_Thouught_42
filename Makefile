@@ -91,7 +91,7 @@ help:
 	@echo "  run_test_v2          - Run test mode (validate MCP tools/skills, no LLM)"
 	@echo "  run_skill_test_v2    - Run skill-only test (quick validation, no place/route)"
 	@echo "  run_init_analysis    - Run init analysis only: extract data + verify dashboard completeness (no LLM)"
-t@echo "  test                 - Run all unit tests (pytest, fast mode)"
+	@echo "  test                 - Run all unit tests (pytest, fast mode)"
 	@echo "  test-unit            - Run optimizer/tests/ unit tests (pytest)"
 	@echo "  test-skills          - Run all skill framework & strategy tests"
 	@echo "  test-quick           - Run only pure-function tests"

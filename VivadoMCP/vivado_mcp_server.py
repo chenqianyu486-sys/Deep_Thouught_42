@@ -1712,12 +1712,21 @@ async def list_tools():
         ),
         Tool(
             name="extract_critical_path_cells",
-            description="""Extract cell names from critical timing paths for spread analysis.
-            
+            description="""VERIFIED critical path cell extraction — AUTHORITATIVE tool.
+
             Parses timing report to get ordered list of cells on each critical path.
-            Output is JSON that can be passed to RapidWright's analyze_critical_path_spread 
-            to calculate Manhattan distances.
-            
+            This is the ONLY reliable way to extract critical path cell data — it uses
+            Vivado's report_timing -return_string and produces correctly-ordered
+            sequential paths. Do NOT use raw Tcl (vivado_run_tcl) for this purpose.
+
+            DO NOT use raw Tcl for cell extraction — this tool is the verified,
+            correct method. Raw Tcl patterns like 'get_cells -of [get_nets -of $ep]'
+            produce INCORRECT results (they include fanout-branch cells, not just
+            the sequential timing path).
+
+            Output is JSON that can be passed to RapidWright's analyze_critical_path_spread
+            or to any strategy tool (MUXFTreeReorder, CombinationalRebalance, etc.).
+
             Can optionally write to a file for efficient data transfer.""",
             inputSchema={
                 "type": "object",

@@ -94,7 +94,7 @@ init_analysis ──► [WNS >= 0?]
 | 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
 | 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
 | 8 | 编码领域知识 | 14 种策略带有触发条件；LLM 自主选择 |
-| 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据 |
+| 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells`，阻断错误 TCL 提取污染 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
 | 12 | DCP 身份完整性 | 在 EXECUTE 阶段，将 `vivado_open_checkpoint` 从 LLM 工具白名单中移除 |
