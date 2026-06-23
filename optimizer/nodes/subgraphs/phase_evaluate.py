@@ -26,14 +26,18 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
 
-STRATEGY_IMPROVEMENT_EPSILON_NS = 0.001
+# WNS delta threshold for strategy improvement detection.
+# Increased from 0.001 to 0.050 based on log analysis: deltas below 50ps
+# are noise-level (Vivado routing variability) and should not be treated
+# as genuine improvements or as reasons to skip strategy cooldown.
+STRATEGY_IMPROVEMENT_EPSILON_NS = 0.050
 
 
 def detect_rollback_needed(state: OptimizerState) -> bool:
@@ -76,27 +80,46 @@ def _cool_down_current_strategy_if_stalled(
 ) -> bool:
     """Block a switched strategy only when its measured WNS did not improve.
 
-    Skips cooldown when tool errors occurred during this iteration's EXECUTE
-    phase — a tool crash (e.g. MCP server exception) means the strategy never
-    got a fair execution chance, so blocking it would penalize the strategy
-    for an infrastructure failure rather than a strategy deficiency. The
-    strategy remains selectable for retry within the same iteration.
+    Distinguishes strategy-tool errors from auxiliary-tool errors:
+    - Strategy-tool error (e.g. rapidwright_execute_pblock_strategy crashed):
+      strategy did NOT get a fair execution chance → skip cooldown, retriable.
+    - Auxiliary-tool error only (e.g. vivado_run_tcl timed out, but the
+      strategy tool itself succeeded): strategy WAS executed fairly → apply
+      cooldown even though tool_errors is non-empty.
+
+    Previously any tool_errors caused cooldown to be skipped, which led to
+    strategies like PBLOCK being retried 3 times in one iteration despite
+    having executed successfully (just auxiliary TCL commands had failed).
     """
     strategy = state.strategy.current_strategy
     delta = _strategy_wns_delta_since_entry(state)
     if not strategy or delta is None or delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
         return False
 
-    # Don't cool down if tools crashed — strategy didn't actually execute.
-    # tool_errors is cleared at iteration_start and accumulates during EXECUTE,
-    # so any entries here belong to the current strategy's execution attempt.
+    # Check whether the strategy tool itself actually failed.
+    # tool_errors entries have the form {"tool": tool_name, "result": summary}.
     if state.iteration.tool_errors:
-        logger.info(
-            f"[EVALUATE] Skipping cooldown for '{strategy}' — "
-            f"{len(state.iteration.tool_errors)} tool error(s) detected this iteration "
-            f"(strategy did not get a fair execution chance; delta={delta:+.3f}ns)"
-        )
-        return False
+        # Collect errors from actual strategy tools (not vivado_run_tcl, etc.)
+        strategy_tool_errors = [
+            e for e in state.iteration.tool_errors
+            if e.get("tool") in STRATEGY_TOOL_NAMES
+        ]
+        if strategy_tool_errors:
+            # Strategy tool itself failed — no fair execution chance
+            tools_str = ", ".join(e.get("tool", "?") for e in strategy_tool_errors)
+            logger.info(
+                f"[EVALUATE] Skipping cooldown for '{strategy}' — "
+                f"strategy tool(s) {tools_str} failed "
+                f"(strategy did not get a fair execution chance; delta={delta:+.3f}ns)"
+            )
+            return False
+        else:
+            # Only auxiliary tools failed — strategy itself executed fairly
+            logger.info(
+                f"[EVALUATE] Applying cooldown for '{strategy}' — "
+                f"strategy tool succeeded but {len(state.iteration.tool_errors)} "
+                f"auxiliary tool(s) had errors (delta={delta:+.3f}ns; {detail})"
+            )
 
     if strategy not in state.iteration.blocked_strategies:
         state.iteration.blocked_strategies.append(strategy)

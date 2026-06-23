@@ -24,7 +24,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -74,6 +74,7 @@ SIDE_EFFECT_TOOLS = frozenset({
 #   - Execution tools (place_design=1800s, route_design=1800s) always reset counter
 #   - LLM round-trip latency ~5-15s → ~20-60s overhead per 4-round window
 NO_PROGRESS_LIMIT = 4
+
 
 # Once a timing-evaluated execution tool has a clear verdict, EXECUTE has
 # produced enough signal. Hand control to EVALUATE instead of asking the LLM
@@ -345,6 +346,32 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"vivado_extract_critical_path_cells tool.")
                             tool_args["critical_path_cells"] = cells
                             logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
+
+                # Data quality guard: if all critical path cells were filtered
+                # (pblock labels, device sites), skip the MCP call and inform LLM.
+                if (tool_name == "rapidwright_execute_pblock_strategy"
+                        and state.timing.critical_paths
+                        and not tool_args.get("critical_path_cells")):
+                    logger.warning(
+                        f"[EXECUTE] All critical path cells were filtered for "
+                        f"{tool_name} — skipping MCP call (data quality issue)"
+                    )
+                    # Record a data quality failure so the strategy gets cooled down
+                    record_strategy_failure(
+                        state, state.strategy.current_strategy,
+                        "data_quality_error", tool=tool_name,
+                        detail="All critical path cells were invalid (pblock labels, device sites)"
+                    )
+                    if deps.compat is not None:
+                        deps.compat.add_message("user",
+                            f"[DATA QUALITY ERROR] All critical path cells for {tool_name} "
+                            f"were invalid (pblock labels, device site coordinates). "
+                            f"Cannot execute PBLOCK strategy without valid cell targets. "
+                            f"Please call report_step_state to select a different strategy, "
+                            f"or switch to ANALYZE for re-extraction."
+                        )
+                    # Skip tool execution — continue LLM loop for re-selection
+                    continue
 
                 # Auto-compute adaptive resource_multiplier for pblock strategy
                 if tool_name == "rapidwright_execute_pblock_strategy":
@@ -688,6 +715,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             else:
                                 await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
                                 reached_callback = True
+                                # Force refresh critical paths after PBLOCK chain completes
+                                # (layout changed, stale paths would mislead EVALUATE Dashboard)
+                                if tool_name == "rapidwright_execute_pblock_strategy":
+                                    try:
+                                        await _auto_refresh_critical_paths(state, deps)
+                                        logger.info(f"[EXECUTE] Forced critical path refresh after {tool_name}")
+                                    except Exception as refresh_err:
+                                        logger.warning(f"[EXECUTE] Post-PBLOCK critical path refresh failed: {refresh_err}")
                         except Exception as e:
                             logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
 

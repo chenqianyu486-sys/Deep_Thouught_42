@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -43,6 +44,66 @@ _VALID_PATH_CELL_PREFIXES = (
     "RAM", "RAMB", "URAM",
     "SRL", "SRLC", "SHIFT",
 )
+
+# Patterns that look like device site/coordinate names (NOT valid cell instances)
+_DEVICE_SITE_PATTERNS = re.compile(
+    r'^(SLICE_X\d+Y\d+'
+    r'|DSP\d*_X\d+Y\d+'
+    r'|RAMB\d*_X\d+Y\d+'
+    r'|URAM\d*_X\d+Y\d+'
+    r'|BUFGCE_X\d+Y\d+'
+    r'|MMCM\d*_X\d+Y\d+'
+    r'|PLL\d*_X\d+Y\d+'
+    r'|X\d+Y\d+'
+    r')$', re.IGNORECASE,
+)
+
+
+def _is_valid_cell_name(name: str) -> bool:
+    """Check if a string looks like a valid hierarchical cell instance name.
+
+    Valid cell names are hierarchical paths with at least one '/' separator
+    and alphanumeric leaf names. Rejects pblock labels, device site
+    coordinates, and other non-cell strings that may appear in Vivado
+    output under certain conditions (e.g. PBLOCK-active extraction).
+
+    Examples of valid names:
+      - layer0_reg/data_out_reg[41]
+      - layer0_inst/layer0_N25_inst/data_out[76]_i_19
+      - u_core/u_alu/reg_0
+
+    Examples of invalid names:
+      - pblock_tight          (PBLOCK constraint name)
+      - pblock_io             (PBLOCK constraint name)
+      - SLICE_X56Y0           (device site coordinate)
+      - DSP48E2_X8Y0          (device site)
+    """
+    if not name or not isinstance(name, str):
+        return False
+
+    # Reject pblock labels entirely
+    name_lower = name.lower()
+    if name_lower.startswith("pblock") or "pblock" in name_lower:
+        return False
+
+    # Reject device site coordinates
+    leaf = name.split("/")[-1] if "/" in name else name
+    if _DEVICE_SITE_PATTERNS.match(leaf):
+        return False
+
+    # Must have hierarchical structure (at least one '/')
+    if "/" not in name:
+        return False
+
+    # Each path segment must be non-empty and contain valid characters
+    for segment in name.split("/"):
+        if not segment:
+            return False
+        # Segments should contain at least one alphanumeric character
+        if not re.search(r'[a-zA-Z0-9]', segment):
+            return False
+
+    return True
 
 
 def validate_critical_path_data(
@@ -162,6 +223,43 @@ def validate_critical_path_data(
         "overlap_with_reference": overlap,
         "diagnosis": diagnosis,
     }
+
+
+def heuristic_cell_type(short_name: str) -> str:
+    """Public wrapper around _heuristic_cell_type.
+
+    Determines cell type (LUT, FF, MUXF, CARRY, DSP, RAM, SRL, etc.)
+    from a short cell name using Vivado naming conventions.
+    """
+    return _heuristic_cell_type(short_name)
+
+
+def build_cell_type_chain(cells: list[str]) -> tuple[str, dict[str, int]]:
+    """Build a cell type chain string and type counts from a list of cell names.
+
+    Each cell name is mapped to a type via heuristic_cell_type() on the leaf name.
+    Unknown types are grouped as "?".
+
+    Returns:
+        (chain_string, counts_dict)
+        chain_string: e.g. "LUT6→MUXF7→LUT6→FDRE"
+        counts_dict: e.g. {"LUT": 3, "MUXF": 1, "FF": 1}
+    """
+    if not cells:
+        return "", {}
+
+    type_names = []
+    counts: dict[str, int] = {}
+    for cell in cells:
+        leaf = cell.split("/")[-1] if "/" in cell else cell
+        ctype = _heuristic_cell_type(leaf)
+        # Normalize: use the known type label when available
+        label = ctype if ctype != "unknown" else "?"
+        counts[label] = counts.get(label, 0) + 1
+        type_names.append(ctype if ctype != "unknown" else leaf[:20])
+
+    chain = "→".join(type_names)
+    return chain, counts
 
 
 def _heuristic_cell_type(short_name: str) -> str:
@@ -284,32 +382,63 @@ def parse_critical_path_cells(result: str) -> list[dict]:
 
     if isinstance(data, list):
         paths = []
+        total_invalid_cells = 0
+        total_cells = 0
         for item in data:
             if isinstance(item, dict) and "cells" in item:
                 # New format: dict with cells + timing fields + D1/D2 diagnostic fields
-                cells = [str(c) for c in item["cells"]]
-                if len(cells) >= 2:
-                    paths.append({
-                        # Legacy fields
-                        "cells": cells,
-                        "slack": item.get("slack"),
-                        "logic_delay": item.get("logic_delay"),
-                        "net_delay": item.get("net_delay"),
-                        "levels": item.get("levels"),
-                        # D1: per-node breakdown
-                        "nodes": item.get("nodes", []),
-                        "startpoint": item.get("startpoint", ""),
-                        "endpoint_pin": item.get("endpoint_pin", ""),
-                        "arrival_time": item.get("arrival_time"),
-                        "required_time": item.get("required_time"),
-                        "top_delay_nodes": item.get("top_delay_nodes", []),
-                        # D2: clock-domain context
-                        "clock": item.get("clock", {}),
-                    })
+                raw_cells = [str(c) for c in item["cells"]]
+                total_cells += len(raw_cells)
+                # Filter out invalid cell names (pblock labels, device sites, etc.)
+                valid_cells = [c for c in raw_cells if _is_valid_cell_name(c)]
+                invalid_count = len(raw_cells) - len(valid_cells)
+                total_invalid_cells += invalid_count
+                if invalid_count > 0:
+                    logger.debug(
+                        f"[critical_path] Filtered {invalid_count}/{len(raw_cells)} invalid cell names "
+                        f"from path (first invalid: {next((c for c in raw_cells if not _is_valid_cell_name(c)), '?')})"
+                    )
+                # Skip path if >50% of cells were filtered (likely entirely contaminated)
+                if len(valid_cells) < 2 or invalid_count >= len(raw_cells) / 2:
+                    if invalid_count > len(raw_cells) / 2:
+                        logger.warning(
+                            f"[critical_path] Skipping path: {invalid_count}/{len(raw_cells)} "
+                            f"cells were invalid (likely pblock-contaminated extraction)"
+                        )
+                    continue
+                paths.append({
+                    # Legacy fields
+                    "cells": valid_cells,
+                    "slack": item.get("slack"),
+                    "logic_delay": item.get("logic_delay"),
+                    "net_delay": item.get("net_delay"),
+                    "levels": item.get("levels"),
+                    # D1: per-node breakdown
+                    "nodes": item.get("nodes", []),
+                    "startpoint": item.get("startpoint", ""),
+                    "endpoint_pin": item.get("endpoint_pin", ""),
+                    "arrival_time": item.get("arrival_time"),
+                    "required_time": item.get("required_time"),
+                    "top_delay_nodes": item.get("top_delay_nodes", []),
+                    # D2: clock-domain context
+                    "clock": item.get("clock", {}),
+                })
             elif isinstance(item, list) and len(item) >= 2:
                 # Legacy format: plain list of cell names
-                paths.append({"cells": [str(c) for c in item]})
-        logger.info(f"[critical_path] Parsed {len(paths)} paths from tool result")
+                raw_cells = [str(c) for c in item]
+                total_cells += len(raw_cells)
+                valid_cells = [c for c in raw_cells if _is_valid_cell_name(c)]
+                invalid_count = len(raw_cells) - len(valid_cells)
+                total_invalid_cells += invalid_count
+                if len(valid_cells) >= 2 and invalid_count < len(raw_cells) / 2:
+                    paths.append({"cells": valid_cells})
+        if total_invalid_cells > 0:
+            logger.info(
+                f"[critical_path] Parsed {len(paths)} paths, "
+                f"filtered {total_invalid_cells}/{total_cells} invalid cell names"
+            )
+        else:
+            logger.info(f"[critical_path] Parsed {len(paths)} paths from tool result")
         return paths
 
     return []

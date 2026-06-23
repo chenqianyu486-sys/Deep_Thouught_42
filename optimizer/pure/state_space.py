@@ -546,6 +546,11 @@ def format_state_space_for_llm(
         if gs.cell_count > 0:
             lines.append(f"  cell_count: {gs.cell_count}")
             lines.append(f"  net_count: {gs.net_count}")
+        # Notify LLM that critical path data is pre-loaded (EXECUTE phase only)
+        if phase == LoopPhase.EXECUTE and state and state.timing.critical_paths:
+            total_cells = sum(len(cp.cells) for cp in state.timing.critical_paths[:15] if cp.cells)
+            lines.append(f"  critical_paths_available_in_state: true (n={len(state.timing.critical_paths[:15])}, cells={total_cells})")
+            lines.append("  # NOTE: Strategy tools auto-inject critical path data. Do NOT extract via TCL.")
         # Design delay profile (SELECT_STRATEGY only) — pure descriptive data, no recommendations
         if phase == LoopPhase.SELECT_STRATEGY and space.timing_clusters.top_violating_paths:
             logic_pcts = [
@@ -580,6 +585,27 @@ def format_state_space_for_llm(
         tc = space.timing_clusters
         lines.append("# Module 2: Timing Path Clusters (Top Violating Endpoints)")
         lines.append("timing_clusters:")
+        # ── Freshness indicator ──
+        if state and state.timing.critical_paths_stale is not None:
+            stale_label = "true (place/route changed)" if state.timing.critical_paths_stale else "false"
+            ext_iter = state.timing.critical_paths_iteration
+            total_fe = state.timing.latest_failing_endpoints
+            fresh_line = f"  freshness: extracted_iteration={ext_iter}, stale={stale_label}"
+            if total_fe is not None:
+                fresh_line += f", total_failing_from_timing_report={total_fe}"
+            lines.append(fresh_line)
+        # ── Empty data graceful degradation ──
+        if not tc.top_violating_paths and tc.violation_summary is None:
+            total_fe = state.timing.latest_failing_endpoints if state else None
+            if total_fe is not None and total_fe > 0:
+                lines.append(f"  status: not_extracted_or_all_cells_invalid")
+                lines.append(f"  # Total failing endpoints from timing report: {total_fe}. "
+                             f"Re-extract via vivado_extract_critical_path_cells for detailed path data.")
+            else:
+                lines.append(f"  status: no_data")
+            lines.append("")
+            return
+        # ── Normal rendering ──
         if tc.top_violating_paths:
             lines.append(f"  top_paths:  # {len(tc.top_violating_paths)} paths")
             for i, p in enumerate(tc.top_violating_paths):
@@ -602,6 +628,12 @@ def format_state_space_for_llm(
                     lines.append(f"      logic_levels: {p.logic_levels}")
                 if p.path_group:
                     lines.append(f"      path_group: {p.path_group}")
+                # Cell type chain (ANALYZE/SELECT_STRATEGY only)
+                if p.cell_type_chain and phase in (LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, None):
+                    lines.append(f"      cell_type_chain: {p.cell_type_chain}")
+                    if p.cell_type_counts:
+                        counts_str = ", ".join(f"{k}={v}" for k, v in sorted(p.cell_type_counts.items()))
+                        lines.append(f"      # cell counts: {counts_str}")
                 # D2: clock skew / uncertainty (ANALYZE/SELECT_STRATEGY full, EXECUTE/EVALUATE inline)
                 if p.clock_skew is not None:
                     lines.append(f"      clock_skew: {p.clock_skew:.3f}ns")
@@ -618,10 +650,13 @@ def format_state_space_for_llm(
                             lines.append(f"        - {h['name']} [{h['type']}] {incr_str}{pct_str}{loc_str}")
                     else:
                         # EXECUTE/EVALUATE: single-line summary (oracle m5 mitigation)
+                        # NOTE: keep [type] annotation for clarity (net vs cell distinction)
                         parts = []
                         for h in p.delay_hotspots[:3]:
                             pct_str = f"({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
-                            parts.append(f"{h['name']}={h['incr']:.3f}ns{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
+                            typ = h.get('type', '')
+                            type_tag = f"[{typ}]" if typ else ""
+                            parts.append(f"{h['name']}={h['incr']:.3f}ns{type_tag}{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
                         lines.append(f"      delay_hotspots: {', '.join(parts)}")
         else:
             ann = _annotated_list(tc.top_violating_paths, "no_violating_paths_extracted")
@@ -634,6 +669,7 @@ def format_state_space_for_llm(
                 lines, tc.violation_summary, indent="  ",
                 path_clusters=tc.path_clusters,
                 failing_endpoint_names=tc.failing_endpoint_names,
+                total_failing_count=state.timing.latest_failing_endpoints if state else None,
             )
         lines.append("")
 
@@ -645,10 +681,20 @@ def format_state_space_for_llm(
         lines.append("timing_violation_summary:")
         if vs is not None:
             lines.append(f"  failing_endpoints: {_annotated_val(vs.total_failing_endpoints, reason='not_analyzed')}")
+            # Freshness indicator (compact)
+            if state and state.timing.critical_paths_stale is not None:
+                stale_label = "true (place/route changed)" if state.timing.critical_paths_stale else "false"
+                ext_iter = state.timing.critical_paths_iteration
+                fresh_line = f"  freshness: extracted_iteration={ext_iter}, stale={stale_label}"
+                total_fe = state.timing.latest_failing_endpoints
+                if total_fe is not None:
+                    fresh_line += f", total_failing_from_timing_report={total_fe}"
+                lines.append(fresh_line)
             _format_violation_summary(
                 lines, vs, indent="  ",
                 path_clusters=tc.path_clusters,
                 failing_endpoint_names=tc.failing_endpoint_names,
+                total_failing_count=state.timing.latest_failing_endpoints if state else None,
             )
             # D1: append top-3 path delay hotspots as single-line summaries
             # (oracle m5: compact form for EXECUTE/EVALUATE to avoid distracting re-analysis)
@@ -660,7 +706,9 @@ def format_state_space_for_llm(
                     parts = []
                     for h in p.delay_hotspots[:3]:
                         pct_str = f"({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
-                        parts.append(f"{h['name']}={h['incr']:.3f}ns{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
+                        typ = h.get('type', '')
+                        type_tag = f"[{typ}]" if typ else ""
+                        parts.append(f"{h['name']}={h['incr']:.3f}ns{type_tag}{pct_str}" if h.get('incr') is not None else f"{h['name']}=?")
                     slack_str = f"{p.slack:.3f}ns" if p.slack is not None else "?"
                     lines.append(f"    - slack={slack_str} endpoint={p.endpoint_name}: {', '.join(parts)}")
         else:
@@ -811,9 +859,13 @@ def format_state_space_for_llm(
     if evaluation_result and evaluation_result != "PENDING":
         lines.append(f"  evaluation: {evaluation_result}")
     if blocked_this_iteration:
-        lines.append(f"  blocked_this_iteration: {', '.join(blocked_this_iteration)}")
+        lines.append("  blocked_this_iteration:")
+        for s in blocked_this_iteration:
+            lines.append(f"    - {s}")
     if blocked_ttl:
-        lines.append(f"  blocked_ttl: {', '.join(blocked_ttl)}")
+        lines.append("  blocked_ttl:")
+        for s in blocked_ttl:
+            lines.append(f"    - {s}")
     lines.append("")
 
     # ── Skill guidance (EXECUTE phase) ─────────────────────────────
@@ -915,6 +967,11 @@ def _convert_critical_path(entry) -> DashboardTimingPath:
                 "location": n.location,
             })
 
+    # Build cell type chain from path cell names
+    from .critical_path import build_cell_type_chain
+    cells = entry.cells if isinstance(entry, CriticalPathEntry) else []
+    cell_type_chain, cell_type_counts = build_cell_type_chain(cells)
+
     return DashboardTimingPath(
         endpoint_name=endpoint,
         source_clock=source_clock,
@@ -930,6 +987,8 @@ def _convert_critical_path(entry) -> DashboardTimingPath:
         clock_uncertainty=clock_uncertainty,
         is_cross_clock=is_cross_clock,
         delay_hotspots=delay_hotspots,
+        cell_type_chain=cell_type_chain,
+        cell_type_counts=cell_type_counts,
     )
 
 
@@ -1188,6 +1247,7 @@ def _format_violation_summary(
     indent: str = "",
     path_clusters: list[DashboardPathCluster] | None = None,
     failing_endpoint_names: list[str] | None = None,
+    total_failing_count: int | None = None,
 ) -> None:
     """Format violation summary YAML lines (used by both full and compact views)."""
     sev = vs.severity_distribution
@@ -1240,10 +1300,16 @@ def _format_violation_summary(
             lines.append(f"{indent}    module: {pc.module}")
 
     # Failing endpoint names (top violating path endpoints)
+    # NOTE: The count shown (from critical_path_extraction) may differ from
+    # the timing report's failing_endpoints count. We show both to avoid
+    # misleading the LLM into thinking only N paths are violating.
     if failing_endpoint_names:
         shown = failing_endpoint_names[:10]
-        lines.append(f"{indent}top_failing_endpoints:  # {len(failing_endpoint_names)} endpoints")
+        shown_count = len(shown)
+        total_fe = total_failing_count if total_failing_count is not None and total_failing_count > 0 else len(failing_endpoint_names)
+        lines.append(f"{indent}top_violating_endpoints:  # showing {shown_count} of {total_fe} total failing (from timing report)")
         for ep in shown:
             lines.append(f"{indent}  - {ep}")
         if len(failing_endpoint_names) > 10:
-            lines.append(f"{indent}  # ... and {len(failing_endpoint_names) - 10} more")
+            lines.append(f"{indent}  # ... and {len(failing_endpoint_names) - 10} more critical-path-derived, "
+                         f"{max(0, total_fe - len(failing_endpoint_names))} additional from timing report")

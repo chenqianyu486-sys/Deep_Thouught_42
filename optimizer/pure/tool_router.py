@@ -89,6 +89,28 @@ async def call_tool(
     Returns:
         Tool result as string.
     """
+    # TCL command interception: detect LLM trying to manually extract
+    # critical path data via raw TCL commands. These are fragile (TCL syntax
+    # errors, fanout-contaminated cells) and wasteful — state already has
+    # verified data that strategy tools auto-inject.
+    if tool_name == "vivado_run_tcl":
+        command = (arguments.get("command") or arguments.get("cmd") or "")
+        # Patterns suggesting manual critical path cell extraction
+        _crit_path_patterns = [
+            "get_timing_paths" in command and "get_cells" in command,
+            "get_timing_paths" in command and "get_nets -of" in command,
+            "report_timing" in command and "get_cells" in command,
+        ]
+        if any(_crit_path_patterns):
+            return (
+                "[AUTO-GUIDANCE] Detected TCL command trying to extract critical path cells. "
+                "Critical path data is already available in Dashboard Module 1 "
+                "(critical_paths_available_in_state) and will be automatically injected "
+                "into strategy tools (rapidwright_execute_pblock_strategy, etc.). "
+                "Use vivado_extract_critical_path_cells (the dedicated MCP tool) instead "
+                "of raw TCL for reliable, validated extraction."
+            )
+
     # Internal tool: retrieve raw tool output from side buffer
     if tool_name == "vivado_get_raw_tool_output":
         if raw_tool_outputs is None:

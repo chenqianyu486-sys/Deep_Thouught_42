@@ -556,6 +556,12 @@ class DashboardTimingPath:
     is_cross_clock: bool = False          # D2: source_clock != dest_clock
     delay_hotspots: list[dict] = field(default_factory=list)
     # e.g. [{"name":"u/carry7","type":"CARRY8","incr":0.082,"pct_of_path":0.16,"location":"SLICE_X.."}]
+    # Cell type chain for the full path, e.g. "LUT6→LUT5→MUXF7→FDRE".
+    # Populated from CriticalPathEntry.cells using heuristic cell type detection.
+    # Only shown in ANALYZE / SELECT_STRATEGY phases.
+    cell_type_chain: str = ""
+    # Summary counts: e.g. {LUT: 3, MUXF: 2, FF: 1}
+    cell_type_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

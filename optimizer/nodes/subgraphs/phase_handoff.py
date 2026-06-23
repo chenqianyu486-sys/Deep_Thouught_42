@@ -69,6 +69,14 @@ class PhaseHandoff:
             parts.append("Recent Tool Results:")
             for tr in self.tool_results[-4:]:
                 parts.append(f"  {tr}")
+        # Append a standard hint for transitions heading into EXECUTE phase:
+        # critical path data is pre-loaded from state, no manual TCL extraction needed.
+        if self.source_phase in ("SELECT_STRATEGY", "ANALYZE"):
+            parts.append("")
+            parts.append("NOTE: Critical path cell data is automatically injected "
+                         "into strategy tools (rapidwright_execute_pblock_strategy, "
+                         "rapidwright_execute_muxf_tree_reorder_strategy, etc.) "
+                         "from state. No manual TCL extraction required.")
         return "\n".join(parts)
 
 

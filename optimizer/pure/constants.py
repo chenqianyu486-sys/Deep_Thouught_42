@@ -269,6 +269,31 @@ HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset({
     "rapidwright_execute_fanout_strategy",
 })
 
+# Names of tools that perform the actual optimization work (strategy tools).
+# Used by EVALUATE cooling logic to distinguish strategy-tool errors (which
+# mean the strategy didn't execute fairly) from auxiliary-tool errors (which
+# mean the strategy ran but auxiliary analysis tools failed). When only
+# auxiliary tools have errors, the strategy still got a fair execution chance
+# and should be cooled down if it showed no improvement.
+STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+    "vivado_physopt_and_route",
+    "vivado_phys_opt_design",
+    "vivado_opt_design",
+})
+
 
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [

@@ -409,14 +409,22 @@ def inject_merged_dashboard(
 
     space = build_state_space(state)
 
-    # Exclude previously failed strategies from the catalog
-    _failed_strategies = [
+    # Exclude previously failed strategies from the catalog.
+    # TTL-persistent failed strategies (strategy_ineffective).
+    _failed_strategies: list[str] = [
         fs.strategy for fs in state.context.failed_strategies
-    ] if state.context.failed_strategies else None
+    ] if state.context.failed_strategies else []
 
-    # Blocked strategy lists for Dashboard strategy_lifecycle section.
-    # Per-iteration cooldown (cleared each iteration at iteration_start).
-    _blocked_this_iter = list(state.iteration.blocked_strategies) if state.iteration.blocked_strategies else None
+    # Per-iteration cooldown strategies (cleared each iteration at iteration_start).
+    # These are also excluded from the catalog so the LLM never sees them
+    # as available options — eliminates the wasted round-trip of selecting
+    # a blocked strategy only to be rejected server-side.
+    _blocked_this_iter: list[str] = list(state.iteration.blocked_strategies) if state.iteration.blocked_strategies else []
+
+    # Merge ALL non-selectable strategies into a single exclude set,
+    # so they are removed from the strategy catalog entirely.
+    _exclude_strategies = list(set(_failed_strategies) | set(_blocked_this_iter)) or None
+
     # TTL-persistent blocks (strategy_ineffective, unblocks after TTL).
     _blocked_ttl = None
     if state.context.failed_strategies:
@@ -434,7 +442,7 @@ def inject_merged_dashboard(
         phase=phase,
         handoff_summary=state.strategy.last_handoff_text,
         show_strategy_catalog=(phase == LoopPhase.SELECT_STRATEGY),
-        exclude_strategies=_failed_strategies,
+        exclude_strategies=_exclude_strategies,
         iteration_narratives=state.iteration.narratives,
         tools_used=state.iteration.tools_used,
         current_strategy=state.strategy.current_strategy,

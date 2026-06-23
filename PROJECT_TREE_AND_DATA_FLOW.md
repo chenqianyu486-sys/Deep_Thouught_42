@@ -25,7 +25,7 @@ fpl26_optimization_contest/
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
 │   └── pure/                     # 15 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）、critical_path.py（关键路径解析 + 数据质量验证）
-├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流等）
+├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流、数据质量守卫、冷却逻辑等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
@@ -223,6 +223,7 @@ global_state:
 
 # Module 2: Timing Path Clusters (Top 20)
 timing_clusters:
+  freshness: extracted_iteration=2, stale=false, total_failing_from_timing_report=1529
   top_paths:
     - endpoint: u_core/u_alu/reg_0
       startpoint: u_core/launch_ff/Q          # D1: launch cell/pin (was missing)
@@ -236,6 +237,8 @@ timing_clusters:
       route_delay_pct: 0.55
       logic_levels: 12
       path_group: clk_a
+      cell_type_chain: LUT→LUT6→MUXF7→LUT→FDRE   # full path cell type sequence
+      # cell counts: LUT=3, MUXF=1, FF=1
       delay_hotspots:  # top contributors (D1: per-node delay breakdown)
         - u_core/lut1 [LUT6] 0.082ns (16%) @ SLICE_X2Y2
         - u_core/launch_ff [FDRE] 0.079ns (15%) @ SLICE_X1Y1
@@ -270,7 +273,7 @@ timing_clusters:
       avg_logic_delay_pct: 0.25
       avg_logic_levels: 3.5
       module: pcie_ctrl
-  top_failing_endpoints:  # 方案6: 端点缓存
+  top_failing_endpoints:  # 方案6: 端点缓存（show N of M）
     - top/aes_core/sbox/reg_0
     - top/aes_core/mix_cols/reg_1
     - top/pcie_ctrl/dma/reg_2
@@ -381,6 +384,11 @@ recent_analysis:
 - **`design_type_note` 简化**：纯组合设计仅标注 `"no sequential elements for retiming"`。
 - **ANALYZE→SELECT_STRATEGY handoff 增强**：`PhaseHandoff` 新增 `tool_results: list[str]` 字段，ANALYZE 阶段退出时通过 `_extract_recent_tool_results()` 注入最近分析工具结果摘要。SELECT_STRATEGY 阶段 LLM 可直接从 handoff 文本中看到工具具体结果。
 - **`raw_tool_outputs` 跨阶段可查询**：SELECT_STRATEGY 阶段 `call_tool_fn()` 现在传递 `raw_tool_outputs` 参数，LLM 可调用 `vivado_get_raw_tool_output` 查询 ANALYZE/EVALUATE 阶段的原始工具输出。
+- **细胞类型链（cell_type_chain）**（2026-06）：Dashboard Module 2 每路线时序路径新增 `cell_type_chain` 字段（如 `LUT→MUXF7→LUT→FDRE`），从 `CriticalPathEntry.cells` 通过 `build_cell_type_chain()` 推导。ANALYZE/SELECT_STRATEGY 阶段可见。零额外 MCP 开销。
+- **新鲜度指示器**（2026-06）：Module 2 / 2b 顶部新增 `freshness: extracted_iteration=N, stale=(true|false), total_failing_from_timing_report=M`。stale 标志来自 `state.timing.critical_paths_stale`，LLM 可判断关键路径数据是否已过时。
+- **端点计数对齐**（2026-06）：`top_failing_endpoints` 重命名为 `top_violating_endpoints`，显示格式从 `# N endpoints` 变为 `# showing N of M total failing (from timing report)`。避免 LLM 被 15 条展示数据误导以为只有少量违规端点。
+- **空数据优雅降级**（2026-06）：当 `critical_paths` 为空（如所有细胞名被过滤）时，Module 2 显示 `status: not_extracted_or_all_cells_invalid` 并指导 LLM 重新提取，而非静默显示 `N/A`。
+- **紧凑热点保留类型标注**（2026-06）：EXECUTE/EVALUATE 阶段的单行延迟热点摘要保留 `[NET]`/`[LUT6]` 等类型标签，帮助 LLM 区分 cell vs net 延迟贡献。
 
 > 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §3.4-§3.5](architecture.md)。
 
@@ -402,6 +410,13 @@ recent_analysis:
 | 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |
 | 策略阻止状态可见性 | Dashboard `strategy_lifecycle` 始终显示 `blocked_this_iteration`（本迭代冷却）和 `blocked_ttl`（TTL 持久阻止+解封倒计时），防止 LLM 在压缩后重复选择已阻止策略 |
 | 空结果模式匹配 | 工具返回 `optimized_count: 0` / `cascades_found: 0` 等空结果时归类为 `tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
+| 关键路径数据质量 | `parse_critical_path_cells()` 使用 `_is_valid_cell_name()` 过滤 pblock 标签、设备坐标等非细胞字符串；>50% 无效的路径整条跳过 |
+| 关键路径细胞类型链 | Dashboard Module 2 每路径显示 `cell_type_chain`（如 `LUT→MUXF7→FDRE`），帮助 LLM 理解路径结构 |
+| TCL 关键路径提取拦截 | `tool_router.py` 检测 `vivado_run_tcl` 中含 `get_timing_paths` + `get_cells` 模式时返回 `[AUTO-GUIDANCE]` 消息，引导 LLM 使用专用工具 |
+| PBLOCK 数据质量提前退出 | `critical_path_cells` 全部被过滤时跳过 MCP 调用，记录 `data_quality_error` 类型策略失败 |
+| 冷却逻辑分层 | `_cool_down_current_strategy_if_stalled()` 区分策略工具错误（`STRATEGY_TOOL_NAMES`） vs 辅助工具错误。只有策略工具本身失败时才跳过冷却 |
+| 策略目录分层暴露 | `blocked_this_iteration` 策略同时加入 `exclude_strategies`，从目录中完全消失。LLM 在 `strategy_lifecycle` 中可见原因 |
+| Improvement 阈值 | `STRATEGY_IMPROVEMENT_EPSILON_NS` 从 0.001 提升至 0.050ns。低于 50ps 的 WNS 变化视为无改善 |
 
 ### 3.4 模型选择
 

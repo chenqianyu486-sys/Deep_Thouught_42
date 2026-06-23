@@ -325,6 +325,26 @@ class ViolationSummary:
 - `format_critical_paths_snapshot(critical_paths, limit)` — YAML 格式化
 - `format_critical_paths_handoff(critical_paths, limit)` — 纯文本格式化
 - `validate_critical_path_data(paths, reference_paths)` — 输入数据质量验证，检测 fanout 污染/低重叠/缺 FF 等问题（2026-06 新增）
+- `heuristic_cell_type(name) -> str` / `build_cell_type_chain(cells) -> (chain, counts)` — 从细胞名推断类型并构建全路径类型链（2026-06-23 新增）
+- `_is_valid_cell_name(name) -> bool` — 验证细胞名格式，拒绝 pblock 标签、设备坐标等非细胞字符串（2026-06-23 新增）
+
+**细胞名格式验证**（`_is_valid_cell_name`, 2026-06-23 新增）：
+- 拒绝 `pblock_*`、`SLICE_X*Y*`、`DSP48E2_X*Y*` 等非细胞模式
+- 要求细胞名包含层级路径格式（至少一个 `/`）
+- 每个路径段必须包含至少一个字母数字字符
+- 在 `parse_critical_path_cells()` 中应用，>50% 细胞无效的路径整条跳过
+- 日志记录被过滤的细胞名（debug 级别）和跳过的路径（warning 级别）
+
+**细胞类型链**（`build_cell_type_chain`, 2026-06-23 新增）：
+- 从 `CriticalPathEntry.cells` 列表通过 `_heuristic_cell_type()` 逐细胞推断类型
+- 输出格式：`LUT→MUXF7→LUT6→FDRE` 及类型计数统计 `{LUT: 2, MUXF: 1, FF: 1}`
+- 由 `_convert_critical_path()` 在构建 `DashboardTimingPath` 时调用
+- 仅 ANALYZE/SELECT_STRATEGY 阶段展示（Module 2），零额外 MCP 开销
+
+**PBLOCK 后强制关键路径刷新**（2026-06-23 新增）：
+- `rapidwright_execute_pblock_strategy` 的 auto-chain 完成后，强制调用 `_auto_refresh_critical_paths()`
+- 确保 EVALUATE 阶段的 Dashboard 看到的是 PBLOCK 后的关键路径数据
+- 日志记录刷新成功/失败状态
 
 **节流**：仅在 `critical_paths_stale == True` 时触发 auto-refresh。
 
@@ -344,6 +364,12 @@ class ViolationSummary:
 | 周期反思 | get_completion() 内嵌 | 每8个 tool_round 注入 REFLECTION CHECKPOINT |
 | Pblock合规性 | Vivado MCP 返回 + Summarizer 解析 | `create_and_apply_pblock` 追加 cells 计数 |
 | Tcl多行 | Vivado MCP `run_tcl_command()` | 按 `\n` 分割多行脚本，在同一 Vivado 会话中顺序执行 |
+| **关键路径细胞名验证** | `critical_path.py:_is_valid_cell_name()` | 拒绝 pblock 标签/设备坐标等非细胞名，>50%无效跳过整条路径 |
+| **TCL 关键路径提取拦截** | `tool_router.py:vivado_run_tcl` 内容匹配 | 检测 `get_timing_paths`+`get_cells` 模式，返回 `[AUTO-GUIDANCE]` |
+| **PBLOCK 数据质量提前退出** | `phase_execute.py` auto-injection 后 | `critical_path_cells` 全部过滤时跳过 MCP 调用，记录 `data_quality_error` |
+| **冷却逻辑分层** | `phase_evaluate.py:_cool_down_current_strategy_if_stalled()` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
+| **策略目录分层暴露** | `context_snapshot.py:inject_merged_dashboard()` | `blocked_this_iteration` 策略同时加入 `exclude_strategies`，从目录完全消失 |
+| **Improvement 阈值 0.050ns** | `phase_evaluate.py:STRATEGY_IMPROVEMENT_EPSILON_NS` | 从 0.001 提升至 0.050，低于 50ps 视为无改善 |
 
 ### 3.7 模型选择
 
@@ -685,7 +711,16 @@ class StrategyState:
 **`_build_skill_recommendation()` 分级过滤**：
 - `reason="strategy_ineffective"` → 永久排除
 - `reason ∈ {tool_error, execution_failure}` → 冷却 2 个迭代后可重试
+- `reason = "data_quality_error"` → 冷却 3 个迭代（同 `strategy_ineffective`）
 - `_strategy_blocked(name)` 辅助函数统一判断逻辑
+
+**冷却逻辑分层**（`phase_evaluate.py`, 2026-06-23 改进）：
+`_cool_down_current_strategy_if_stalled()` 的"公平执行判断"从简单的"有 tool_errors → 跳过冷却"改进为：
+1. 定义 `STRATEGY_TOOL_NAMES` 常量（`constants.py`），包含 16 个策略执行工具（`rapidwright_execute_pblock_strategy`, `vivado_physopt_and_route` 等）
+2. 检查 `state.iteration.tool_errors` 中的错误工具名是否在 `STRATEGY_TOOL_NAMES` 中
+3. **策略工具本身失败**（如 `rapidwright_execute_pblock_strategy` 抛出异常）→ 策略未获公平执行机会 → **跳过冷却**
+4. **仅辅助工具失败**（如 `vivado_run_tcl` 超时，但策略工具成功返回）→ 策略已执行 → **应用冷却**
+5. Improvement 阈值从 0.001ns 提升至 **0.050ns**（`STRATEGY_IMPROVEMENT_EPSILON_NS`）：低于 50ps 的 WNS 变化视为无改善，进入冷却
 
 **`_infer_strategy_from_tools()` 策略推断映射**：
 - PBLOCK → 工具名含 `pblock`
@@ -1175,6 +1210,33 @@ MAX_TIMEOUT = 900.0  # 单次工具调用硬上限 (秒)
 
 # Vivado Tcl 命令规范: Agent pipeline 禁用 report_* (cost 不可预测)
 # 改用 get_* 命令 (cost 线性可控), 详见 init_analysis.py 与 vivado_mcp_server.py
+
+# 冷却逻辑 Improvement 阈值
+# 从 0.001 提升至 0.050（2026-06-23）
+# 低于 50ps 的 WNS 变化视为 Vivado 路由变异噪音，不触发 cooldown 跳过
+STRATEGY_IMPROVEMENT_EPSILON_NS: float = 0.050
+
+# 策略工具名称集合（用于冷却逻辑分层）
+# 当这些工具本身报错时跳过 cooldown（策略未执行），
+# 仅辅助工具报错时应用 cooldown（策略已执行但无改善）
+STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+    "vivado_physopt_and_route",
+    "vivado_phys_opt_design",
+    "vivado_opt_design",
+})
 ```
 
 ## 11. Tool 描述增强（2026-05 新增）
@@ -1233,7 +1295,11 @@ FORMAT_GUARD (~12行, 一次性注入)
 Dashboard (7模块, 每轮动态重建)
    ├── 纯数据，无判断标签
    ├── 相位过滤（ANALYZE 看 6 模块，EXECUTE 看 2+摘要 模块）
-   ├── Module 2 含 path_clusters（路径聚类压缩）+ failing_endpoint_names（端点缓存）
+   ├── Module 2 含 path_clusters（路径聚类压缩）+ cell_type_chain（细胞类型链）
+   │        + freshness（新鲜度指示器）+ top_violating_endpoints（计数对齐 N of M）
+   ├── 空数据优雅降级：status=not_extracted_or_all_cells_invalid
+   ├── 紧凑模式保持 [NET]/[LUT6] 类型标注
+   ├── EXECUTE Dashboard 含 critical_paths_available_in_state 提示
    └── 作为最后一条 user 消息注入
 
 Tool schema (按阶段过滤 + flow_control enum 动态 patch)
