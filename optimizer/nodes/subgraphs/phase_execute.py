@@ -24,7 +24,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -494,27 +494,41 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         and deps.rapidwright_session
                         and state.timing.latest_wns is not None):
                     precheck_verdict = await _rapidwright_direction_check(state, deps, rw_precheck_baseline)
-                    if precheck_verdict == "REGRESS":
+                    if precheck_verdict in ("REGRESS", "UNCHANGED"):
+                        gate_reason = (
+                            "precheck_direction_regress"
+                            if precheck_verdict == "REGRESS"
+                            else "precheck_direction_unchanged"
+                        )
                         logger.warning(yellow(
-                            f"[EXECUTE] Pre-check REGRESS for {tool_name}: "
+                            f"[EXECUTE] Pre-check {precheck_verdict} for {tool_name}: "
                             f"skipping Vivado P&R chain (~900s saved)"
                         ))
-                        state.control.done_reason = "precheck_direction_regress"
+                        state.control.done_reason = gate_reason
                         record_flow_signal(
-                            state, "SYSTEM_EXIT", "precheck_direction_regress",
+                            state, "SYSTEM_EXIT", gate_reason,
                             phase="EXECUTE_STRATEGY",
                         )
                         if deps.compat is not None:
-                            deps.compat.add_message("user",
-                                f"[PRECHECK] {tool_name}: RapidWright timing estimate "
-                                f"shows directional WNS regression. Skipping Vivado "
-                                f"place+route chain. Strategy marked as ineffective."
-                            )
+                            if precheck_verdict == "REGRESS":
+                                deps.compat.add_message("user",
+                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
+                                    f"shows directional WNS regression. Skipping Vivado "
+                                    f"place+route chain. Strategy marked as ineffective."
+                                )
+                            else:
+                                deps.compat.add_message("user",
+                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
+                                    f"shows no directional WNS change (delta within dead "
+                                    f"band). Skipping Vivado place+route chain — the skill "
+                                    f"produced no measurable benefit. Strategy marked as "
+                                    f"ineffective."
+                                )
                         # Record strategy failure so select_model won't retry it
                         record_strategy_failure(
                             state, state.strategy.current_strategy,
                             "strategy_ineffective", tool=tool_name,
-                            detail="precheck_direction_regress"
+                            detail=gate_reason
                         )
                         force_exit = True
                         break
@@ -988,8 +1002,11 @@ async def _rapidwright_direction_check(
 
     Returns:
         "IMPROVED"  — RW estimate shows WNS improvement → proceed to chain
-        "REGRESS"   — RW estimate shows significant directional regression
+        "REGRESS"   — RW estimate shows directional regression
                        → skip chain, let EVALUATE switch strategy
+        "UNCHANGED" — RW estimate is flat (delta <= improve_eps): the skill
+                      produced no directional gain. Skip the expensive P&R
+                      chain (~900s) and mark the strategy ineffective.
         "UNCERTAIN" — cannot determine (no baseline, tool error, etc.)
                        → fall through to existing chain logic (conservative)
     """
@@ -1018,18 +1035,27 @@ async def _rapidwright_direction_check(
             f"est={est_wns:.3f}ns, delta={delta:+.3f}ns"
         )
 
-        if delta > 0.001:
+        # Tightened gate: only a strictly-positive delta (RW estimate is
+        # directionally better than baseline) is allowed to proceed to the
+        # expensive Vivado P&R chain (~900s). A delta of 0 means the skill
+        # produced no directional change in RW's estimate — paying the full
+        # P&R chain on that signal historically wastes ~3min per attempt
+        # (see dcp_optimizer_run-20260623_013335 iter1/3 fanout). Any
+        # delta <= 0 returns UNCHANGED (close to zero) or REGRESS (clearly
+        # negative) and skips the chain; the caller marks the strategy
+        # ineffective.
+        IMPROVE_EPS = 0.001
+        if delta > IMPROVE_EPS:
             logger.info(green(f"[PRECHECK] Direction looks IMPROVED (delta={delta:+.3f})"))
             return "IMPROVED"
-        elif delta < -RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD:
+        if delta < -IMPROVE_EPS:
             logger.warning(yellow(
                 f"[PRECHECK] Direction shows REGRESS (delta={delta:+.3f}ns, "
-                f"threshold={RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD:.3f})"
+                f"threshold=0.000) — skipping Vivado P&R chain"
             ))
             return "REGRESS"
-        else:
-            logger.info(f"[PRECHECK] Direction UNCERTAIN (delta={delta:+.3f}, within dead band)")
-            return "UNCERTAIN"
+        logger.info(f"[PRECHECK] Direction UNCHANGED (delta={delta:+.3f}, not strictly positive) — skipping Vivado P&R chain")
+        return "UNCHANGED"
 
     except Exception as e:
         logger.warning(f"[PRECHECK] RapidWright direction check failed: {e}")

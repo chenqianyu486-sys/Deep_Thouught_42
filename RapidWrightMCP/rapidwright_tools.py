@@ -23,12 +23,122 @@ _device_sites_cache: Dict[str, list] = {}
 # Cache for tile info (device_name:tile_name -> tile info dict)
 _tile_info_cache: Dict[str, Dict[str, Any]] = {}
 
+# Cache for net name resolution: maps (design identity) -> index of net names.
+# Vivado reports hierarchical net names in short form (e.g. "M1w[0]") while
+# RapidWright stores fully-qualified names (e.g. "layer0_reg/M1w[0]"). This
+# index lets fanout_strategy resolve caller-supplied names to actual design
+# nets instead of silently failing with "net not found".
+_net_name_lower_index: Dict[str, Any] = {}
+_net_name_full_list: list[str] = []
+
+
+def _build_net_name_index() -> None:
+    """Build a case-insensitive index of all net names in the current design.
+
+    Used by fanout_strategy (and potentially other skills) to resolve
+    caller-supplied net names — which may be short hierarchical forms from
+    Vivado cache reports — against the actual fully-qualified names stored
+    in the RapidWright in-memory design.
+    """
+    global _net_name_lower_index, _net_name_full_list
+    if _net_name_full_list or not _current_design:
+        return
+    try:
+        nets = _current_design.getNets()
+        if nets is None:
+            return
+        for net in nets:
+            try:
+                full = str(net.getName())
+            except Exception:
+                continue
+            if not full:
+                continue
+            _net_name_full_list.append(full)
+            key = full.lower()
+            # Keep first occurrence so duplicate names don't overwrite a
+            # valid net with a later (possibly stale) one.
+            if key not in _net_name_lower_index:
+                _net_name_lower_index[key] = net
+        logger.debug(
+            f"Built net-name index: {len(_net_name_full_list)} nets"
+        )
+    except Exception as e:
+        logger.warning(f"Could not build net-name index: {e}")
+
+
+def _resolve_net_name(design, requested_name: str):
+    """Resolve a (possibly short / Vivado-form) net name to the loaded design.
+
+    Resolution order:
+      1. Direct ``design.getNet(name)`` lookup.
+      2. Case-insensitive full-name match against design net index.
+      3. Hierarchical-suffix match: a design net whose full name equals
+         ``"<prefix>/<requested_name>"``. This catches the common Vivado →
+         RapidWright mismatch (e.g. "M1w[0]" → "layer0_reg/M1w[0]").
+      4. Bare endswith match with a separator/boundary guard as a last resort.
+
+    Returns (net_or_None, resolved_or_requested_name). When ``net_or_None``
+    is None, ``resolved_or_requested_name`` is ``requested_name`` unchanged.
+    """
+    if design is None or not requested_name:
+        return None, requested_name
+
+    # 1. Direct lookup (fast path — also the only path when names match).
+    try:
+        net = design.getNet(requested_name)
+        if net is not None:
+            return net, requested_name
+    except Exception:
+        pass
+
+    # Lazy-build the index on first miss, then re-check direct lookup.
+    if not _net_name_full_list:
+        _build_net_name_index()
+
+    if not _net_name_lower_index:
+        return None, requested_name
+
+    req_lower = requested_name.lower()
+
+    # 2. Case-insensitive full-name match.
+    net = _net_name_lower_index.get(req_lower)
+    if net is not None:
+        try:
+            return net, str(net.getName())
+        except Exception:
+            return net, requested_name
+
+    # 3. Hierarchical-suffix match: full name ends with "/<requested>".
+    suffix = "/" + requested_name
+    suffix_lower = suffix.lower()
+    for full in _net_name_full_list:
+        if full.lower().endswith(suffix_lower):
+            resolved = _net_name_lower_index.get(full.lower())
+            if resolved is not None:
+                return resolved, full
+
+    # 4. Bare endswith with boundary guard (avoid spurious substring hits).
+    for full in _net_name_full_list:
+        full_lower = full.lower()
+        if full_lower.endswith(req_lower) and (
+            len(full_lower) == len(req_lower)
+            or full_lower[-len(req_lower) - 1] in ("/", "_", ".")
+        ):
+            resolved = _net_name_lower_index.get(full_lower)
+            if resolved is not None:
+                return resolved, full
+
+    return None, requested_name
+
 
 def _clear_caches() -> None:
     """Clear all cached device/tile data when design changes."""
-    global _device_sites_cache, _tile_info_cache
+    global _device_sites_cache, _tile_info_cache, _net_name_lower_index, _net_name_full_list
     _device_sites_cache.clear()
     _tile_info_cache.clear()
+    _net_name_lower_index.clear()
+    _net_name_full_list.clear()
     logger.debug("Cleared site/tile caches")
 
 
@@ -861,8 +971,12 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
                 continue
 
             try:
-                # Get the net
-                net = design.getNet(net_name)
+                # Resolve caller-supplied net name to an actual design net.
+                # Vivado cache reports short hierarchical forms (e.g. "M1w[0]")
+                # that don't match RapidWright's fully-qualified net names
+                # (e.g. "layer0_reg/M1w[0]"). Without resolution this would
+                # silently fail for every net and waste ~3min of place+route.
+                net, resolved_name = _resolve_net_name(design, net_name)
                 if net is None:
                     results.append({
                         "net_name": net_name,
@@ -875,22 +989,28 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
                     failed_count += 1
                     continue
 
+                if resolved_name != net_name:
+                    logger.info(
+                        f"Resolved net '{net_name}' -> '{resolved_name}'"
+                    )
+
                 # Calculate split_factor: fanout/100, min 3, max 8
                 original_fanout = net.getFanOut()
                 split_factor = max(3, min(8, original_fanout // 100))
 
-                logger.info(f"Optimizing net '{net_name}' with fanout {original_fanout} into {split_factor} parts")
+                logger.info(f"Optimizing net '{resolved_name}' with fanout {original_fanout} into {split_factor} parts")
 
                 # Perform optimization
                 FanOutOptimization.cutFanOutOfRoutedNet(design, net, split_factor)
 
                 results.append({
-                    "net_name": net_name,
+                    "net_name": resolved_name,
+                    "requested_net_name": net_name,
                     "fanout": fanout,
                     "split_factor": split_factor,
                     "original_fanout": original_fanout,
                     "status": "success",
-                    "message": f"Successfully split net '{net_name}' into {split_factor} parts"
+                    "message": f"Successfully split net '{resolved_name}' into {split_factor} parts"
                 })
                 successful_count += 1
 
