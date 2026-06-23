@@ -1,6 +1,6 @@
 # FPL26 优化竞赛 - 项目结构与数据流
 
-> 读者：贡献者/评委。高层架构概览见 [README.md](README.md)，实现级技术细节见 [architecture.md](architecture.md)。
+> 读者：贡献者/评委。高层架构概览见 [README.md](README.md)（中文）/[README_EN.md](README_EN.md)（英文），实现级技术细节见 [architecture.md](architecture.md)。
 
 ## 1. 项目结构（模块级）
 
@@ -135,7 +135,7 @@ llm_tool_loop_node (调度器)
 
 ### 2.4 关键设计原则
 
-> 40 条设计原则（故障安全、数据可信度、DCP 身份完整性、工具缓存、自适应 PBLOCK、LLM 提示缓存等）。完整列表见 [README.md](README.md) 中文版核心设计原则和 [architecture.md §13](architecture.md)。
+> 40 条设计原则（故障安全、数据可信度、DCP 身份完整性、工具缓存、自适应 PBLOCK、LLM 提示缓存等）。完整列表见 [README.md](README.md) 核心设计原则和 [architecture.md §13](architecture.md)。
 
 ## 3. 核心数据流
 
@@ -385,7 +385,7 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 
 ### 3.6 策略库清单
 
-> 14 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
+> 14 种策略及触发条件。完整列表见 [README.md](README.md) 优化策略和 [strategy_library.py](strategy_library.py)。
 
 ### 3.7 Tool 描述增强
 

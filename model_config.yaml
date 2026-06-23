@@ -5,9 +5,9 @@
 
 worker:
   model_tier: "worker"
-  model_name: "deepseek/deepseek-v4-flash"  # Default worker model name
+  model_name: "deepseek/deepseek-v4-pro"   # Default worker model name（升级为Pro，更强推理）
   reasoning_enabled: true                     # Enable reasoning/thinking mode for worker
-  reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
+  reasoning_max_output_tokens: null           # Max tokens for reasoning chain (null=unlimited, 即思考开到max)
   max_tokens: 250000
   soft_threshold: 180000       # Trigger soft compression at 180K (72% of max) to leave room for current task
   hard_limit: 200000         # Trigger aggressive compression at 200K (80% of max)
@@ -25,10 +25,10 @@ worker:
   cost_hard_limit: 1.00      # USD hard limit (combined planner+worker budget)
 planner:
   model_tier: "planner"
-  model_name: "deepseek/deepseek-v4-flash"    # Default planner model name
+  model_name: "deepseek/deepseek-v4-pro"   # Default planner model name（升级为Pro，更强推理）
   max_tokens: 1000000
   reasoning_enabled: true                     # Enable reasoning/thinking mode for planner
-  reasoning_max_output_tokens: 16384          # Max tokens for reasoning chain (None=unlimited)
+  reasoning_max_output_tokens: null           # Max tokens for reasoning chain (null=unlimited, 即思考开到max)
   soft_threshold: 250000      # Trigger soft compression at 250K (25% of max)
   hard_limit: 300000         # Trigger aggressive compression at 300K (30% of max)
   token_budget: 120000        # Target compressed output ~120K tokens (12% of max) — bumped for D1/D2 timing diagnostics

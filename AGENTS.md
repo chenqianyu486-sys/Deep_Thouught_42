@@ -5,8 +5,8 @@ Implement an FPGA back-end timing closure agent that optimizes `.dcp` files, wit
 - Employ elegant context engineering and loop engineering to provide the LLM with accurate and sufficient information for making optimization decisions.
 
 # ALWAYS:
-**ALWAYS read `README.md` & `PROJECT_TREE_AND_DATA_FLOW.md` before exploring the code.**
-**ALWAYS update `README.md`、`PROJECT_TREE_AND_DATA_FLOW.md` & `architecture.md` after task accomplished(if necessary).**
+**ALWAYS read `README.md`（中文）/ `README_EN.md`（English） & `PROJECT_TREE_AND_DATA_FLOW.md` before exploring the code.**
+**ALWAYS update `README.md` / `README_EN.md`、`PROJECT_TREE_AND_DATA_FLOW.md` & `architecture.md` after task accomplished(if necessary).**
 **ALWAYS use English to write code comment, but use Chinese to write plans.**
 
 # Guidelines:

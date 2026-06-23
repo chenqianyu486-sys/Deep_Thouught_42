@@ -6,225 +6,9 @@
 [![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4%20Flash-purple)](#)
 [![Contest](https://img.shields.io/badge/contest-FPL%202026-orange)](#)
 
-**Autonomous LLM-driven FPGA timing closure agent.** Orchestrates Vivado and RapidWright to iteratively optimize P&R strategies until WNS >= 0 — with formal logic equivalence guarantees.
-
----
-
-## Why This Project?
-
-- **No manual timing closure loops.** The agent autonomously analyzes critical paths, selects optimization strategies, executes them, and evaluates results.
-- **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
-- **Dual architecture.** V2 state machine for production reliability; V1 conversational loop removed (deprecated).
-- **Real-time observability.** Web Dashboard with 20 panels — 7-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
-- **14 validation-safe strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, OptDesign, LogicResynthesis, PhysOptAggressive, plus 3 new inter-layer combinational-logic strategies: CombinationalRebalance (validation-safe retiming — rebalances LUT6/MUXF7/MUXF8 cascade depth via logic-equivalent resynthesis, no FF insert), LUTMUXFRepack (LUT6+MUXF co-repack for NN/wide-datapath cones that exceed 6-input LUT limit), MUXFTreeReorder (MUXF7/MUXF8 tree reorder — the carry-reorder analogue for designs without CARRY4). Strategies that insert new pipeline FFs (RegisterRetiming, SmartRetiming, PhysOpt+RegisterRetiming) are excluded from the catalog because they would fail cycle-exact functional validation.
-- **Multi-strategy loop.** Up to 5 strategies can be tried per iteration, with TTL-based strategy retry (3 iterations). Failed strategies auto-unblock after TTL expires.
-
----
-
-## Quick Start
-
-```bash
-# 1. Clone and set up environment
-git clone https://github.com/chenqianyu486-sys/Deep_Thouught_42.git
-cd Deep_Thouught_42
-make setup
-
-# 2. Set your OpenRouter API key
-export OPENROUTER_API_KEY="sk-or-..."
-
-# 3. Run optimization (state machine)
-make run_optimizer DCP=input.dcp
-
-# 4. With live dashboard
-make run_optimizer_dashboard DCP=input.dcp
-# Open http://localhost:8080
-```
-
----
-
-## Architecture
-
-```
-                    ┌─────────────────────────────┐
-                    │     dcp_optimizer.py         │
-                    │   (CLI entry + V2 hub)       │
-                    └──────────┬──────────────────┘
-                               │
-                               ▼
-                    ┌──────────────────┐
-                    │   V2: State       │
-                    │   Machine (9 nodes)│
-                    └────────┬─────────┘
-                             │
-                ┌────────────┼────────────┐
-                ▼            ▼            ▼
-         ┌────────────┐ ┌────────────┐ ┌────────────┐
-         │ Vivado MCP │ │RapidWright │ │   LLM      │
-         │  Server    │ │ MCP Server │ │(DeepSeek)  │
-         └────────────┘ └────────────┘ └────────────┘
-```
-
-### V2 State Machine Topology
-
-```
-init_analysis ──► [WNS >= 0?]
-  │  YES ──► save_output ──► end
-  │  NO  ──► iteration_start ──► select_model ──► prepare_context
-  │            ──► llm_tool_loop ──► iteration_end ──► check_exit
-  │                  │                       │
-  │       ┌──────────┴──────────┐           │
-  │       ▼          ▼          ▼           │
-  │   ANALYZE ──► SELECT ──► EXECUTE ──► EVALUATE
-  │       ▲                    ▲              │
-  │       └────── CONTINUE ───┼──────────────┘
-  │                            │
-  │       SWITCH ─────────────┘  (multi-strategy loop, max 3 per iteration)
-  │                                          │
-  │       DONE / NEXT / ROLLBACK ──► iteration_start
-```
-
-### Key Design Principles
-
-40 principles covering fail-safety, data trustworthiness, DCP identity, tool caching, adaptive PBLOCK, LLM prompt caching, and more. See the Chinese section below (核心设计原则) for the full table.
-
-
-## Optimization Strategies
-
-14 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, LogicResynthesis, PhysOptAggressive, CombinationalRebalance, LUTMUXFRepack, MUXFTreeReorder. See the Chinese section below (优化策略) for trigger conditions and platform details.
-
-
-## Prerequisites
-
-| Dependency | Minimum Version | Purpose |
-|------------|-----------------|---------|
-| Python | 3.10+ | Agent runtime |
-| Vivado | 2024.1+ | P&R, timing analysis, Tcl scripting |
-| Java (JRE) | 11+ | RapidWright runtime |
-| RapidWright | (bundled as submodule) | Cell-level manipulation |
-| OpenRouter API | — | LLM access (DeepSeek V4 Flash) |
-
----
-
-## Environment Variables
-
-```bash
-OPENROUTER_API_KEY    # Required — OpenRouter API key
-VIVADO_EXEC           # Optional — Vivado executable path (default: vivado)
-JAVA_HOME             # Optional — Java installation path (RapidWright dependency)
-```
-
----
-
-## Usage
-
-### Basic Optimization
-
-```bash
-# State machine (default)
-python dcp_optimizer.py input.dcp
-
-# With 30-minute timeout and custom output
-python dcp_optimizer.py input.dcp --timeout 1800 --output output.dcp
-```
-
-### Testing (No LLM)
-
-```bash
-# Full V2 test (tools + skills + place/route)
-make run_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
-
-# Skill-only test (fast, no place/route)
-make run_skill_test_v2 DCP=demo_corundum_25g_misses_timing.dcp
-```
-
-### Dashboard
-
-```bash
-# Launch with dashboard on port 8080
-make run_optimizer_dashboard DCP=input.dcp
-
-# Custom port
-make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
-```
-
-The dashboard provides 20 real-time panels: 7-module StateSpace (Global State, Timing Clusters, Physical/Congestion, Netlist Quality, Constraints, Dynamic Gradient, Architecture Overview) + 13 legacy detail panels. See the Chinese section below (仪表盘) for the full panel listing.
-
-
-## Project Structure
-
-See the Chinese section below (项目结构) for the full directory tree, or refer to [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md).
-
-
-## Model Configuration
-
-Two model tiers, differentiated by context window and compression parameters:
-
-| Parameter | Worker | Planner |
-|-----------|--------|---------|
-| Model | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-flash` |
-| Max tokens | 250K | 1M |
-| Soft threshold | 175K | 200K |
-| Hard limit | 200K | 300K |
-| Preserve turns | 40 / 25 (hard) | 60 / 40 (hard) |
-| Cost hard limit | $1.00 | $1.00 |
-
-Edit `model_config.yaml` to customize models, thresholds, and fallback chains.
-
----
-
-## Performance
-
-Benchmarks from the `demo_corundum_25g_misses_timing` baseline (typical scenario):
-
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| WNS | -2.347 ns | 0.012 ns | +2.359 ns |
-| TNS | -48.2 ns | 0.0 ns | +48.2 ns |
-| Failing Endpoints | 127 | 0 | -127 |
-| Iterations | — | 4–8 | — |
-| LLM Cost | — | ~$0.15–$0.40 | — |
-
-*Results vary by design complexity and initial timing violation severity. Recent improvements: timing-aware placement/routing (Explore directives), PBLOCK multiplier variation, AggressiveExplore PhysOpt, relaxed pre-check thresholds, extended iteration budget.*
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow, test modes, and the checklist for adding new strategies/tools.
-
----
-
-## Troubleshooting
-
-See the Chinese section below (故障排除) for common issues and solutions.
-
-
-## License
-
-Apache 2.0 — see [LICENSE-APACHE-2.0.txt](LICENSE-APACHE-2.0.txt).
-
-Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
-
----
-
-## Acknowledgments
-
-- **Vivado** and **RapidWright** by AMD/Xilinx — the EDA backbone
-- **DeepSeek V4 Flash** via OpenRouter — the LLM reasoning engine
-- **MCP (Model Context Protocol)** — tool-calling infrastructure
-- **FPL 2026** — competition driving this research
-- **Douglas Adams** — inspiration for the project name
-
-
-# Deep Thought 42
-
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE-APACHE-2.0.txt)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![FPGA](https://img.shields.io/badge/FPGA-Vivado%20%2B%20RapidWright-green)](#)
-[![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4%20Flash-purple)](#)
-[![Contest](https://img.shields.io/badge/contest-FPL%202026-orange)](#)
-
 **自主 LLM 驱动的 FPGA 时序收敛智能体。** 协调 Vivado 和 RapidWright，迭代优化布局布线（P&R）策略，直至最差负裕量（WNS）>= 0 —— 并提供形式化的逻辑等价性保证。
+
+> 🇬🇧 English version: [README_EN.md](README_EN.md)
 
 ---
 
@@ -309,7 +93,7 @@ init_analysis ──► [WNS >= 0?]
 | 5 | 关注点分离 | Worker（250K tokens，负责执行） vs. Planner（1M tokens，负责战略决策） |
 | 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
 | 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
-| 8 | 编码领域知识 | 11 种策略带有触发条件；LLM 自主选择 |
+| 8 | 编码领域知识 | 14 种策略带有触发条件；LLM 自主选择 |
 | 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据 |
 | 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
@@ -322,7 +106,6 @@ init_analysis ──► [WNS >= 0?]
 | 18 | **Vivado 超时自动重启** | Tcl 超时会污染 Vivado session。不再使用不可靠的 `sync_after_timeout()`，改为 MCP server 内部自动 kill→restart→reopen DCP。移除 `_command_pending` 全局状态。 |
 | 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`，回退到时序报告 `Design State` 字段（识别 `routed`/`placed`/`optimized` 三种状态）。若设计未布线，从 best_checkpoint 恢复或自动执行 `place_design` + `route_design` 修复后再保存。写入后再次验证设计状态，若非 `routed` 则记录警告。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
 | 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。Place-only WNS 检查也验证设计状态——若为 `Optimized`（未布局），跳过 WNS 检查避免基于估计延迟的虚假正信号。 |
-| 29 | **Vivado 执行工具错误检测** | `place_design`、`route_design`、`phys_opt_design`、`opt_design`、`physopt_and_route` 在 MCP 服务器中检测 Vivado `ERROR: [` 文本，返回 JSON `{"error": ...}` 响应。链式执行（`phase_execute.py`）同时检查 JSON `error` 键和文本 `ERROR: [` 模式，确保 Vivado 命令失败时链中止并回滚，而非静默继续。 |
 | 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
 | 22 | **多策略循环** | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
 | 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
@@ -331,6 +114,7 @@ init_analysis ──► [WNS >= 0?]
 | 26 | **设计一致性验证工具** | 4 个验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_estimate_timing`, `rapidwright_compare_designs`）在所有阶段可用。LLM 可自主验证设计状态，确保修改后一致性。 |
 | 27 | **独立 RapidWright 工具** | 19 个 RapidWright 工具（8 个分析 + 10 个执行 + 1 个验证）暴露给 LLM，支持细粒度控制。LLM 可自主选择工具组合，而非被硬编码链限制。 |
 | 28 | **可选链验证** | `OPTIONAL_CHAIN_VALIDATION` 提供 4 个可选验证链，LLM 可选择是否在执行前后插入验证步骤。验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_compare_designs`）确保设计一致性。 |
+| 29 | **Vivado 执行工具错误检测** | `place_design`、`route_design`、`phys_opt_design`、`opt_design`、`physopt_and_route` 在 MCP 服务器中检测 Vivado `ERROR: [` 文本，返回 JSON `{"error": ...}` 响应。链式执行（`phase_execute.py`）同时检查 JSON `error` 键和文本 `ERROR: [` 模式，确保 Vivado 命令失败时链中止并回滚，而非静默继续。 |
 | 30 | **策略阻止状态可见性** | Dashboard `strategy_lifecycle` 始终显示，包含 `blocked_this_iteration`（本迭代冷却策略）和 `blocked_ttl`（TTL 持久阻止策略及解封倒计时）。防止 LLM 在上下文压缩后丢失 `[BLOCKED]` 消息而重复选择已阻止策略。 |
 
 ---
@@ -454,7 +238,7 @@ Deep_Thouught_42/
 │   ├── graph.py              # NodeGraph：执行引擎
 │   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
 │   └── pure/                 # 14 个无状态纯函数模块（可单元测试），含 state_space.py（7 模块 StateSpace）
-├── strategy_library.py       # 11 种策略及触发条件
+├── strategy_library.py       # 14 种策略及触发条件
 ├── skills/                   # 技能框架：14 个注册技能
 ├── RapidWrightMCP/           # RapidWright MCP 服务器
 ├── VivadoMCP/                # Vivado MCP 服务器
@@ -468,6 +252,8 @@ Deep_Thouught_42/
 └── docs/                     # 竞赛提交文档
 ```
 
+详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md)。
+
 ---
 
 ## 模型配置
@@ -476,7 +262,7 @@ Deep_Thouught_42/
 
 | 参数 | Worker | Planner |
 |-----------|--------|---------|
-| 模型 | `deepseek/deepseek-v4-flash` | `deepseek/deepseek-v4-flash` |
+| 模型 | `deepseek/deepseek-v4-pro` | `deepseek/deepseek-v4-pro` |
 | 最大 tokens | 250K | 1M |
 | 软阈值 | 175K | 200K |
 | 硬限制 | 200K | 300K |
@@ -511,7 +297,7 @@ Deep_Thouught_42/
 
 ## 故障排除
 
-### `Vivado license not found` (未找到 Vivado 许可证)
+### `Vivado license not found`（未找到 Vivado 许可证）
 
 ```bash
 # 验证 Vivado 是否可访问
@@ -520,7 +306,7 @@ which vivado
 source /opt/Xilinx/Vivado/2024.1/settings64.sh
 ```
 
-### `OPENROUTER_API_KEY not set` (未设置 OPENROUTER_API_KEY)
+### `OPENROUTER_API_KEY not set`（未设置 OPENROUTER_API_KEY）
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
@@ -528,7 +314,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.bashrc
 ```
 
-### `RapidWright Java error` (RapidWright Java 错误)
+### `RapidWright Java error`（RapidWright Java 错误）
 
 ```bash
 # 确保已安装 Java 11+
@@ -537,7 +323,7 @@ java -version
 export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 ```
 
-### Dashboard not loading (仪表盘无法加载)
+### Dashboard not loading（仪表盘无法加载）
 
 ```bash
 # 检查端口可用性
@@ -546,7 +332,7 @@ lsof -i :8080
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-### WNS not improving after many iterations (多次迭代后 WNS 未改善)
+### WNS not improving after many iterations（多次迭代后 WNS 未改善）
 
 - 当 WNS 恶化 >30ps 时，智能体会自动回滚
 - 检查仪表盘中的 Flow Control Log（流控日志）以获取 `EXHAUSTED` 信号

@@ -5,7 +5,7 @@
 
 ## 1. 部署与运行
 
-> 入口命令、测试模式、Dashboard 启动方式见 [README.md](README.md) Quick Start / Usage。
+> 入口命令、测试模式、Dashboard 启动方式见 [README.md](README.md)（中文）/[README_EN.md](README_EN.md)（英文）Quick Start / Usage。
 
 
 ## 2. 架构演进（历史参考）

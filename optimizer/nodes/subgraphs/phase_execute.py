@@ -289,15 +289,36 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if not tool_args.get("critical_path_cells") and state.timing.critical_paths:
                         cells = []
                         seen = set()
+                        filtered_count = 0
                         for cp in state.timing.critical_paths[:10]:
                             for cell_name in cp.cells:
                                 if cell_name not in seen:
                                     seen.add(cell_name)
+                                    # Skip names that look like Pblock/constraint names
+                                    # (not valid cell instances — likely data corruption)
+                                    if "pblock" in cell_name.lower():
+                                        filtered_count += 1
+                                        continue
                                     cells.append(cell_name)
                                     if len(cells) >= 50:
                                         break
                             if len(cells) >= 50:
                                 break
+                        if filtered_count > 0:
+                            logger.warning(
+                                f"[EXECUTE] Filtered {filtered_count} non-cell name(s) from "
+                                f"critical path data for {tool_name} — possible data corruption"
+                            )
+                        if not cells and state.timing.critical_paths:
+                            total_cells = sum(len(cp.cells) for cp in state.timing.critical_paths[:10])
+                            logger.warning(
+                                f"[EXECUTE] All {total_cells} critical path cells filtered "
+                                f"for {tool_name} — state.timing.critical_paths may be corrupted"
+                            )
+                            logger.debug(
+                                f"[EXECUTE] critical_paths sample: "
+                                f"{[cp.cells[:5] for cp in state.timing.critical_paths[:3]]}"
+                            )
                         if cells:
                             tool_args["critical_path_cells"] = cells
                             logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
@@ -492,7 +513,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             data = json.loads(result) if result else {}
                             post = data.get("post_optimization", {})
                             if isinstance(post, dict) and post.get("wns") is not None:
-                                prev_wns = state.timing.latest_wns
+                                prev_wns = pre_tool_wns
                                 new_wns = float(post["wns"])
                                 raw_tns = post.get("tns")
                                 new_tns = float(raw_tns) if isinstance(raw_tns, (int, float)) else None
@@ -1385,7 +1406,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     state_match = re.search(r'Design\s+State\s*:\s*(\w+)', po_result or "")
                     if state_match:
                         po_design_state = state_match.group(1)
-                    if po_design_state and po_design_state.lower() not in ("placed", "routed"):
+                    if po_design_state and po_design_state.lower() not in ("placed", "routed", "fully"):
                         logger.warning(
                             f"[PLACE-ONLY] Skipping WNS check for {tool_name}: "
                             f"design state is '{po_design_state}' (not placed/routed). "

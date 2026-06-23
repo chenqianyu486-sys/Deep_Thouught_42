@@ -35,7 +35,7 @@ See [CLAUDE.md](CLAUDE.md) for full guidelines.
 
 - [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md) — Module-level project structure and high-level data flow
 - [architecture.md](architecture.md) — Implementation details (migration mapping, compression pipeline, message flow, SKILL_CHAIN, flow_control)
-- [README.md](README.md) — Getting started, architecture overview, design principles
+- [README.md](README.md) (中文) / [README_EN.md](README_EN.md) (English) — Getting started, architecture overview, design principles
 
 ## Adding New Strategies or Tools
 
