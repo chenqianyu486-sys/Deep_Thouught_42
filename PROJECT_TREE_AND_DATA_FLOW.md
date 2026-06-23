@@ -29,7 +29,7 @@ fpl26_optimization_contest/
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 11 种策略库（含 LogicResynthesis、PhysOptAggressive）
+├── strategy_library.py           # 14 种策略库（含 LogicResynthesis、PhysOptAggressive、CombinationalRebalance、LUTMUXFRepack、MUXFTreeReorder）
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件
@@ -52,7 +52,10 @@ fpl26_optimization_contest/
 │   ├── descriptor.py / validate_descriptors.py
 │   ├── strategy_plan.py
 │   ├── opt_design_strategy.py       # opt_design RapidWright skill wrapper
-│   └── 14 个 Skill 实现文件 + 测试 + JSON 描述符
+│   ├── combinational_rebalancing_strategy.py  # 验证安全 retiming（不插 FF，opt_design -remap 重平衡组合锥深度）
+│   ├── lut_muxf_repack_strategy.py            # LUT6+MUXF 联合重打包（opt_design -AddRemap，针对 NN 宽锥）
+│   ├── muxf_tree_reorder_strategy.py          # MUXF7/MUXF8 树重排（phys_opt_design 无 -retime，carry-reorder 对应物）
+│   └── 17 个 Skill 实现文件 + 测试 + JSON 描述符
 ├── docs/                         # GitHub Pages 竞赛提交文档
 └── (various config files)
 ```
@@ -376,11 +379,11 @@ Planner（1M max）vs Worker（250K max），迭代边界切换。
 
 ### 3.5 Skill 机制
 
-> 14 个注册 Skills + SKILL_CHAIN_ACTIONS 自动链式执行 + OPTIONAL_CHAIN_VALIDATION。完整调用链、超时映射、推荐机制见 [architecture.md §4](architecture.md)。
+> 17 个注册 Skills + SKILL_CHAIN_ACTIONS 自动链式执行 + OPTIONAL_CHAIN_VALIDATION。完整调用链、超时映射、推荐机制见 [architecture.md §4](architecture.md)。
 
 ### 3.6 策略库清单
 
-> 11 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
+> 14 种策略及触发条件。完整列表见 [README.md](README.md) 中文版优化策略和 [strategy_library.py](strategy_library.py)。
 
 ### 3.7 Tool 描述增强
 

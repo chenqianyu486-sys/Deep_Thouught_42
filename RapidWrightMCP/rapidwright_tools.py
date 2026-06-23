@@ -2408,6 +2408,161 @@ def execute_opt_design_strategy(
         return {"error": str(e)}
 
 
+def execute_combinational_rebalancing_strategy(
+    critical_paths: list[list[str]],
+    min_depth: int = 3,
+    directive: str = "Explore",
+    retarget: bool = True,
+) -> dict:
+    """Validation-safe combinational rebalancing (no FF insert).
+
+    Identifies deep combinational cones on critical paths and generates a
+    Vivado opt_design -remap execution plan for logic-equivalent resynthesis.
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("combinational_rebalancing_strategy")
+        if skill is None:
+            return {"error": "Skill 'combinational_rebalancing_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            min_depth=min_depth,
+            directive=directive,
+            retarget=retarget,
+        )
+
+        if not result.success:
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing combinational rebalancing strategy: {e}")
+        return {"error": str(e)}
+
+
+def execute_lut_muxf_repack_strategy(
+    critical_paths: list[list[str]],
+    directive: str = "AddRemap",
+    retarget: bool = True,
+) -> dict:
+    """Validation-safe LUT6+MUXF co-repack (no FF insert).
+
+    Identifies LUT6<->MUXF7/MUXF8 adjacency pairs and LUT5 merge candidates
+    on critical paths, generates a Vivado opt_design -directive AddRemap plan.
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("lut_muxf_repack_strategy")
+        if skill is None:
+            return {"error": "Skill 'lut_muxf_repack_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            directive=directive,
+            retarget=retarget,
+        )
+
+        if not result.success:
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing lut_muxf repack strategy: {e}")
+        return {"error": str(e)}
+
+
+def execute_muxf_tree_reorder_strategy(
+    critical_paths: list[list[str]],
+    directive: str = "Explore",
+    min_tree_depth: int = 2,
+) -> dict:
+    """Validation-safe MUXF tree reorder (no FF insert, no -retime).
+
+    Identifies MUXF7/MUXF8 tree runs on critical paths and generates a
+    Vivado phys_opt_design -directive Explore (NO -retime) plan.
+    """
+    global _current_design
+
+    if not _initialized:
+        return {"error": "RapidWright not initialized. Call initialize_rapidwright first."}
+
+    err = _ensure_design_loaded()
+    if err:
+        return {"error": err}
+
+    try:
+        from skills import SkillRegistry, SkillContext
+
+        skill = SkillRegistry.get("muxf_tree_reorder_strategy")
+        if skill is None:
+            return {"error": "Skill 'muxf_tree_reorder_strategy' not found in registry"}
+
+        context = SkillContext(design=_current_design, initialized=True)
+        result = skill.execute_with_telemetry(
+            context,
+            critical_paths=critical_paths,
+            directive=directive,
+            min_tree_depth=min_tree_depth,
+        )
+
+        if not result.success:
+            error_msg = result.error
+            if error_msg is None and result.data is not None:
+                error_msg = getattr(result.data, 'message', None)
+            return {"error": error_msg or "Unknown error"}
+
+        plan = result.data
+        return _strategy_plan_to_dict(plan)
+
+    except ImportError as e:
+        logger.error(f"Could not import skill module: {e}")
+        return {"error": f"Skill module not found: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing muxf tree reorder strategy: {e}")
+        return {"error": str(e)}
+
+
 def execute_fanout_strategy(
     nets: list[dict],
     temp_dir: str = "temp",

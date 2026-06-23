@@ -55,6 +55,9 @@ COMPLEX_TOOLS = {
     "execute_pblock_strategy",
     "execute_physopt_strategy",
     "execute_opt_design_strategy",
+    "execute_combinational_rebalancing_strategy",
+    "execute_lut_muxf_repack_strategy",
+    "execute_muxf_tree_reorder_strategy",
     "execute_fanout_strategy",
     "analyze_net_detour",
     "optimize_cell_placement",
@@ -733,6 +736,147 @@ async def list_tools() -> list[Tool]:
                         "default": True
                     }
                 }
+            }
+        ),
+        Tool(
+            name="execute_combinational_rebalancing_strategy",
+            description="""Validation-safe combinational rebalancing (NO flip-flop insertion).
+
+            Identifies deep combinational cones (LUT6/LUT5/MUXF7/MUXF8 cascades
+            between registers) on critical paths and generates a Vivado
+            opt_design -remap execution plan for logic-equivalent resynthesis to
+            rebalance logic depth. Unlike register retiming, this inserts NO new
+            FFs — design latency is preserved, so cycle-exact validation passes.
+
+            This is the validation-safe alternative to register retiming: it
+            achieves the same goal (shortening critical-path logic depth) via
+            combinational resynthesis only.
+
+            Trigger: WNS stuck, deep combinational chains between registers on
+            critical paths, FF insertion unsafe (cycle-exact validation required).
+            Input: critical_paths (cell names from extract_critical_path_cells),
+            min_depth, opt_design directive, retarget flag.
+            Output: structured plan with ordered Vivado steps (opt_design -> place -> route -> report).
+
+            VALIDATION: safe (logic-equivalent, no latency change).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                    },
+                    "min_depth": {
+                        "type": "integer",
+                        "description": "Minimum combinational depth (LUT/MUXF levels between registers) to target",
+                        "default": 3
+                    },
+                    "directive": {
+                        "type": "string",
+                        "description": "opt_design directive (Explore, AddRemap, ExploreArea)",
+                        "default": "Explore"
+                    },
+                    "retarget": {
+                        "type": "boolean",
+                        "description": "Retarget logic to equivalent primitives (e.g., LUT5->LUT6 merge)",
+                        "default": True
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="execute_lut_muxf_repack_strategy",
+            description="""Validation-safe LUT6+MUXF co-repack (NO flip-flop insertion).
+
+            Targets NN/wide-datapath designs where critical paths are dominated
+            by LUT6 -> MUXF7 -> MUXF8 -> LUT6 cascades (8:1/16:1 mux trees that
+            exceed the 6-input LUT physical limit). Unlike flatten_lut_cascade
+            (which returns optimized_count=0 on such wide cones), this delegates
+            to Vivado opt_design -directive AddRemap for aggressive logic-equivalent
+            LUT-equation repacking that merges LUT5/LUT6 pairs and restructures
+            MUXF+LUT6 adjacencies. Inserts NO flip-flops — latency preserved.
+
+            Trigger: NN/datapath design, MUXF7/MUXF8 + LUT6 cascade on critical
+            paths, flatten_lut_cascade returned optimized_count=0.
+            Input: critical_paths (cell names), opt_design directive, retarget flag.
+            Output: structured plan (opt_design -> place -> route -> report).
+
+            VALIDATION: safe (logic-equivalent, no latency change).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                    },
+                    "directive": {
+                        "type": "string",
+                        "description": "opt_design directive. 'AddRemap' is recommended for aggressive LUT-equation repacking; 'Explore' is milder.",
+                        "default": "AddRemap"
+                    },
+                    "retarget": {
+                        "type": "boolean",
+                        "description": "Retarget LUT5 -> LUT6 merge candidates. Safe — does not change function.",
+                        "default": True
+                    }
+                },
+                "required": ["critical_paths"]
+            }
+        ),
+        Tool(
+            name="execute_muxf_tree_reorder_strategy",
+            description="""Validation-safe MUXF tree reorder (NO flip-flop insertion, NO -retime).
+
+            Maps 'carry chain reorder' onto designs without CARRY4/CARRY8 that
+            instead use MUXF7/MUXF8 mux trees (the dominant inter-layer
+            combinational structure in NN designs). Identifies MUXF tree runs on
+            critical paths where the timing-critical input traverses the deepest
+            mux level, then delegates to Vivado phys_opt_design -directive Explore
+            (NO -retime) for logic-equivalent pin/cell optimization that reorders
+            selection paths and pulls critical inputs to faster mux levels.
+
+            Trigger: NN/datapath design, MUXF7/MUXF8 tree on critical paths,
+            no CARRY4 carry chains, WNS stuck after PBLOCK.
+            Input: critical_paths (cell names), phys_opt_design directive,
+            min_tree_depth.
+            Output: structured plan (phys_opt_design -> route -> report).
+
+            WARNING: Do NOT pass directive='AddRetime' — it would insert/move FFs
+            and fail cycle-exact validation. The skill rejects AddRetime.
+
+            VALIDATION: safe (logic-equivalent, no latency change).""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "critical_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                    },
+                    "directive": {
+                        "type": "string",
+                        "description": "phys_opt_design directive. 'Explore' is balanced; 'AggressiveExplore' is stronger. Do NOT use 'AddRetime' (validation-unsafe).",
+                        "default": "Explore"
+                    },
+                    "min_tree_depth": {
+                        "type": "integer",
+                        "description": "Minimum MUXF run depth (consecutive MUXF7/MUXF8 cells) to target",
+                        "default": 2
+                    }
+                },
+                "required": ["critical_paths"]
             }
         ),
         Tool(
@@ -1544,6 +1688,37 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 directive=arguments.get("directive", "Explore"),
                 retarget=arguments.get("retarget", True),
             )
+
+        elif name == "execute_combinational_rebalancing_strategy":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.execute_combinational_rebalancing_strategy(
+                    critical_paths=arguments["critical_paths"],
+                    min_depth=arguments.get("min_depth", 3),
+                    directive=arguments.get("directive", "Explore"),
+                    retarget=arguments.get("retarget", True),
+                )
+
+        elif name == "execute_lut_muxf_repack_strategy":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.execute_lut_muxf_repack_strategy(
+                    critical_paths=arguments["critical_paths"],
+                    directive=arguments.get("directive", "AddRemap"),
+                    retarget=arguments.get("retarget", True),
+                )
+
+        elif name == "execute_muxf_tree_reorder_strategy":
+            if "critical_paths" not in arguments:
+                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_cells."}
+            else:
+                result = rw.execute_muxf_tree_reorder_strategy(
+                    critical_paths=arguments["critical_paths"],
+                    directive=arguments.get("directive", "Explore"),
+                    min_tree_depth=arguments.get("min_tree_depth", 2),
+                )
 
         elif name == "execute_fanout_strategy":
             result = rw.execute_fanout_strategy(

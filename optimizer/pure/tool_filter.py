@@ -110,6 +110,9 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_analyze_pblock_region",
         "rapidwright_optimize_lut_input_cone",
         "rapidwright_execute_opt_design_strategy",
+        "rapidwright_execute_combinational_rebalancing_strategy",
+        "rapidwright_execute_lut_muxf_repack_strategy",
+        "rapidwright_execute_muxf_tree_reorder_strategy",
         "rapidwright_execute_physopt_strategy",
         # Independent RapidWright tools (for fine-grained control)
         "rapidwright_optimize_fanout_batch",

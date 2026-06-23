@@ -61,6 +61,9 @@ SIDE_EFFECT_TOOLS = frozenset({
     "rapidwright_execute_net_swapping",
     "rapidwright_optimize_cell_placement",
     "rapidwright_optimize_lut_input_cone",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
 })
 # No-progress detection threshold. After this many consecutive rounds
 # without any side-effect tool call, exit the EXECUTE phase early.
@@ -264,6 +267,19 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Auto-inject critical_paths for LUT cascade tool
                 if tool_name == "rapidwright_flatten_lut_cascade":
+                    if not tool_args.get("critical_paths") and state.timing.critical_paths:
+                        paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
+                        if paths:
+                            tool_args["critical_paths"] = paths
+                            logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
+
+                # Auto-inject critical_paths for validation-safe combinational strategies
+                # (CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder)
+                if tool_name in (
+                    "rapidwright_execute_combinational_rebalancing_strategy",
+                    "rapidwright_execute_lut_muxf_repack_strategy",
+                    "rapidwright_execute_muxf_tree_reorder_strategy",
+                ):
                     if not tool_args.get("critical_paths") and state.timing.critical_paths:
                         paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
                         if paths:

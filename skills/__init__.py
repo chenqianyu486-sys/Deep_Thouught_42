@@ -54,6 +54,9 @@ from skills import smart_retiming
 from skills import net_swapping_strategy
 from skills import lut_cascade_flattening_strategy
 from skills import opt_design_strategy
+from skills import combinational_rebalancing_strategy
+from skills import lut_muxf_repack_strategy
+from skills import muxf_tree_reorder_strategy
 
 __all__ = [
     "Skill",

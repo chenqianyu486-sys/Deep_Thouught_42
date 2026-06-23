@@ -16,7 +16,7 @@
 - **Logic equivalence guaranteed.** Every optimization is verified by `validate_dcps.py` (structural diff + functional simulation), ensuring the design behavior never changes.
 - **Dual architecture.** V2 state machine for production reliability; V1 conversational loop removed (deprecated).
 - **Real-time observability.** Web Dashboard with 20 panels — 7-module StateSpace (agent data input layer) + 13 legacy detail panels. Every flow control decision, WNS trajectory, and LLM call is traceable.
-- **11 validation-safe strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, OptDesign, LogicResynthesis, PhysOptAggressive. Strategies that insert new pipeline FFs (RegisterRetiming, SmartRetiming, PhysOpt+RegisterRetiming) are excluded from the catalog because they would fail cycle-exact functional validation.
+- **14 validation-safe strategies.** PBLOCK, PhysOpt, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, OptDesign, LogicResynthesis, PhysOptAggressive, plus 3 new inter-layer combinational-logic strategies: CombinationalRebalance (validation-safe retiming — rebalances LUT6/MUXF7/MUXF8 cascade depth via logic-equivalent resynthesis, no FF insert), LUTMUXFRepack (LUT6+MUXF co-repack for NN/wide-datapath cones that exceed 6-input LUT limit), MUXFTreeReorder (MUXF7/MUXF8 tree reorder — the carry-reorder analogue for designs without CARRY4). Strategies that insert new pipeline FFs (RegisterRetiming, SmartRetiming, PhysOpt+RegisterRetiming) are excluded from the catalog because they would fail cycle-exact functional validation.
 - **Multi-strategy loop.** Up to 5 strategies can be tried per iteration, with TTL-based strategy retry (3 iterations). Failed strategies auto-unblock after TTL expires.
 
 ---
@@ -90,7 +90,7 @@ init_analysis ──► [WNS >= 0?]
 
 ## Optimization Strategies
 
-11 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, LogicResynthesis, PhysOptAggressive. See the Chinese section below (优化策略) for trigger conditions and platform details.
+14 strategies: PBLOCK, PhysOpt, OptDesign, Fanout, PinSwap, LUTCascade, CellReplication, CongestionSpreading, NetSwap, LogicResynthesis, PhysOptAggressive, CombinationalRebalance, LUTMUXFRepack, MUXFTreeReorder. See the Chinese section below (优化策略) for trigger conditions and platform details.
 
 
 ## Prerequisites
@@ -234,7 +234,7 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
 - **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环已弃用并移除。
 - **实时可观测性。** 包含 20 个面板的 Web 仪表盘 —— 7 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
-- **11 种验证安全策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、NetSwap、OptDesign、LogicResynthesis、PhysOptAggressive。插入新流水线 FF 的策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）因会改变设计延迟、无法通过逐周期功能仿真验证，已从策略目录中排除。
+- **14 种验证安全策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、NetSwap、OptDesign、LogicResynthesis、PhysOptAggressive，以及 3 个直击层间组合逻辑瓶颈的新策略：CombinationalRebalance（验证安全的 retiming——通过逻辑等价重综合重平衡 LUT6/MUXF7/MUXF8 级联深度，不插 FF）、LUTMUXFRepack（LUT6+MUXF 联合重打包，针对超过 6 输入 LUT 物理上限的 NN/宽数据通路锥）、MUXFTreeReorder（MUXF7/MUXF8 树重排——无 CARRY4 设计的 carry-reorder 对应物）。插入新流水线 FF 的策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）因会改变设计延迟、无法通过逐周期功能仿真验证，已从策略目录中排除。
 
 ---
 
@@ -350,6 +350,9 @@ init_analysis ──► [WNS >= 0?]
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
 | **LogicResynthesis** | 100% 逻辑延迟，NN/数据通路设计含 MUXF7/8 级联，PBLOCK 已应用 | Vivado (synth_design -remap) |
 | **PhysOptAggressive** | WNS 在 PBLOCK 后停滞，需要更激进的优化 | Vivado (Explore 指令) |
+| **CombinationalRebalance** | WNS 停滞，寄存器间深组合链（LUT6/MUXF7/MUXF8 级联），寄存器 retiming 不安全（需逐周期验证） | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
+| **LUTMUXFRepack** | NN/宽数据通路，MUXF7/MUXF8 + LUT6 级联，flatten_lut_cascade 返回 optimized_count=0（锥 >6 输入） | Vivado (opt_design -AddRemap，通过 RapidWright 定点分析 + 自动链式) |
+| **MUXFTreeReorder** | 无 CARRY4 的 NN 设计，MUXF7/MUXF8 树在关键路径上，PBLOCK 后 WNS 停滞 | Vivado (phys_opt_design 无 -retime，通过 RapidWright 定点分析 + 自动链式) |
 
 ---
 

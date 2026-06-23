@@ -82,6 +82,9 @@ SKILL_TOOL_MAP: dict[str, str] = {
     "rapidwright_analyze_register_retiming": "analyze_register_retiming",
     "rapidwright_smart_retiming": "smart_retiming",
     "rapidwright_execute_opt_design_strategy": "opt_design_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy": "combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy": "lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy": "muxf_tree_reorder_strategy",
     "rapidwright_analyze_congestion": "analyze_congestion",
 }
 SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
@@ -102,6 +105,10 @@ EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
     "CongestionSpreading": "rapidwright_execute_congestion_spreading",
     "NetSwap": "rapidwright_execute_net_swapping",
     "OptDesign": "rapidwright_execute_opt_design_strategy",
+    # Validation-safe inter-layer combinational logic strategies (no FF insert)
+    "CombinationalRebalance": "rapidwright_execute_combinational_rebalancing_strategy",
+    "LUTMUXFRepack": "rapidwright_execute_lut_muxf_repack_strategy",
+    "MUXFTreeReorder": "rapidwright_execute_muxf_tree_reorder_strategy",
     # Aliases: LLM may use alternative names for the same strategy
     "LogicOptimization": "rapidwright_execute_opt_design_strategy",
     # New strategies for NN/datapath designs
@@ -161,6 +168,8 @@ PLACE_ONLY_REGRESS_THRESHOLD: float = 0.030
 PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
     "rapidwright_execute_fanout_strategy",
     "rapidwright_execute_opt_design_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
     "rapidwright_execute_pblock_strategy",
 })
 
@@ -295,6 +304,35 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
+    # Auto-chain: combinational rebalancing — same as opt_design chain.
+    # RapidWright identifies deep combinational segments; Vivado opt_design -remap
+    # performs logic-equivalent resynthesis (NO FF insert, latency preserved).
+    "rapidwright_execute_combinational_rebalancing_strategy": [
+        {"tool": "vivado_opt_design",
+         "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
+    # Auto-chain: LUT6+MUXF co-repack — same as opt_design chain (AddRemap directive).
+    "rapidwright_execute_lut_muxf_repack_strategy": [
+        {"tool": "vivado_opt_design",
+         "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
+    # Auto-chain: MUXF tree reorder — phys_opt_design (NO -retime) + route.
+    # phys_opt_design requires a placed design; no place_design step needed.
+    "rapidwright_execute_muxf_tree_reorder_strategy": [
+        {"tool": "vivado_phys_opt_design",
+         "args_from_skill": {"directive": "directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
@@ -452,6 +490,9 @@ _TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
     "rapidwright_compare_design_structure": 120.0,
     "rapidwright_smart_retiming": 300.0,
     "rapidwright_execute_opt_design_strategy": 120.0,
+    "rapidwright_execute_combinational_rebalancing_strategy": 120.0,
+    "rapidwright_execute_lut_muxf_repack_strategy": 120.0,
+    "rapidwright_execute_muxf_tree_reorder_strategy": 120.0,
     "rapidwright_execute_physopt_strategy": 120.0,
     "vivado_opt_design": 600.0,
 }

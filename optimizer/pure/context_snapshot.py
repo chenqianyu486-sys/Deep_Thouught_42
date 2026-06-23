@@ -33,6 +33,9 @@ STRATEGY_TO_PRIMARY_TOOL: dict[str, str] = {
     "NetSwap": "rapidwright_execute_net_swapping",
     "OptDesign": "rapidwright_execute_opt_design_strategy",
     "PhysOpt+RegisterRetiming": "vivado_physopt_and_route",
+    "CombinationalRebalance": "rapidwright_execute_combinational_rebalancing_strategy",
+    "LUTMUXFRepack": "rapidwright_execute_lut_muxf_repack_strategy",
+    "MUXFTreeReorder": "rapidwright_execute_muxf_tree_reorder_strategy",
 }
 
 # Phase-aware section filters: which sections to show for each phase.

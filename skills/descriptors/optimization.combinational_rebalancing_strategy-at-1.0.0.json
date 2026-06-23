@@ -1,0 +1,66 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.combinational_rebalancing_strategy@1.0.0",
+  "displayName": "Combinational Logic Rebalancing (validation-safe retiming)",
+  "description": "Validation-safe alternative to register retiming: identify deep combinational cones (LUT6/MUXF7/MUXF8 cascades) on critical paths and delegate to Vivado opt_design -remap for logic-equivalent resynthesis to rebalance logic depth. Inserts NO flip-flops — design latency is preserved, so cycle-exact validation passes. MUTATING. Side effects: netlist remapping (logic-equivalent), checkpoint via Vivado chain. Trigger: WNS stuck, deep combinational chains between registers on critical paths, FF insertion unsafe. After this, chain auto-executes opt_design -> place -> route -> report.",
+  "idempotency": "safe",
+  "sideEffects": [
+    "netlist_modification",
+    "cell_remapping"
+  ],
+  "timeout": {
+    "defaultMs": 600000,
+    "maxMs": 1200000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "critical_paths": {
+        "type": "array",
+        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+      },
+      "min_depth": {
+        "type": "integer",
+        "description": "Minimum combinational depth (LUT/MUXF levels between registers) to target. Default 3.",
+        "default": 3
+      },
+      "directive": {
+        "type": "string",
+        "description": "opt_design directive. 'Explore' is balanced; 'AddRemap' is more aggressive at LUT equation remapping.",
+        "default": "Explore",
+        "minLength": 1
+      },
+      "retarget": {
+        "type": "boolean",
+        "description": "Retarget logic to equivalent primitives (e.g., LUT5->LUT6 merge). Safe — does not change function.",
+        "default": true
+      }
+    },
+    "required": [
+      "critical_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

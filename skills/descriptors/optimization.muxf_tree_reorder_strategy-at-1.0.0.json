@@ -1,0 +1,61 @@
+{
+  "$schema": "https://spec.example.com/skill-descriptor-v3.json",
+  "specVersion": "3.0",
+  "id": "optimization.muxf_tree_reorder_strategy@1.0.0",
+  "displayName": "MUXF Tree Reorder (validation-safe carry-reorder analogue)",
+  "description": "Validation-safe 'carry reorder' analogue for designs without CARRY4/CARRY8: identifies MUXF7/MUXF8 mux tree runs on critical paths (the dominant inter-layer combinational structure in NN designs) and delegates to Vivado phys_opt_design -directive Explore (NO -retime) for logic-equivalent pin/cell optimization that reorders selection paths and pulls critical inputs to faster mux levels. Inserts NO flip-flops — latency preserved, cycle-exact validation passes. MUTATING. Side effects: placement/netlist optimization (logic-equivalent), checkpoint via Vivado chain. Trigger: NN/datapath design, MUXF7/MUXF8 tree on critical paths, no CARRY4 carry chains, WNS stuck after PBLOCK. After this, chain auto-executes phys_opt_design -> route -> report.",
+  "idempotency": "safe",
+  "sideEffects": [
+    "placement_optimization",
+    "cell_remapping"
+  ],
+  "timeout": {
+    "defaultMs": 600000,
+    "maxMs": 1200000
+  },
+  "authentication": {
+    "type": "none"
+  },
+  "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "critical_paths": {
+        "type": "array",
+        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+      },
+      "directive": {
+        "type": "string",
+        "description": "phys_opt_design directive. 'Explore' is balanced; 'AggressiveExplore' is stronger. Do NOT use 'AddRetime' — it would insert FFs and fail validation.",
+        "default": "Explore",
+        "minLength": 1
+      },
+      "min_tree_depth": {
+        "type": "integer",
+        "description": "Minimum MUXF run depth (consecutive MUXF7/MUXF8 cells) to target. Default 2.",
+        "default": 2
+      }
+    },
+    "required": [
+      "critical_paths"
+    ]
+  },
+  "returns": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "errors": [
+    {
+      "code": "INVALID_PARAMETER",
+      "recoverable": false
+    },
+    {
+      "code": "TEMPORARILY_UNAVAILABLE",
+      "recoverable": true
+    },
+    {
+      "code": "SKILL_TIMEOUT",
+      "recoverable": true
+    }
+  ]
+}

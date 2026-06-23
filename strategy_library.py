@@ -251,6 +251,78 @@ STRATEGIES = {
              "note": "Aggressive PhysOpt with Explore directive. Tries multiple optimization passes."},
         ],
     },
+    "CombinationalRebalance": {
+        "name": "Combinational Logic Rebalancing (validation-safe retiming)",
+        "trigger": "WNS stuck, deep combinational chains (LUT6/MUXF7/MUXF8 cascades) "
+                   "between registers on critical paths, register retiming unsafe "
+                   "(cycle-exact validation required, FF insertion would change latency)",
+        "ff_prerequisite": "",
+        "sequence": [
+            {"step": "extract_critical_path_cells", "platform": "Vivado",
+             "params": {"num_paths": 10},
+             "note": "Get critical path cell lists for combinational cone analysis"},
+            {"step": "execute_combinational_rebalancing_strategy", "platform": "RapidWright",
+             "params": {"min_depth": 3, "directive": "Explore", "retarget": True},
+             "note": "RapidWright identifies deep combinational segments, generates "
+                     "Vivado opt_design -remap plan (logic-equivalent, NO FF insert)"},
+            {"step": "opt_design", "platform": "Vivado",
+             "params": {"directive": "from plan", "retarget": "from plan"},
+             "note": "Auto-chained: logic-equivalent resynthesis to rebalance depth"},
+            {"step": "place_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-place after netlist change"},
+            {"step": "route_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-route"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: evaluate timing"},
+        ],
+    },
+    "LUTMUXFRepack": {
+        "name": "LUT6+MUXF Co-Repack (validation-safe LUT merge)",
+        "trigger": "NN/wide-datapath design, MUXF7/MUXF8 + LUT6 cascade on critical "
+                   "paths, flatten_lut_cascade returned optimized_count=0 "
+                   "(cones exceed 6-input LUT limit)",
+        "ff_prerequisite": "",
+        "sequence": [
+            {"step": "extract_critical_path_cells", "platform": "Vivado",
+             "params": {"num_paths": 10},
+             "note": "Get critical path cell lists for LUT/MUXF adjacency analysis"},
+            {"step": "execute_lut_muxf_repack_strategy", "platform": "RapidWright",
+             "params": {"directive": "AddRemap", "retarget": True},
+             "note": "RapidWright identifies LUT6<->MUXF pairs + LUT5 merge candidates, "
+                     "generates Vivado opt_design -AddRemap plan (logic-equivalent, NO FF insert)"},
+            {"step": "opt_design", "platform": "Vivado",
+             "params": {"directive": "from plan", "retarget": "from plan"},
+             "note": "Auto-chained: aggressive LUT-equation repacking"},
+            {"step": "place_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-place after repack"},
+            {"step": "route_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-route"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: evaluate timing"},
+        ],
+    },
+    "MUXFTreeReorder": {
+        "name": "MUXF Tree Reorder (validation-safe carry-reorder analogue)",
+        "trigger": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux tree on "
+                   "critical paths, WNS stuck after PBLOCK, register retiming unsafe",
+        "ff_prerequisite": "",
+        "sequence": [
+            {"step": "extract_critical_path_cells", "platform": "Vivado",
+             "params": {"num_paths": 10},
+             "note": "Get critical path cell lists for MUXF tree analysis"},
+            {"step": "execute_muxf_tree_reorder_strategy", "platform": "RapidWright",
+             "params": {"directive": "Explore", "min_tree_depth": 2},
+             "note": "RapidWright identifies MUXF tree runs, generates Vivado "
+                     "phys_opt_design plan (NO -retime, logic-equivalent, NO FF insert)"},
+            {"step": "phys_opt_design", "platform": "Vivado",
+             "params": {"directive": "from plan"},
+             "note": "Auto-chained: reorder MUXF selection paths (no retiming)"},
+            {"step": "route_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-route after phys_opt"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: evaluate timing"},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -269,6 +341,9 @@ STRATEGY_LABEL_MAP = {
     "PhysOpt+RegisterRetiming": "PhysOpt+RegisterRetiming",
     "LogicResynthesis": "LogicResynthesis",
     "PhysOptAggressive": "PhysOptAggressive",
+    "CombinationalRebalance": "CombinationalRebalance",
+    "LUTMUXFRepack": "LUTMUXFRepack",
+    "MUXFTreeReorder": "MUXFTreeReorder",
 }
 
 # ── Validation Compatibility ────────────────────────────────────
@@ -293,6 +368,9 @@ STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
     "PhysOpt+RegisterRetiming": False,  # includes register retiming → changes latency
     "LogicResynthesis": True,     # synth_design -remap, logic-equivalent remapping
     "PhysOptAggressive": True,    # Vivado-guaranteed (retiming blocked by safety guard)
+    "CombinationalRebalance": True,   # opt_design -remap, logic-equivalent, NO FF insert
+    "LUTMUXFRepack": True,           # opt_design -AddRemap, logic-equivalent, NO FF insert
+    "MUXFTreeReorder": True,         # phys_opt_design (no -retime), logic-equivalent, NO FF insert
 }
 
 # Map strategy names to registered skill identifiers
@@ -310,6 +388,9 @@ STRATEGY_SKILL_MAP = {
     "NetSwap": "execute_net_swapping",
     "LogicResynthesis": "logic_resynthesis",
     "PhysOptAggressive": "physopt_strategy",
+    "CombinationalRebalance": "combinational_rebalancing_strategy",
+    "LUTMUXFRepack": "lut_muxf_repack_strategy",
+    "MUXFTreeReorder": "muxf_tree_reorder_strategy",
 }
 
 # ── Skill Guidance ──────────────────────────────────────────────
@@ -457,6 +538,58 @@ SKILL_GUIDANCE = {
                              "may fail due to expected cell name changes — Phase 2 (functional simulation) "
                              "provides the correctness guarantee.",
     },
+    "execute_combinational_rebalancing_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
+        "output": "StrategyPlan with Vivado opt_design -remap steps (segments_found, max_depth, avg_depth)",
+        "condition": "Deep combinational chains (LUT6/MUXF7/MUXF8 cascades) between registers "
+                     "on critical paths; register retiming unsafe (cycle-exact validation required)",
+        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists",
+        "post_actions": "Chain auto-executes: vivado_opt_design -> vivado_place_design -> "
+                        "vivado_route_design -> vivado_report_timing_summary -> "
+                        "vivado_extract_critical_path_cells",
+        "risk": "LOW — opt_design -remap is logic-equivalent resynthesis only. NO flip-flops inserted, "
+                "latency preserved. Validation-safe (cycle-exact).",
+        "advantage": "Validation-safe alternative to register retiming: achieves the same goal "
+                     "(shortening critical-path logic depth) via combinational resynthesis only.",
+        "contraindications": "Ineffective when critical paths are already shallow (logic depth < 3) "
+                             "or when routing delay (not logic depth) is the dominant bottleneck.",
+    },
+    "execute_lut_muxf_repack_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
+        "output": "StrategyPlan with Vivado opt_design -AddRemap steps (lut_muxf_pairs, lut5_candidates)",
+        "condition": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascades on critical paths; "
+                     "flatten_lut_cascade returned optimized_count=0 (cones exceed 6-input LUT limit)",
+        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists",
+        "post_actions": "Chain auto-executes: vivado_opt_design -> vivado_place_design -> "
+                        "vivado_route_design -> vivado_report_timing_summary",
+        "risk": "LOW — opt_design -AddRemap aggressively remaps LUT equations but is still "
+                "logic-equivalent. NO flip-flops inserted, latency preserved. Validation-safe.",
+        "advantage": "Handles the wide LUT6/MUXF cones that flatten_lut_cascade cannot (it returns "
+                     "optimized_count=0 on cones > 6 inputs). Targets 8:1/16:1 mux tree cascades.",
+        "contraindications": "Ineffective when no LUT<->MUXF adjacency pairs or LUT5 merge candidates "
+                             "exist on critical paths.",
+    },
+    "execute_muxf_tree_reorder_strategy": {
+        "category": "OPTIMIZATION",
+        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
+        "output": "StrategyPlan with Vivado phys_opt_design steps (muxf_trees, max_depth, avg_depth)",
+        "condition": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux tree on critical paths, "
+                     "WNS stuck after PBLOCK",
+        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists. "
+                        "Design must be placed (phys_opt_design requires placement).",
+        "post_actions": "Chain auto-executes: vivado_phys_opt_design -> vivado_route_design -> "
+                        "vivado_report_timing_summary",
+        "risk": "LOW — phys_opt_design without -retime performs only placement-level "
+                "logic-equivalent optimization (pin swap, cell relocation, duplication). "
+                "NO flip-flops inserted or moved, latency preserved. Validation-safe.",
+        "advantage": "Maps 'carry chain reorder' onto MUXF-tree designs (no CARRY4). Pulls critical "
+                     "mux inputs to faster selection levels.",
+        "contraindications": "Do NOT pass directive='AddRetime' — it would insert/move FFs and fail "
+                             "validation (the skill rejects AddRetime). Ineffective when no MUXF tree "
+                             "runs (depth >= 2) exist on critical paths.",
+    },
 }
 
 SKILL_EXECUTION_PATTERN = [
@@ -523,7 +656,8 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
     ordered = ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",
                "CellReplication", "CongestionSpreading", "RegisterRetiming",
                "SmartRetiming", "NetSwap", "PhysOpt+RegisterRetiming",
-               "LogicResynthesis", "PhysOptAggressive"]
+               "LogicResynthesis", "PhysOptAggressive",
+               "CombinationalRebalance", "LUTMUXFRepack", "MUXFTreeReorder"]
     for i, key in enumerate(ordered, 1):
         if key in excluded:
             continue
