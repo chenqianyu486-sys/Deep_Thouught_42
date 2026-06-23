@@ -54,6 +54,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     while True:
         tool_round += 1
         state.iteration.tool_round = tool_round
+        _pending_signal: str | None = None  # defer exit until pending tools execute
 
         # Check exit conditions
         if _check_phase_exit(state, tool_round, max_rounds):
@@ -97,7 +98,10 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 logger.info(green(f"[ANALYZE] LLM signaled ANALYZE_DONE at round {tool_round}"))
                 record_flow_signal(state, "ANALYZE_DONE", "analysis_complete",
                                    phase="ANALYZE", result_status=step_state.result_status or "")
-                break
+                if message.tool_calls:
+                    _pending_signal = "ANALYZE_DONE"
+                else:
+                    break
 
             # Terminal signals: forward to outer loop
             if flow_signal in ("DONE", "EXHAUSTED"):
@@ -105,7 +109,10 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 record_flow_signal(state, flow_signal, "terminal_during_analysis",
                                    phase="ANALYZE", result_status=step_state.result_status or "")
                 state.control.done_reason = flow_signal
-                return LoopPhase.EVALUATE  # Skip to evaluate for final decision
+                if message.tool_calls:
+                    _pending_signal = flow_signal
+                else:
+                    return LoopPhase.EVALUATE  # Skip to evaluate for final decision
 
         else:
             state.context.step_state_misses += 1
@@ -207,6 +214,11 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                 if refreshable:
                     state.timing.refreshed_fields |= refreshable
+
+            if _pending_signal == "ANALYZE_DONE":
+                break
+            if _pending_signal in ("DONE", "EXHAUSTED"):
+                return LoopPhase.EVALUATE
 
             continue
 

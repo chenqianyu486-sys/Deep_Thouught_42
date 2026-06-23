@@ -42,7 +42,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     while True:
         tool_round += 1
         state.iteration.tool_round = tool_round
-
+        _pending_signal: str | None = None  # defer exit until pending tools execute
         if _check_phase_exit(state, tool_round, max_rounds):
             break
 
@@ -84,7 +84,10 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                                    phase="SELECT_STRATEGY", result_status=step_state.result_status or "")
                 state.control.is_done = True
                 state.control.done_reason = "strategies_exhausted"
-                return LoopPhase.EVALUATE
+                if message.tool_calls:
+                    _pending_signal = "EXHAUSTED"
+                else:
+                    return LoopPhase.EVALUATE
 
             # Strategy selected: check for strategy_name
             if step_state.strategy_name:
@@ -134,7 +137,10 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 if len(state.strategy.phase_history) > 100:
                     state.strategy.phase_history = state.strategy.phase_history[-100:]
                 state.strategy.current_phase = "SELECT_STRATEGY"
-                break
+                if message.tool_calls:
+                    _pending_signal = "STRATEGY_SELECTED"
+                else:
+                    break
 
         else:
             state.context.step_state_misses += 1
@@ -181,6 +187,10 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     deps.compat.add_message("tool", summary, {
                         "tool_call_id": tc.id, "name": tool_name,
                     })
+            if _pending_signal == "STRATEGY_SELECTED":
+                break
+            if _pending_signal == "EXHAUSTED":
+                return LoopPhase.EVALUATE
             continue
 
         # No tool calls, no strategy selected: prompt again

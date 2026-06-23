@@ -173,6 +173,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     state.context.consecutive_empty_responses = 0
     reached_callback = False  # track if the strategy reached callback indicating completion
     no_progress_count = 0  # consecutive rounds without side-effect tool calls
+    _exit_after_tools = False  # defer exit until pending tools execute
 
     # Record phase entry
     phase_entry = PhaseEntry(
@@ -245,14 +246,22 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 logger.info(green(f"[EXECUTE] LLM signaled EXEC_DONE at round {tool_round}"))
                 record_flow_signal(state, "EXEC_DONE", "execution_complete",
                                    phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
-                break
+                if message.tool_calls:
+                    _exit_after_tools = True
+                    logger.info(f"[EXECUTE] Deferred EXEC_DONE — executing {len(message.tool_calls)} pending tool(s) first")
+                else:
+                    break
 
             # EXHAUSTED during execution
             if flow_signal == "EXHAUSTED":
                 logger.info("[EXECUTE] LLM signaled EXHAUSTED")
                 record_flow_signal(state, "EXHAUSTED", "execution_exhausted",
                                    phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
-                break
+                if message.tool_calls:
+                    _exit_after_tools = True
+                    logger.info(f"[EXECUTE] Deferred EXHAUSTED — executing {len(message.tool_calls)} pending tool(s) first")
+                else:
+                    break
 
         else:
             state.context.step_state_misses += 1
@@ -797,6 +806,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     state, "SYSTEM_EXIT", "no_progress",
                     phase="EXECUTE_STRATEGY",
                 )
+                break
+
+            if _exit_after_tools:
                 break
 
             continue

@@ -175,6 +175,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
     while True:
         tool_round += 1
         state.iteration.tool_round = tool_round
+        _pending_signal = False  # defer exit until pending tools execute
 
         if _check_phase_exit(state, tool_round, max_rounds):
             break
@@ -220,15 +221,24 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             # Handle terminal signals
             if flow_signal == "DONE":
                 _handle_done(state, deps, assistant_content)
-                return LoopPhase.ANALYZE  # Will be caught by outer loop
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "NEXT_ITERATION":
                 _handle_next_iteration(state, deps, assistant_content)
-                return LoopPhase.ANALYZE  # Will be caught by outer loop
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "SWITCH_STRATEGY":
                 _handle_switch_strategy(state, deps, assistant_content)
-                return LoopPhase.ANALYZE  # Restart analysis for new strategy
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "ROLLBACK":
                 logger.warning(yellow("[EVALUATE] LLM signaled ROLLBACK"))
@@ -238,42 +248,54 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 state.control.post_rollback_analyze = True
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
-                return LoopPhase.ANALYZE
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "CONTINUE":
                 logger.info("[EVALUATE] LLM chose CONTINUE — re-entering ANALYZE")
                 record_flow_signal(state, "CONTINUE", "re_analyze", phase="EVALUATE",
                                    result_status=step_state.result_status or "")
-                # Reset phase tracking for re-analysis
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
-                return LoopPhase.ANALYZE
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "EXHAUSTED":
                 _handle_exhausted(state, deps)
-                return LoopPhase.ANALYZE
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "EXEC_DONE":
-                # LLM sometimes sends EXEC_DONE from EVALUATE (confused with EXECUTE phase).
-                # Treat as NEXT_ITERATION — execution is done, proceed to next iteration.
                 logger.info("[EVALUATE] EXEC_DONE received in EVALUATE phase, treating as NEXT_ITERATION")
                 _handle_next_iteration(state, deps, llm_summary or "Execution complete (EXEC_DONE from EVALUATE).")
                 state.strategy.current_phase = ""
                 state.strategy.current_strategy = ""
-                return LoopPhase.ANALYZE
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             elif flow_signal == "ANALYZE_DONE":
-                # LLM confused about phase — ANALYZE_DONE is only valid in ANALYZE.
-                # Map to SWITCH_STRATEGY (not CONTINUE) so the stalled strategy is
-                # cooled down and the multi-strategy loop advances. CONTINUE would
-                # skip cooldown and re-enter a full ANALYZE cycle, wasting rounds.
                 logger.info("[EVALUATE] ANALYZE_DONE from EVALUATE (phase confusion), treating as SWITCH_STRATEGY")
                 _handle_switch_strategy(state, deps, assistant_content)
-                return LoopPhase.ANALYZE
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
             # Unknown signal: treat as CONTINUE
-            logger.warning(f"[EVALUATE] Unknown flow_signal: {flow_signal}, treating as CONTINUE")
-            return LoopPhase.ANALYZE
+            else:
+                logger.warning(f"[EVALUATE] Unknown flow_signal: {flow_signal}, treating as CONTINUE")
+                if message.tool_calls:
+                    _pending_signal = True
+                else:
+                    return LoopPhase.ANALYZE
 
         else:
             state.context.step_state_misses += 1
@@ -372,6 +394,9 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                     if refreshable:
                         state.timing.refreshed_fields |= refreshable
+
+            if _pending_signal:
+                return LoopPhase.ANALYZE
 
             continue
 
