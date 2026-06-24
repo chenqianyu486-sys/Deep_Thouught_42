@@ -683,9 +683,15 @@ def extract_critical_path_cells(
     # Cell line: "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)" — Location + CellType + optional (Prop_)
     RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\)\s*$')
     # Cell line without Prop_ (endpoint cell, pin on same line): "    DSP48E2_X10Y46  DSP_A_B_DATA  r  cell/pin"
-    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)')
+    # NOTE: The PBlock column (e.g. "pblock_tight") is inserted by Vivado when cells
+    # are assigned to a pblock. It appears between the r/f marker and Netlist Resource.
+    # We use two sequential capture groups for the last two tokens; the code takes
+    # group(5) if present (PBlock mode), otherwise group(4) (normal mode).
+    # See vivado timing report header for column order.
+    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)(?:\s+(\S+))?$')
     # Delay line: "                              0.079  0.108 r  cell/pin"
-    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)')
+    #   or (with PBlock): "                        0.079  0.108 r  pblock_tight  cell/pin"
+    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)(?:\s+(\S+))?$')
     # Net line: "                         net (fo=28, routed)          0.357     0.465    netname"
     RE_NET_LINE     = re.compile(r'^\s*net\s+\(fo=(\d+),\s*(\w+)\)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\S+)')
 
@@ -806,7 +812,7 @@ def extract_critical_path_cells(
             if m:
                 incr = float(m.group(1))
                 cumul = float(m.group(2))
-                pin = m.group(4)
+                pin = m.group(5) if m.group(5) else m.group(4)
                 if pending_cell:
                     loc, ctype = pending_cell
                     cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
@@ -831,7 +837,7 @@ def extract_critical_path_cells(
             if m and not pending_cell:
                 loc = m.group(1)
                 ctype = m.group(2)
-                pin = m.group(4)
+                pin = m.group(5) if m.group(5) else m.group(4)
                 cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
                 nodes.append({
                     "kind": "cell", "name": cell_name, "cell_type": ctype, "location": loc,
