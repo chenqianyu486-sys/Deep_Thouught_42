@@ -18,7 +18,7 @@ _prepare_api_messages() 每轮LLM调用前:
   2. _auto_compact_messages() ← 轻量去重(重复REFLECTION/REPETITION/FORMAT→仅最新; 连续同名工具→仅最后)
   3. 增强系统提示词(scenario hint + skill catalog)
   4. 注入迭代交接提示词
-  5. _inject_context_snapshot(): best_wns/remaining_violation/active_strategy/failed_strategies/iteration_history
+  5. inject_merged_dashboard(): 7-module StateSpace 仪表板（phase-aware，含 field_freshness）
   → LLM API Call
 ```
 
@@ -64,7 +64,7 @@ _prepare_api_messages() 每轮LLM调用前:
 ```
 API调用前 → _inject_wns_state_to_system_prompt()
     - 追加数据驱动scenario hint（avg_distance>70 → "distributed"场景 → PBLOCK推荐）
-    - 追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）
+    - ~~追加analysis skill guide（get_skill_guide()，一次性注入含"Skill Catalog"标记）~~（已移除，SKILL_GUIDANCE 死代码清理）
     → 仅处理静态上下文增强，不再注入WNS状态
 
 WNS动态状态 → 已迁移至 _inject_dashboard_at_end()，作为 user message 注入
@@ -73,11 +73,14 @@ WNS动态状态 → 已迁移至 _inject_dashboard_at_end()，作为 user messag
 ### 1.5 Agent 上下文快照注入机制
 
 ```
-V2 tool loop 每轮 LLM 调用前 → _inject_dashboard_at_end()
+V2 tool loop 每轮 LLM 调用前 → inject_merged_dashboard()
     ↓
-inject_context_snapshot_at_end(api_messages):
-    1. 扫描 api_messages 查找以 "--- Optimization Dashboard ---" 开头的 user 消息 → 找到则移除
-    2. 追加为最后一条 user 消息（最大注意力权重）
+inject_merged_dashboard(api_messages, state, phase):
+    1. build_state_space(state) → 7-module StateSpace
+    2. format_state_space_for_llm() → YAML 仪表板（phase-aware 模块过滤）
+    3. inject_context_snapshot_at_end(api_messages, snapshot):
+       a. 查找已有 Dashboard header → 移除旧版
+       b. 追加为最后一条 user 消息（最大注意力权重）
     → 每次 API 调用最多一条快照消息，零残留
 ```
 
@@ -90,7 +93,7 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
 - **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_catalog` 排除机制**: 仅 `strategy_ineffective` reason 的策略从 catalog 排除（TTL 阻断）。`strategy_not_applicable`（skill 未找到可优化的 cell 模式）、`tool_error`、`no_improvement` 仍保留在 catalog 中 — LLM 可在下一轮重试。排除逻辑在 `context_snapshot.py` 的 `_exclude_strategies` 构建中按 `fs.reason == "strategy_ineffective"` 过滤。
+- **`strategy_catalog` 排除机制**: `strategy_ineffective`（TTL 阻断）和冷却策略不在 catalog 中移除，而是标为 `[BLOCKED]` 占位符（含剩余轮数/原因）。`strategy_not_applicable`、`tool_error`、`no_improvement` 完全移出 catalog（可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共19个）执行后全部降级为 `stale`。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
 - **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）。`strategy_not_applicable` 及其他 reason 无 TTL 阻断（`blocked_until_iter=current`），可在下一轮立即重试。
 
@@ -152,7 +155,7 @@ class CriticalPathEntry:
 **展示位置**:
 | 位置 | 来源 | 限制 |
 |------|------|------|
-| Context Dashboard | `build_context_snapshot()` | top 8, 6 cells/path |
+| Context Dashboard | `format_state_space_for_llm()` | top 8, 6 cells/path |
 | Planner Handoff | `_generate_planner_handoff()` | top 5, 6 cells/path |
 | Worker Handoff | `_generate_worker_handoff()` | top 3, 6 cells/path |
 
@@ -161,7 +164,7 @@ class CriticalPathEntry:
 | 类型 | 存储位置 | 保护机制 |
 |------|----------|----------|
 | System消息 | Working memory（受保护） | 压缩前分离，始终前置 |
-| WNS/TNS/策略状态 | 上下文Dashboard（user message，独立于压缩系统） | 每 API 调用前通过 `build_context_snapshot()` → `inject_context_snapshot()` 注入 |
+| WNS/TNS/策略状态 | 上下文Dashboard（user message，独立于压缩系统） | 每 API 调用前通过 `format_state_space_for_llm()` → `inject_merged_dashboard()` 注入 |
 | 失败策略 | CompressionContext | 存入YAML输出；`record_failure()` 在8个检测点被调用 |
 | Tool调用摘要 | state.iteration.tools_used | 工具名直接追加到 state |
 | 最近N轮消息 | Working memory（role保留） | preserve_role_turns=6 |
@@ -175,7 +178,7 @@ class CriticalPathEntry:
 | TCL 关键路径提取拦截 | `tool_router.py:vivado_run_tcl` 内容匹配 | 检测 `get_timing_paths`+`get_cells` 模式，返回 `[AUTO-GUIDANCE]` |
 | PBLOCK 数据质量提前退出 | `phase_execute.py` | `critical_path_cells` 全部过滤时跳过 MCP，记录 `data_quality_error` |
 | 冷却逻辑分层 | `phase_evaluate.py` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
-| 策略目录分层暴露 | `context_snapshot.py` | `blocked_this_iteration` 策略同时加入 `exclude_strategies`，从目录完全消失 |
+| 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective` + 冷却策略标为 `[BLOCKED]` 占位符；`tool_error`/`no_improvement` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
 | 空结果模式匹配 | `iteration_end.py` | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久排除） |
 | Improvement 阈值 | `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | 低于 50ps 视为无改善 |
 
@@ -494,7 +497,7 @@ api_messages = [
 4 层排除策略：
 1. **`STRATEGY_VALIDATION_SAFE` 字典**（strategy_library.py）: RegisterRetiming 等映射为 False
 2. **工具白名单移除**（tool_filter.py）: 从 `INDEPENDENT_RAPIDWRIGHT_TOOLS` 和 `PHASE_TOOLS[EXECUTE]` 中移除重定时工具
-3. **策略→工具映射移除**（constants.py）: 从 `EXECUTE_STRATEGY_TOOL_MAP` 中移除映射
+3. **策略→工具映射移除**（constants.py）: 从 `STRATEGY_MAP` 中移除映射（原 `EXECUTE_STRATEGY_TOOL_MAP` 已合并到统一 `STRATEGY_MAP`）
 4. **静态提示词**（SYSTEM_PROMPT.TXT）: 说明为何排除
 
 策略定义和 RapidWright 工具实现**保留**在代码库中，仅切断 LLM 的暴露路径。
@@ -514,7 +517,7 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 ### 6.5 策略别名映射
 
-`EXECUTE_STRATEGY_TOOL_MAP` 新增 `"LogicOptimization": "rapidwright_execute_opt_design_strategy"`。FORMAT_GUARD 策略列表同步添加。`_STRATEGY_MAPPING_LINES` 自动生成。
+`STRATEGY_MAP` 新增 `"LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy")`。FORMAT_GUARD 策略列表同步添加。`_STRATEGY_MAPPING_LINES` 自动生成。
 
 ### 6.6 Dashboard 数据新鲜度与工具 rate limit
 
@@ -689,4 +692,4 @@ WNS_TARGET_THRESHOLD = 0.0
 3. **STRATEGY INTERACTION WARNING**: 策略交互警告
 4. **`llm_hint` 运行时注入**: 当工具返回异常结果时注入提示
 5. **SYSTEM_PROMPT.TXT 策略排序约束**: 策略目录的排列顺序规则
-6. **strategy_library.py SKILL_GUIDANCE 增强字段**: 策略引导元数据
+6. **~~strategy_library.py SKILL_GUIDANCE 增强字段~~**（已移除，死代码清理）

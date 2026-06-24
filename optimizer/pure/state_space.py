@@ -501,12 +501,11 @@ def format_state_space_for_llm(
     handoff_summary: str = "",
     show_strategy_catalog: bool = False,
     exclude_strategies: list[str] | None = None,
+    blocked_strategies: dict[str, str] | None = None,
     iteration_narratives: list[dict] | None = None,
     tools_used: list[str] | None = None,
     current_strategy: str = "",
     evaluation_result: str = "",
-    blocked_this_iteration: list[str] | None = None,
-    blocked_ttl: list[str] | None = None,
     state: OptimizerState | None = None,
 ) -> str:
     """Format the 6-module StateSpace as YAML for LLM context injection.
@@ -530,7 +529,8 @@ def format_state_space_for_llm(
     if show_strategy_catalog:
         try:
             from strategy_library import get_strategy_catalog as _get_catalog
-            catalog = _get_catalog(exclude_strategies=exclude_strategies)
+            catalog = _get_catalog(exclude_strategies=exclude_strategies,
+                                   blocked_strategies=blocked_strategies)
             if catalog:
                 lines.append("strategy_catalog:")
                 for line in catalog.strip().split("\n"):
@@ -882,21 +882,14 @@ def format_state_space_for_llm(
     if phase and "trajectory" not in PHASE_STATESPACE_MODULES.get(phase, frozenset()):
         pass  # trajectory now embedded in dynamic_gradient; skip separate section
 
-    # ── Strategy lifecycle (always shown — blocked lists matter even
-    #    when no current_strategy is set, e.g. early in ANALYZE) ───
+    # ── Strategy lifecycle (always shown) ────────────────────────────
+    # NOTE: Blocked strategies are shown as [BLOCKED] placeholders in the
+    # strategy_catalog section (SELECT_STRATEGY) rather than here.
     lines.append("strategy_lifecycle:")
     if current_strategy:
         lines.append(f"  current_strategy: {current_strategy}")
     if evaluation_result and evaluation_result != "PENDING":
         lines.append(f"  evaluation: {evaluation_result}")
-    if blocked_this_iteration:
-        lines.append("  blocked_this_iteration:")
-        for s in blocked_this_iteration:
-            lines.append(f"    - {s}")
-    if blocked_ttl:
-        lines.append("  blocked_ttl:")
-        for s in blocked_ttl:
-            lines.append(f"    - {s}")
     lines.append("")
 
     # ── Skill guidance (EXECUTE phase) ─────────────────────────────
@@ -1038,10 +1031,10 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
     """Append skill guidance section for EXECUTE phase."""
     try:
         from strategy_library import STRATEGIES as _STRATEGIES
-        from .constants import SKILL_CHAIN_ACTIONS as _CHAIN_ACTIONS
-        from .context_snapshot import STRATEGY_TO_PRIMARY_TOOL
+        from .constants import SKILL_CHAIN_ACTIONS as _CHAIN_ACTIONS, STRATEGY_MAP as _STRATEGY_MAP
 
-        tool = STRATEGY_TO_PRIMARY_TOOL.get(current_strategy)
+        entry = _STRATEGY_MAP.get(current_strategy)
+        tool = entry.execute_tool if entry else None
         if tool:
             lines.append("skill_guidance:")
             lines.append(f"  tool: {tool}")

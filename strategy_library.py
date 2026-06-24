@@ -364,225 +364,6 @@ STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
     "MUXFTreeReorder": True,         # phys_opt_design (no -retime), logic-equivalent, NO FF insert
 }
 
-# Map strategy names to registered skill identifiers
-STRATEGY_SKILL_MAP = {
-    "PBLOCK": "pblock_strategy",
-    "PhysOpt": "physopt_strategy",
-    "OptDesign": "opt_design_strategy",
-    "Fanout": "fanout_strategy",
-    "LUTCascade": "lut_cascade_flattening",
-    "PinSwap": "pin_swapping_strategy",
-    "CellReplication": "critical_path_cell_replication",
-    "CongestionSpreading": "execute_congestion_spreading",
-    "RegisterRetiming": "execute_register_retiming",
-    "SmartRetiming": "smart_retiming",
-    "NetSwap": "execute_net_swapping",
-    "LogicResynthesis": "logic_resynthesis",
-    "PhysOptAggressive": "physopt_strategy",
-    "CombinationalRebalance": "combinational_rebalancing_strategy",
-    "LUTMUXFRepack": "lut_muxf_repack_strategy",
-    "MUXFTreeReorder": "muxf_tree_reorder_strategy",
-}
-
-# ── Skill Guidance ──────────────────────────────────────────────
-
-SKILL_GUIDANCE = {
-    "analyze_net_detour": {
-        "category": "ANALYSIS",
-        "input": "pin_paths list from Vivado extract_critical_path_pins",
-        "output": "cells with detour_ratio > threshold, sorted descending",
-        "threshold": "2.0 (higher = worse placement)",
-        "condition": "Critical path has >3 LUT levels OR high detour cells detected",
-        "interpretation": "Empty result (no cells > threshold) = routing already compact for analyzed paths. Valid diagnosis, not a failure.",
-    },
-    "optimize_cell_placement": {
-        "category": "PLACEMENT",
-        "input": "list of cell names identified by analyze_net_detour",
-        "output": "new placement for each cell at connection centroid",
-        "note": "Must write_checkpoint and re-route in Vivado",
-        "condition": "Cells with detour_ratio > 2.0 identified",
-    },
-    "smart_region_search": {
-        "category": "PLACEMENT",
-        "input": "target resource counts (1.5x current usage from utilization report)",
-        "output": "optimal rectangular region with pblock ranges",
-        "advantage": "Avoids delay-heavy columns (URAM, HPIO) and prioritizes high-density columns",
-        "condition": "Need to create pblock but optimal region unknown",
-    },
-    "execute_fanout_strategy": {
-        "category": "OPTIMIZATION",
-        "input": "List of high fanout nets from vivado_get_critical_high_fanout_nets: [{\"net_name\": str, \"fanout\": int}, ...]",
-        "output": "Optimization results: nets_processed, successful_count, failed_count, checkpoint_path, per-net results",
-        "condition": "High fanout nets present (fanout > 100), no path spread",
-        "prerequisite": "Call vivado_get_critical_high_fanout_nets first to get the list of high fanout nets with fanout counts",
-        "note": "split_factor is calculated internally as max(3, min(8, fanout // 100)) — do NOT provide it",
-        "prerequisite": "PBLOCK placement for distributed designs (avg_distance > 70). Run execute_pblock_strategy first.",
-        "risk": "HIGH when used after PBLOCK placement. Fanout splitting disrupts PBLOCK dense layout — WNS often regresses. "
-                "Running fanout BEFORE PBLOCK on distributed designs causes WNS regression of 0.5ns+ (observed: -0.978 → -1.660ns).",
-        "contraindications": "Risk: Fanout splitting after PBLOCK disrupts dense layout (WNS regression observed). "
-                             "On distributed designs (avg_distance > 70), running before PBLOCK regresses WNS ~0.5ns.",
-    },
-    "analyze_pblock_region": {
-       "category": "ANALYSIS",
-       "input": "target_lut_count, target_ff_count, target_dsp_count, target_bram_count from vivado_report_utilization_for_pblock",
-       "output": "region coordinates, pblock_ranges string, estimated resources, deficit (LUT/FF/DSP/BRAM), next_steps list, is_soft_recommended",
-       "advantage": "Finds optimal pblock region in one call; avoids delay-heavy columns. Returns pblock_ranges ready for vivado_create_and_apply_pblock. "
-                   "DSP/BRAM deficits now reported. IS_SOFT auto-recommended based on utilization density (>80% → soft constraint).",
-       "condition": "avg_distance > 70 (distributed scenario) or recommendation == 'PBLOCK'",
-       "prerequisite": "Call vivado_report_utilization_for_pblock first to get LUT/FF/DSP/BRAM counts",
-    },
-    "optimize_pin_swapping": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths JSON from Vivado extract_critical_path_pins",
-        "output": "swap results + checkpoint_path",
-        "condition": "WNS stuck ~-0.3ns, LUT input pins have delay variation",
-        "prerequisite": "Load DCP via read_checkpoint first",
-        "risk": "If WNS regresses > 0.05ns after reroute, rollback to pre_swap_checkpoint",
-    },
-    "flatten_lut_cascade": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
-        "output": "cascades_found, optimized_count, checkpoint_path, per-pin results",
-        "condition": "Critical paths have >3 LUT levels in series (logic depth bottleneck)",
-        "prerequisite": "Call vivado extract_critical_path_cells first to get path cell lists",
-        "risk": "LOW — saves checkpoint before mutation. If WNS regresses >0.05ns, roll back to pre-flatten checkpoint.",
-        "contraindications": "Ineffective on neural network / wide-datapath designs where logic cones exceed 6-input LUT physical limit — optimized_count will be 0.",
-    },
-    "replicate_critical_cells": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths JSON + delay_threshold (default 0.3 ns)",
-        "output": "replication results + checkpoint_path",
-        "condition": "High delay cells on critical paths (fanout > 10 or delay > 0.3 ns)",
-        "prerequisite": "Load DCP via read_checkpoint first",
-        "risk": "MEDIUM — cell replication increases resource usage. Limit to 10 cells max.",
-    },
-    "analyze_congestion_spreading": {
-        "category": "ANALYSIS",
-        "input": "congestion_threshold (default 0.8), max_cells_to_spread (default 20)",
-        "output": "ranked candidate cells with congestion_connectivity_score and spread direction",
-        "condition": "analyze_congestion shows severity=HIGH or congested_ratio > 0.3",
-        "prerequisite": "Design must be loaded via read_checkpoint",
-        "interpretation": "Empty candidates = no congestion issues. Non-empty = cells with many connections in congested regions.",
-    },
-    "execute_congestion_spreading": {
-        "category": "OPTIMIZATION",
-        "input": "max_cells_to_spread (default 20), spread_distance (default 10 columns)",
-        "output": "cells_moved, density_reduction, checkpoint_path",
-        "condition": "analyze_congestion_spreading identified candidates AND congestion severity=HIGH",
-        "prerequisite": "Call analyze_congestion_spreading first to understand impact",
-        "risk": "MEDIUM — moving cells can disrupt existing good placement. Limit spread_distance to avoid excessive displacement.",
-        "contraindications": "Ineffective when congestion is LOW or MODERATE. PBLOCK is typically more effective for geographic constraints.",
-    },
-    "analyze_register_retiming": {
-        "category": "ANALYSIS",
-        "input": "critical_paths JSON from Vivado extract_critical_path_pins",
-        "output": "retiming candidates with source/dest FF, chain depth, insertion point",
-        "condition": "WNS stuck, critical paths have deep combinational chains (>2 LUTs between FFs)",
-        "prerequisite": "Load DCP via read_checkpoint first, call extract_critical_path_pins in Vivado",
-        "interpretation": "Empty candidates = no deep chains found. Non-empty = segments where pipeline registers would help.",
-        "contraindications": "Low impact when FF utilization < 2% — few FFs available as pipeline insertion targets. "
-                             "PBLOCK or PhysOpt typically more effective for combinational-dominated designs.",
-    },
-    "execute_register_retiming": {
-        "category": "OPTIMIZATION",
-        "input": "retiming_candidates from analyze_register_retiming, max_retiming_ops (default 5)",
-        "output": "retiming_ops_performed, checkpoint_path, per-candidate results",
-        "condition": "analyze_register_retiming identified candidates with deep chains",
-        "prerequisite": "Call analyze_register_retiming first to get candidate list",
-        "risk": "MEDIUM - inserting FFs changes logic depth and routing. Limit to 5 ops per call.",
-        "contraindications": "Risk: If Vivado global retiming (phys_opt_design -retime) already caused functional errors, "
-                             "targeted retiming may also be problematic. Low impact when FF utilization < 2% — "
-                             "few sequential elements available for pipeline insertion.",
-    },
-    "analyze_net_swapping": {
-        "category": "ANALYSIS",
-        "input": "max_candidates (default 20), wirelength_threshold (default 50)",
-        "output": "ranked list of net swap candidates within SLICE sites",
-        "condition": "Routing congestion within SLICEs, LUT pairs with identical INIT strings",
-        "prerequisite": "Design must be loaded via read_checkpoint",
-        "interpretation": "Empty candidates = no beneficial swaps found. Non-empty = swaps that reduce wirelength.",
-    },
-    "execute_net_swapping": {
-        "category": "OPTIMIZATION",
-        "input": "candidates from analyze_net_swapping, temp_dir, checkpoint_prefix",
-        "output": "swaps_performed, swaps_failed, checkpoint_path",
-        "condition": "analyze_net_swapping identified candidates",
-        "prerequisite": "Call analyze_net_swapping first to get candidate list",
-        "risk": "LOW - swaps are within a single SLICE, limited blast radius. If WNS regresses >0.05ns, roll back to pre_swap_checkpoint.",
-    },
-    "opt_design_strategy": {
-        "category": "OPTIMIZATION",
-        "input": "directive (default: Explore), retarget (default: True)",
-        "output": "execution plan with recommended opt_design parameters",
-        "condition": "Logic-depth limited design (>70% logic delay), "
-                     "6-7 LUT levels on critical paths",
-        "prerequisite": "Design must be loaded. opt_design runs BEFORE placement — "
-                        "no placement/routing prerequisites needed.",
-        "post_actions": "Chain auto-executes: vivado_opt_design → vivado_place_design → "
-                        "vivado_route_design → vivado_report_timing_summary → "
-                        "vivado_extract_critical_path_cells",
-        "risk": "LOW — opt_design has NO retiming options. Unlike phys_opt_design, "
-                "all directives are safe for functional correctness. "
-                "Netlist changes are logic-equivalent remapping (Vivado-guaranteed).",
-        "contraindications": "Ineffective on designs already at minimal LUT depth, or where routing delay "
-                             "(not logic depth) is the bottleneck. Note: validate_dcps.py Phase 1 (structural) "
-                             "may fail due to expected cell name changes — Phase 2 (functional simulation) "
-                             "provides the correctness guarantee.",
-    },
-    "execute_combinational_rebalancing_strategy": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
-        "output": "StrategyPlan with Vivado opt_design -remap steps (segments_found, max_depth, avg_depth)",
-        "condition": "Deep combinational chains (LUT6/MUXF7/MUXF8 cascades) between registers "
-                     "on critical paths; register retiming unsafe (cycle-exact validation required)",
-        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists",
-        "post_actions": "Chain auto-executes: vivado_opt_design -> vivado_place_design -> "
-                        "vivado_route_design -> vivado_report_timing_summary -> "
-                        "vivado_extract_critical_path_cells",
-        "risk": "LOW — opt_design -remap is logic-equivalent resynthesis only. NO flip-flops inserted, "
-                "latency preserved. Validation-safe (cycle-exact).",
-        "advantage": "Validation-safe alternative to register retiming: achieves the same goal "
-                     "(shortening critical-path logic depth) via combinational resynthesis only.",
-        "contraindications": "Ineffective when critical paths are already shallow (logic depth < 3) "
-                             "or when routing delay (not logic depth) is the dominant bottleneck.",
-    },
-    "execute_lut_muxf_repack_strategy": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
-        "output": "StrategyPlan with Vivado opt_design -AddRemap steps (lut_muxf_pairs, lut5_candidates)",
-        "condition": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascades on critical paths. "
-                     "Tip: run flatten_lut_cascade first — if optimized_count=0, wide cones confirm LUTMUXFRepack is ideal",
-        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists",
-        "post_actions": "Chain auto-executes: vivado_opt_design -> vivado_place_design -> "
-                        "vivado_route_design -> vivado_report_timing_summary",
-        "risk": "LOW — opt_design -AddRemap aggressively remaps LUT equations but is still "
-                "logic-equivalent. NO flip-flops inserted, latency preserved. Validation-safe.",
-        "advantage": "Handles the wide LUT6/MUXF cones that flatten_lut_cascade cannot (it returns "
-                     "optimized_count=0 on cones > 6 inputs). Targets 8:1/16:1 mux tree cascades.",
-        "contraindications": "Ineffective when no LUT<->MUXF adjacency pairs or LUT5 merge candidates "
-                             "exist on critical paths.",
-    },
-    "execute_muxf_tree_reorder_strategy": {
-        "category": "OPTIMIZATION",
-        "input": "critical_paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]",
-        "output": "StrategyPlan with Vivado phys_opt_design steps (muxf_trees, max_depth, avg_depth)",
-        "condition": "NN/datapath design without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels on critical paths, "
-                     "route-dominated delay profile",
-        "prerequisite": "Call vivado_extract_critical_path_cells (num_paths=10) first to get path cell lists. "
-                        "Design must be placed (phys_opt_design requires placement).",
-        "post_actions": "Chain auto-executes: vivado_phys_opt_design -> vivado_route_design -> "
-                        "vivado_report_timing_summary",
-        "risk": "LOW — phys_opt_design without -retime performs only placement-level "
-                "logic-equivalent optimization (pin swap, cell relocation, duplication). "
-                "NO flip-flops inserted or moved, latency preserved. Validation-safe.",
-        "advantage": "Maps 'carry chain reorder' onto MUXF-tree designs (no CARRY4). Pulls critical "
-                     "mux inputs to faster selection levels.",
-        "contraindications": "Do NOT pass directive='AddRetime' — it would insert/move FFs and fail "
-                             "validation (the skill rejects AddRetime). Ineffective when no MUXF tree "
-                             "runs (depth >= 2) exist on critical paths.",
-    },
-}
-
 SKILL_EXECUTION_PATTERN = [
     "Use Vivado report_timing/extract_critical_path_cells to get path data",
     "Call appropriate skill via MCP tool",
@@ -621,15 +402,19 @@ def get_scenario_guide() -> str:
     return "\n".join(lines)
 
 
-def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
+def get_strategy_catalog(exclude_strategies: list[str] | None = None,
+                         blocked_strategies: dict[str, str] | None = None) -> str:
     """Compact strategy catalog for system prompt (names + purposes only).
 
     Strategies are listed alphabetically — no implied priority. The LLM
     should choose based on design characteristics, not list position.
 
     Args:
-        exclude_strategies: Strategy keys to omit from the catalog
-            (e.g., strategies with reason='strategy_ineffective').
+        exclude_strategies: Strategy keys to omit entirely from the catalog
+            (e.g., strategies with reason='tool_error' that are retriable).
+        blocked_strategies: Strategy keys to show as [BLOCKED] placeholders
+            instead of removing (e.g., TTL/cooldown blocks so the LLM
+            understands why they're unavailable). Values are reason strings.
 
     Note:
         Strategies marked unsafe in STRATEGY_VALIDATION_SAFE are always
@@ -639,12 +424,16 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
         potential future use with latency-tolerant validation.
     """
     excluded = set(exclude_strategies or [])
+    blocked = blocked_strategies or {}
     # Always exclude validation-unsafe strategies (insert new FFs → change latency)
     excluded.update(k for k, safe in STRATEGY_VALIDATION_SAFE.items() if not safe)
+
+    all_keys = set(STRATEGIES.keys())
+    available_keys = sorted(k for k in all_keys if k not in excluded and k not in blocked)
+    blocked_keys = sorted(k for k in all_keys if k in blocked)
+
     parts = ["Available strategies:"]
-    # Alphabetical ordering — no implied priority
-    ordered = sorted(k for k in STRATEGIES.keys() if k not in excluded)
-    for key in ordered:
+    for key in available_keys:
         s = STRATEGIES.get(key)
         if s:
             line = f"  - {s['name']} (trigger: {s['trigger']})"
@@ -652,7 +441,19 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None) -> str:
                 line += f" - {s['ff_prerequisite']}"
             parts.append(line)
     if not parts[1:]:
-        parts.append("  (all strategies excluded)")
+        parts.append("  (all strategies unavailable)")
+
+    # Append [BLOCKED] placeholders so the LLM understands why
+    # some strategies are missing from the available list.
+    if blocked_keys:
+        parts.append("")
+        parts.append("  # Blocked strategies (not available this iteration):")
+        for key in blocked_keys:
+            reason = blocked.get(key, "")
+            s = STRATEGIES.get(key)
+            name = s['name'] if s else key
+            parts.append(f"  - {name} [BLOCKED{f': {reason}' if reason else ''}]")
+
     return "\n".join(parts)
 
 
@@ -676,29 +477,6 @@ def get_strategy_details(name: str) -> Optional[str]:
             lines.append(f"  - {step_name} ({platform}, params: {step['params']})")
         else:
             lines.append(f"  - {step_name} ({platform})")
-    return "\n".join(lines)
-
-
-def get_skill_guide(name: Optional[str] = None) -> str:
-    """Return skill guidance. If name is None, returns all skills catalog."""
-    if name:
-        skill = SKILL_GUIDANCE.get(name)
-        if not skill:
-            return ""
-        lines = [f"**Skill: {name}**"]
-        for k, v in skill.items():
-            lines.append(f"  {k}: {v}")
-        return "\n".join(lines)
-
-    # Full catalog
-    lines = ["**Skill Catalog:**"]
-    for sname, sinfo in SKILL_GUIDANCE.items():
-        lines.append(f"  - {sname} ({sinfo.get('category', 'N/A')}): "
-                     f"{sinfo.get('condition', '')}")
-    lines.append("")
-    lines.append("Execution Pattern:")
-    for i, step in enumerate(SKILL_EXECUTION_PATTERN, 1):
-        lines.append(f"  {i}. {step}")
     return "\n".join(lines)
 
 

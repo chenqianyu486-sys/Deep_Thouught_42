@@ -14,13 +14,13 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.compress import compress_context
-from ..pure.constants import EXECUTE_STRATEGY_TOOL_MAP
+from ..pure.constants import STRATEGY_MAP as _STRATEGY_MAP
 
 logger = logging.getLogger(__name__)
 
 # Build strategy-to-tool mapping text from shared constant (single source of truth).
 _STRATEGY_MAPPING_LINES = "\n".join(
-    f"      {k} → {v}" for k, v in sorted(EXECUTE_STRATEGY_TOOL_MAP.items())
+    f"      {k} → {v.execute_tool}" for k, v in sorted(_STRATEGY_MAP.items())
 )
 
 # FORMAT_GUARD: enforced on first iteration so the LLM reliably calls report_step_state.

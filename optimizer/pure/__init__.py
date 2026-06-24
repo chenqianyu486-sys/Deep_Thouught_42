@@ -19,7 +19,7 @@ from .constants import (
     TOOL_MODEL_MAPPING,
     ROUTING_FAILURE_PHRASES,
     SKILL_TOOL_MAP,
-    SKILL_NAME_TO_TOOL,
+    STRATEGY_MAP,
     WORKER_UPGRADE_THRESHOLD,
     WORKER_DOWNGRADE_THRESHOLD,
     GLOBAL_NO_IMPROVEMENT_LIMIT,
@@ -46,11 +46,9 @@ from .iteration_logic import (
     build_iteration_narrative,
 )
 from .context_snapshot import (
-    build_context_snapshot,
     inject_context_snapshot,
     inject_context_snapshot_at_end,
     inject_merged_dashboard,
-    PHASE_DASHBOARD_SECTIONS,
 )
 from .handoff import (
     build_handoff_prompt,
@@ -75,7 +73,7 @@ __all__ = [
     # constants
     "TaskCategory", "INFORMATION_PATTERNS", "OPTIMIZATION_PATTERNS",
     "ModelTier", "TOOL_MODEL_MAPPING", "ROUTING_FAILURE_PHRASES",
-    "SKILL_TOOL_MAP", "SKILL_NAME_TO_TOOL",
+    "SKILL_TOOL_MAP", "STRATEGY_MAP",
     "WORKER_UPGRADE_THRESHOLD", "WORKER_DOWNGRADE_THRESHOLD",
     "GLOBAL_NO_IMPROVEMENT_LIMIT", "WNS_TARGET_THRESHOLD",
     "SMALL_OUTPUT_THRESHOLD", "TOOL_RESULT_TRUNCATE", "RECENT_TURNS_TO_KEEP",
@@ -88,7 +86,7 @@ __all__ = [
     # iteration_logic
     "update_iteration_counters", "infer_strategy_from_tools", "build_iteration_narrative",
     # context_snapshot
-    "build_context_snapshot", "inject_context_snapshot", "inject_context_snapshot_at_end",
+    "inject_context_snapshot", "inject_context_snapshot_at_end",
     # handoff
     "build_handoff_prompt", "build_situation_summary", "build_status_signal",
     # tool_router

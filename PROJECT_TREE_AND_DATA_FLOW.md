@@ -155,7 +155,7 @@ _prepare_api_messages():
   1. auto_compact_messages()  ← 去重
   2. 增强系统提示词(scenario hint + skill catalog)
   3. 注入迭代 handoff（迭代边界）
-  4. inject_context_snapshot_at_end() ← 数据 Dashboard 作为最后一条 user 消息
+  4. inject_merged_dashboard() ← 数据 Dashboard 作为最后一条 user 消息
                                                             ↓
                                                    LLM API Call
 ```
@@ -261,7 +261,7 @@ architecture_overview:
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
 | 调用频率限制 | 超限返回 `[RATE LIMITED]`（`search_cells`:3, `vivado_run_tcl`:2 等） |
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
-| 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录移除（TTL 阻断），`strategy_not_applicable`/`tool_error` 保留可供选择；`strategy_lifecycle` 显示 `blocked_this_iteration`/`blocked_ttl` |
+| 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录标为 `[BLOCKED]`（TTL 阻断，占位符保留）；`strategy_not_applicable`/`tool_error`/`no_improvement` 完全移出目录；冷却策略在目录中标 `[BLOCKED: cooldown]` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
 | 细胞名验证 | `_is_valid_cell_name()` 过滤非细胞字符串；>50% 无效整条跳过 |
 | TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |

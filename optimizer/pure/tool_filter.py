@@ -16,7 +16,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 
-from .constants import EXECUTE_STRATEGY_TOOL_MAP
+from .constants import STRATEGY_MAP as _STRATEGY_MAP
 
 
 class LoopPhase(str, Enum):
@@ -219,7 +219,8 @@ def filter_tools_for_phase(
         return all_tools
 
     if phase == LoopPhase.EXECUTE and strategy:
-        primary_tool = EXECUTE_STRATEGY_TOOL_MAP.get(strategy)
+        entry = _STRATEGY_MAP.get(strategy)
+        primary_tool = entry.execute_tool if entry else None
         if primary_tool:
             allowed = frozenset({primary_tool, "report_step_state"})
 

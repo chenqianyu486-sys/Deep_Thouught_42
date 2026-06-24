@@ -65,13 +65,12 @@ class TestInjectAtEnd:
         assert "data v2" in dashboards[0]["content"]
 
     def test_all_header_markers_recognized(self):
-        """Each of the 4 phase headers + the legacy marker should be replaced."""
+        """Each of the 4 phase headers should be recognized and replaced."""
         for header in [
             "[ANALYZE — Context & Dashboard]",
             "[SELECT_STRATEGY — Context & Dashboard]",
             "[EXECUTE — Context & Dashboard]",
             "[EVALUATE — Context & Dashboard]",
-            "--- Optimization Dashboard ---",
         ]:
             messages = [
                 {"role": "user", "content": header + "\nold"},
@@ -81,16 +80,6 @@ class TestInjectAtEnd:
             assert len(messages) == 2, f"Failed for header: {header}"
             assert messages[-1]["content"] == "[NEW — Context & Dashboard]\nfresh"
             assert messages[0]["content"] == "keep me"
-
-    def test_old_dashboard_marker_recognized(self):
-        """The legacy '--- Optimization Dashboard ---' marker should be replaced."""
-        messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "--- Optimization Dashboard ---\nold data"},
-        ]
-        inject_context_snapshot_at_end(messages, "[NEW — Context & Dashboard]\nfresh")
-        assert len(messages) == 2
-        assert messages[-1]["content"] == "[NEW — Context & Dashboard]\nfresh"
 
 
 # ── inject_context_snapshot (V1 compatibility) ─────────────────────────

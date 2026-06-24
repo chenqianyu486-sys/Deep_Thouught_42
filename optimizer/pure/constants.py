@@ -5,6 +5,8 @@ Extracted from dcp_optimizer.py: L90-122, L135-159, L296-315, L865-868.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 
 # ── PBLOCK strategy parameters ────────────────────────────────
 PBLOCK_DISTANCE_WEIGHT_DEFAULT = 0.3
@@ -61,60 +63,51 @@ ROUTING_FAILURE_PHRASES = [
 ]
 
 
-# ── Skill tool mapping ──────────────────────────────────────────
+# ── Strategy map (single source of truth) ─────────────────────────
+# Consolidates four previously independent mappings:
+#   EXECUTE_STRATEGY_TOOL_MAP (strategy → execute tool)
+#   STRATEGY_TO_PRIMARY_TOOL (strategy → primary tool)
+#   STRATEGY_SKILL_MAP (strategy → skill identifier)
+#   SKILL_TOOL_MAP / SKILL_NAME_TO_TOOL (bidirectional tool ↔ skill)
 
-SKILL_TOOL_MAP: dict[str, str] = {
-    "rapidwright_analyze_net_detour": "net_detour",
-    "rapidwright_optimize_cell_placement": "optimize_cell",
-    "rapidwright_smart_region_search": "smart_region",
-    "rapidwright_analyze_pblock_region": "pblock_strategy",
-    "rapidwright_execute_physopt_strategy": "physopt_strategy",
-    "rapidwright_execute_pblock_strategy": "execute_pblock_strategy",
-    "rapidwright_execute_fanout_strategy": "fanout_strategy",
-    "rapidwright_analyze_congestion_spreading": "analyze_congestion_spreading",
-    "rapidwright_execute_congestion_spreading": "execute_congestion_spreading",
-    "rapidwright_analyze_net_swapping": "analyze_net_swapping",
-    "rapidwright_execute_net_swapping": "execute_net_swapping",
-    "rapidwright_optimize_pin_swapping": "pin_swapping_strategy",
-    "rapidwright_flatten_lut_cascade": "lut_cascade_flattening",
-    "rapidwright_replicate_critical_cells": "critical_path_cell_replication_strategy",
-    "rapidwright_execute_register_retiming": "execute_register_retiming",
-    "rapidwright_analyze_register_retiming": "analyze_register_retiming",
-    "rapidwright_smart_retiming": "smart_retiming",
-    "rapidwright_execute_opt_design_strategy": "opt_design_strategy",
-    "rapidwright_execute_combinational_rebalancing_strategy": "combinational_rebalancing_strategy",
-    "rapidwright_execute_lut_muxf_repack_strategy": "lut_muxf_repack_strategy",
-    "rapidwright_execute_muxf_tree_reorder_strategy": "muxf_tree_reorder_strategy",
-    "rapidwright_analyze_congestion": "analyze_congestion",
-}
-SKILL_NAME_TO_TOOL: dict[str, str] = {v: k for k, v in SKILL_TOOL_MAP.items()}
+@dataclass
+class StrategyEntry:
+    """Mapping entry for a single strategy.
+
+    Fields:
+        skill_id:   Skill identifier (used in telemetry, logging).
+        execute_tool: MCP tool called during the EXECUTE phase.
+    """
+    skill_id: str
+    execute_tool: str
 
 
-# ── EXECUTE phase strategy-to-tool mapping ─────────────────────────
-# Maps strategy names (as selected by LLM in SELECT_STRATEGY) to the
-# corresponding MCP tool to call in the EXECUTE phase.
-# Used by phase_execute.py (runtime constraint injection) and
-# prepare_context.py (LLM prompt generation).  Keep in sync.
-EXECUTE_STRATEGY_TOOL_MAP: dict[str, str] = {
-    "PBLOCK": "rapidwright_execute_pblock_strategy",
-    "PhysOpt": "vivado_physopt_and_route",
-    "Fanout": "rapidwright_execute_fanout_strategy",
-    "LUTCascade": "rapidwright_flatten_lut_cascade",
-    "PinSwap": "rapidwright_optimize_pin_swapping",
-    "CellReplication": "rapidwright_replicate_critical_cells",
-    "CongestionSpreading": "rapidwright_execute_congestion_spreading",
-    "NetSwap": "rapidwright_execute_net_swapping",
-    "OptDesign": "rapidwright_execute_opt_design_strategy",
-    # Validation-safe inter-layer combinational logic strategies (no FF insert)
-    "CombinationalRebalance": "rapidwright_execute_combinational_rebalancing_strategy",
-    "LUTMUXFRepack": "rapidwright_execute_lut_muxf_repack_strategy",
-    "MUXFTreeReorder": "rapidwright_execute_muxf_tree_reorder_strategy",
+STRATEGY_MAP: dict[str, StrategyEntry] = {
+    "PBLOCK": StrategyEntry("pblock_strategy", "rapidwright_execute_pblock_strategy"),
+    "PhysOpt": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
+    "Fanout": StrategyEntry("fanout_strategy", "rapidwright_execute_fanout_strategy"),
+    "LUTCascade": StrategyEntry("lut_cascade_flattening", "rapidwright_flatten_lut_cascade"),
+    "PinSwap": StrategyEntry("pin_swapping_strategy", "rapidwright_optimize_pin_swapping"),
+    "CellReplication": StrategyEntry("critical_path_cell_replication", "rapidwright_replicate_critical_cells"),
+    "CongestionSpreading": StrategyEntry("execute_congestion_spreading", "rapidwright_execute_congestion_spreading"),
+    "NetSwap": StrategyEntry("execute_net_swapping", "rapidwright_execute_net_swapping"),
+    "OptDesign": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
+    "RegisterRetiming": StrategyEntry("execute_register_retiming", "rapidwright_execute_register_retiming"),
+    "SmartRetiming": StrategyEntry("smart_retiming", "rapidwright_smart_retiming"),
+    "LogicResynthesis": StrategyEntry("logic_resynthesis", "vivado_run_tcl"),
+    "PhysOptAggressive": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
+    "CombinationalRebalance": StrategyEntry("combinational_rebalancing_strategy", "rapidwright_execute_combinational_rebalancing_strategy"),
+    "LUTMUXFRepack": StrategyEntry("lut_muxf_repack_strategy", "rapidwright_execute_lut_muxf_repack_strategy"),
+    "MUXFTreeReorder": StrategyEntry("muxf_tree_reorder_strategy", "rapidwright_execute_muxf_tree_reorder_strategy"),
     # Aliases: LLM may use alternative names for the same strategy
-    "LogicOptimization": "rapidwright_execute_opt_design_strategy",
-    # New strategies for NN/datapath designs
-    "LogicResynthesis": "vivado_run_tcl",
-    "PhysOptAggressive": "vivado_physopt_and_route",
+    "LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
+    # Combined strategies
+    "PhysOpt+RegisterRetiming": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
 }
+
+# Backward-compatible reverse mapping: tool → skill_id.
+# Auto-derived from STRATEGY_MAP so it never drifts.
+SKILL_TOOL_MAP: dict[str, str] = {v.execute_tool: v.skill_id for v in STRATEGY_MAP.values()}
 
 
 # ── Threshold constants ──────────────────────────────────────────
