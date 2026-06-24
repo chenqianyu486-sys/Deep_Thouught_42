@@ -88,11 +88,11 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **类型契约**: Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）
 - **无持久化**: 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
-- **设计状态标注（design_not_routed）**: `_post_eval_hook` 和 `_track_wns_from_result` 从 `report_timing_summary` 的 `Design State` 字段检测，设置 `state.timing.design_not_routed = True`，Dashboard M1 `current_stage` 下方显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`
+- **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_catalog` 排除机制**: 已记录在 `state.context.failed_strategies` 中的策略自动从 catalog 中排除
+- **`strategy_catalog` 排除机制**: 仅 `strategy_ineffective` reason 的策略从 catalog 排除（TTL 阻断）。`strategy_not_applicable`（skill 未找到可优化的 cell 模式）、`tool_error`、`no_improvement` 仍保留在 catalog 中 — LLM 可在下一轮重试。排除逻辑在 `context_snapshot.py` 的 `_exclude_strategies` 构建中按 `fs.reason == "strategy_ineffective"` 过滤。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共19个）执行后全部降级为 `stale`。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
-- **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）
+- **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）。`strategy_not_applicable` 及其他 reason 无 TTL 阻断（`blocked_until_iter=current`），可在下一轮立即重试。
 
 ---
 

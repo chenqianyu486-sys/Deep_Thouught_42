@@ -16,6 +16,38 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
+class DesignState:
+    """Design physical implementation state (from Vivado Design State string).
+
+    Used to determine reliability of WNS/TNS data for LLM strategy selection
+    and RapidWright pre-check gating. Degrades from fully accurate (ROUTED)
+    to wireload estimate (UNPLACED).
+    """
+    UNPLACED = "unplaced"     # Synthesized only — no placement, WNS is wireload estimate
+    PLACED = "placed_only"    # Placed but not routed — placement-level WNS, no routing
+    ROUTED = "routed"         # Fully placed and routed — full timing accuracy
+
+
+def parse_design_state(timing_report: str) -> str:
+    """Parse Design State from a Vivado timing report.
+
+    Args:
+        timing_report: Raw text output from vivado_report_timing_summary.
+
+    Returns:
+        One of DesignState.UNPLACED, DesignState.PLACED, DesignState.ROUTED.
+        Defaults to UNPLACED when the field cannot be parsed.
+    """
+    if "Design State" not in timing_report:
+        return DesignState.UNPLACED
+    if "Routed" in timing_report:
+        return DesignState.ROUTED
+    # Placed/Phys_Opt_Design → has placement info but no routing
+    if "Placed" in timing_report or "Phys_Opt" in timing_report:
+        return DesignState.PLACED
+    return DesignState.UNPLACED
+
+
 # ── Control signals ─────────────────────────────────────────────
 
 @dataclass
@@ -215,10 +247,12 @@ class TimingState:
     violation_summary: Optional[ViolationSummary] = None
     # Top failing endpoint names (last cell of each critical path), derived from critical_paths
     failing_endpoint_names: list[str] = field(default_factory=list)
-    # Flag: whether the design is NOT routed (detected from timing report Design State).
-    # True = design is unplaced/unrouted → WNS may be inaccurate (false positive).
+    # Design physical implementation state (detected from timing report Design State).
+    # UNPLACED → synthesized only, no placement; WNS is wireload estimate (highly unreliable).
+    # PLACED   → placed but not routed; WNS has placement info but estimated routing (moderate).
+    # ROUTED   → fully placed and routed; WNS has full accuracy.
     # Updated by _post_eval_hook / _track_wns_from_result every time a timing report is parsed.
-    design_not_routed: bool = False
+    design_state: str = "unplaced"
 
 
 @dataclass
@@ -416,19 +450,30 @@ def record_strategy_failure(
     Replaces MemoryManager.record_failure() / DCPOptimizerCompat.record_failure()
     as the canonical V2 path.
 
-    TTL: strategy_ineffective entries auto-unblock after STRATEGY_RETRY_TTL iterations.
+    TTL: Only `strategy_ineffective` entries get TTL-blocked for STRATEGY_RETRY_TTL
+    iterations. `strategy_not_applicable` entries are recorded for observability but
+    NOT blocked (immediate unblock), allowing the LLM to retry after the design
+    changes. `tool_error` / `no_improvement` entries also bypass TTL blocking.
     """
     STRATEGY_RETRY_TTL = 3  # iterations before a blocked strategy can be retried
     existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
     if existing:
         return
+    # strategy_not_applicable = skill found no matching cells → not a real failure,
+    # don't block with TTL (the strategy may become applicable after other optimizations).
+    # Other reasons (tool_error, no_improvement) also bypass TTL.
+    # Only strategy_ineffective gets the full TTL block.
+    if reason == "strategy_ineffective":
+        blocked_until_iter = state.iteration.current + STRATEGY_RETRY_TTL
+    else:
+        blocked_until_iter = state.iteration.current
     entry = FailedStrategyRecord(
         strategy=strategy,
         reason=reason,
         tool=tool,
         iteration=state.iteration.current,
         detail=detail[:200],
-        blocked_until_iter=state.iteration.current + STRATEGY_RETRY_TTL,
+        blocked_until_iter=blocked_until_iter,
     )
     state.context.failed_strategies.append(entry)
     logger.warning(
@@ -519,8 +564,9 @@ class DashboardGlobalState:
     # Design scale (from design_info)
     cell_count: int = 0
     net_count: int = 0
-    # Whether the design is NOT routed (from timing report Design State)
-    design_not_routed: bool = False
+    # Design physical implementation state (from timing report Design State)
+    # UNPLACED | PLACED | ROUTED — determines WNS accuracy and pre-check gating
+    design_state: str = "unplaced"
 
 
 @dataclass

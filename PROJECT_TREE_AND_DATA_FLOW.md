@@ -128,7 +128,7 @@ llm_tool_loop_node (调度器)
       CONTINUE → ANALYZE
 ```
 
-**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
+**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制区分处理：`strategy_ineffective`（3 轮后解封）、`strategy_not_applicable`（无 TTL，下轮可重试）、`tool_error`（无 TTL，始终可重试）。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
@@ -233,7 +233,7 @@ architecture_overview:
 
 **LLM 防歧义注解**: 所有 N/A 和空列表带机器可读原因——`"N/A(initial_state)"`、`"N/A(no_io_ports)"`、`[]  # no_high_fanout_nets_found`。纯数据无判断标签。每次通过 `build_state_space()` 重建，不进入 MessageStore，同时通过 WebSocket 推送到前端。
 
-**设计状态标注（design_not_routed）**: 检测到 `Design State` 不含 `Routed` 时，Dashboard 显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`。
+**设计状态标注（DesignState 枚举）**: 从 `Design State` 字段解析为 `UNPLACED` / `PLACED` / `ROUTED` 三级，Dashboard 根据状态显示对应粒度的准确性警告。未布线时 Level 1 RW 预检查自动跳过。
 
 ### 3.2.1 新增模块
 
@@ -261,7 +261,7 @@ architecture_overview:
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
 | 调用频率限制 | 超限返回 `[RATE LIMITED]`（`search_cells`:3, `vivado_run_tcl`:2 等） |
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
-| 策略 catalog 排除 | 失败策略从目录移除 + `strategy_lifecycle` 显示 `blocked_this_iteration`/`blocked_ttl` |
+| 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录移除（TTL 阻断），`strategy_not_applicable`/`tool_error` 保留可供选择；`strategy_lifecycle` 显示 `blocked_this_iteration`/`blocked_ttl` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
 | 细胞名验证 | `_is_valid_cell_name()` 过滤非细胞字符串；>50% 无效整条跳过 |
 | TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |

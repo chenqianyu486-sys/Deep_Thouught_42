@@ -13,7 +13,7 @@ import json
 import logging
 import time
 
-from ..state import OptimizerState
+from ..state import OptimizerState, parse_design_state
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.critical_path import parse_critical_path_cells, update_critical_paths
@@ -179,6 +179,12 @@ async def init_analysis_node(
                 )
                 result["timing_report"] = timing_report
                 timing_info = parse_timing_summary(timing_report)
+
+                # Parse design physical implementation state from Design State field
+                state.timing.design_state = parse_design_state(timing_report)
+                logger.info(
+                    f"[init_analysis] Design state: {state.timing.design_state}"
+                )
 
                 state.timing.initial_wns = timing_info["wns"]
                 state.timing.initial_tns = timing_info["tns"]

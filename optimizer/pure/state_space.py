@@ -28,6 +28,7 @@ from ..state import (
     DashboardDynamicGradient,
     DashboardArchitectureOverview,
     DashboardModuleEntry,
+    DesignState,
     StateSpace,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
@@ -177,7 +178,7 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
         best_wns_iteration=timing.best_wns_iteration,
         cell_count=cell_count,
         net_count=net_count,
-        design_not_routed=timing.design_not_routed,
+        design_state=timing.design_state,
     )
 
 
@@ -549,8 +550,10 @@ def format_state_space_for_llm(
         lines.append("# Module 1: Global State & Targets")
         lines.append("global_state:")
         lines.append(f"  current_stage: {gs.current_stage or 'UNKNOWN'}")
-        if gs.design_not_routed:
-            lines.append("  # WARNING: Design is NOT routed — WNS/TNS may be inaccurate (estimated delays, no routing)")
+        if gs.design_state == DesignState.UNPLACED:
+            lines.append("  # WARNING: Design is unplaced — WNS based on wireload estimates, may be highly inaccurate")
+        elif gs.design_state == DesignState.PLACED:
+            lines.append("  # WARNING: Design has placement only — WNS based on estimated routing delays")
         lines.append(f"  iteration_count: {gs.iteration_count}")
         lines.append(f"  target_frequency: {gs.target_frequency}")
         lines.append(f"  wns_setup: {gs.wns_setup:.3f}{_tag('timing_summary')}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')

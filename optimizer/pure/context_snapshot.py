@@ -409,10 +409,13 @@ def inject_merged_dashboard(
 
     space = build_state_space(state)
 
-    # Exclude previously failed strategies from the catalog.
-    # TTL-persistent failed strategies (strategy_ineffective).
+    # Exclude TTL-blocked strategies from the catalog.
+    # Only strategy_ineffective entries get a TTL block — other reasons
+    # (strategy_not_applicable, tool_error, no_improvement) are recorded
+    # for observability but the strategy remains selectable.
     _failed_strategies: list[str] = [
         fs.strategy for fs in state.context.failed_strategies
+        if fs.reason == "strategy_ineffective"
     ] if state.context.failed_strategies else []
 
     # Per-iteration cooldown strategies (cleared each iteration at iteration_start).

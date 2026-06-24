@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal, record_strategy_failure
+from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal, record_strategy_failure, DesignState, parse_design_state
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, filter_tools_for_phase, get_phase_max_rounds
@@ -645,6 +645,33 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # RapidWright is reliable for *directional* comparison (which of
                 # two placements is better) but NOT for absolute WNS values.
                 # See docs/plans/p-r-rollback-abundant-puffin.md for details.
+
+                # ── Extract skill diagnostics before pre-check ─────────
+                # Some skills return status="skipped" with detailed analysis_summary
+                # when they find no applicable cells on critical paths. Capture this
+                # before the pre-check so we can use it for differentiated handling.
+                skill_was_skipped = False
+                skill_diagnostics = ""
+                if (tool_name in SKILL_CHAIN_ACTIONS
+                        and tool_name != "rapidwright_execute_pblock_strategy"
+                        and result):
+                    try:
+                        skill_data = json.loads(result) if isinstance(result, str) else {}
+                        if isinstance(skill_data, dict):
+                            if skill_data.get("status") == "skipped":
+                                skill_was_skipped = True
+                                analysis = skill_data.get("analysis_summary", {}) or {}
+                                if isinstance(analysis, dict):
+                                    diagnosis = analysis.get("diagnosis", "no_match")
+                                    cell_types = analysis.get("cell_type_distribution", {})
+                                    top_cells = dict(sorted(cell_types.items(), key=lambda x: -x[1])[:5])
+                                    skill_diagnostics = (
+                                        f"critical path cell types: {top_cells}, "
+                                        f"diagnosis: {diagnosis}"
+                                    )
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+
                 precheck_verdict = None
                 if (RAPIDWRIGHT_PRECHECK_ENABLED
                         and tool_name in SKILL_CHAIN_ACTIONS
@@ -688,6 +715,49 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             "strategy_ineffective", tool=tool_name,
                             detail=gate_reason
                         )
+                        force_exit = True
+                        break
+
+                    elif precheck_verdict == "NO_WORK":
+                        # Pre-check detected no delta — the skill did not change
+                        # RW's timing model. Distinguish between "skill found no
+                        # applicable cells" (not_applicable) and "skill ran but
+                        # produced no RW-visible effect" (ineffective).
+                        logger.warning(yellow(
+                            f"[EXECUTE] Pre-check NO_WORK for {tool_name}: "
+                            f"no RW timing change detected, skipping P&R chain"
+                        ))
+                        state.control.done_reason = "precheck_no_work"
+                        record_flow_signal(
+                            state, "SYSTEM_EXIT", "precheck_no_work",
+                            phase="EXECUTE_STRATEGY",
+                        )
+                        if skill_was_skipped and skill_diagnostics:
+                            # Skill explicitly reported no applicable cells
+                            record_strategy_failure(
+                                state, state.strategy.current_strategy,
+                                "strategy_not_applicable", tool=tool_name,
+                                detail=f"no_applicable_cells: {skill_diagnostics}"
+                            )
+                            if deps.compat is not None:
+                                deps.compat.add_message("user",
+                                    f"[PRECHECK] {tool_name}: {skill_diagnostics}. "
+                                    f"Strategy is not applicable to current critical path "
+                                    f"architecture — try a different strategy type."
+                                )
+                        else:
+                            # Skill ran but produced no RW-visible effect
+                            record_strategy_failure(
+                                state, state.strategy.current_strategy,
+                                "strategy_ineffective", tool=tool_name,
+                                detail="precheck_no_work"
+                            )
+                            if deps.compat is not None:
+                                deps.compat.add_message("user",
+                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
+                                    f"shows no WNS change. Skipping Vivado place+route chain. "
+                                    f"Strategy marked as ineffective."
+                                )
                         force_exit = True
                         break
 
@@ -1026,7 +1096,7 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
                          "vivado_route_design", "vivado_get_wns", "vivado_physopt_and_route"):
         return
     if tool_name != "vivado_report_timing_summary":
-        state.timing.design_not_routed = False  # clear stale flag for non-timing tools
+        state.timing.design_state = DesignState.UNPLACED  # clear stale state for non-timing tools
     # Try JSON path for physopt_and_route
     wns = None
     tns = None
@@ -1045,12 +1115,16 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
             pass
     # Fallback to string parsing
     if wns is None:
-        # Warn if timing report comes from an unrouted design
+        # Update design state from timing report; only vivado_report_timing_summary
+        # has the "Design State" header — other tools (phys_opt, route) always show
+        # post-state as routed/placed and would give misleading state info.
         if tool_name == "vivado_report_timing_summary":
-            not_routed = "Design State" in raw_result and "Routed" not in raw_result
-            state.timing.design_not_routed = not_routed
-            if not_routed:
-                logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
+            state.timing.design_state = parse_design_state(raw_result)
+            if state.timing.design_state != DesignState.ROUTED:
+                logger.warning(
+                    f"[EXECUTE] WARNING: Timing report from "
+                    f"{state.timing.design_state} design — WNS may be inaccurate"
+                )
         timing = parse_timing_summary(raw_result)
         wns = timing.get("wns")
         tns = timing.get("tns")
@@ -1179,6 +1253,20 @@ async def _rapidwright_direction_check(
         "UNCERTAIN" — cannot determine (no baseline, tool error, etc.)
                        → fall through to existing chain logic (conservative)
     """
+    # ── Design state gate ──────────────────────────────────────────────
+    # RapidWright timing estimation cannot account for routing congestion,
+    # making its WNS unreliable for designs that haven't been fully routed.
+    # For non-ROUTED designs, skip the pre-check entirely and rely on the
+    # Vivado-level checks (Level 2 Place-Only, Level 3 Post-Eval) which
+    # use actual placement data and are more trustworthy.
+    if state.timing.design_state != DesignState.ROUTED:
+        logger.warning(
+            f"[PRECHECK] Design state is '{state.timing.design_state}' — "
+            f"RapidWright timing estimate unreliable without routing data. "
+            f"Skipping pre-check, proceeding to Vivado P&R chain."
+        )
+        return "UNCERTAIN"
+
     # Prefer same-engine baseline (RW-before) for reliable directional comparison.
     # Fall back to Vivado WNS only if no RW baseline was captured.
     if rw_baseline is not None:
@@ -1214,15 +1302,23 @@ async def _rapidwright_direction_check(
         # negative) and skips the chain; the caller marks the strategy
         # ineffective.
         IMPROVE_EPS = 0.001
+        NO_WORK_EPS = 1e-9  # essentially zero — skill didn't touch the design
         if delta > IMPROVE_EPS:
             logger.info(green(f"[PRECHECK] Direction looks IMPROVED (delta={delta:+.3f})"))
             return "IMPROVED"
         if delta < -IMPROVE_EPS:
             logger.warning(yellow(
                 f"[PRECHECK] Direction shows REGRESS (delta={delta:+.3f}ns, "
-                f"threshold=0.000) — skipping Vivado P&R chain"
+                f"threshold={-IMPROVE_EPS:.3f}) — skipping Vivado P&R chain"
             ))
             return "REGRESS"
+        if abs(delta) <= NO_WORK_EPS:
+            # delta is effectively zero: the skill produced no measurable change
+            # in RW's timing model. This often means the skill found no applicable
+            # cells on the critical paths. The caller may check the skill result
+            # for more detailed diagnostics.
+            logger.info(f"[PRECHECK] NO_WORK (delta={delta:+.3f}, |delta|<={NO_WORK_EPS}) — skill did not modify design")
+            return "NO_WORK"
         logger.info(f"[PRECHECK] Direction UNCHANGED (delta={delta:+.3f}, not strictly positive) — skipping Vivado P&R chain")
         return "UNCHANGED"
 
@@ -1268,10 +1364,13 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         design_size_factor=state.timing.design_size_factor,
     )
     # Detect false-positive timing from unplaced/unrouted designs
-    design_not_routed = "Design State" in timing_result and "Routed" not in timing_result
-    state.timing.design_not_routed = design_not_routed
-    if design_not_routed:
-        logger.warning("[EXECUTE] WARNING: Timing report from unplaced/unrouted design — WNS may be inaccurate")
+    design_state = parse_design_state(timing_result)
+    state.timing.design_state = design_state
+    if design_state != DesignState.ROUTED:
+        logger.warning(
+            f"[EXECUTE] WARNING: Timing report from "
+            f"{design_state} design — WNS may be inaccurate"
+        )
     timing = parse_timing_summary(timing_result)
     wns = timing.get("wns")
     tns = timing.get("tns")
@@ -1297,8 +1396,8 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         f"[EVAL] After {tool_name}: WNS={wns:.3f}ns "
         f"(delta={delta:+.3f}ns vs previous). {verdict}."
     )
-    if design_not_routed:
-        eval_notice += " [WARNING: design not routed]"
+    if design_state != DesignState.ROUTED:
+        eval_notice += f" [WARNING: design state={design_state}]"
     if tns is not None:
         eval_notice += f" TNS={tns:.3f}ns"
     if deps.compat is not None:
