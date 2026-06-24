@@ -635,7 +635,7 @@ def format_state_space_for_llm(
             else:
                 lines.append(f"  status: no_data")
             lines.append("")
-            return
+            lines.append("  # No detailed path data (not extracted or all timing met)")
         # ── Normal rendering ──
         if tc.top_violating_paths:
             lines.append(f"  top_paths:  # {len(tc.top_violating_paths)} paths")
