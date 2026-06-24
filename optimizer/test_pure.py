@@ -329,7 +329,7 @@ class TestSelectModel:
         state = OptimizerState()
         state.model.planner_model = "planner-v4"
         state.model.worker_model = "worker-v4"
-        result = select_model(0, 10, state, 160_000)  # >= WORKER_CONTEXT_FORCE_TOKENS
+        result = select_model(0, 10, state, 200_000)  # >= WORKER_CONTEXT_FORCE_TOKENS
         assert result == "planner-v4"
 
     def test_planner_wins_with_margin(self):

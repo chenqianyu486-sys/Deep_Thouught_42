@@ -378,17 +378,25 @@ def parse_critical_path_cells(result: str) -> list[dict]:
         if data.get("status") == "success" and "path_count" in data:
             logger.info(f"[critical_path] Tool wrote {data['path_count']} paths to file (no inline data)")
             return []
+        # Unexpected dict format — log structure for diagnosis
+        logger.warning(
+            f"[critical_path] Received unexpected dict (not error, not output_file mode). "
+            f"Keys: {list(data.keys())[:10]}. Full data preview: {str(data)[:500]}"
+        )
         return []
 
     if isinstance(data, list):
         paths = []
         total_invalid_cells = 0
         total_cells = 0
+        total_empty_cells = 0  # diagnose "Parsed 0 paths" issue
         for item in data:
             if isinstance(item, dict) and "cells" in item:
                 # New format: dict with cells + timing fields + D1/D2 diagnostic fields
                 raw_cells = [str(c) for c in item["cells"]]
                 total_cells += len(raw_cells)
+                if not raw_cells:
+                    total_empty_cells += 1
                 # Filter out invalid cell names (pblock labels, device sites, etc.)
                 valid_cells = [c for c in raw_cells if _is_valid_cell_name(c)]
                 invalid_count = len(raw_cells) - len(valid_cells)
@@ -436,6 +444,15 @@ def parse_critical_path_cells(result: str) -> list[dict]:
             logger.info(
                 f"[critical_path] Parsed {len(paths)} paths, "
                 f"filtered {total_invalid_cells}/{total_cells} invalid cell names"
+            )
+        elif total_empty_cells > 0 and len(paths) == 0:
+            logger.warning(
+                f"[critical_path] Parsed 0 paths: received {len(data)} path dicts, "
+                f"but {total_empty_cells}/{len(data)} have empty 'cells' arrays. "
+                f"This indicates the Vivado timing report regexes did not match cell lines. "
+                f"First item keys: {list(data[0].keys()) if data else 'N/A'}. "
+                f"First item cells: {data[0].get('cells', 'KEY_MISSING') if data else 'N/A'}. "
+                f"First item nodes count: {len(data[0].get('nodes', [])) if data else 'N/A'}."
             )
         else:
             logger.info(f"[critical_path] Parsed {len(paths)} paths from tool result")

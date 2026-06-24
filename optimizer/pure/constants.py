@@ -311,6 +311,8 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
     "vivado_physopt_and_route",
     "vivado_phys_opt_design",
     "vivado_opt_design",
+    "vivado_place_design",
+    "vivado_route_design",
 })
 
 

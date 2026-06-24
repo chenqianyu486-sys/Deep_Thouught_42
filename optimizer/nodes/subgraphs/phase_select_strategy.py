@@ -224,6 +224,9 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
             "wns_before": state.timing.latest_wns,
         },
         message_count=tool_round,
+        design_stage=getattr(state.timing, 'current_stage', ''),
+        critical_paths_count=len(state.timing.critical_paths),
+        stalled_strategies=list(state.iteration.blocked_strategies),
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
     await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff, tool_cache=state.context.tool_cache)

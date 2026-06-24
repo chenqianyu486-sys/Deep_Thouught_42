@@ -183,6 +183,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         iteration=state.iteration.current,
         tool_round=0,
         wns_at_entry=state.timing.latest_wns,
+        best_wns_at_entry=state.timing.best_wns,  # track pre-strategy baseline for true delta
     )
     state.strategy.phase_history.append(phase_entry)
     if len(state.strategy.phase_history) > 100:
@@ -423,6 +424,33 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"State data is extracted via vivado_extract_critical_path_cells.")
                             tool_args["critical_paths"] = paths
                             logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
+
+                # Guard: warn when strategy tools are called with empty critical_paths.
+                # This prevents the wasteful chain: strategy→"skipped"→opt_design error→rollback (17s).
+                if tool_name in (
+                    "rapidwright_execute_combinational_rebalancing_strategy",
+                    "rapidwright_execute_lut_muxf_repack_strategy",
+                    "rapidwright_execute_muxf_tree_reorder_strategy",
+                ):
+                    cp_val = tool_args.get("critical_paths")
+                    # Normalize: both [[]] and [] mean "no usable paths"
+                    cp_is_empty = (
+                        cp_val is None
+                        or not cp_val
+                        or (isinstance(cp_val, list) and all(not p for p in cp_val))
+                    )
+                    if cp_is_empty:
+                        logger.warning(
+                            f"[EXECUTE] Strategy tool '{tool_name}' called with empty critical_paths. "
+                            f"State has {len(state.timing.critical_paths)} entries. "
+                            f"Tool will likely return 'skipped' — injecting notification."
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[DATA WARNING] Strategy tool '{tool_name}' has empty critical_paths. "
+                                f"The tool will likely be skipped because it needs cell path data to operate. "
+                                f"Use vivado_extract_critical_path_cells to get path data, OR select a "
+                                f"strategy that does not depend on critical paths (e.g., opt_design).")
 
                 # Rate limiting for read-only tools
                 if tool_name in PHASE_TOOL_RATE_LIMITS:
@@ -995,6 +1023,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             "wns_after": wns_after,
         },
         message_count=tool_round,
+        design_stage=getattr(state.timing, 'current_stage', ''),
+        critical_paths_count=len(state.timing.critical_paths),
+        stalled_strategies=list(state.iteration.blocked_strategies),
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
     await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff, tool_cache=state.context.tool_cache)
@@ -1488,6 +1519,32 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
     """
     chain = SKILL_CHAIN_ACTIONS.get(tool_name)
     if not chain:
+        return
+
+    # Guard: skip expensive Vivado P&R chain when the skill was skipped / returned empty results.
+    # This prevents the wasteful pattern: strategy→"skipped"→opt_design error→rollback (~17s wasted).
+    is_skipped = (
+        isinstance(skill_result_data, dict)
+        and skill_result_data.get("status") in ("skipped", "no_action", "unchanged")
+    )
+    has_empty_cps = (
+        isinstance(skill_result_data, dict)
+        and not skill_result_data.get("optimized_cells")
+        and not skill_result_data.get("critical_paths")
+    )
+    if is_skipped or (has_empty_cps and tool_name not in ("rapidwright_flatten_lut_cascade",)):
+        skip_reason = "skipped" if is_skipped else "no data produced"
+        logger.info(
+            f"[chain] Strategy tool '{tool_name}' returned '{skip_reason}' — "
+            f"skipping Vivado P&R chain (opt_design→place→route→timing). "
+            f"This avoids ~17s of unproductive rollback when the skill had no effect."
+        )
+        if deps.compat is not None:
+            deps.compat.add_message("user",
+                f"[CHAIN SKIPPED] '{tool_name}' returned '{skip_reason}'. "
+                f"The Vivado P&R chain was skipped because the strategy had no netlist effect. "
+                f"Consider selecting a strategy that does not require critical path data, "
+                f"or use vivado_extract_critical_path_cells to populate path data first.")
         return
 
     # Capture pre-chain WNS baseline (before Vivado opens the skill's DCP).

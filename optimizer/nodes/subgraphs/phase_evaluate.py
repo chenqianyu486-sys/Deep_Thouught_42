@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Increased from 0.001 to 0.050 based on log analysis: deltas below 50ps
 # are noise-level (Vivado routing variability) and should not be treated
 # as genuine improvements or as reasons to skip strategy cooldown.
-STRATEGY_IMPROVEMENT_EPSILON_NS = 0.050
+STRATEGY_IMPROVEMENT_EPSILON_NS = 0.020  # 20ps: filter true noise (<1 LUT delay) but keep small real gains
 
 
 def detect_rollback_needed(state: OptimizerState) -> bool:
@@ -70,7 +70,13 @@ def _strategy_wns_delta_since_entry(state: OptimizerState) -> float | None:
                 and entry.strategy == strategy
                 and entry.iteration == state.iteration.current
                 and entry.wns_at_entry is not None):
-            return best_wns - entry.wns_at_entry
+            # Use best_wns_at_entry as baseline when available.
+            # This prevents crediting THIS strategy with improvements from
+            # prior auto-chains (where best_wns was already better before
+            # the strategy started). Falls back to wns_at_entry for older
+            # phase entries that don't have the field.
+            baseline = entry.best_wns_at_entry if entry.best_wns_at_entry is not None else entry.wns_at_entry
+            return best_wns - baseline
     return None
 
 

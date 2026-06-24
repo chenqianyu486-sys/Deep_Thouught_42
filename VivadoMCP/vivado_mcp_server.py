@@ -907,6 +907,19 @@ def extract_critical_path_cells(
                 },
             })
 
+    # ── Diagnostic: log extraction summary ──
+    total_cells_extracted = sum(len(p.get("cells", [])) for p in all_paths)
+    sample_cells = []
+    for p in all_paths:
+        if p.get("cells"):
+            sample_cells = p["cells"][:3]
+            break
+    logger.info(
+        f"[extract_critical_path_cells] Parsed {len(path_sections)-1} timing sections → "
+        f"{len(all_paths)} paths extracted, {total_cells_extracted} total cells. "
+        f"Sample cells from first path: {sample_cells if sample_cells else '(empty)'}"
+    )
+
     # Write to file if specified, otherwise return JSON
     if output_file:
         try:
@@ -2551,8 +2564,16 @@ async def call_tool(name: str, arguments: dict):
             directive = arguments.get("directive", "Explore")
             retarget = arguments.get("retarget", True)
 
-            # No safety guard needed: opt_design has NO retiming options
-            # (unlike phys_opt_design which has AlternateFlowWithRetiming, AddRetime)
+            # SAFETY GUARD: Vivado forbids using -retarget together with -directive.
+            # Error: [Vivado_Tcl 4-167] Cannot specify '-retarget' when '-directive' is specified
+            # Resolution: only use -retarget when NO directive is specified at all.
+            # When any directive (including Default) is set, suppress -retarget.
+            has_active_directive = bool(directive)
+            if has_active_directive and retarget:
+                logger.info(
+                    f"Suppressing -retarget flag: incompatible with -directive {directive}. "
+                    f"The directive already implies retarget-equivalent behavior."
+                )
 
             # Get WNS before opt_design for delta reporting
             wns_before = None
@@ -2566,9 +2587,9 @@ async def call_tool(name: str, arguments: dict):
 
             # Build and run opt_design command
             cmd = "opt_design"
-            if directive:
+            if has_active_directive:
                 cmd += f" -directive {directive}"
-            if retarget:
+            elif retarget:
                 cmd += " -retarget"
 
             result_text = run_tcl_command(cmd, timeout=timeout)

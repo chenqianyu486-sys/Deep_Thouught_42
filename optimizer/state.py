@@ -70,6 +70,7 @@ class PhaseEntry:
     iteration: int = 0
     tool_round: int = 0
     wns_at_entry: Optional[float] = None     # WNS when entering this phase
+    best_wns_at_entry: Optional[float] = None  # best_wns when entering this phase (for true delta)
     timestamp: float = field(default_factory=time.time)
 
 

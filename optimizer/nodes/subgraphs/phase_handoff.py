@@ -37,6 +37,11 @@ class PhaseHandoff:
     message_count: int = 0
     tool_results: list[str] = field(default_factory=list)
 
+    # P1 fix: state-awareness fields to prevent LLM blindness
+    design_stage: str = ""               # "unplaced" | "placed" | "routed"
+    critical_paths_count: int = 0         # number of paths in state.timing.critical_paths
+    stalled_strategies: list[str] = field(default_factory=list)  # blocked this iteration
+
     def to_phase_context_string(self) -> str:
         """Format handoff as injectable context string.
 
@@ -53,6 +58,15 @@ class PhaseHandoff:
             parts.append(f"TNS: {self.tns:.3f}ns")
         if self.failing_endpoints is not None:
             parts.append(f"Failing Endpoints: {self.failing_endpoints}")
+        # P1: design state awareness
+        if self.design_stage:
+            parts.append(f"Design Stage: {self.design_stage}")
+        if self.critical_paths_count > 0:
+            parts.append(f"Critical Paths Available: {self.critical_paths_count} paths in state")
+        else:
+            parts.append("Critical Paths Available: NONE — parser returned 0 paths. Use vivado_extract_critical_path_cells to populate.")
+        if self.stalled_strategies:
+            parts.append(f"Stalled (blocked this iteration): {', '.join(self.stalled_strategies)}")
         if self.llm_summary:
             # Trim very long summaries
             summary = self.llm_summary[:600]
@@ -90,6 +104,9 @@ def build_phase_handoff(
     tools_called: list[str] | None = None,
     message_count: int = 0,
     tool_results: list[str] | None = None,
+    design_stage: str = "",
+    critical_paths_count: int = 0,
+    stalled_strategies: list[str] | None = None,
 ) -> PhaseHandoff:
     """Build a PhaseHandoff from a completed phase."""
     return PhaseHandoff(
@@ -102,6 +119,9 @@ def build_phase_handoff(
         tools_called=tools_called or [],
         message_count=message_count,
         tool_results=tool_results or [],
+        design_stage=design_stage,
+        critical_paths_count=critical_paths_count,
+        stalled_strategies=stalled_strategies or [],
     )
 
 
