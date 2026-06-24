@@ -68,54 +68,55 @@ make run_optimizer_dashboard DCP=input.dcp
 ### V2 状态机拓扑
 
 ```text
-init_analysis ──► [WNS >= 0?]
-  │  YES ──► save_output ──► end
-  │  NO  ──► iteration_start ──► select_model ──► prepare_context
-  │            ──► llm_tool_loop ──► iteration_end ──► check_exit
-  │                  │                       │
-  │       ┌──────────┴──────────┐           │
-  │       ▼          ▼          ▼           │
-  │   ANALYZE ──► SELECT ──► EXECUTE ──► EVALUATE
-  │       ▲                                  │
-  │       └────── CONTINUE ──────────────────┘
-  │                                          │
-  │       DONE / NEXT / SWITCH / ROLLBACK ──► iteration_start
+init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
+                  └──NO──► iteration_start ──► select_model ──► prepare_context
+                            ──► llm_tool_loop (4阶段子图: ANALYZE→SELECT→EXECUTE→EVALUATE)
+                            ──► iteration_end ──► check_exit ──► loop/rollback/end
 ```
 
 ### 核心设计原则
 
+**架构层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
 | 1 | 故障安全，不阻塞 | 当 `report_step_state` 缺失时，自动合成 `CONTINUE` 信号 |
 | 2 | 事实，而非主观判断 | 仪表盘仅包含原始测量数据，作为最后一条用户消息注入 |
-| 3 | 消除冗余 | 仪表盘是唯一的实时数据源；交接时仅传递迭代记忆 |
-| 4 | 显式优于隐式 | 9 节点状态机 + 类型化数据类（dataclass）状态切片 |
-| 5 | 关注点分离 | Worker（250K tokens，负责执行） vs. Planner（1M tokens，负责战略决策） |
-| 6 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
-| 7 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
-| 8 | 编码领域知识 | 14 种策略带有触发条件；LLM 自主选择 |
-| 9 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；自动注释过期数据；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells`，阻断错误 TCL 提取污染 |
-| 10 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status） |
+| 3 | 关注点分离 | Worker（250K tokens，负责执行）vs. Planner（1M tokens，负责战略决策） |
+| 4 | 单一调用路径 | V2 仅使用原生函数调用；无 XML/YAML 文本回退 |
+| 5 | 单一事实来源 | 运行时数据存储在 `OptimizerState` 中；`MemoryManager` 中无影子副本 |
+
+**数据与上下文层面**:
+| # | 原则 | 实现方式 |
+|---|-----------|----------------|
+| 6 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
+| 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
+| 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
+| 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |
+| 10 | 上下文工程：弱引导 | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。LLM 保留自主决策权 |
+
+**验证与安全层面**:
+| # | 原则 | 实现方式 |
+|---|-----------|----------------|
 | 11 | 逻辑等价性硬约束 | 所有优化均由 `validate_dcps.py` 验证（结构 + 功能） |
-| 12 | DCP 身份完整性 | 在 EXECUTE 阶段，将 `vivado_open_checkpoint` 从 LLM 工具白名单中移除 |
-| 13 | **工具结果缓存** | 同 phase 内相同工具+参数自动命中缓存，避免 LLM 重复调用；执行工具（place_design, route_design 等）后自动失效缓存防止物理数据过期 |
-| 14 | **只读工具白名单控制** | 与 Dashboard 数据冗余的工具（`get_wns`, `get_resource_counts`）从 ANALYZE/EVALUATE 白名单移除；Rate limiting（`search_cells` 最多 3 次/phase, `vivado_run_tcl` 最多 5 次/phase）防止 LLM 浪费轮次 |
-| 15 | **PBLOCK 自适应紧缩** | 公式 `M = max(1.10, 1.2 + util_local x 0.3 - 0.1 x log10(N_LUT))`，低利用率自动紧缩 region，高利用率自动宽松 |
-| 16 | **LLM 提示缓存** | 每次 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`。OpenRouter 在同一会话的重复调用间缓存系统提示前缀，每轮迭代节省约 4KB×44 次 ≈ 176KB tokens。共享函数 `build_llm_extra_body()` 位于 `optimizer/pure/constants.py`。 |
-| 17 | **Dashboard 数据可信度注解** | Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）。每个 N/A 和空列表携带机器可读原因: `"N/A(congestion_analysis_not_supported)"`、`[]  # no_high_fanout_nets_found`。 |
-| 18 | **Vivado 超时自动重启** | Tcl 超时会污染 Vivado session。不再使用不可靠的 `sync_after_timeout()`，改为 MCP server 内部自动 kill→restart→reopen DCP。移除 `_command_pending` 全局状态。 |
-| 19 | **未布局 DCP 保存防护** | 在写入输出 DCP 前，`save_output` 查询 `get_property STATUS [current_design]`，回退到时序报告 `Design State` 字段（识别 `routed`/`placed`/`optimized` 三种状态）。若设计未布线，从 best_checkpoint 恢复或自动执行 `place_design` + `route_design` 修复后再保存。写入后再次验证设计状态，若非 `routed` 则记录警告。防止保存未布局 DCP 导致 `validate_dcps.py` 验证失败。 |
-| 20 | **虚假正 WNS 检测** | `_post_eval_hook` 和 `_track_wns_from_result` 检查时序报告中的 `Design State`。若非 `Routed`，记录警告并追加到评估通知（`[WARNING: design not routed]`），提醒 LLM WNS 可能不准确。Place-only WNS 检查也验证设计状态——若为 `Optimized`（未布局），跳过 WNS 检查避免基于估计延迟的虚假正信号。 |
-| 21 | **Unplace 自动回滚** | EXECUTE 阶段追踪 `place_design -unplace` 调用。若阶段退出时未执行后续 `place_design`（非 unplace），自动从 pre-unplace checkpoint 恢复设计并刷新 WNS。 |
-| 22 | **多策略循环** | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。防止单次迭代因单一失败策略浪费。 |
-| 23 | **TTL 策略重试** | `FailedStrategyRecord.blocked_until_iter` 为策略阻止添加 TTL。`strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封。防止策略目录被永久阻止耗尽。 |
-| 24 | **EXECUTE 约束放宽** | 执行策略工具后，LLM 可调用 `rapidwright_report_timing` 快速反馈（~2.5s vs ~14s 全 Vivado 时序），然后信号 EXEC_DONE。提供快速方向性检查。 |
-| 25 | **上下文工程：弱引导** | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。工具过滤 + auto-chain 处理执行机制。LLM 保留自主策略选择和诊断决策权。 |
-| 26 | **设计一致性验证工具** | 4 个验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_estimate_timing`, `rapidwright_compare_designs`）在所有阶段可用。LLM 可自主验证设计状态，确保修改后一致性。 |
-| 27 | **独立 RapidWright 工具** | 19 个 RapidWright 工具（8 个分析 + 10 个执行 + 1 个验证）暴露给 LLM，支持细粒度控制。LLM 可自主选择工具组合，而非被硬编码链限制。 |
-| 28 | **可选链验证** | `OPTIONAL_CHAIN_VALIDATION` 提供 4 个可选验证链，LLM 可选择是否在执行前后插入验证步骤。验证工具（`vivado_check_design_status`, `vivado_validate_timing`, `rapidwright_compare_designs`）确保设计一致性。 |
-| 29 | **Vivado 执行工具错误检测** | `place_design`、`route_design`、`phys_opt_design`、`opt_design`、`physopt_and_route` 在 MCP 服务器中检测 Vivado `ERROR: [` 文本，返回 JSON `{"error": ...}` 响应。链式执行（`phase_execute.py`）同时检查 JSON `error` 键和文本 `ERROR: [` 模式，确保 Vivado 命令失败时链中止并回滚，而非静默继续。 |
-| 30 | **策略阻止状态可见性** | Dashboard `strategy_lifecycle` 始终显示，包含 `blocked_this_iteration`（本迭代冷却策略）和 `blocked_ttl`（TTL 持久阻止策略及解封倒计时）。防止 LLM 在上下文压缩后丢失 `[BLOCKED]` 消息而重复选择已阻止策略。 |
+| 12 | DCP 身份完整性 | EXECUTE 阶段从工具白名单移除 `vivado_open_checkpoint` |
+| 13 | 虚假正 WNS 检测 | 检查时序报告 `Design State`，若非 `Routed` 则标注警告 |
+| 14 | 未布局 DCP 防护 | `save_output` 前检查设计状态，自动执行 place/route 修复 |
+| 15 | Unplace 自动回滚 | 追踪 `place_design -unplace`，阶段退出时若未恢复则从 checkpoint 回滚 |
+| 16 | Vivado 执行工具错误检测 | MCP 服务器检测 `ERROR: [` 文本，返回 JSON `{"error": "..."}` |
+| 17 | retiming 安全守卫 | 阻止 `AlternateFlowWithRetiming`、`AddRetime` 等指令（双层防护） |
+
+**策略与迭代层面**:
+| # | 原则 | 实现方式 |
+|---|-----------|----------------|
+| 18 | 编码领域知识 | 14 种策略带有触发条件；LLM 自主选择 |
+| 19 | 多策略循环 | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`) |
+| 20 | TTL 策略重试 | `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮后自动解封 |
+| 21 | 冷却逻辑分层 | 区分策略工具错误 vs 辅助工具错误；Improvement 阈值 0.050ns |
+| 22 | 工具结果缓存 | 同 phase 内相同参数自动命中缓存；执行工具后自动失效 |
+| 23 | 工具调用频率限制 | `search_cells` 最多 3 次/phase，`vivado_run_tcl` 最多 2 次/phase |
+| 24 | 收益递减自动检测 | 同一策略最近 2+ 次使用且每次 |delta| < 0.020ns 时标记为 `no_improvement` |
+
+> 完整实现级技术细节见 [architecture.md](architecture.md)。
 
 ---
 
@@ -194,65 +195,41 @@ make run_optimizer_dashboard DCP=input.dcp
 make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 
-仪表盘提供 20 个实时面板（7 模块 StateSpace + 13 个旧版详情面板）：
+仪表盘提供 20 个实时面板：
 
-**7 模块 StateSpace（Agent 数据输入层）：**
+**7 模块 StateSpace（Agent 数据输入层）**: M1 Global State（WNS/TNS/利用率）、M2 Timing Clusters（Top-20 违例路径）、M3 Physical Congestion（拥塞/热点）、M4 Netlist Quality（扇出/控制集）、M5 Constraints（时钟/约束）、M6 Dynamic Gradient（上一步 delta）、M7 Architecture Overview（模块级热力图）。
 
-| 模块 | 面板 | 内容 |
-|--------|-------|---------|
-| **M1** | **Global State & Targets** | 阶段标签、WNS/TNS/WHS/THS 裕量、LUT/FF/DSP/BRAM 利用率进度条 |
-| **M2** | **Timing Path Clusters** | Top-20 违例端点，含时钟组、逻辑/布线延迟占比、逻辑级数 |
-| **M3** | **Physical & Congestion** | 全局拥塞评分、热点区域（bbox + 严重度 + 模块）、Pblock 溢出数 |
-| **M4** | **Netlist Quality** | 高扇出网络（含复制状态）、控制集、跨时钟域路径、推理失败列表 |
-| **M5** | **Constraints Environment** | 时钟表（名称→频率）、伪/多周期路径数、IO 延迟覆盖率、PVT corner |
-| **M6** | **Dynamic Gradient (Delta)** | delta_WNS、delta_TNS、delta_congestion、上一步动作 + 动作状态 |
-| **M7** | **Architecture Overview** | 模块级时序热力图（critical_path_hits, path_coverage）、跨/模块内关键路径计数、最深逻辑模块。零成本：从关键路径 cell 名解析。
-
-**旧版详情面板：**
-
-| 面板 | 内容 |
-|-------|---------|
-| **Timing (时序)** | WNS / TNS / 失败端点及迷你折线图 |
-| **Iteration (迭代)** | 计数器、无改善追踪、策略序列 |
-| **Strategy Lifecycle (策略生命周期)** | 4 阶段指示器 + 当前策略/评估 |
-| **Model (模型)** | 当前模型、回退状态、调用次数 |
-| **Cost (成本)** | 总成本及进度条、Token 细分 |
-| **Control (控制)** | 运行时状态、已用时间、DCP 路径 |
-| **Critical Paths (关键路径)** | 单元列表及每条路径的时序详情 |
-| **LLM Log (LLM 日志)** | 最新提示词/响应 + 完整调用历史 |
-| **Transition History (转换历史)** | 节点到节点的转换及 WNS 快照 |
-| **Tool Call Trace (工具调用追踪)** | 所有工具调用的耗时和状态 |
-| **Flow Control Log (流控日志)** | 颜色编码的信号轨迹 (DONE/SWITCH/ROLLBACK) |
-| **Phase History (阶段历史)** | 带时间戳的阶段转换 |
-| **WNS Trajectory (WNS 轨迹)** | 随迭代累计的改善情况 |
+**13 个旧版详情面板**: Timing、Iteration、Strategy Lifecycle、Model、Cost、Control、Critical Paths、LLM Log、Transition History、Tool Call Trace、Flow Control Log、Phase History、WNS Trajectory。
 
 ---
 
 ## 项目结构
 
-```text
+```
 Deep_Thouught_42/
-├── dcp_optimizer.py          # 主入口：V2 状态机 CLI + 模型配置
-├── optimizer/                # V2 状态机框架
-│   ├── state.py              # 类型化数据类：7 个状态子切片
-│   ├── graph.py              # NodeGraph：执行引擎
-│   ├── nodes/                # 9 个节点实现 + llm_tool_loop 子图
-│   └── pure/                 # 14 个无状态纯函数模块（可单元测试），含 state_space.py（7 模块 StateSpace）
+├── dcp_optimizer.py          # CLI 入口：V2 状态机启动 + 模型配置
+├── optimizer/                # V2 状态机框架（41 文件）
+│   ├── state.py              # OptimizerState + 7 子切片 dataclass
+│   ├── deps.py               # NodeDeps：外部依赖容器
+│   ├── graph.py / edges.py   # NodeGraph 执行引擎 + 条件边
+│   ├── nodes/                # 9 个节点 + llm_tool_loop 子图（4 阶段）
+│   └── pure/                 # 15 个纯函数模块（可独立单元测试）
 ├── strategy_library.py       # 14 种策略及触发条件
-├── skills/                   # 技能框架：14 个注册技能
-├── RapidWrightMCP/           # RapidWright MCP 服务器
-├── VivadoMCP/                # Vivado MCP 服务器
-├── context_manager/          # 内存/压缩管理
-├── dashboard/                # Web 仪表盘 (aiohttp + WebSocket)
-├── architecture.md           # 架构技术细节（迁移映射、压缩管线、flow_control）
-├── CONTRIBUTING.md           # 贡献工作流与同步清单
-├── validate_dcps.py          # DCP 逻辑等价性验证器
+├── skills/                   # Skill 框架（渐进式三层加载，34 文件）
+├── RapidWrightMCP/           # RapidWright MCP 服务器（19+ 工具）
+├── VivadoMCP/                # Vivado MCP 服务器（20+ 工具）
+├── context_manager/          # 内存/压缩管理（EventBus + yaml_structured 压缩器）
+├── dashboard/                # Web 仪表盘（aiohttp + WebSocket，20 面板）
+├── validate_dcps.py          # DCP 逻辑等价性验证器（结构 + 功能双阶段）
+├── config_loader.py          # 模型配置加载器（单例）
 ├── model_config.yaml         # LLM 层级与回退配置
-├── Makefile                  # 构建自动化
-└── docs/                     # 竞赛提交文档
+├── Makefile                  # 构建自动化（setup/run/test/validate）
+├── CONTRIBUTING.md           # 贡献工作流与同步清单
+├── docs/                     # 竞赛提交文档
+└── .claude/                  # Claude Code 配置 + MCP 设置
 ```
 
-详见 [PROJECT_TREE_AND_DATA_FLOW.md](PROJECT_TREE_AND_DATA_FLOW.md)。
+> 完整模块级结构见 [PROJECT_TREE_AND_DATA_FLOW.md §1](PROJECT_TREE_AND_DATA_FLOW.md#1-项目结构模块级)。
 
 ---
 

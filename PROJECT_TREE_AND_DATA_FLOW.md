@@ -132,11 +132,11 @@ llm_tool_loop_node (调度器)
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
 
-> 阶段内完整消息流程、压缩细节、handoff 格式见 [architecture.md §3](architecture.md)。
+> 阶段内完整消息流程、压缩细节、handoff 格式见 [architecture.md §1](architecture.md)。
 
 ### 2.4 关键设计原则
 
-> 40 条设计原则（故障安全、数据可信度、DCP 身份完整性、工具缓存、自适应 PBLOCK、LLM 提示缓存等）。完整列表见 [README.md](README.md) 核心设计原则和 [architecture.md §13](architecture.md)。
+> 40 条设计原则（故障安全、数据可信度、DCP 身份完整性、工具缓存、自适应 PBLOCK、LLM 提示缓存等）。完整列表见 [README.md](README.md) 核心设计原则和 [architecture.md §11](architecture.md)。
 
 ## 3. 核心数据流
 
@@ -160,296 +160,126 @@ _prepare_api_messages():
                                                    LLM API Call
 ```
 
-> 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §3.1-§3.2](architecture.md)。
+> 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §1.1-§1.2](architecture.md)。
 
 ### 3.1.1 init_analysis 增强数据提取
 
-`init_analysis_node` 在优化开始前一次性提取所有可获取的设计数据，填入 Dashboard 的 7 个模块，避免 LLM 在 ANALYZE 阶段浪费工具调用轮次：
+`init_analysis_node` 在优化开始前一次性提取设计数据，填入 Dashboard 7 个模块，避免 LLM 在 ANALYZE 阶段浪费工具调用轮次：
 
 ```
-Phase A (并行初始化):
-  vivado_open_checkpoint ∥ rapidwright_initialize_rapidwright
-
-Phase B (跨服务器并行管线):
-  Vivado pipeline (10步串行) ∥ RapidWright pipeline (3步串行)
-  Vivado:  timing_summary → clock_period → hold_timing → high_fanout_nets
-           → resource_utilization(get_cells -filter, 非report_*) → critical_path_cells → route_status
-           → control_sets → false_paths → multicycle_paths → IO_delay → CDC
-  RapidWright: read_checkpoint → device_topology → design_info
-
-Phase C (跨服务器分析):
-  critical_path_spread → congestion_analysis
+Phase A (并行): vivado_open_checkpoint ∥ rapidwright_initialize_rapidwright
+Phase B (并行管线):
+  Vivado: timing_summary→clock_period→hold_timing→high_fanout→utilization→critical_path→route_status→control_sets→false_paths→multicycle→IO_delay→CDC
+  RapidWright: read_checkpoint→device_topology→design_info
+Phase C (跨服务器): critical_path_spread→congestion_analysis
 ```
 
-**提取数据与 Dashboard 模块映射**:
+提取数据对应 Dashboard 模块：M1(WNS/TNS/Utilization)、M2(Critical paths + spread)、M3(Congestion/Route status)、M4(Control sets/CDC/High fanout)、M4b(Cell composition)、M5(Constraints/PVT)、M6(Delta)、M7(Module hotspots)。新鲜度分动态(工具刷新)和静态(仅初始化提取)两类。
 
-| 数据 | Dashboard 模块 | 新鲜度 |
-|------|---------------|--------|
-| WNS/TNS/Failing endpoints | M1 Global State | 动态 (后续工具刷新) |
-| Clock period, hold timing, utilization | M1 Global State | 静态 / 动态 |
-| Critical path cells + spread | M2 Timing Clusters | 动态 |
-| Best WNS / best_wns_iteration | M1 Global State | 静态(初始为 N/A(initial_state)) |
-| Cell count / net count | M1 Global State | 静态(来自 RapidWright) |
-| Route status (wirelength, long nets) | M3 Physical Congestion | 动态 |
-| Congestion (global score) | M3 Physical Congestion | 动态 |
-| Control sets, CDC paths, cell types | M4 Netlist Quality | 静态 |
-| Cell type composition (MUXF/FF/LUT ratio) | M4b Design Structure | 静态（SELECT_STRATEGY 独占） |
-| Recent analysis tool results | M8 Recent Analysis | 动态（SELECT_STRATEGY 独占，从 raw_tool_outputs 推导） |
-| High fanout nets | M4 Netlist Quality | 动态 |
-| Constraints (false/multicycle paths, IO delay) | M5 Constraints | 静态 |
-| PVT corner | M5 Constraints | 静态 |
-| Delta data | M6 Dynamic Gradient | 初始为空 |
-| Module-level timing hotspots (from critical path cell names) | M7 Architecture Overview | 动态（随着 critical_paths 更新） |
-
-**验证**: `make run_init_analysis DCP=<path>` 运行完整提取 + Dashboard 构建 + 字段完整性检查，无需 LLM。
+**验证**: `make run_init_analysis DCP=<path>` 运行完整提取 + Dashboard 字段完整性检查。
 
 ### 3.2 Agent 上下文 Dashboard (7 模块 StateSpace)
 
-每轮 LLM 调用前注入纯数据 Dashboard（作为最后一条 user 消息，最大注意力权重）。数据由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化的 7 模块 YAML：
+每轮 LLM 调用前注入纯数据 Dashboard（最后一条 user 消息，最大注意力权重）。由 `optimizer/pure/state_space.py` 从 `OptimizerState` 构建为规范化 YAML：
 
 ```yaml
 [ANALYZE — Context & Dashboard]
 
 # Module 1: Global State & Targets
 global_state:
-  current_stage: PLACEMENT
-  iteration_count: 5
-  target_frequency: 300.0
-  wns_setup: -0.523
-  tns_setup: -12.340
-  whs_hold: 0.045
-  lut_utilization: 49.16%
-  ff_utilization: 19.66%
+  current_stage: PLACEMENT;  wns_setup: -0.523;  tns_setup: -12.340;  whs_hold: 0.045
+  iteration_count: 5;  target_frequency: 300.0
+  lut_utilization: 49.16%;  ff_utilization: 19.66%
 
-# Module 2: Timing Path Clusters (Top 20)
+# Module 2: Timing Path Clusters
 timing_clusters:
-  freshness: extracted_iteration=2, stale=false, total_failing_from_timing_report=1529
+  freshness: "extracted_iter=2, stale=false, total_failing=1529"
   top_paths:
     - endpoint: u_core/u_alu/reg_0
-      startpoint: u_core/launch_ff/Q          # D1: launch cell/pin (was missing)
-      source_clock: clk_a                      # D2: real clock (was string-guessed)
-      dest_clock: clk_b
-      cross_clock: true                        # D2: cross-clock flag
-      slack: -0.523
-      clock_skew: 0.014ns                      # D2: Clock Path Skew
-      clock_uncertainty: 0.035ns               # D2: Clock Uncertainty
-      logic_delay_pct: 0.45
-      route_delay_pct: 0.55
-      logic_levels: 12
-      path_group: clk_a
-      cell_type_chain: LUT→LUT6→MUXF7→LUT→FDRE   # full path cell type sequence
-      # cell counts: LUT=3, MUXF=1, FF=1
-      delay_hotspots:  # top contributors (D1: per-node delay breakdown)
-        - u_core/lut1 [LUT6] 0.082ns (16%) @ SLICE_X2Y2
-        - u_core/launch_ff [FDRE] 0.079ns (15%) @ SLICE_X1Y1
-        - u_core/n2 [net] 0.065ns (13%)
+      slack: -0.523;  logic_levels: 12;  logic_delay_pct: 0.45;  route_delay_pct: 0.55
+      cell_type_chain: LUT→LUT6→MUXF7→LUT→FDRE   # D1: per-node delay breakdown
+      delay_hotspots: [u_core/lut1 [LUT6] 0.082ns, u_core/launch_ff [FDRE] 0.079ns]
+      source_clock: clk_a;  dest_clock: clk_b;  cross_clock: true  # D2: clock context
+  severity_distribution: {critical: 12, moderate: 38, marginal: 77}
+  path_clusters: [{cluster: logic_deep_aes, path_count: 12, slack_range: -1.200~-0.850ns}]
 
-  # Violation summary: compact aggregate (always shown with full Module 2)
-  severity_distribution:
-    critical_slack_lt_-1.0ns: 12
-    moderate_slack_-1.0_to_-0.3ns: 38
-    marginal_slack_-0.3_to_0ns: 77
-  delay_profile_breakdown:
-    logic_dominated_paths: 45
-    route_dominated_paths: 62
-    mixed_paths: 20
-    dominant_delay_type: route_dominated
-  logic_level_distribution:
-    levels_1_to_5: 15
-    levels_6_to_10: 52
-    levels_gt_10: 60
-  top_violating_modules:
-    aes_core: 38 endpoints, min_slack=-0.52ns
-  path_clusters:  # Representative path per cluster (方案3: 路径聚类压缩)
-    - cluster: logic_dominated_aes_core
-      path_count: 12
-      slack_range: -1.200ns to -0.850ns
-      avg_logic_delay_pct: 0.82
-      avg_logic_levels: 14.0
-      module: aes_core
-    - cluster: route_dominated_pcie_ctrl
-      path_count: 25
-      slack_range: -0.600ns to -0.300ns
-      avg_logic_delay_pct: 0.25
-      avg_logic_levels: 3.5
-      module: pcie_ctrl
-  top_failing_endpoints:  # 方案6: 端点缓存（show N of M）
-    - top/aes_core/sbox/reg_0
-    - top/aes_core/mix_cols/reg_1
-    - top/pcie_ctrl/dma/reg_2
+# Module 3: Physical & Congestion
+physical_congestion: {global_congestion_score: 0.65, avg_wirelength: 12.3, hotspots: [...]}
 
-# Module 3: Physical & Congestion Metrics
-physical_congestion:
-  global_congestion_score: 0.65
-  avg_wirelength: 12.3
-  long_route_nets_count: 42
-  hotspots: [...]
-
-# Module 4: Netlist Quality Profiler
-netlist_quality:
-  total_control_sets: 5
-  avg_control_sets_per_slice: 0.12
-  cross_domain_paths_count: 3
-  top_cell_types: LUT6:1234, FDRE:5678, CARRY8:210, LUT5:98, ...
-  high_fanout_nets: [...]
+# Module 4: Netlist Quality
+netlist_quality: {total_control_sets: 5, cross_domain_paths: 3, high_fanout_nets: [...]}
 
 # Module 5: Constraints Environment
-constraints_env:
-  clock_definitions:
-    clk_fpl26contest: 300.0 MHz
-  false_paths_count: 2
-  multicycle_paths_count: 1
-  io_delay_defined_pct: 85.00%
-  pvt_corner: slow_0p95v_85c
+constraints_env: {clock_defs: {clk: 300MHz}, false_paths: 2, pvt: slow_0p95v_85c}
 
-# Module 6: Dynamic Gradient (Delta)
-# NOTE: last_action_taken and action_status are only populated during
-# EXECUTE_STRATEGY and EVALUATE phases. In ANALYZE/SELECT_STRATEGY
-# phases they are cleared to prevent stale iteration data from
-# misleading the LLM (see _build_dynamic_gradient in state_space.py).
-dynamic_gradient:
-  delta_wns: +0.0770
-  last_action_taken: PhysOpt
-  action_status: Success
+# Module 6: Dynamic Gradient
+dynamic_gradient: {delta_wns: +0.077, last_action: PhysOpt, status: Success}
 
 # Module 7: Architecture Overview
 architecture_overview:
-  top_modules:
-    - name: "aes_core"
-      critical_path_hits: 38
-      path_coverage: 52.8%
-      sub_modules: [sbox, mix_cols, key_expand]
-    - name: "pcie_ctrl"
-      critical_path_hits: 21
-      path_coverage: 29.2%
-      sub_modules: [dma, tlp]
-  cross_module_paths: 3
-  intra_module_paths: 6
-  deepest_module: "aes_core/sbox"
-  total_cells_analyzed: 72
+  top_modules: [{name: aes_core, hits: 38, coverage: 52.8%, sub: [sbox, mix_cols]}]
+  deepest_module: aes_core/sbox;  total_cells_analyzed: 72
 ```
 
-**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块可见性——ANALYZE 阶段看 **7 模块**（M5 constraints 在 ANALYZE 隐藏，SELECT_STRATEGY 才出现；M4b `design_structure` 两阶段均可见，为 LLM 提供早期细胞组成结构信号），**SELECT_STRATEGY 看 9 模块**（新增 Module 4b `design_structure` + Module 8 `recent_analysis`），EXECUTE/EVALUATE 阶段看 M1 + M2b (timing_violation_summary 紧凑摘要) + M6。
+**Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块——ANALYZE 看 7 模块（M5 隐藏），SELECT_STRATEGY 看 9 模块（新增 M4b `design_structure` + M8 `recent_analysis`），EXECUTE/EVALUATE 看 M1 + M2b (紧凑摘要) + M6。
 
-**LLM 防歧义注解**: Dashboard 所有 N/A 和空列表都带有动态原因，区分"未分析"与"确实为零"：
-- `best_wns: "N/A(initial_state)"` — 首次迭代前尚未有最佳值
-- `high_fanout_nets: []  # no_high_fanout_nets_found` — 已分析，结果为 0
-- `global_congestion_score: "N/A(congestion_analysis_not_supported)"` — 当前设备不支持该分析
-- `io_delay_defined_pct: "N/A(no_io_ports)"` — 设计中无 IO 端口
-- `long_route_nets_count: "N/A(data_not_available)"` — 路由状态数据不可用
+**LLM 防歧义注解**: 所有 N/A 和空列表带机器可读原因——`"N/A(initial_state)"`、`"N/A(no_io_ports)"`、`[]  # no_high_fanout_nets_found`。纯数据无判断标签。每次通过 `build_state_space()` 重建，不进入 MessageStore，同时通过 WebSocket 推送到前端。
 
-- 纯数据，无判断标签 → LLM 自主推理
-- 每次通过 `build_state_space()` 重建，不进入 MessageStore
-- 同时作为 Web 前端 `data.state_space` 通过 WebSocket 推送
-- **设计状态标注（design_not_routed）**: 当 `_post_eval_hook` / `_track_wns_from_result` 检测到 `report_timing_summary` 输出中 `Design State` 不含 `Routed` 时，设置 `state.timing.design_not_routed = True`。Dashboard M1 `current_stage` 下方显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`，防止 LLM 基于未布线设计的虚假 WNS 做出错误决策。
+**设计状态标注（design_not_routed）**: 检测到 `Design State` 不含 `Routed` 时，Dashboard 显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`。
 
-### 3.2.1 新增模块：design_structure（Module 4b）
+### 3.2.1 新增模块
 
-ANALYZE + SELECT_STRATEGY 阶段均可见，从 `state.timing.design_info.top_cell_types` 推导细胞组成结构信号。零额外 MCP 开销。LLM 在 ANALYZE 阶段即可看到 LUT/MUXF/FF 构成比，为早期策略判断提供依据。
+**Module 4b `design_structure`** (ANALYZE+SELECT_STRATEGY 可见)：从 `top_cell_types` 推导细胞组成信号——`muxf_ratio`、`ff_to_lut_ratio`、`structural_patterns`(如 `MUXF7+MUXF8_cascade`)、`dominant_cell_types`。零 MCP 开销。
 
-```yaml
-# Module 4b: Design Structure
-design_structure:
-  cell_composition:
-    lut: 31370
-    muxf: 3983  # MUXF7=3016, MUXF8=967
-    ff: 1660
-    muxf_ratio: 10.7%
-    ff_to_lut_ratio: 0.053
-  structural_patterns: MUXF7+MUXF8_cascade, shallow_pipeline
-  dominant_cell_types: LUT6(24377) > MUXF7(3016) > LUT5(4744)
-```
+**Module 8 `recent_analysis`** (SELECT_STRATEGY 独占)：从 `raw_tool_outputs` 提取最近两轮分析工具摘要（timing_summary、critical_path_spread、congestion、fanout 等 8 种工具）。零 MCP 开销。
 
-提供四个关键结构信号：`muxf_ratio`（MUXF 在总细胞占比）、`ff_to_lut_ratio`（FF/LUT 比例反映流水线深度）、`structural_patterns`（MUXF7+MUXF8_cascade / carry_chain / shallow_pipeline）、`dominant_cell_types`（前三大细胞类型）。
+### 3.2.2 上下文工程变更（2026-06）
 
-### 3.2.2 新增模块：recent_analysis（Module 8）
+- **弱引导**: `design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
+- **Handoff 增强**: `PhaseHandoff` 新增 `tool_results` 字段；SELECT_STRATEGY 阶段可调用 `vivado_get_raw_tool_output` 查询 ANALYZE/EVALUATE 阶段原始输出
+- **细胞类型链**: Module 2 每路径新增 `cell_type_chain`（如 `LUT→MUXF7→LUT→FDRE`），零 MCP 开销
+- **端点计数对齐**: `top_violating_endpoints` 显示 `showing N of M total failing`，避免误导
+- **空数据优雅降级**: `critical_paths` 为空时显示 `status: not_extracted_or_all_cells_invalid`
 
-SELECT_STRATEGY 阶段独占。从 `state.context.raw_tool_outputs` 提取最近两轮迭代的分析工具摘要。零额外 MCP 开销。
-
-```yaml
-# Module 8: Recent Analysis Results
-recent_analysis:
-  - [vivado_report_timing_summary] WNS=-0.978, TNS=-835.005, failing=1529
-  - [rapidwright_analyze_critical_path_spread] avg_distance=111.86, max_distance=198
-  - [rapidwright_analyze_congestion] global_score=0.10, severity=LOW
-  - [vivado_get_cached_high_fanout_nets] 24 nets, max_fanout=259
-```
-
-覆盖 8 种分析工具：`vivado_report_timing_summary`、`rapidwright_analyze_critical_path_spread`、`rapidwright_analyze_congestion`、`vivado_get_cached_high_fanout_nets`、`rapidwright_analyze_net_detour`、`vivado_check_design_status`、`rapidwright_search_cells`、`vivado_extract_critical_path_cells`。
-
-### 3.2.3 上下文工程变更
-
-- **移除策略引导**：`design_delay_profile` 不再附带 `strategy_hint`（如 `"PBLOCK/CongestionSpreading/NetSwap preferred"`），`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述（如 `arch_insight: Critical paths concentrate in "module" (52% coverage)`），不再推荐具体策略。
-- **移除 `ff_warning` 否定引导**：FF 利用率低时仅标注 `ff_utilization: 0.21%  # low FF count`，不再说 "pipeline-based strategies inapplicable"。
-- **`design_type_note` 简化**：纯组合设计仅标注 `"no sequential elements for retiming"`。
-- **ANALYZE→SELECT_STRATEGY handoff 增强**：`PhaseHandoff` 新增 `tool_results: list[str]` 字段，ANALYZE 阶段退出时通过 `_extract_recent_tool_results()` 注入最近分析工具结果摘要。SELECT_STRATEGY 阶段 LLM 可直接从 handoff 文本中看到工具具体结果。
-- **`raw_tool_outputs` 跨阶段可查询**：SELECT_STRATEGY 阶段 `call_tool_fn()` 现在传递 `raw_tool_outputs` 参数，LLM 可调用 `vivado_get_raw_tool_output` 查询 ANALYZE/EVALUATE 阶段的原始工具输出。
-- **细胞类型链（cell_type_chain）**（2026-06）：Dashboard Module 2 每路线时序路径新增 `cell_type_chain` 字段（如 `LUT→MUXF7→LUT→FDRE`），从 `CriticalPathEntry.cells` 通过 `build_cell_type_chain()` 推导。ANALYZE/SELECT_STRATEGY 阶段可见。零额外 MCP 开销。
-- **新鲜度指示器**（2026-06）：Module 2 / 2b 顶部新增 `freshness: extracted_iteration=N, stale=(true|false), total_failing_from_timing_report=M`。stale 标志来自 `state.timing.critical_paths_stale`，LLM 可判断关键路径数据是否已过时。
-- **端点计数对齐**（2026-06）：`top_failing_endpoints` 重命名为 `top_violating_endpoints`，显示格式从 `# N endpoints` 变为 `# showing N of M total failing (from timing report)`。避免 LLM 被 15 条展示数据误导以为只有少量违规端点。
-- **空数据优雅降级**（2026-06）：当 `critical_paths` 为空（如所有细胞名被过滤）时，Module 2 显示 `status: not_extracted_or_all_cells_invalid` 并指导 LLM 重新提取，而非静默显示 `N/A`。
-- **紧凑热点保留类型标注**（2026-06）：EXECUTE/EVALUATE 阶段的单行延迟热点摘要保留 `[NET]`/`[LUT6]` 等类型标签，帮助 LLM 区分 cell vs net 延迟贡献。
-
-> 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §3.4-§3.5](architecture.md)。
+> 完整 Dashboard 格式、新鲜度机制、critical path 管理见 [architecture.md §1.5-§2.1](architecture.md)。
 
 ### 3.3 关键信息保护
 
-| 类型 | 保护机制 |
-|------|----------|
+| 保护层 | 机制 |
+|------|------|
 | System 消息 | 压缩前分离，始终前置 |
-| WNS/TNS/策略状态 | 上下文 Dashboard（user message，独立于压缩系统） |
-| 失败策略 | `state.context.failed_strategies`（FailedStrategyRecord 列表）+ `record_strategy_failure()` 去重写入 |
-| 工具调用摘要 | V2: `state.iteration.tools_used` 直接追加 |
-| 最近 N 轮消息 | `preserve_role_turns=6` 保留原始 role |
-| report_step_state 格式 | ① 一次性 User FORMAT_GUARD（精简版：行为要求 + EXECUTE 工具映射） ② 工具 schema 自描述参数 |
-| 工具重复检测 | `_recent_tools` 滑动窗口，>=3次+delta<0.05ns → REPETITION DETECTED |
-| 工具结果缓存 | `state.context.tool_cache` — 同 phase 内相同参数工具调用自动返回 `[CACHED]`，避免重复执行；phase 切换时清空。执行工具后自动失效缓存（`tool_cache.clear()`），防止过期物理数据被误用 |
-| 工具调用频率限制 | `state.context.tool_phase_call_counts` — 只读工具超限后返回 `[RATE LIMITED]` 消息，引导 LLM 使用 Dashboard 数据或批量参数 |
-| 周期反思 | 每 8 tool_round 注入 REFLECTION CHECKPOINT |
-| DCP 身份 | EXECUTE 阶段从白名单移除 `vivado_open_checkpoint`；`current_dcp_path` 全程追踪 |
-| 策略 catalog 排除 | 已失败策略自动从 SELECT_STRATEGY 阶段的策略目录中移除，避免重复选中 |
-| 策略阻止状态可见性 | Dashboard `strategy_lifecycle` 始终显示 `blocked_this_iteration`（本迭代冷却）和 `blocked_ttl`（TTL 持久阻止+解封倒计时），防止 LLM 在压缩后重复选择已阻止策略 |
-| 空结果模式匹配 | 工具返回 `optimized_count: 0` / `cascades_found: 0` 等空结果时归类为 `tool_error`（可重试）而非 `strategy_ineffective`（永久排除） |
-| 关键路径数据质量 | `parse_critical_path_cells()` 使用 `_is_valid_cell_name()` 过滤 pblock 标签、设备坐标等非细胞字符串；>50% 无效的路径整条跳过 |
-| 关键路径细胞类型链 | Dashboard Module 2 每路径显示 `cell_type_chain`（如 `LUT→MUXF7→FDRE`），帮助 LLM 理解路径结构 |
-| TCL 关键路径提取拦截 | `tool_router.py` 检测 `vivado_run_tcl` 中含 `get_timing_paths` + `get_cells` 模式时返回 `[AUTO-GUIDANCE]` 消息，引导 LLM 使用专用工具 |
-| PBLOCK 数据质量提前退出 | `critical_path_cells` 全部被过滤时跳过 MCP 调用，记录 `data_quality_error` 类型策略失败 |
-| 冷却逻辑分层 | `_cool_down_current_strategy_if_stalled()` 区分策略工具错误（`STRATEGY_TOOL_NAMES`） vs 辅助工具错误。只有策略工具本身失败时才跳过冷却 |
-| 策略目录分层暴露 | `blocked_this_iteration` 策略同时加入 `exclude_strategies`，从目录中完全消失。LLM 在 `strategy_lifecycle` 中可见原因 |
-| Improvement 阈值 | `STRATEGY_IMPROVEMENT_EPSILON_NS` 从 0.001 提升至 0.050ns。低于 50ps 的 WNS 变化视为无改善 |
+| WNS/TNS | 上下文 Dashboard（user message，独立于压缩系统） |
+| 最近消息 | `preserve_role_turns=6` 保留原始 API role |
+| 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
+| 调用频率限制 | 超限返回 `[RATE LIMITED]`（`search_cells`:3, `vivado_run_tcl`:2 等） |
+| DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
+| 策略 catalog 排除 | 失败策略从目录移除 + `strategy_lifecycle` 显示 `blocked_this_iteration`/`blocked_ttl` |
+| 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
+| 细胞名验证 | `_is_valid_cell_name()` 过滤非细胞字符串；>50% 无效整条跳过 |
+| TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |
+| 冷却分层 | **策略工具失败**→跳过冷却；**仅辅助工具失败**→应用冷却；阈值 0.050ns |
+
+> 完整保护机制表见 [architecture.md §2.2](architecture.md)。
 
 ### 3.4 模型选择
 
-Planner（1M max）vs Worker（250K max），迭代边界切换。
+Planner(1M max) vs Worker(250K max)，迭代边界切换。`compute_model_scores()` 7 维度评分 (margin=2)：
 
-`compute_model_scores()` 7 维度评分（margin=2 防震荡）：
+| 维度 | P | W | 条件 |
+|------|---|---|------|
+| 上下文复杂 | +2 | +1 | >=6 |
+| 连续失败>=2 | +4 | - | - |
+| 连续成功>=3 | - | +1 | - |
+| WNS 严重倒退 | +3 | - | - |
+| 预算>80% | - | +3 | - |
+| 历史能力>70% | - | +2 | - |
+| 历史能力<30% | +2 | - | - |
 
-| 维度 | Planner | Worker |
-|------|---------|--------|
-| 上下文复杂度 >=6 | +2 | +1 |
-| 历史能力 >=70% | - | +2 |
-| 历史能力 <30% | +2 | - |
-| 连续失败 >=2 次 | +4 | - |
-| 连续成功 >=3 次 | - | +1 |
-| 全局无改善 >=2.5 次 | - | +1 |
-| 上下文容量 >=60% | +2 | - |
-| WNS 严重倒退 | +3 | - |
-| 预算 >80% | - | +3 |
-| 预算 >60% | - | +1 |
-
-> 完整模型选择逻辑、handoff 提示词格式见 [architecture.md §3.7](architecture.md)。
-
-### 3.5 Skill 机制
-
-> 17 个注册 Skills + SKILL_CHAIN_ACTIONS 自动链式执行 + OPTIONAL_CHAIN_VALIDATION。完整调用链、超时映射、推荐机制见 [architecture.md §4](architecture.md)。
-
-### 3.6 策略库清单
-
-> 14 种策略及触发条件。完整列表见 [README.md](README.md) 优化策略和 [strategy_library.py](strategy_library.py)。
+> 完整 handoff 格式见 [architecture.md §4.1](architecture.md)。策略清单见 [README.md](README.md) 优化策略表。Skill 详见 [architecture.md §3](architecture.md)。
 
 ### 3.7 Tool 描述增强
 
-在工具 description 中标注禁忌症、结果解读指南、策略交互警告。详见 [architecture.md §11](architecture.md)。
+在工具 description 中标注禁忌症、结果解读指南、策略交互警告。详见 [architecture.md §12](architecture.md)。
 
 ### 3.8 phys_opt_design 安全守卫
 
@@ -457,78 +287,65 @@ VivadoMCP 服务端 + dcp_optimizer.py 入口双层守卫，阻止以下指令�
 - `AlternateFlowWithRetiming`、`AddRetime`（retiming 改变流水线结构）
 - `retime=true`、`interconnect_retime=true`（布尔选项）
 
-## 4. 迭代控制
+## 4. MCP 服务器架构
 
-### 4.1 常量
+### 4.1 VivadoMCP
 
-```python
-MAX_TOOL_ROUNDS_PER_ITERATION = 80
-GLOBAL_NO_IMPROVEMENT_LIMIT = 3
-WNS_TARGET_THRESHOLD = 0.0
+[VivadoMCP/vivado_mcp_server.py](VivadoMCP/vivado_mcp_server.py) — 通过 pexpect 管理 Vivado Tcl 子进程，约 20+ 工具。
+
+```
+LLM → MCP tool call → vivado_mcp_server.py → pexpect → vivado -mode tcl
+                                               ← stdout/stderr ←
+                                                      ↓
+                                               JSON parse + error detect
 ```
 
-### 4.2 flow_control 信号处理
+**核心机制**: 超时自动 kill→restart→reopen DCP；`^ERROR: [` 匹配返回 `{"error": "..."}`；retiming 指令守卫；多行 Tcl 支持。
 
-| 场景 | 行为 |
-|------|------|
-| `ANALYZE_DONE` | 切换到 SELECT_STRATEGY 阶段 |
-| `EXEC_DONE` | 切换到 EVALUATE 阶段 |
-| `DONE`, WNS<0 | 进入下一迭代 |
-| `DONE`, WNS>=0 | 退出优化 |
-| `SWITCH_STRATEGY` (EVALUATE) | 多策略循环：回到 SELECT_STRATEGY 尝试下一策略（最多 5 轮/迭代） |
-| `NEXT_ITERATION` (EVALUATE) | 结束迭代 + 不记录失败 |
-| `CONTINUE` (EVALUATE) | 回到 ANALYZE 阶段 |
-| `detect_rollback_needed()` | WNS 退化时自动恢复最佳 checkpoint |
-| `ROLLBACK` (EVALUATE) | LLM 主动请求回滚 |
+### 4.2 RapidWrightMCP
 
-所有信号通过 `record_flow_signal()` 录制到 `state.context.flow_control_log`，Dashboard 颜色编码展示。
+[RapidWrightMCP/server.py](RapidWrightMCP/server.py) + [rapidwright_tools.py](RapidWrightMCP/rapidwright_tools.py) — 通过 JPype 桥接 Java RapidWright API，19+ 工具。
 
-> 完整行为矩阵、可观测性、StepState/FlowControlRecord 数据结构见 [architecture.md §5.2-§5.4](architecture.md)。
-
-### 4.3 退出原因
-
-| 原因 | 描述 |
-|------|------|
-| `cost_limit` | 达到成本硬限制 |
-| `wns_target_met` | WNS>=0.0（时序收敛） |
-| `max_iterations_reached` | 3 次迭代无改进 |
-| `tool_round_limit` | 工具轮次达限 |
-| `user_requested` | 用户输入 quit |
-| `rollback` | WNS 退化且恢复后仍不改善 |
-
-## 5. 429 降级机制
-
-按层级 fallback 列表轮询 → 耗尽追踪 → 全耗尽切另一层级 → 清空双方耗尽集合。
-
-## 6. 控制台退出
-
-stdin 监听线程 → `state.control.user_exit_requested` → `save_output` → end（清标志防死循环）。
-
-## 7. 事件系统
-
-```python
-EventBus: subscribe(event_type, handler) → token → unsubscribe_by_token(token) → emit(event)
-EventTypes: CONTEXT_COMPRESSED, LAYER_PROMOTED, BRANCH_CREATED, BRANCH_MERGED
+```
+LLM → MCP tool call → server.py → JPype → Java RapidWright API → Python dict
 ```
 
-## 8. DCP 验证（硬约束）
+**核心机制**: 内存中持有完整 EDIF 网表+布局（跨调用持久化）；细胞级操作（LUT 交换、MUXF 重排、单元复制）；快速时序估计(~2.5s)；拥塞评分(0-1)；`smart_region_search` 距离加权因子 0.3。
 
-两阶段验证（`validate_dcps.py`）：
-- **Phase 1 结构对比**（RapidWright）：EDIF 网表结构一致性
-- **Phase 2 功能仿真**（Vivado xsim）：LFSR 随机测试激励（默认 200 向量，先运行 100 向量 precheck；可通过 `--vectors`/`--precheck-vectors` 调整）
+### 4.3 MCP 工具路由（tool_router.py）
 
-每 5 次迭代中间 checkpoint 验证（500 向量），完成时完整验证。
+[optimizer/pure/tool_router.py](optimizer/pure/tool_router.py) — 前缀分发（`vivado_*`/`rapidwright_*`）+ 工具结果缓存 + TCL 提取拦截 + 调用频率限制。
 
-> 完整验证策略、安全约束见 [architecture.md §7](architecture.md)。
+## 5. Dashboard 架构
 
-## 9. 工具输出摘要化
+**数据流**: `NodeGraph.run()` → 每节点退出触发 `tracer.on_exit()` → `DashboardStateTracer` 序列化 → WebSocket 推送前端。
 
-大输出（Vivado 时序报告）→ 提取 WNS/TNS/failing_endpoints YAML 摘要，`raw_output_truncated: true`。小型输出（<3KB 非 timing）→ 直通嵌入。
+**核心文件**:
+- [dashboard/server.py](dashboard/server.py) — aiohttp 服务器 + WebSocket 广播 + REST API
+- [dashboard/serializer.py](dashboard/serializer.py) — OptimizerState→JSON（含 state_space 键）
+- [dashboard/static/index.html](dashboard/static/index.html) — 自包含前端（暗色主题，20 面板）
 
-原始日志存储在 side buffer（FIFO 50 条），LLM 可调 `vivado_get_raw_tool_output` 获取。
+**20 面板构成**: 7 模块 StateSpace（M1 Global State & Targets ~ M7 Architecture Overview）+ 13 旧版面板（Timing、Iteration、Strategy Lifecycle、Model、Cost、Control、Critical Paths、LLM Log、Transition History、Tool Call Trace、Flow Control Log、Phase History、WNS Trajectory）。
 
-> 完整实现细节见 [architecture.md §6](architecture.md)。
+## 6. 测试基础设施
 
-## 10. 设计一致性验证工具
+```
+make test-quick           # 纯函数单元测试 (pytest, ~3s)
+make test-unit            # 单元测试 (pytest, ~10s)
+make test-skills          # Skill 框架测试 (~30-60s)
+make run_skill_test_v2    # Skill-only 测试 (无布局布线)
+make run_test_v2          # 完整 V2 测试 (工具+技能+P&R, ~10-30min)
+make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性)
+```
 
-> 4 个验证工具 + 19 个独立 RapidWright 工具 + 可选链验证。完整清单和设计一致性约束见 [architecture.md §4.2](architecture.md)。
+**核心测试文件**: [optimizer/test_mode.py](optimizer/test_mode.py)(76K, 完整V2编排)、[test_graph.py](optimizer/test_graph.py)(28K, NodeGraph测试)、[test_pure.py](optimizer/test_pure.py)(21K, 纯函数测试)、[skills/test_skill_framework.py](skills/test_skill_framework.py)(21K)、[VivadoMCP/test_vivado_mcp.py](VivadoMCP/test_vivado_mcp.py)(22K)。
+
+---
+
+## 附录 A. 迭代控制概览
+
+- **常量**: `MAX_TOOL_ROUNDS=80`, `GLOBAL_NO_IMPROVEMENT_LIMIT=3`, `WNS_TARGET=0.0`
+- **退出原因**: `cost_limit` / `wns_target_met` / `max_iterations_reached` / `tool_round_limit` / `user_requested` / `rollback`
+- **429 降级**: fallback 轮询→耗尽→切层级→清空
+- **DCP 验证**: Phase 1 结构对比(RapidWright) + Phase 2 功能仿真(Vivado xsim, 200向量)。每5次迭代中间验证。详见 [architecture.md §6](architecture.md)
+- **工具输出摘要化**: 大输出提取WNS/TNS摘要 + `raw_output_truncated: true`；小型(<3KB)直通嵌入。侧缓冲 FIFO 50条。详见 [architecture.md §5](architecture.md)
