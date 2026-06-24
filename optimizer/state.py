@@ -171,9 +171,10 @@ class TimingState:
     critical_paths_iteration: int = 0
     critical_paths_stale: bool = False
     resource_utilization: Optional[dict] = None
-    refreshed_fields: set[str] = field(default_factory=set)
-    # Tracks which dashboard fields have been refreshed since init.
-    # Values are field names from DASHBOARD_REFRESH_MAP values.
+    field_freshness: dict[str, str] = field(default_factory=dict)
+    # Tracks freshness status per dashboard field: "fresh" | "stale".
+    # Initialized by init_analysis, updated by DASHBOARD_REFRESH_MAP on tool call,
+    # set to "stale" on design modification. Keys match DASHBOARD_REFRESH_MAP values.
     # Hold timing (parsed from init_analysis, stored for dashboard Module 1)
     hold_wns: Optional[float] = None
     hold_tns: Optional[float] = None

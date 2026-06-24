@@ -201,6 +201,32 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "rapidwright_get_design_info": frozenset({"design_info"}),
 }
 
+# ── Design modification tools ──────────────────────────────────
+# Tools that modify the design (place, route, phys_opt, RW strategies).
+# When called, all dashboard field_freshness entries are marked "stale"
+# so the LLM knows which data may no longer be current.
+DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
+    "vivado_phys_opt_design",
+    "vivado_route_design",
+    "vivado_place_design",
+    "vivado_create_and_apply_pblock",
+    "vivado_physopt_and_route",
+    # RapidWright strategy tools — all modify the design
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_execute_opt_design_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
+    "rapidwright_smart_retiming",
+})
+
 
 # ── Per-phase tool rate limits ────────────────────────────────────
 # Prevents LLM from repeatedly calling the same read-only tool within

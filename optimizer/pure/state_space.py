@@ -70,6 +70,29 @@ def _annotated_val(value, fmt: str | None = None, reason: str = "not_available")
         return fmt.format(value)
     return str(value)
 
+
+def _freshness_tag(field_key: str, field_freshness: dict[str, str] | None) -> str:
+    """Return freshness annotation for a dashboard field: ``[fresh]`` or ``[stale]``.
+
+    Args:
+        field_key: Field name in field_freshness dict (e.g. "timing_summary").
+        field_freshness: The dict from state.timing.field_freshness, or None.
+
+    Returns:
+        " [fresh]" if the field was refreshed by a recent tool call,
+        " [stale]" if design was modified since collection,
+        "" if unknown or fresh_by_default.
+    """
+    if not field_freshness:
+        return ""
+    status = field_freshness.get(field_key)
+    if status == "fresh":
+        return " [fresh]"
+    elif status == "stale":
+        return " [stale]"
+    return ""
+
+
 # Phase-aware module filters for LLM context injection.
 PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
     LoopPhase.ANALYZE: frozenset({
@@ -493,6 +516,10 @@ def format_state_space_for_llm(
     enabled = PHASE_STATESPACE_MODULES.get(phase) if phase else None
     lines: list[str] = []
 
+    # Freshness tag helper — available to all module renderers below
+    _ff = state.timing.field_freshness if state else None
+    _tag = lambda k: _freshness_tag(k, _ff)
+
     # ── Header ────────────────────────────────────────────────────
     phase_label = phase.value.upper() if phase else "OPTIMIZATION"
     lines.append(f"[{phase_label} — Context & Dashboard]")
@@ -526,19 +553,19 @@ def format_state_space_for_llm(
             lines.append("  # WARNING: Design is NOT routed — WNS/TNS may be inaccurate (estimated delays, no routing)")
         lines.append(f"  iteration_count: {gs.iteration_count}")
         lines.append(f"  target_frequency: {gs.target_frequency}")
-        lines.append(f"  wns_setup: {gs.wns_setup:.3f}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')
-        lines.append(f"  tns_setup: {gs.tns_setup:.3f}" if gs.tns_setup is not None else '  tns_setup: "N/A(not_analyzed)"')
+        lines.append(f"  wns_setup: {gs.wns_setup:.3f}{_tag('timing_summary')}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')
+        lines.append(f"  tns_setup: {gs.tns_setup:.3f}{_tag('timing_summary')}" if gs.tns_setup is not None else '  tns_setup: "N/A(not_analyzed)"')
         lines.append(f"  best_wns: {_annotated_val(gs.best_wns, '{:.3f}', 'initial_state')}")
         if gs.best_wns_iteration is not None:
             lines.append(f"  best_wns_iteration: {gs.best_wns_iteration}")
         if gs.whs_hold is not None:
-            lines.append(f"  whs_hold: {gs.whs_hold:.3f}")
+            lines.append(f"  whs_hold: {gs.whs_hold:.3f}{_tag('timing_summary')}")
         if gs.ths_hold is not None:
             lines.append(f"  ths_hold: {gs.ths_hold:.3f}")
         if gs.lut_utilization is not None:
-            lines.append(f"  lut_utilization: {gs.lut_utilization:.2%}")
+            lines.append(f"  lut_utilization: {gs.lut_utilization:.2%}{_tag('resource_utilization')}")
         if gs.ff_utilization is not None:
-            lines.append(f"  ff_utilization: {gs.ff_utilization:.2%}")
+            lines.append(f"  ff_utilization: {gs.ff_utilization:.2%}{_tag('resource_utilization')}")
         if gs.bram_utilization is not None:
             lines.append(f"  bram_utilization: {gs.bram_utilization:.2%}")
         if gs.dsp_utilization is not None:
@@ -588,9 +615,10 @@ def format_state_space_for_llm(
         # ── Freshness indicator ──
         if state and state.timing.critical_paths_stale is not None:
             stale_label = "true (place/route changed)" if state.timing.critical_paths_stale else "false"
+            cp_fresh = _tag("critical_path_cells") if state else ""
             ext_iter = state.timing.critical_paths_iteration
             total_fe = state.timing.latest_failing_endpoints
-            fresh_line = f"  freshness: extracted_iteration={ext_iter}, stale={stale_label}"
+            fresh_line = f"  freshness: extracted_iteration={ext_iter}, stale={stale_label}{cp_fresh}"
             if total_fe is not None:
                 fresh_line += f", total_failing_from_timing_report={total_fe}"
             lines.append(fresh_line)
@@ -721,10 +749,10 @@ def format_state_space_for_llm(
         pc = space.physical_congestion
         lines.append("# Module 3: Physical & Congestion Metrics")
         lines.append("physical_congestion:")
-        lines.append(f"  global_congestion_score: {_annotated_val(pc.global_congestion_score, '{:.2f}', 'congestion_analysis_not_supported')}")
+        lines.append(f"  global_congestion_score: {_annotated_val(pc.global_congestion_score, '{:.2f}', 'congestion_analysis_not_supported')}{_tag('congestion_data')}")
         if pc.congestion_level:
             lines.append(f"  congestion_level: {pc.congestion_level}")
-        lines.append(f"  avg_wirelength: {_annotated_val(pc.avg_wirelength, '{:.1f}', 'data_not_available')}")
+        lines.append(f"  avg_wirelength: {_annotated_val(pc.avg_wirelength, '{:.1f}', 'data_not_available')}{_tag('route_status')}")
         lr = _annotated_val(pc.long_route_nets_count, reason="data_not_available")
         lines.append(f"  long_route_nets_count: {lr}")
         if pc.total_wirelength is not None:
@@ -755,11 +783,11 @@ def format_state_space_for_llm(
         lines.append("netlist_quality:")
         lines.append(f"  total_control_sets: {nq.total_control_sets}")
         lines.append(f"  avg_control_sets_per_slice: {_annotated_val(nq.avg_control_sets_per_slice, '{:.2f}', 'data_not_available')}")
-        lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}")
+        lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}{_tag('cdc_paths')}")
         if nq.cell_type_summary:
-            lines.append(f"  top_cell_types: {nq.cell_type_summary}")
+            lines.append(f"  top_cell_types: {nq.cell_type_summary}{_tag('design_info')}")
         if nq.high_fanout_nets:
-            lines.append(f"  high_fanout_nets:  # {len(nq.high_fanout_nets)} nets")
+            lines.append(f"  high_fanout_nets:{_tag('high_fanout_nets')}  # {len(nq.high_fanout_nets)} nets")
             for net in nq.high_fanout_nets[:10]:
                 rep = " (replicated)" if net.is_replicated else ""
                 lines.append(f"    - {net.net_name}: fanout={net.fanout_count}{rep}")

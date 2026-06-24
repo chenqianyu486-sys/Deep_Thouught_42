@@ -394,6 +394,20 @@ async def init_analysis_node(
         except Exception as e:
             logger.warning(f"[init_analysis] Failed to save initial checkpoint: {e}")
 
+    # Initialize dashboard freshness: mark all fields as fresh since init_analysis
+    # collected them. Keys match DASHBOARD_REFRESH_MAP values in constants.py.
+    state.timing.field_freshness = {
+        "resource_utilization": "fresh",
+        "high_fanout_nets": "fresh",
+        "critical_path_spread": "fresh",
+        "route_status": "fresh",
+        "timing_summary": "fresh",
+        "cdc_paths": "fresh",
+        "design_info": "fresh",
+        "congestion_data": "fresh",
+        "critical_path_cells": "fresh",
+    }
+
     logger.info(
         f"[init_analysis] Complete: WNS={state.timing.initial_wns}, "
         f"best_wns={state.timing.best_wns:.3f}"

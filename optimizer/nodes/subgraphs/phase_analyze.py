@@ -213,7 +213,8 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # Track dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                 if refreshable:
-                    state.timing.refreshed_fields |= refreshable
+                    for field in refreshable:
+                        state.timing.field_freshness[field] = "fresh"
 
             if _pending_signal == "ANALYZE_DONE":
                 break

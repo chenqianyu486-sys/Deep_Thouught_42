@@ -24,7 +24,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard
@@ -570,14 +570,17 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
 
                 # Mark critical paths stale after layout changes
-                if tool_name in ("vivado_phys_opt_design", "vivado_route_design",
-                                 "vivado_place_design", "vivado_create_and_apply_pblock"):
+                if tool_name in DESIGN_MODIFICATION_TOOLS:
                     state.timing.critical_paths_stale = True
+                    # Mark all dashboard fields stale — design has changed
+                    for field in state.timing.field_freshness:
+                        state.timing.field_freshness[field] = "stale"
 
                 # Dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                 if refreshable:
-                    state.timing.refreshed_fields |= refreshable
+                    for field in refreshable:
+                        state.timing.field_freshness[field] = "fresh"
 
                 # Post-eval hook for critical tools
                 post_eval_verdict = None

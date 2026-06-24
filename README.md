@@ -88,7 +88,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **数据与上下文层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 6 | 数据可信度 | `DASHBOARD_REFRESH_MAP` 追踪字段新鲜度；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
+| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`）自动将所有字段降级为 `stale`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
 | 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |

@@ -68,7 +68,7 @@ fpl26_optimization_contest/
 
 ```
 OptimizerState (可变 dataclass，7 个子切片)
-├── TimingState     — WNS/TNS/best_wns/关键路径/新鲜度追踪/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT/violation_summary(路径聚类)/failing_endpoint_names
+├── TimingState     — WNS/TNS/best_wns/field_freshness(每字段fresh/stale状态)/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT/violation_summary(路径聚类)/failing_endpoint_names
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
@@ -174,7 +174,7 @@ Phase B (并行管线):
 Phase C (跨服务器): critical_path_spread→congestion_analysis
 ```
 
-提取数据对应 Dashboard 模块：M1(WNS/TNS/Utilization)、M2(Critical paths + spread)、M3(Congestion/Route status)、M4(Control sets/CDC/High fanout)、M4b(Cell composition)、M5(Constraints/PVT)、M6(Delta)、M7(Module hotspots)。新鲜度分动态(工具刷新)和静态(仅初始化提取)两类。
+提取数据对应 Dashboard 模块：M1(WNS/TNS/Utilization)、M2(Critical paths + spread)、M3(Congestion/Route status)、M4(Control sets/CDC/High fanout)、M4b(Cell composition)、M5(Constraints/PVT)、M6(Delta)、M7(Module hotspots)。新鲜度通过 `field_freshness: dict[str, str]` 逐字段追踪：`init_analysis` 完成后全部初始化为 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部字段降级为 `stale`。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记。
 
 **验证**: `make run_init_analysis DCP=<path>` 运行完整提取 + Dashboard 字段完整性检查。
 
@@ -187,13 +187,13 @@ Phase C (跨服务器): critical_path_spread→congestion_analysis
 
 # Module 1: Global State & Targets
 global_state:
-  current_stage: PLACEMENT;  wns_setup: -0.523;  tns_setup: -12.340;  whs_hold: 0.045
-  iteration_count: 5;  target_frequency: 300.0
-  lut_utilization: 49.16%;  ff_utilization: 19.66%
+  current_stage: PLACEMENT;  iteration_count: 5;  target_frequency: 300.0
+  wns_setup: -0.523 [fresh];  tns_setup: -12.340 [fresh];  whs_hold: 0.045 [fresh]
+  lut_utilization: 49.16% [fresh];  ff_utilization: 19.66% [fresh]
 
 # Module 2: Timing Path Clusters
 timing_clusters:
-  freshness: "extracted_iter=2, stale=false, total_failing=1529"
+  freshness: "extracted_iter=2, stale=false, total_failing=1529" [fresh]
   top_paths:
     - endpoint: u_core/u_alu/reg_0
       slack: -0.523;  logic_levels: 12;  logic_delay_pct: 0.45;  route_delay_pct: 0.55
@@ -204,10 +204,15 @@ timing_clusters:
   path_clusters: [{cluster: logic_deep_aes, path_count: 12, slack_range: -1.200~-0.850ns}]
 
 # Module 3: Physical & Congestion
-physical_congestion: {global_congestion_score: 0.65, avg_wirelength: 12.3, hotspots: [...]}
+physical_congestion:
+  global_congestion_score: 0.65 [fresh];  avg_wirelength: 12.3 [fresh]
+  hotspots: [...]
 
 # Module 4: Netlist Quality
-netlist_quality: {total_control_sets: 5, cross_domain_paths: 3, high_fanout_nets: [...]}
+netlist_quality:
+  total_control_sets: 5;  cross_domain_paths: 3 [fresh]
+  high_fanout_nets: [fresh]  # 8 nets
+  top_cell_types: "LUT6:24377, LUT5:4744, MUXF7:3016" [fresh]
 
 # Module 5: Constraints Environment
 constraints_env: {clock_defs: {clk: 300MHz}, false_paths: 2, pvt: slow_0p95v_85c}
@@ -220,6 +225,9 @@ architecture_overview:
   top_modules: [{name: aes_core, hits: 38, coverage: 52.8%, sub: [sbox, mix_cols]}]
   deepest_module: aes_core/sbox;  total_cells_analyzed: 72
 ```
+```
+
+**新鲜度标记**: Dashboard 中每个数据字段后显示 `[fresh]` 或 `[stale]` 标记，由 `field_freshness: dict[str, str]` 逐字段追踪。`init_analysis` 完成后全部初始化为 `[fresh]`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `[fresh]`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共 19 个）执行后全部字段降级为 `[stale]`。LLM 根据标记决定是否信任数据或重新获取。
 
 **Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块——ANALYZE 看 7 模块（M5 隐藏），SELECT_STRATEGY 看 9 模块（新增 M4b `design_structure` + M8 `recent_analysis`），EXECUTE/EVALUATE 看 M1 + M2b (紧凑摘要) + M6。
 

@@ -216,6 +216,6 @@ def _validate_phase_result(phase: LoopPhase, state: OptimizerState) -> str:
         if not state.iteration.tools_used:
             return "no_tools_executed"
     elif phase == LoopPhase.ANALYZE:
-        if not state.timing.refreshed_fields:
+        if not state.timing.field_freshness:
             return "no_dashboard_data_refreshed"
     return ""

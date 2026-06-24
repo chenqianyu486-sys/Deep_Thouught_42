@@ -91,6 +91,7 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **设计状态标注（design_not_routed）**: `_post_eval_hook` 和 `_track_wns_from_result` 从 `report_timing_summary` 的 `Design State` 字段检测，设置 `state.timing.design_not_routed = True`，Dashboard M1 `current_stage` 下方显示 `⚠️ WARNING: Design is NOT routed — WNS/TNS may be inaccurate`
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`strategy_catalog` 排除机制**: 已记录在 `state.context.failed_strategies` 中的策略自动从 catalog 中排除
+- **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共19个）执行后全部降级为 `stale`。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
 - **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）
 
 ---
@@ -515,9 +516,11 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 `EXECUTE_STRATEGY_TOOL_MAP` 新增 `"LogicOptimization": "rapidwright_execute_opt_design_strategy"`。FORMAT_GUARD 策略列表同步添加。`_STRATEGY_MAPPING_LINES` 自动生成。
 
-### 6.6 Dashboard 数据工具 rate limit
+### 6.6 Dashboard 数据新鲜度与工具 rate limit
 
-`PHASE_TOOL_RATE_LIMITS` 限制每 phase 调用次数：
+**字段级新鲜度追踪**: `field_freshness: dict[str, str]`（2026-06-24 新增，替代 `refreshed_fields: set[str]`）。每个 Dashboard 数据字段独立标注 `[fresh]`/`[stale]`。初始化全部 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部降级为 `stale`。
+
+**工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
 - `vivado_run_tcl`: 2
 - `vivado_write_checkpoint`: 3
@@ -616,6 +619,20 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
     "rapidwright_optimize_cell_placement",
     "rapidwright_optimize_lut_input_cone",
     "vivado_physopt_and_route", "vivado_phys_opt_design", "vivado_opt_design",
+})
+
+# 设计修改工具集合（执行后所有 field_freshness 降级为 stale）
+DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
+    "vivado_phys_opt_design", "vivado_route_design", "vivado_place_design",
+    "vivado_create_and_apply_pblock", "vivado_physopt_and_route",
+    "rapidwright_execute_pblock_strategy", "rapidwright_execute_fanout_strategy",
+    "rapidwright_optimize_pin_swapping", "rapidwright_flatten_lut_cascade",
+    "rapidwright_replicate_critical_cells", "rapidwright_execute_congestion_spreading",
+    "rapidwright_execute_register_retiming", "rapidwright_execute_net_swapping",
+    "rapidwright_execute_opt_design_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy", "rapidwright_smart_retiming",
 })
 
 # 迭代控制常量
