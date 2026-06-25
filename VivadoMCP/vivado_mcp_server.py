@@ -703,7 +703,7 @@ def extract_critical_path_cells(
     all_paths = []
 
     for path_section in path_sections[1:]:  # Skip first (header before any path)
-        lines = path_section.split('\n')
+        lines = [l.rstrip('\r\n') for l in path_section.split('\n')]
 
         # ── Phase 1: parse header (before first --- separator) ──
         header = {
@@ -1006,7 +1006,7 @@ def extract_critical_path_pins(
         pin_match_count = 0
         last_part_checks = []
 
-        for line in path_section.split('\n'):
+        for line in [l.rstrip('\r\n') for l in path_section.split('\n')]:
             stripped = line.strip()
 
             # Detect data path section boundaries

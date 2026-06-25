@@ -72,6 +72,7 @@ async def iteration_end_node(
         state,
         wns_improved=False if is_rollback else wns_improved,
         model_used=state.model.current_model,
+        is_rollback=is_rollback,
     )
 
     if not is_rollback:

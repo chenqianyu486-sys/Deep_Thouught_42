@@ -7,6 +7,7 @@ OptimizerState. Nodes modify state in-place (mutable pattern).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -38,13 +39,19 @@ def parse_design_state(timing_report: str) -> str:
         One of DesignState.UNPLACED, DesignState.PLACED, DesignState.ROUTED.
         Defaults to UNPLACED when the field cannot be parsed.
     """
-    if "Design State" not in timing_report:
-        return DesignState.UNPLACED
-    if "Routed" in timing_report:
-        return DesignState.ROUTED
-    # Placed/Phys_Opt_Design → has placement info but no routing
-    if "Placed" in timing_report or "Phys_Opt" in timing_report:
-        return DesignState.PLACED
+    match = re.search(
+        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
+        timing_report or "",
+        re.IGNORECASE,
+    )
+    if match:
+        state = match.group(1).strip().lower()
+        if "routed" in state:
+            return DesignState.ROUTED
+        if "placed" in state:
+            return DesignState.PLACED
+        if "optimized" in state:
+            return DesignState.UNPLACED
     return DesignState.UNPLACED
 
 

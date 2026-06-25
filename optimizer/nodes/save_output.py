@@ -23,6 +23,9 @@ from ..pure.timing import parse_hold_timing, parse_timing_summary
 from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
+from ..pure.trajectory import format_trajectory_summary
+from ..color import green
+
 logger = logging.getLogger(__name__)
 
 BEST_WNS_VERIFY_TOLERANCE_NS = 0.005
@@ -37,16 +40,18 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
         return "placed"
 
     match = re.search(
-        r"Design\s+State\s*:\s*([A-Za-z_]+)",
+        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
         timing_summary or "",
         re.IGNORECASE,
     )
     if match:
-        state = match.group(1).lower()
-        # "optimized" means the design is not yet placed (post-synthesis state).
-        # Recognize all known Vivado design states so we don't fall through to "unknown".
-        if state in {"routed", "placed", "optimized"}:
-            return state
+        state = match.group(1).strip().lower()
+        if "routed" in state:
+            return "routed"
+        if "placed" in state:
+            return "placed"
+        if "optimized" in state:
+            return "optimized"
 
     return "unknown"
 

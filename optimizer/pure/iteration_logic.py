@@ -21,6 +21,7 @@ def update_iteration_counters(
     state: OptimizerState,
     wns_improved: bool,
     model_used: str,
+    is_rollback: bool = False,
 ) -> None:
     """Update global_no_improvement, worker_consecutive_success/failures.
 
@@ -45,14 +46,15 @@ def update_iteration_counters(
         # For high-frequency designs (period <= 2.0ns), small improvements
         # within 1% of clock period still count as progress
         # But if delta = 0 (no change at all), still increment
-        if (state.timing.clock_period is not None
-                and state.timing.clock_period <= 2.0
-                and state.timing.latest_wns is not None
-                and state.timing.best_wns != float('-inf')):
-            delta = state.timing.latest_wns - state.timing.best_wns
-            threshold = state.timing.clock_period * 0.01  # 1% of period
-            if delta > -threshold and delta < 0:  # Only skip if small negative delta
-                return  # don't increment no_improvement
+        if not is_rollback:
+            if (state.timing.clock_period is not None
+                    and state.timing.clock_period <= 2.0
+                    and state.timing.latest_wns is not None
+                    and state.timing.best_wns != float('-inf')):
+                delta = state.timing.latest_wns - state.timing.best_wns
+                threshold = state.timing.clock_period * 0.01  # 1% of period
+                if delta > -threshold and delta < 0:  # Only skip if small negative delta
+                    return  # don't increment no_improvement
         state.iteration.global_no_improvement += 1
 
 
