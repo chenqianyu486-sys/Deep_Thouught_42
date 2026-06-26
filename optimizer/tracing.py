@@ -79,3 +79,57 @@ class StateTracer:
         with open(path, 'w') as f:
             json.dump(self.transitions, f, indent=2)
         logger.info(cyan("[GRAPH]") + f" Exported {len(self.transitions)} transitions to {path}")
+
+
+# Score history for tracking contest formula over time
+SCORE_HISTORY: list[dict] = []
+
+def record_score_snapshot(state, label: str = ""):
+    """Record a score snapshot for later analysis."""
+    from .state import OptimizerState
+    if state.timing.initial_wns is None or state.timing.best_wns == float("-inf"):
+        return
+    
+    clock_ns = state.timing.clock_period or 1.5
+    init_fmax = 1000.0 / (clock_ns - state.timing.initial_wns)
+    final_fmax = 1000.0 / (clock_ns - state.timing.best_wns) if state.timing.best_wns < clock_ns else 9999
+    alpha = final_fmax - init_fmax
+    
+    cost = getattr(getattr(state, "cost", None), "total_spent", 0.0)
+    elapsed = getattr(getattr(state, "control", None), "elapsed_seconds", 0.0)
+    
+    score = alpha - 0.1 * alpha * cost - 0.1 * alpha * (elapsed / 3600.0)
+    
+    SCORE_HISTORY.append({
+        "label": label,
+        "iteration": state.iteration.current,
+        "wns": state.timing.best_wns,
+        "alpha": alpha,
+        "cost": cost,
+        "elapsed_h": elapsed / 3600.0,
+        "score": score,
+    })
+
+# Tracing: log every phase transition for debugging
+TRACE_PHASE_TRANSITIONS = True
+TRACE_TOOL_CALLS = True
+
+def trace_iteration_summary(state) -> str:
+    """Generate a one-line summary of an iteration."""
+    i = state.iteration.current
+    w = state.timing.best_wns
+    c = getattr(getattr(state, "cost", None), "total_spent", 0)
+    return f"Iter{i}: WNS={w:.3f}ns Cost=${c:.4f}"
+
+def format_trace_entry(node: str, event: str, data: dict) -> str:
+    """Format a trace entry for logging."""
+    import json
+    return f"[TRACE] {node}:{event} {json.dumps(data)}"
+
+def compute_trace_batch_size(trace_count: int) -> int:
+    """Optimal batch size for trace flushing."""
+    return min(100, max(10, trace_count // 10))
+
+def compute_trace_retention_period(trace_count: int) -> int:
+    """How many seconds to retain trace entries."""
+    return min(3600, max(300, trace_count * 10))

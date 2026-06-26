@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 # Contest score is dominated by Fmax improvement, but cost and wall-clock
 # penalties scale with that improvement. Late in the run, bank a verified gain
 # instead of spending the final budget on low-probability exploration.
-SCORE_GUARD_ELAPSED_FRACTION = 0.80
-SCORE_GUARD_MIN_ITERATION = 3
-SCORE_GUARD_MIN_WNS_GAIN_NS = 0.020
-SCORE_GUARD_STALL_LIMIT = 2
+SCORE_GUARD_ELAPSED_FRACTION = 0.70
+SCORE_GUARD_MIN_ITERATION = 2
+SCORE_GUARD_MIN_WNS_GAIN_NS = 0.010
+SCORE_GUARD_STALL_LIMIT = 1
 
 
 def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> str:
@@ -64,6 +64,19 @@ def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> st
     )
 
 
+
+    # Check if initial timing already meets constraints - skip all optimization
+    if (state.timing.initial_wns is not None 
+            and state.timing.initial_wns >= 0.0
+            and state.control.done_reason != "timing_already_met"):
+        logger.info(
+            "[check_exit] Setup timing already met (WNS=%.3fns). "
+            "Exiting early to save time and cost.",
+            state.timing.initial_wns,
+        )
+        state.control.done_reason = "timing_already_met"
+        record_flow_signal(state, "SYSTEM_EXIT", "timing_already_met", phase="CHECK_EXIT")
+        return NodeName.SAVE_OUTPUT
 async def check_exit_node(
     state: OptimizerState, deps: NodeDeps
 ) -> str:
@@ -82,6 +95,34 @@ async def check_exit_node(
     Returns:
         Next node name (edge after_check_exit resolves final destination).
     """
+
+    # Cost limit check: exit if approaching budget limit with unclear improvement
+    COST_LIMIT_WARN_FRACTION = 0.90  # Warn at 90% of budget
+    cost_used = getattr(getattr(state, "cost", None), "total_spent", 0.0)
+    cost_limit = getattr(getattr(state, "control", None), "cost_hard_limit", 10.0)
+    if cost_limit > 0 and cost_used > cost_limit * COST_LIMIT_WARN_FRACTION:
+        logger.warning(
+            "[check_exit] Cost limit approaching: $%.4f / $%.2f (%.0f%%)",
+            cost_used, cost_limit, 100 * cost_used / cost_limit,
+        )
+        # If no improvement in last 2 iterations and cost is high, exit
+        if (state.iteration.global_no_improvement >= 2 
+                and state.timing.best_wns is not None
+                and state.timing.best_wns > float("-inf")):
+            logger.info("[check_exit] Exiting due to cost limit + no improvement")
+            state.control.done_reason = "cost_limit_no_improvement"
+            record_flow_signal(state, "SYSTEM_EXIT", "cost_limit_no_improvement", phase="CHECK_EXIT")
+            return NodeName.SAVE_OUTPUT
+
+    # Per-iteration cost guard: if single iteration cost exceeds threshold, warn
+    ITER_COST_WARN_THRESHOLD = 0.50  # dollars
+    if (hasattr(state, "cost") and hasattr(state.cost, "iteration_cost")
+            and state.cost.iteration_cost > ITER_COST_WARN_THRESHOLD):
+        logger.warning(
+            "[check_exit] High iteration cost: $%.4f (threshold $%.2f). "
+            "Consider using cheaper models.",
+            state.cost.iteration_cost, ITER_COST_WARN_THRESHOLD,
+        )
     # Wall-clock timeout (redundant with iteration_start)
     if state.control.start_time is not None:
         elapsed = time.time() - state.control.start_time
@@ -161,3 +202,57 @@ async def check_exit_node(
         f"cost=${state.cost.total_cost:.4f}"
     )
     return NodeName.CHECK_EXIT
+
+# Check exit: absolute maximum wall clock ratio
+ABSOLUTE_MAX_WALL_CLOCK_RATIO = 1.05  # Allow 5% overrun for cleanup
+
+def should_exit_immediately(state) -> bool:
+    """Emergency exit check - true if process must stop NOW."""
+    if state.control.done_reason: return True
+    if getattr(state.control, "emergency_exit", False): return True
+    return False
+
+def compute_exit_urgency(state) -> str:
+    """How urgent is it to exit? none, low, medium, high, critical."""
+    if state.iteration.global_no_improvement >= 4: return "critical"
+    if state.iteration.global_no_improvement >= 3: return "high"
+    if state.iteration.global_no_improvement >= 2: return "medium"
+    if state.iteration.global_no_improvement >= 1: return "low"
+    return "none"
+
+def compute_remaining_budget_ratio(state) -> float:
+    """How much of wall clock + cost budget remains."""
+    t_elapsed = getattr(getattr(state, "control", None), "elapsed_seconds", 0)
+    t_total = max(state.control.wall_clock_timeout, 1)
+    c_spent = getattr(getattr(state, "cost", None), "total_spent", 0)
+    c_total = max(getattr(getattr(state, "control", None), "cost_hard_limit", 10), 0.01)
+    t_ratio = 1 - min(t_elapsed / t_total, 1)
+    c_ratio = 1 - min(c_spent / c_total, 1)
+    return min(t_ratio, c_ratio)
+
+def compute_exit_score_threshold(initial_wns: float, cost_spent: float, elapsed_h: float) -> float:
+    """Minimum score needed to justify continuing."""
+    return elapsed_h * 5.0 + cost_spent * 10.0
+
+def _compute_urgency_score(state) -> float:
+    """0=no urgency, 1=must exit now."""
+    score = 0.0
+    if state.iteration.global_no_improvement >= 4: score += 0.4
+    if state.iteration.global_no_improvement >= 3: score += 0.3
+    if state.iteration.global_no_improvement >= 2: score += 0.2
+    if state.iteration.current >= 8: score += 0.3
+    return min(score, 1.0)
+
+def _compute_optimal_stopping_point(wns_history: list) -> int:
+    """Optimal iteration to stop based on diminishing returns."""
+    if len(wns_history) < 3: return -1
+    improvements = [wns_history[i+1] - wns_history[i] for i in range(len(wns_history)-1)]
+    for i in range(1, len(improvements)):
+        if improvements[i] < improvements[i-1] * 0.3:
+            return i + 1  # Diminishing returns detected
+    return -1
+
+def _compute_time_value(remaining_seconds: float, expected_gain_mhz: float) -> float:
+    """Value of remaining time: expected score gain per second."""
+    if remaining_seconds <= 0: return 0.0
+    return expected_gain_mhz / remaining_seconds

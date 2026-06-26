@@ -175,12 +175,12 @@ PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
 # ── Per-phase max tool rounds ──────────────────────────────────────
 
 PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
-    LoopPhase.ANALYZE: 12,
-    LoopPhase.SELECT_STRATEGY: 6,
+    LoopPhase.ANALYZE: 8,
+    LoopPhase.SELECT_STRATEGY: 4,
     # Keep EXECUTE short: strategies should run one modifying action and signal
     # EXEC_DONE; longer loops previously wasted wall-clock time on plateaus.
     LoopPhase.EXECUTE: 5,
-    LoopPhase.EVALUATE: 8,
+    LoopPhase.EVALUATE: 5,
 }
 
 EXTENDED_EXECUTE_MAX_ROUNDS = 8
@@ -246,3 +246,55 @@ def filter_tools_for_phase(
                 break
 
     return filtered
+
+
+# Expensive tools that should be used sparingly
+EXPENSIVE_TOOLS: frozenset[str] = frozenset({
+    "vivado_place_design",     # ~120s
+    "vivado_route_design",     # ~70s
+    "vivado_phys_opt_design",  # ~60s
+})
+
+def is_expensive_tool(tool_name: str) -> bool:
+    """Check if a tool is time-expensive."""
+    return tool_name in EXPENSIVE_TOOLS
+
+def get_cheapest_alternative(tool_name: str) -> str:
+    """Get a cheaper/faster alternative tool if available."""
+    ALTERNATIVES = {"vivado_report_timing_summary": "rapidwright_report_timing"}
+    return ALTERNATIVES.get(tool_name, tool_name)
+
+def get_tool_priority(tool_name: str) -> int:
+    """Tool priority for ordering (higher = present first to LLM)."""
+    FAST_TOOLS = {"rapidwright_report_timing": 100, "vivado_check_design_status": 90}
+    return FAST_TOOLS.get(tool_name, 50)
+
+def should_allow_tool_in_phase(tool_name: str, phase: str, wns_gap: float) -> bool:
+    """Additional phase-specific tool filtering."""
+    if phase == "execute" and "report_timing" in tool_name and wns_gap > -0.010:
+        return False  # Skip timing reports when close to target
+    return True
+
+def compute_tool_diversity_score(tools_used: list[str]) -> float:
+    """Score tool usage diversity: higher = more varied exploration."""
+    if not tools_used: return 0.0
+    unique = len(set(tools_used))
+    return unique / len(tools_used)
+
+def compute_tool_budget_remaining(tools_called: int, max_tools: int) -> float:
+    """Fraction of tool call budget remaining."""
+    if max_tools <= 0: return 0.0
+    return max(0, 1 - tools_called / max_tools)
+
+def filter_tools_by_budget(tools: list, budget_remaining: float) -> list:
+    """Remove expensive tools when budget is tight."""
+    if budget_remaining > 0.3: return tools
+    expensive = {"vivado_place_design", "vivado_route_design"}
+    return [t for t in tools if t not in expensive]
+
+def compute_tool_utility(tool: str, wns_gap: float) -> float:
+    """Utility score for a tool: 0=useless, 1=essential."""
+    if "place" in tool and wns_gap < -0.200: return 0.9
+    if "route" in tool and wns_gap < -0.100: return 0.8
+    if "timing" in tool: return 0.7
+    return 0.5

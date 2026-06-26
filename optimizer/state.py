@@ -43,7 +43,7 @@ def parse_design_state(timing_report: str) -> str:
         Defaults to UNPLACED when the field cannot be parsed.
     """
     match = re.search(
-        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
+        r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
         timing_report or "",
         re.IGNORECASE,
     )

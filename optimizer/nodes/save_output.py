@@ -40,7 +40,7 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
         return "placed"
 
     match = re.search(
-        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
+        r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
         timing_summary or "",
         re.IGNORECASE,
     )

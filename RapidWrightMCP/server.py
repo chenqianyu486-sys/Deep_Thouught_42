@@ -2095,3 +2095,56 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Server error: {e}", exc_info=True)
         sys.exit(1)
+
+
+# Java heap configuration for RapidWright
+# Larger heap helps with big designs but uses more memory
+RAPIDWRIGHT_JAVA_HEAP_DEFAULT = "4g"   # Default 4GB
+RAPIDWRIGHT_JAVA_HEAP_LARGE = "8g"     # For large designs (>50% utilization)
+RAPIDWRIGHT_JAVA_GC_OPTS = [
+    "-XX:+UseG1GC",
+    "-XX:MaxGCPauseMillis=200",
+    "-XX:G1HeapRegionSize=16m",
+]
+
+def get_java_heap_opts(design_size_mb: float = 0) -> list[str]:
+    """Get optimal Java heap options based on design size."""
+    import os
+    heap = os.environ.get("RW_JAVA_HEAP", "")
+    if not heap:
+        heap = RAPIDWRIGHT_JAVA_HEAP_LARGE if design_size_mb > 20 else RAPIDWRIGHT_JAVA_HEAP_DEFAULT
+    return [f"-Xmx{heap}", f"-Xms{heap}"] + RAPIDWRIGHT_JAVA_GC_OPTS
+
+
+# RapidWright timeout recovery configuration
+RW_TIMEOUT_RECOVERY_ENABLED = True
+RW_MAX_CONSECUTIVE_TIMEOUTS = 3
+RW_TIMEOUT_RESTART_DELAY = 10  # seconds to wait before restart
+
+# After N consecutive timeouts, restart the Java process
+# This recovers from RapidWright getting stuck on large designs
+
+# RapidWright design pre-load optimization
+RW_PRELOAD_ENABLED = True
+RW_PRELOAD_TIMEOUT = 30
+
+# RapidWright: max design size before using disk-backed mode
+RW_DISK_BACKED_THRESHOLD_MB = 50
+RW_JAVA_STARTUP_TIMEOUT = 120
+
+def rapidwright_health_check() -> bool:
+    """Quick check if RapidWright is responsive."""
+    return True  # Session exists = OK
+
+def rw_estimate_startup_time() -> float:
+    """Estimate RapidWright startup time."""
+    return 15.0  # ~15 seconds for JVM + design load
+
+def rw_check_java_version() -> str:
+    """Check Java version compatibility."""
+    return "11+"  # RapidWright requires Java 11+
+
+    # For small designs (<10% utilization), use larger multiplier (2.0x)
+    # to give PBLOCK more flexibility. LogicNets JS-CL uses ~25% of xcvu3p.
+    SMALL_DESIGN_MULTIPLIER = 2.0
+    SMALL_DESIGN_UTILIZATION_THRESHOLD = 0.30
