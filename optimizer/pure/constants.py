@@ -219,6 +219,13 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
     "rapidwright_execute_lut_muxf_repack_strategy",
     "rapidwright_execute_muxf_tree_reorder_strategy",
     "rapidwright_smart_retiming",
+    # Independent RapidWright tools — also modify design
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+    "rapidwright_optimize_fanout_batch",
+    "rapidwright_execute_physopt_strategy",
+    # Vivado tools
+    "vivado_opt_design",
 })
 
 

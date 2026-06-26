@@ -109,7 +109,7 @@ llm_tool_loop_node (调度器)
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
   │  Dashboard+Handoff决策  极简工具(~4个,仅report_step_state+raw_tool_output)
-  │  raw_tool_outputs侧缓冲   可见ANALYZE/EVALUATE阶段原始工具结果
+  │  raw_tool_outputs侧缓冲(键=iteration+phase+round+tool_name)    可见ANALYZE/EVALUATE阶段原始工具结果
   │  可查询                              默认最多6轮；仅纯数据描述，无策略推荐引导
   │  Dashboard含9个模块(新增 design_structure+recent_analysis)
   │
@@ -230,7 +230,7 @@ architecture_overview:
 ```
 ```
 
-**新鲜度标记**: Dashboard 中每个数据字段后显示 `[fresh]` 或 `[stale]` 标记，由 `field_freshness: dict[str, str]` 逐字段追踪。`init_analysis` 完成后全部初始化为 `[fresh]`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `[fresh]`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共 19 个）执行后全部字段降级为 `[stale]`。LLM 根据标记决定是否信任数据或重新获取。
+**新鲜度标记**: Dashboard 中每个数据字段后显示 `[fresh]` 或 `[stale]` 标记，由 `field_freshness: dict[str, str]` 逐字段追踪。`init_analysis` 完成后全部初始化为 `[fresh]`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `[fresh]`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共 24 个，2026-06-27 补充 5 个）执行后全部字段降级为 `[stale]`（EXECUTE 和 EVALUATE 对称处理）。LLM 根据标记决定是否信任数据或重新获取。
 
 **Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块——ANALYZE 看 7 模块（M5 隐藏），SELECT_STRATEGY 看 9 模块（新增 M4b `design_structure` + M8 `recent_analysis`），EXECUTE/EVALUATE 看 M1 + M2b (紧凑摘要) + M6。
 
@@ -259,7 +259,7 @@ architecture_overview:
 | 保护层 | 机制 |
 |------|------|
 | System 消息 | 压缩前分离，始终前置 |
-| **Pinned cell 注册表（L2）** | **`inject_pinned_cell_registry()` 每轮从 `state.entity_registry` 重建为独立 user 消息（system 之后），不进入 MessageStore，天然抗压缩；LLM 引用 cell 名的唯一权威来源** |
+| **Pinned cell 注册表（L2）** | **`inject_pinned_cell_registry()` 每轮从 `state.entity_registry` 重建为独立 user 消息（system 之后），不进入 MessageStore，天然抗压缩；LLM 引用 cell 名的唯一权威来源。rollback 后 `entity_registry.clear()` 清除陈旧名称** |
 | WNS/TNS | 上下文 Dashboard（user message，独立于压缩系统） |
 | 最近消息 | `preserve_role_turns=6` 保留原始 API role |
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
@@ -267,7 +267,7 @@ architecture_overview:
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
 | 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录标为 `[BLOCKED]`（TTL 阻断，占位符保留）；`strategy_not_applicable`/`tool_error`/`no_improvement` 完全移出目录；冷却策略在目录中标 `[BLOCKED: cooldown]` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
-| **cell 名边界校验** | **`tool_router.call_tool` 在 LLM→MCP 咽喉校验 cell 名（`validate_and_sanitize_cell_args`，部分放行+警告）；全部非法返回富错误（含候选名建议），不调用 MCP** |
+| **cell 名边界校验** | **`tool_router.call_tool` 在 LLM→MCP 咽喉校验 cell 名（`validate_and_sanitize_cell_args`，部分放行+警告，2026-06-27 新增 `allow_unverified` 参数）；全部非法返回富错误（含候选名建议），不调用 MCP；设计修改工具强制 strict 模式（拒绝 unverified 名）** |
 | 细胞名验证 | `_is_valid_cell_name()`（SSOT 在 `entities.py`，`critical_path.py` re-export）过滤非细胞字符串；>50% 无效整条跳过 |
 | TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |
 | 冷却分层 | **策略工具失败**→跳过冷却；**仅辅助工具失败**→应用冷却；阈值 0.050ns |

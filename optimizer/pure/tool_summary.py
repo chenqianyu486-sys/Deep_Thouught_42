@@ -321,8 +321,9 @@ def summarize_tool_result(
                     # Top delay hotspots from worst path
                     top_nodes = worst.get("top_delay_nodes", [])
                     if top_nodes:
+                        key_details["total_delay_nodes_worst"] = len(top_nodes)
                         hotspots = []
-                        for n in top_nodes[:3]:
+                        for n in top_nodes[:5]:
                             hotspots.append({
                                 "name": n.get("name", ""),
                                 "type": n.get("cell_type") or n.get("kind", ""),
@@ -332,6 +333,16 @@ def summarize_tool_result(
                         hs_str = ", ".join(f"{h['name']}={h['incr']:.3f}ns" for h in hotspots if h.get('incr') is not None)
                         if hs_str:
                             summary_parts.append(f"Top hotspots: {hs_str}")
+                        if len(top_nodes) > 5:
+                            summary_parts.append(f"({len(top_nodes)} total delay nodes on worst path)")
+                    # Delay hotspots from additional paths (up to 2 more)
+                    for pi, path in enumerate(data[1:3], 1):
+                        p_nodes = path.get("top_delay_nodes", [])
+                        if p_nodes:
+                            p_hot = [n for n in p_nodes[:2] if n.get("incr_delay") is not None]
+                            for n in p_hot:
+                                incr = round(n["incr_delay"], 3)
+                                summary_parts.append(f"Path{pi}: {n.get('name','')}={incr:.3f}ns")
         except (json.JSONDecodeError, Exception):
             pass
 

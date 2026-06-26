@@ -379,7 +379,7 @@ class FailedStrategyRecord:
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
-    raw_tool_outputs: dict[tuple[int, int], tuple[str, str]] = field(default_factory=dict)
+    raw_tool_outputs: dict[tuple[int, str, int, str], str] = field(default_factory=dict)
     raw_tool_output_max: int = 50
     # LLM message log for dashboard (not used by compression logic)
     latest_user_prompt: str = ""
@@ -472,6 +472,23 @@ def record_strategy_failure(
     STRATEGY_RETRY_TTL = 3  # iterations before a blocked strategy can be retried
     existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
     if existing:
+        # Refresh reason and blocked_until_iter on re-failure so TTL
+        # restarts and the entry stays blocked if still ineffective.
+        entry = existing[0]
+        entry.reason = reason
+        entry.tool = tool
+        entry.iteration = state.iteration.current
+        entry.detail = (detail or "")[:200]
+        if reason == "strategy_ineffective":
+            entry.blocked_until_iter = state.iteration.current + STRATEGY_RETRY_TTL
+        else:
+            entry.blocked_until_iter = state.iteration.current
+        logger.warning(
+            "[FAILED_STRATEGY] Updated: %s (reason=%s, tool=%s, blocked_until_iter=%d)",
+            strategy, reason, tool, entry.blocked_until_iter,
+            extra={"strategy": strategy, "reason": reason, "tool": tool,
+                   "blocked_until": entry.blocked_until_iter},
+        )
         return
     # strategy_not_applicable = skill found no matching cells → not a real failure,
     # don't block with TTL (the strategy may become applicable after other optimizations).

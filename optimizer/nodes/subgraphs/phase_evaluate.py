@@ -26,7 +26,7 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # Increased from 0.001 to 0.050 based on log analysis: deltas below 50ps
 # are noise-level (Vivado routing variability) and should not be treated
 # as genuine improvements or as reasons to skip strategy cooldown.
-STRATEGY_IMPROVEMENT_EPSILON_NS = 0.020  # 20ps: filter true noise (<1 LUT delay) but keep small real gains
+STRATEGY_IMPROVEMENT_EPSILON_NS = 0.050  # 50ps: Vivado routing noise floor (see doc)
 
 
 def detect_rollback_needed(state: OptimizerState) -> bool:
@@ -386,6 +386,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
+                    raw_tool_outputs=state.context.raw_tool_outputs,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
                     entity_registry=state.entity_registry,
@@ -420,6 +421,14 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                             state.timing.best_wns = wns
                             state.timing.best_wns_iteration = state.iteration.current
                             state.control.needs_save = True
+                    # Mark fields stale after design modification (architectural
+                    # symmetry with EXECUTE — EVALUATE allowlist is read-only but
+                    # the guard must exist for consistency and future tool additions).
+                    if tool_name in DESIGN_MODIFICATION_TOOLS:
+                        state.timing.critical_paths_stale = True
+                        for field in state.timing.field_freshness:
+                            state.timing.field_freshness[field] = "stale"
+                        state.entity_registry.mark_stale()
                     # Track dashboard freshness
                     refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                     if refreshable:

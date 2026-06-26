@@ -88,13 +88,13 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **数据与上下文层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`）自动将所有字段降级为 `stale`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
+| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 24 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
 | 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |
 | 10 | 上下文工程：弱引导 | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。LLM 保留自主决策权 |
 | 10b | 上下文工程：分层上下文管理 | 显式四层注入（STATIC > PINNED > DYNAMIC > EPHEMERAL）；CellNameRegistry 作为 Pinned 层每轮重建注入（绕过压缩），消除 LLM 在 EXECUTE 阶段"记忆重建"cell 名导致的幻觉 |
-| 10c | 上下文工程：实体注册表 SSOT | `EntityRegistry`（`state.entity_registry`）为 canonical cell 名唯一权威来源；解析/search_cells 同步写入，设计修改后 `mark_stale()`；`tool_router` 在 LLM→MCP 边界校验（部分放行+富错误反馈，含候选名建议） |
+| 10c | 上下文工程：实体注册表 SSOT | `EntityRegistry`（`state.entity_registry`）为 canonical cell 名唯一权威来源；解析/search_cells 同步写入，设计修改后 `mark_stale()`，rollback 后 `clear()`；`tool_router` 在 LLM→MCP 边界校验（设计修改工具强制严格模式，拒绝注册表外名） |
 
 **验证与安全层面**:
 | # | 原则 | 实现方式 |

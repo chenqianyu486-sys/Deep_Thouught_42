@@ -1196,7 +1196,7 @@ def _append_recent_analysis_results(lines: list[str], state: OptimizerState) -> 
     current_iter = state.iteration.current
     entries: list[str] = []
 
-    for (it, rd), (name, raw) in sorted(state.context.raw_tool_outputs.items()):
+    for (it, _phase, rd, name), raw in sorted(state.context.raw_tool_outputs.items()):
         if name not in _ANALYSIS_TOOL_NAMES:
             continue
         if it != current_iter and it != current_iter - 1:

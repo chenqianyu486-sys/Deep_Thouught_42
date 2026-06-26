@@ -100,8 +100,8 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`strategy_catalog` 排除机制**: `strategy_ineffective`（TTL 阻断）和冷却策略不在 catalog 中移除，而是标为 `[BLOCKED]` 占位符（含剩余轮数/原因）。`strategy_not_applicable`、`tool_error`、`no_improvement` 完全移出 catalog（可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
-- **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共19个）执行后全部降级为 `stale`。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
-- **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）。`strategy_not_applicable` 及其他 reason 无 TTL 阻断（`blocked_until_iter=current`），可在下一轮立即重试。
+- **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共24个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
+- **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）。`strategy_not_applicable` 及其他 reason 无 TTL 阻断（`blocked_until_iter=current`），可在下一轮立即重试。`record_strategy_failure` 去重时刷新 `blocked_until_iter`（2026-06-27 修复：之前去重后不刷新，导致反复失败策略永久不再被阻断）。
 
 ---
 
@@ -454,7 +454,7 @@ tool_result:
     -0.352
 ```
 
-**2. `_raw_tool_outputs`**: FIFO 淘汰（最多 50 条），仅当 LLM 调 `vivado_get_raw_tool_output` 时返回。
+**2. `_raw_tool_outputs`**: FIFO 淘汰（最多 50 条），仅当 LLM 调 `vivado_get_raw_tool_output` 时返回。键格式为 `(iteration, phase, tool_round, tool_name)`（2026-06-27 修复：之前为 `(iteration, tool_round)`，ANALYZE/EXECUTE 阶段键冲突导致结果互相覆盖）。
 
 **3. 压缩阶段旧消息裁剪**: `_compress_outdated_tool_results()` — 迭代差 > 2 的工具消息替换为 `[COMPRESSED: {tool} iter={N} | {summary}]`。
 
@@ -527,7 +527,7 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 ### 6.6 Dashboard 数据新鲜度与工具 rate limit
 
-**字段级新鲜度追踪**: `field_freshness: dict[str, str]`（2026-06-24 新增，替代 `refreshed_fields: set[str]`）。每个 Dashboard 数据字段独立标注 `[fresh]`/`[stale]`。初始化全部 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部降级为 `stale`。
+**字段级新鲜度追踪**: `field_freshness: dict[str, str]`（2026-06-24 新增，替代 `refreshed_fields: set[str]`）。每个 Dashboard 数据字段独立标注 `[fresh]`/`[stale]`。初始化全部 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部降级为 `stale`。EXECUTE 和 EVALUATE 两阶段对称处理（2026-06-27 修复：EVALUATE 之前缺失 stale 标记逻辑，造成 false-fresh）。
 
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
@@ -642,6 +642,13 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
     "rapidwright_execute_combinational_rebalancing_strategy",
     "rapidwright_execute_lut_muxf_repack_strategy",
     "rapidwright_execute_muxf_tree_reorder_strategy", "rapidwright_smart_retiming",
+    # 补充的独立 RW 工具（2026-06-27）
+    "rapidwright_optimize_cell_placement",
+    "rapidwright_optimize_lut_input_cone",
+    "rapidwright_optimize_fanout_batch",
+    "rapidwright_execute_physopt_strategy",
+    # Vivado 工具
+    "vivado_opt_design",
 })
 
 # 迭代控制常量
@@ -729,19 +736,20 @@ EntityRegistry
 **数据流**：
 - `vivado_extract_critical_path_cells` 返回 → `update_critical_paths()` 解析 → 同步写入 `entity_registry`（`register_cells_from_entries`）
 - `rapidwright_search_cells` 返回 → `sync_search_cells_result()` 同步写入注册表
-- 设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后 → `mark_stale()`（`snapshot_version += 1`），标记注册表 stale
+- 设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后 → `mark_stale()`（`snapshot_version += 1`），标记注册表 stale（EXECUTE 和 EVALUATE 两阶段均处理）
+- rollback 后 → `entity_registry.clear()`（2026-06-27 新增：checkpoint 恢复后 cell 拓扑可能变化，旧名必须重新获取）
 - LLM 调用工具时，工具参数中的 cell 名 → `validate_and_sanitize_cell_args()` 与注册表比对
 
 **关键设计**：注册表不进入 MessageStore，而是和 Dashboard 一样每次从 state 重建注入（Pinned 层）—— 天然抗压缩。
 
 ### 12.3 边界校验层（tool_router）
 
-`tool_router.call_tool` 在 LLM→MCP 咽喉处增加 `validate_and_sanitize_cell_args()`（部分放行+警告策略）：
+`tool_router.call_tool` 在 LLM→MCP 咽喉处增加 `validate_and_sanitize_cell_args()`（部分放行+警告策略；2026-06-27 新增 `allow_unverified` 参数，设计修改工具强制 `allow_unverified=False`）：
 
 | 情况 | 处置 |
 |------|------|
 | 格式合法 + 在注册表 | 放行（accepted） |
-| 格式合法 + 不在注册表 | 标记 `[UNVERIFIED]` 放行（允许设计变更后的新 cell） |
+| 格式合法 + 不在注册表 | `allow_unverified=True`（默认）→ 标记 `[UNVERIFIED]` 放行；`allow_unverified=False`（设计修改工具）→ 剔除（2026-06-27 新增严格模式） |
 | 格式非法（device site / bare type / pblock label） | 剔除并记录（rejected） |
 | 全部非法 | 返回结构化富错误，**不调用 MCP** |
 

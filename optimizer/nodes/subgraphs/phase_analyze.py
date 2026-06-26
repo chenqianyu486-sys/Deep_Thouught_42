@@ -198,9 +198,9 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 )
 
                 # Store raw output
-                state.context.raw_tool_outputs[(state.iteration.current, tool_round)] = (tool_name, result)
+                state.context.raw_tool_outputs[(state.iteration.current, "ANALYZE", tool_round, tool_name)] = result
                 if len(state.context.raw_tool_outputs) > state.context.raw_tool_output_max:
-                    oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
+                    oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[2]))
                     del state.context.raw_tool_outputs[oldest_key]
 
                 if deps.compat is not None:
@@ -504,7 +504,7 @@ def _extract_recent_tool_results(state: OptimizerState) -> list[str]:
     current_iter = state.iteration.current
     results: list[str] = []
 
-    for (it, rd), (name, raw) in sorted(state.context.raw_tool_outputs.items()):
+    for (it, _phase, rd, name), raw in sorted(state.context.raw_tool_outputs.items()):
         if it != current_iter:
             continue
         if name not in _ANALYSIS_TOOL_NAMES:

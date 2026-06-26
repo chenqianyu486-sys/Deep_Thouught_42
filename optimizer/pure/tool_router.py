@@ -18,6 +18,7 @@ from .constants import (
     _DEFAULT_TOOL_TIMEOUT,
     _TOOL_TIMEOUT_MAX,
     _MCP_ERROR_PATTERNS,
+    DESIGN_MODIFICATION_TOOLS,
 )
 from .entities import (
     EntityRegistry,
@@ -47,6 +48,10 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "rapidwright_optimize_cell_placement",
     "rapidwright_smart_region_search",
     "rapidwright_optimize_lut_input_cone",
+    "rapidwright_execute_opt_design_strategy",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
 })
 
 
@@ -132,9 +137,9 @@ async def call_tool(
         target_tool = arguments.get("tool_name", "")
 
         candidates = []
-        for (it, rd), (tname, txt) in raw_tool_outputs.items():
+        for (it, _phase, rd, tname), txt in raw_tool_outputs.items():
             if it == iter_arg and (round_idx is None or rd == round_idx):
-                candidates.append(((it, rd), tname, txt))
+                candidates.append(((it, _phase, rd, tname), tname, txt))
 
         if target_tool and candidates:
             filtered = [c for c in candidates if c[1] == target_tool]
@@ -146,8 +151,8 @@ async def call_tool(
         if not candidates:
             return json.dumps({"error": f"No raw output found for iteration={iter_arg}, round={round_idx}, tool={target_tool}"})
 
-        candidates.sort(key=lambda x: (x[0][0], x[0][1]), reverse=True)
-        (it, rd), tname, txt = candidates[0]
+        candidates.sort(key=lambda x: (x[0][0], x[0][2]), reverse=True)
+        (it, _phase, rd, tname), tname, txt = candidates[0]
         return f"[Raw tool output from iteration {it}, round {rd} ({len(txt)} chars, tool: {tname})]\n\n{txt}"
 
     # Internal tool: retrieve cached high-fanout nets
@@ -184,8 +189,13 @@ async def call_tool(
     # Partial-pass+warn policy (confirmed decision). Returns a structured
     # rejection when ALL provided cell names are invalid, without calling MCP.
     if entity_registry is not None:
+        # Stricter validation for design-modification tools: reject
+        # unverified cell names (not in registry) to prevent LLM
+        # hallucinated names from reaching MCP servers.
+        strict = tool_name in DESIGN_MODIFICATION_TOOLS
         sanitized_args, cell_error = validate_and_sanitize_cell_args(
             tool_name, arguments, entity_registry,
+            allow_unverified=not strict,
         )
         if cell_error is not None:
             logger.warning(

@@ -690,9 +690,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 )
 
                 # Store raw output
-                state.context.raw_tool_outputs[(state.iteration.current, tool_round)] = (tool_name, result)
+                state.context.raw_tool_outputs[(state.iteration.current, "EXECUTE", tool_round, tool_name)] = result
                 if len(state.context.raw_tool_outputs) > state.context.raw_tool_output_max:
-                    oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[1]))
+                    oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[2]))
                     del state.context.raw_tool_outputs[oldest_key]
 
                 # Record tool call trace
@@ -1233,9 +1233,8 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     system_text = ""
     api_clean: list[dict] = []
     for msg in api_messages:
-        if msg.get("role") == "system":
-            if not system_text:
-                system_text = msg.get("content", "")
+        if msg.get("role") == "system" and not system_text:
+            system_text = msg.get("content", "")
         else:
             api_clean.append(msg)
     api_messages = api_clean

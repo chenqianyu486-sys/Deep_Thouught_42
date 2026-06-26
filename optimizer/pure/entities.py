@@ -436,6 +436,8 @@ def validate_and_sanitize_cell_args(
     tool_name: str,
     arguments: dict,
     registry: EntityRegistry | None,
+    *,
+    allow_unverified: bool = True,
 ) -> tuple[dict, str | None]:
     """Validate & sanitize cell-name arguments at the LLM->tool boundary.
 
@@ -482,9 +484,9 @@ def validate_and_sanitize_cell_args(
                 if not isinstance(path, list):
                     continue
                 total_names += len(path)
-                res = validate_cell_list(path, registry)
+                res = validate_cell_list(path, registry, allow_unverified=allow_unverified)
                 total_rejected += len(res.rejected)
-                kept = res.accepted + res.unverified
+                kept = res.accepted + (res.unverified if allow_unverified else [])
                 if kept:
                     kept_paths.append(kept)
             if total_names > 0 and total_rejected == total_names:
@@ -500,12 +502,12 @@ def validate_and_sanitize_cell_args(
         else:
             # flat list[str]
             names_list = value if isinstance(value, list) else []
-            res = validate_cell_list(names_list, registry)
+            res = validate_cell_list(names_list, registry, allow_unverified=allow_unverified)
             if res.all_invalid and names_list:
                 accumulated_error = res.to_rich_error(tool_name, registry)
                 del sanitized[param]
                 continue
-            sanitized[param] = res.accepted + res.unverified
+            sanitized[param] = res.accepted + (res.unverified if allow_unverified else [])
 
     return sanitized, accumulated_error
 

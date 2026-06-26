@@ -97,6 +97,11 @@ async def rollback_node(
             deps.compat.add_message("user", notification)
             logger.info("[ROLLBACK] Rollback notification injected into LLM context")
 
+        # Clear entity registry after rollback: checkpoint may have different
+        # cell topology (merged/split/renamed), so stale names must be re-fetched.
+        state.entity_registry.clear()
+        logger.info("[ROLLBACK] Entity registry cleared — cells must be re-fetched")
+
     except Exception as e:
         logger.error(f"[ROLLBACK] Exception during rollback: {e}")
 

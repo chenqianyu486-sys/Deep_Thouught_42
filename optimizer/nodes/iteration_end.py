@@ -280,7 +280,7 @@ def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str
 
     if state.control.done_reason == "switch_strategy":
         # Check raw tool outputs for empty-result indicators
-        for (iter_num, _round), (tool_name, raw_output) in state.context.raw_tool_outputs.items():
+        for (iter_num, _phase, _round, tool_name), raw_output in state.context.raw_tool_outputs.items():
             if iter_num != state.iteration.current:
                 continue
             output_lower = raw_output.lower() if raw_output else ""
