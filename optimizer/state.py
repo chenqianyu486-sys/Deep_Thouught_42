@@ -199,6 +199,7 @@ class TimingState:
     best_wns_tns: Optional[float] = None
     best_wns_failing_endpoints: Optional[int] = None
     latest_wns: Optional[float] = None
+    baseline_wns: Optional[float] = None  # WNS of iteration baseline DCP, refreshed on strategy switch reload
     latest_tns: Optional[float] = None
     latest_failing_endpoints: Optional[int] = None
     prev_best_wns: Optional[float] = None
@@ -578,6 +579,7 @@ class DashboardGlobalState:
     iteration_count: int = 0
     target_frequency: float = 0.0      # MHz
     wns_setup: Optional[float] = None
+    baseline_wns: Optional[float] = None  # iteration baseline WNS (start point for current strategy)
     tns_setup: Optional[float] = None
     whs_hold: Optional[float] = None
     ths_hold: Optional[float] = None

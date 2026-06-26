@@ -491,10 +491,18 @@ def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str)
     state.control.done_reason = "switch_strategy"
     if deps.compat is not None:
         current_wns = state.timing.latest_wns
-        wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+        current_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
+        baseline_wns = state.timing.baseline_wns
+        baseline_str = f"{baseline_wns:.3f}ns" if baseline_wns is not None else "same as current"
+        best_wns = state.timing.best_wns
+        best_str = f"{best_wns:.3f}ns" if best_wns != float('-inf') else "N/A"
+        best_iter = state.timing.best_wns_iteration or "?"
         deps.compat.add_message("user",
-            f"[STRATEGY SWITCH] Previous strategy ({state.strategy.current_strategy}) ended. "
-            f"WNS={wns_str}. New iteration starts with fresh context. "
+            f"[STRATEGY SWITCH] Previous strategy ({state.strategy.current_strategy}) ended.\n"
+            f"  Current WNS={current_str} (previous strategy result, not the start point)\n"
+            f"  Baseline WNS={baseline_str} (iteration start — next strategy starts from here)\n"
+            f"  Best WNS={best_str} (from iteration {best_iter}, saved in best_checkpoint.dcp)\n"
+            f"The system will restore the iteration baseline DCP before the next strategy. "
             f"Failed strategies are listed in the dashboard.")
     record_flow_signal(state, "SWITCH_STRATEGY", "switch_strategy", phase="EVALUATE",
                        result_status=state.control.step_state.result_status if state.control.step_state else "")

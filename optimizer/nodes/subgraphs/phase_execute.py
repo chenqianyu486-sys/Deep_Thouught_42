@@ -154,6 +154,91 @@ async def _ensure_iteration_start_checkpoint(
     return True
 
 
+def _is_strategy_reentry(state: OptimizerState) -> bool:
+    """Detect if EXECUTE is re-entered for a strategy switch within the same iteration.
+
+    Counts EXECUTE_STRATEGY entries in phase_history for the current iteration.
+    Returns True when there is more than one entry, meaning this is at least the
+    second strategy execution in this iteration.
+    """
+    entry_count = sum(
+        1 for e in state.strategy.phase_history
+        if e.phase == "EXECUTE_STRATEGY" and e.iteration == state.iteration.current
+    )
+    return entry_count > 1
+
+
+async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> None:
+    """Reload iteration baseline DCP into Vivado on strategy switch.
+
+    Strategy switches reuse the iteration start DCP. Vivado's in-memory state
+    still holds the previous strategy's modifications, so timing reports would
+    be wrong. This function reloads the baseline DCP, refreshes timing, marks
+    all state stale, and injects a LLM notification.
+    """
+    iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
+    logger.info(
+        f"[EXECUTE] Strategy re-entry ({state.strategy.current_strategy}), "
+        f"reloading baseline DCP: {iter_ckpt}"
+    )
+
+    # 1. Reload baseline DCP into Vivado
+    await call_tool_fn(
+        "vivado_open_checkpoint",
+        {"dcp_path": str(iter_ckpt.resolve())},
+        deps.rapidwright_session,
+        deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
+    )
+
+    # 2. Refresh timing summary to get fresh baseline WNS
+    timing_result = await call_tool_fn(
+        "vivado_report_timing_summary",
+        {},
+        deps.rapidwright_session,
+        deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
+    )
+    parsed = parse_timing_summary(timing_result)
+    baseline_wns: float | None = None
+    if parsed and "wns" in parsed:
+        baseline_wns = parsed["wns"]
+        state.timing.baseline_wns = baseline_wns
+        state.timing.latest_wns = baseline_wns
+        # Sync design_state from parsed timing too
+        ds = parsed.get("design_state")
+        if ds:
+            state.timing.design_state = ds
+
+    # 3. Mark all state as stale — nothing from the previous strategy is valid
+    state.timing.critical_paths_stale = True
+    for field in state.timing.field_freshness:
+        state.timing.field_freshness[field] = "stale"
+    # Ensure critical_path_cells freshness entry exists even if not yet extracted
+    state.timing.field_freshness["critical_path_cells"] = "stale"
+    state.entity_registry.mark_stale()
+
+    # 4. Inject [SYSTEM — Baseline Restored] notification so LLM understands
+    if deps.compat is not None:
+        best_wns_str = (
+            f"{state.timing.best_wns:.3f}"
+            if state.timing.best_wns != float('-inf') else "N/A"
+        )
+        baseline_str = f"{baseline_wns:.3f}" if baseline_wns is not None else "N/A"
+        deps.compat.add_message("user",
+            f"[SYSTEM — Baseline Restored]\n"
+            f"Design reloaded from iteration {state.iteration.current} baseline DCP.\n"
+            f"Baseline WNS: {baseline_str}ns\n"
+            f"Best WNS: {best_wns_str}ns (preserved in best_checkpoint.dcp)\n"
+            f"Starting fresh strategy: {state.strategy.current_strategy}"
+        )
+
+    logger.info(
+        f"[EXECUTE] Baseline restored: WNS={baseline_wns}, "
+        f"strategy={state.strategy.current_strategy}"
+    )
+
+
 async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     """Run the EXECUTE phase: execute the chosen strategy via tool calls.
 
@@ -191,10 +276,18 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     state.strategy.current_phase = "EXECUTE_STRATEGY"
 
     # Save the rollback baseline once even if this iteration switches strategy.
+    checkpoint_created = False
     try:
-        await _ensure_iteration_start_checkpoint(state, deps)
+        checkpoint_created = await _ensure_iteration_start_checkpoint(state, deps)
     except Exception as e:
         logger.warning(f"[CHECKPOINT] Failed to save iteration checkpoint: {e}")
+
+    # Strategy switch detection: if checkpoint already existed AND we've been
+    # in this iteration's EXECUTE before, reload the baseline DCP into Vivado.
+    # This ensures the new strategy starts from the clean baseline design state
+    # rather than inheriting the previous strategy's in-memory modifications.
+    if not checkpoint_created and _is_strategy_reentry(state):
+        await _reload_baseline_on_switch(state, deps)
 
     while True:
         tool_round += 1
@@ -556,13 +649,20 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 if (RAPIDWRIGHT_PRECHECK_ENABLED
                         and tool_name in SKILL_CHAIN_ACTIONS
                         and tool_name != "rapidwright_execute_pblock_strategy"
-                        and deps.rapidwright_session):
+                        and deps.rapidwright_session
+                        and state.timing.design_state != DesignState.UNPLACED):
                     rw_precheck_baseline = await _get_rw_timing_estimate(state, deps)
                     if rw_precheck_baseline is not None:
                         logger.info(
                             f"[PRECHECK] RW baseline (before skill): "
                             f"WNS={rw_precheck_baseline:.3f}ns"
                         )
+                elif (RAPIDWRIGHT_PRECHECK_ENABLED and deps.rapidwright_session
+                      and state.timing.design_state == DesignState.UNPLACED):
+                    logger.info(
+                        f"[PRECHECK] Design unplaced — skipping RW timing estimate "
+                        f"(wireload would be inaccurate)"
+                    )
 
                 result = await call_tool_fn(
                     tool_name=tool_name, arguments=tool_args,
@@ -765,7 +865,8 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         and tool_name in SKILL_CHAIN_ACTIONS
                         and tool_name != "rapidwright_execute_pblock_strategy"  # analysis-only
                         and deps.rapidwright_session
-                        and state.timing.latest_wns is not None):
+                        and state.timing.latest_wns is not None
+                        and state.timing.design_state != DesignState.UNPLACED):
                     precheck_verdict = await _rapidwright_direction_check(state, deps, rw_precheck_baseline)
                     if precheck_verdict in ("REGRESS", "UNCHANGED"):
                         gate_reason = (

@@ -207,14 +207,16 @@ async def call_tool(
                 )
             arguments = sanitized_args
 
-    # Tool result cache: skip cache for internal/side-effect tools
+    # Tool result cache: skip cache for internal/side-effect tools.
+    # Cache is cleared at phase transitions (phase_handoff.py transition_phase),
+    # so within a single phase, read-only tools with identical arguments always
+    # return the cached result — no round window restriction needed.
     if tool_cache is not None and tool_name not in _NO_CACHE_TOOLS:
         cache_key = f"{tool_name}:{json.dumps(arguments, sort_keys=True)}"
         if cache_key in tool_cache:
             cached_round, cached_result = tool_cache[cache_key]
-            if tool_round - cached_round <= 2:
-                logger.info(f"[CACHE_HIT] {tool_name} (cached from round {cached_round})")
-                return f"[CACHED from round {cached_round}]\n{cached_result}"
+            logger.info(f"[CACHE_HIT] {tool_name} (cached from round {cached_round})")
+            return f"[CACHED from round {cached_round}]\n{cached_result}"
 
     # Parse server prefix
     if tool_name.startswith("rapidwright_"):

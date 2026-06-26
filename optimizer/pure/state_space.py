@@ -167,6 +167,7 @@ def _build_global_state(state: OptimizerState) -> DashboardGlobalState:
         iteration_count=state.iteration.current,
         target_frequency=round(target_freq, 1),
         wns_setup=timing.latest_wns,
+        baseline_wns=timing.baseline_wns,
         tns_setup=timing.latest_tns,
         whs_hold=timing.hold_wns,
         ths_hold=timing.hold_tns,
@@ -557,6 +558,8 @@ def format_state_space_for_llm(
         lines.append(f"  iteration_count: {gs.iteration_count}")
         lines.append(f"  target_frequency: {gs.target_frequency}")
         lines.append(f"  wns_setup: {gs.wns_setup:.3f}{_tag('timing_summary')}" if gs.wns_setup is not None else '  wns_setup: "N/A(not_analyzed)"')
+        if gs.baseline_wns is not None:
+            lines.append(f"  baseline_wns: {gs.baseline_wns:.3f}  # iteration start WNS, refreshed on strategy switch")
         lines.append(f"  tns_setup: {gs.tns_setup:.3f}{_tag('timing_summary')}" if gs.tns_setup is not None else '  tns_setup: "N/A(not_analyzed)"')
         lines.append(f"  best_wns: {_annotated_val(gs.best_wns, '{:.3f}', 'initial_state')}")
         if gs.best_wns_iteration is not None:
@@ -903,18 +906,25 @@ def format_state_space_for_llm(
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _infer_current_stage(state: OptimizerState) -> str:
-    """Infer current design stage from strategy phase and state context.
+    """Infer current design stage from actual design state or tool context.
 
-    Heuristic based on tool calls available at each stage:
-    - SYNTHESIS: initial analysis not yet complete (no DCP loaded)
-    - PLACEMENT: place_design available, routing not yet done
-    - ROUTING: route_design available or in progress
-    - POST_ROUTE: routing complete, phys_opt or evaluation ongoing
+    Priority:
+    1. timing.design_state (from Vivado timing report — most reliable)
+    2. Heuristic from tools_used (fallback when design_state is the default "unplaced")
     """
     timing = state.timing
-    # If we have a best_wns iteration > 0, we're past init (placement or later)
+
+    # Priority 1: actual design state from last timing report
+    ds = timing.design_state
+    if ds == DesignState.UNPLACED:
+        return "PLACEMENT_UNPLACED"
+    elif ds == DesignState.PLACED:
+        return "PLACEMENT"
+    elif ds == DesignState.ROUTED:
+        return "ROUTING"
+
+    # Priority 2: infer from tool history (fallback for early iterations)
     if timing.best_wns_iteration is not None and timing.best_wns_iteration > 0:
-        # Check if route_design has been called
         tools = state.iteration.tools_used
         if any("route" in t.lower() for t in tools):
             return "ROUTING"

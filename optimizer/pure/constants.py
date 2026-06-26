@@ -192,6 +192,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_report_route_status": frozenset({"route_status", "route_status_detail"}),
     "vivado_report_timing_summary": frozenset({"timing_summary", "cdc_paths"}),
     "rapidwright_get_design_info": frozenset({"design_info"}),
+    "vivado_extract_critical_path_cells": frozenset({"critical_path_cells"}),
 }
 
 # ── Design modification tools ──────────────────────────────────
