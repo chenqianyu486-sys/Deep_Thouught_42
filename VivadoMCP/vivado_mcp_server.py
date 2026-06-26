@@ -142,21 +142,34 @@ def get_vivado_path() -> str:
     raise RuntimeError("Vivado not found in PATH. Set VIVADO_EXEC env var, provide --vivado-path, or add Vivado to PATH.")
 
 
+def _kill_vivado_process_group(pid: int) -> None:
+    """Kill the isolated process group that owns a Vivado invocation."""
+    try:
+        process_group = os.getpgid(pid)
+    except (OSError, ProcessLookupError):
+        process_group = None
+
+    try:
+        if process_group is not None and process_group != os.getpgrp():
+            os.killpg(process_group, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def cleanup_vivado():
-    """Kill Vivado process if running. Called on exit."""
+    """Kill the complete Vivado process tree if running. Called on exit."""
     global _vivado_process, _vivado_pid
     if _vivado_pid:
-        try:
-            os.kill(_vivado_pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
+        _kill_vivado_process_group(_vivado_pid)
         _vivado_pid = None
     if _vivado_process and _vivado_process.isalive():
         try:
-            _vivado_process.terminate(force=True)
+            _vivado_process.close(force=True)
         except Exception:
             pass
-        _vivado_process = None
+    _vivado_process = None
 
 
 def signal_handler(signum, frame):
@@ -683,15 +696,9 @@ def extract_critical_path_cells(
     # Cell line: "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)" — Location + CellType + optional (Prop_)
     RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\)\s*$')
     # Cell line without Prop_ (endpoint cell, pin on same line): "    DSP48E2_X10Y46  DSP_A_B_DATA  r  cell/pin"
-    # NOTE: The PBlock column (e.g. "pblock_tight") is inserted by Vivado when cells
-    # are assigned to a pblock. It appears between the r/f marker and Netlist Resource.
-    # We use two sequential capture groups for the last two tokens; the code takes
-    # group(5) if present (PBlock mode), otherwise group(4) (normal mode).
-    # See vivado timing report header for column order.
-    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)(?:\s+(\S+))?$')
+    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)')
     # Delay line: "                              0.079  0.108 r  cell/pin"
-    #   or (with PBlock): "                        0.079  0.108 r  pblock_tight  cell/pin"
-    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)(?:\s+(\S+))?$')
+    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)')
     # Net line: "                         net (fo=28, routed)          0.357     0.465    netname"
     RE_NET_LINE     = re.compile(r'^\s*net\s+\(fo=(\d+),\s*(\w+)\)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\S+)')
 
@@ -703,7 +710,7 @@ def extract_critical_path_cells(
     all_paths = []
 
     for path_section in path_sections[1:]:  # Skip first (header before any path)
-        lines = [l.rstrip('\r\n') for l in path_section.split('\n')]
+        lines = path_section.split('\n')
 
         # ── Phase 1: parse header (before first --- separator) ──
         header = {
@@ -812,7 +819,7 @@ def extract_critical_path_cells(
             if m:
                 incr = float(m.group(1))
                 cumul = float(m.group(2))
-                pin = m.group(5) if m.group(5) else m.group(4)
+                pin = m.group(4)
                 if pending_cell:
                     loc, ctype = pending_cell
                     cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
@@ -837,7 +844,7 @@ def extract_critical_path_cells(
             if m and not pending_cell:
                 loc = m.group(1)
                 ctype = m.group(2)
-                pin = m.group(5) if m.group(5) else m.group(4)
+                pin = m.group(4)
                 cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
                 nodes.append({
                     "kind": "cell", "name": cell_name, "cell_type": ctype, "location": loc,
@@ -907,24 +914,13 @@ def extract_critical_path_cells(
                 },
             })
 
-    # ── Diagnostic: log extraction summary ──
-    total_cells_extracted = sum(len(p.get("cells", [])) for p in all_paths)
-    sample_cells = []
-    for p in all_paths:
-        if p.get("cells"):
-            sample_cells = p["cells"][:3]
-            break
-    logger.info(
-        f"[extract_critical_path_cells] Parsed {len(path_sections)-1} timing sections → "
-        f"{len(all_paths)} paths extracted, {total_cells_extracted} total cells. "
-        f"Sample cells from first path: {sample_cells if sample_cells else '(empty)'}"
-    )
-
     # Write to file if specified, otherwise return JSON
     if output_file:
         try:
             import os
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            dirname = os.path.dirname(output_file)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
             with open(output_file, 'w') as f:
                 json.dump(all_paths, f, indent=2)
             return json.dumps({
@@ -1006,7 +1002,7 @@ def extract_critical_path_pins(
         pin_match_count = 0
         last_part_checks = []
 
-        for line in [l.rstrip('\r\n') for l in path_section.split('\n')]:
+        for line in path_section.split('\n'):
             stripped = line.strip()
 
             # Detect data path section boundaries
@@ -1080,7 +1076,9 @@ def extract_critical_path_pins(
     if output_file:
         try:
             import os
-            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            dirname = os.path.dirname(output_file)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
             with open(output_file, 'w') as f:
                 json.dump(result, f, indent=2)
             result["output_file"] = output_file
@@ -1731,21 +1729,12 @@ async def list_tools():
         ),
         Tool(
             name="extract_critical_path_cells",
-            description="""VERIFIED critical path cell extraction — AUTHORITATIVE tool.
-
+            description="""Extract cell names from critical timing paths for spread analysis.
+            
             Parses timing report to get ordered list of cells on each critical path.
-            This is the ONLY reliable way to extract critical path cell data — it uses
-            Vivado's report_timing -return_string and produces correctly-ordered
-            sequential paths. Do NOT use raw Tcl (vivado_run_tcl) for this purpose.
-
-            DO NOT use raw Tcl for cell extraction — this tool is the verified,
-            correct method. Raw Tcl patterns like 'get_cells -of [get_nets -of $ep]'
-            produce INCORRECT results (they include fanout-branch cells, not just
-            the sequential timing path).
-
-            Output is JSON that can be passed to RapidWright's analyze_critical_path_spread
-            or to any strategy tool (MUXFTreeReorder, CombinationalRebalance, etc.).
-
+            Output is JSON that can be passed to RapidWright's analyze_critical_path_spread 
+            to calculate Manhattan distances.
+            
             Can optionally write to a file for efficient data transfer.""",
             inputSchema={
                 "type": "object",
@@ -2148,10 +2137,6 @@ Unlike phys_opt_design, there are no blocked directives.""",
 
             USE: Before timing checks to ensure design is in valid state.
             USE: After design modifications to verify placement/routing status.
-
-            NOTE: Design status is also shown in Dashboard Module 1 (Global State,
-            current_stage field). Avoid repeated calls — the status only changes
-            after execution tools (place_design, route_design, phys_opt_design).
 
             READ-ONLY: Does not modify design.""",
             inputSchema={
@@ -2564,16 +2549,8 @@ async def call_tool(name: str, arguments: dict):
             directive = arguments.get("directive", "Explore")
             retarget = arguments.get("retarget", True)
 
-            # SAFETY GUARD: Vivado forbids using -retarget together with -directive.
-            # Error: [Vivado_Tcl 4-167] Cannot specify '-retarget' when '-directive' is specified
-            # Resolution: only use -retarget when NO directive is specified at all.
-            # When any directive (including Default) is set, suppress -retarget.
-            has_active_directive = bool(directive)
-            if has_active_directive and retarget:
-                logger.info(
-                    f"Suppressing -retarget flag: incompatible with -directive {directive}. "
-                    f"The directive already implies retarget-equivalent behavior."
-                )
+            # No safety guard needed: opt_design has NO retiming options
+            # (unlike phys_opt_design which has AlternateFlowWithRetiming, AddRetime)
 
             # Get WNS before opt_design for delta reporting
             wns_before = None
@@ -2587,9 +2564,9 @@ async def call_tool(name: str, arguments: dict):
 
             # Build and run opt_design command
             cmd = "opt_design"
-            if has_active_directive:
+            if directive:
                 cmd += f" -directive {directive}"
-            elif retarget:
+            if retarget:
                 cmd += " -retarget"
 
             result_text = run_tcl_command(cmd, timeout=timeout)
