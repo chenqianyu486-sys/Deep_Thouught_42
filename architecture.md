@@ -73,9 +73,15 @@ WNS动态状态 → 已迁移至 _inject_dashboard_at_end()，作为 user messag
 ### 1.5 Agent 上下文快照注入机制
 
 ```
-V2 tool loop 每轮 LLM 调用前 → inject_merged_dashboard()
+V2 tool loop 每轮 LLM 调用前 → inject_pinned_cell_registry() + inject_merged_dashboard()
     ↓
-inject_merged_dashboard(api_messages, state, phase):
+inject_pinned_cell_registry(api_messages, state):       # Pinned 层（L2，2026-06 新增）
+    1. build_registry_snapshot_yaml(state.entity_registry) → [CELL REGISTRY] YAML
+    2. 移除已有 [CELL REGISTRY] header 消息（幂等，防累积）
+    3. 插入为 system 消息之后的独立 user 消息
+    → 不进入 MessageStore，天然抗压缩；每轮从 state.entity_registry 重建
+    ↓
+inject_merged_dashboard(api_messages, state, phase):    # Dynamic 层（L3）
     1. build_state_space(state) → 7-module StateSpace
     2. format_state_space_for_llm() → YAML 仪表板（phase-aware 模块过滤）
     3. inject_context_snapshot_at_end(api_messages, snapshot):
@@ -150,7 +156,7 @@ class CriticalPathEntry:
 
 **双重更新**: 被动(LLM调`vivado_extract_critical_path_cells`) + 主动(phys_opt/place/route后设`stale`, 自动调用`_auto_refresh_critical_paths()`)。
 
-**纯函数** ([critical_path.py](optimizer/pure/critical_path.py)): `parse_critical_path_cells()` / `update_critical_paths()` / `format_critical_paths_snapshot` / `validate_critical_path_data()` / `heuristic_cell_type()` / `_is_valid_cell_name()`。细胞名验证：拒绝 `pblock_*`/`SLICE_X*Y*` 等非细胞模式，>50% 无效整条跳过。
+**纯函数** ([critical_path.py](optimizer/pure/critical_path.py) + [entities.py](optimizer/pure/entities.py)): `parse_critical_path_cells()` / `update_critical_paths()` / `format_critical_paths_snapshot` / `validate_critical_path_data()` / `heuristic_cell_type()`。细胞名验证 `is_valid_cell_name()` 的 SSOT 实现已迁移至 `entities.py`（`critical_path.py` 通过 re-export 保持向后兼容）；拒绝 `pblock_*`/`SLICE_X*Y*` 等非细胞模式，>50% 无效整条跳过。`update_critical_paths()` 解析后同步写入 `state.entity_registry`（SSOT + Pinned 层）。
 
 **展示位置**:
 | 位置 | 来源 | 限制 |
@@ -254,15 +260,15 @@ llm_tool_loop._execute_chain_actions()
 3. **评分函数**: `_score(width, dist) = width + dist * distance_weight_factor`（默认 `distance_weight_factor=0.3`）
 4. **参考点优先级**: 关键路径 cell 质心 > 显式传入坐标 > 全局 cell 质心
 
-**自动注入逻辑（始终覆盖）**:
+**自动注入逻辑（始终覆盖，2026-06 统一为注册表过滤）**:
 ```python
 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
-    if state.timing.critical_paths:  # 始终覆盖 LLM 提供的数据
-        for cp in state.timing.critical_paths[:10]:
-            for cell_name in cp.cells:
-                ...  # 去重后注入
+    if state.timing.critical_paths or state.entity_registry.cells:
+        # 统一使用 extract_registry_cells_for_inject()（entities.py SSOT）
+        cells = extract_registry_cells_for_inject(state.entity_registry, state.timing.critical_paths)
+        tool_args["critical_path_cells"] = cells  # 始终覆盖 LLM 提供的数据
 ```
-> **数据完整性保护（2026-06）**: LLM 可能通过 TCL 提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。
+> **数据完整性保护（2026-06）**: LLM 可能通过 TCL 提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。**2026-06 增强**：注入逻辑统一改用 `extract_registry_cells_for_inject()`（注册表 + critical paths），替换原 pblock 子串过滤与零过滤的不一致实现；`rapidwright_optimize_cell_placement` 新增同源 auto-inject（详见 §12.4）。
 
 ---
 
@@ -375,7 +381,7 @@ class StepState:
 
 ### 4.5 report_step_state 格式提醒（双重提醒）
 
-**提醒 1 — User Message（一次性，精简版）**: 约 12 行 FORMAT_GUARD，由 `format_guard_injected` 标志控制，仅注入一次。
+**提醒 1 — User Message（一次性，精简版）**: FORMAT_GUARD（约 4000 字符，含 EXECUTE 工具映射 + DESIGN CONSISTENCY 要求 + CELL NAME CONTRACT），由 `format_guard_injected` 标志控制，仅注入一次。
 
 **提醒 2 — 工具 schema 自描述**: `report_step_state` 工具的 parameters 定义包含完整描述，`filter_tools_for_phase()` 按阶段动态 patch flow_control enum。
 
@@ -661,7 +667,7 @@ WNS_TARGET_THRESHOLD = 0.0
 ### 上下文注入层次
 
 1. **SYSTEM_PROMPT.TXT** (~90行): 角色定义 + known_risks(事实描述) + 策略目录
-2. **FORMAT_GUARD** (~12行, 一次性): 行为要求 + EXECUTE工具映射 + 格式禁令
+2. **FORMAT_GUARD** (~4000 字符, 一次性): 行为要求 + EXECUTE工具映射 + 格式禁令 + **CELL NAME CONTRACT**（2026-06 新增：指引 LLM 使用 [CELL REGISTRY]、禁止 device site / bare type 名、说明富错误反馈机制）
 3. **Dashboard** (每轮动态重建): 纯数据无判断标签 + phase-aware过滤 + 最后一条user消息注入
 4. **Tool schema** (按阶段过滤): `filter_tools_for_phase()` 深拷贝+动态patch flow_control enum
 5. **Runtime nudge** (按需): 事实描述("Current WNS: X")，非处方
@@ -683,9 +689,119 @@ WNS_TARGET_THRESHOLD = 0.0
 
 `filter_tools_for_phase()` 对 `report_step_state` 工具定义做深拷贝 + 按阶段 patch `flow_control` enum，LLM 只看到当前阶段的合法信号。
 
+### 上下文注入层次（分层上下文管理，2026-06 增强）
+
+显式四层注入架构，每层有明确的生命周期与注意力权重策略：
+
+| 层 | 生命周期 | 内容 | 注入位置 |
+|------|---------|------|---------|
+| L1 STATIC | 不变（system message） | SYSTEM_PROMPT.TXT + FORMAT_GUARD | 消息列表最前 |
+| L2 PINNED | 每轮重建，绕过压缩 | **CellNameRegistry 快照**（canonical cell 名 + 模块索引） | system 之后，独立 user 消息 |
+| L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace | 最后一条 user 消息 |
+| L4 EPHEMERAL | 受压缩管理（preserve_role_turns=6） | 最近对话轮次 + 压缩后 YAML 历史 | 消息列表主体 |
+
+**Pinned 层（L2）是关键**：LLM 在 EXECUTE 阶段调用 `optimize_cell_placement` 等工具时，不再依赖"几轮前看过的、已被压缩的工具输出"来回忆 cell 名，而是直接看到 Pinned 层注册表提供的规范化名。把"记忆重建"降级为"复制粘贴"，从根上消除 cell 名幻觉。Pinned 层由 `inject_pinned_cell_registry()` 每轮移除并重新插入（幂等，不累积），不进入 MessageStore，天然抗压缩。
+
 ---
 
-## 12. Tool 描述增强模式（2026-05 新增）
+## 12. 实体注册表与 cell 名边界校验（2026-06 新增）
+
+### 12.1 根因：cell 名错误的上下文工程缺口
+
+cell 实例名（如 `u_core/u_alu/lut1`）在原架构中只出现在三个不稳定来源：
+- 工具原始输出（被 `summarize_tool_result` 压缩为摘要，cell 名丢失）
+- Dashboard Module 2（仅 ANALYZE/SELECT_STRATEGY 可见，固定截断 top 8 路径）
+- LLM 对话记忆（更早的 cell 名被 YAML 化或标记化）
+
+结果：LLM 在 EXECUTE 阶段调用 cell-targeting 工具时只能凭"记忆重建" cell 名 → 拼写错误、截断、幻觉。
+
+### 12.2 EntityRegistry（单一事实来源 + Pinned 上下文）
+
+`optimizer/pure/entities.py` 定义 `EntityRegistry` dataclass，挂在 `OptimizerState.entity_registry`：
+
+```
+EntityRegistry
+├── cells: dict[str, CellRef]      # canonical_name → {type, location, source_path_idx, last_seen_iter}
+├── by_module: dict[str, set[str]] # 模块索引（第二路径段）
+└── snapshot_version: int          # 设计变更后自增，触发 LLM 侧失效
+```
+
+**数据流**：
+- `vivado_extract_critical_path_cells` 返回 → `update_critical_paths()` 解析 → 同步写入 `entity_registry`（`register_cells_from_entries`）
+- `rapidwright_search_cells` 返回 → `sync_search_cells_result()` 同步写入注册表
+- 设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后 → `mark_stale()`（`snapshot_version += 1`），标记注册表 stale
+- LLM 调用工具时，工具参数中的 cell 名 → `validate_and_sanitize_cell_args()` 与注册表比对
+
+**关键设计**：注册表不进入 MessageStore，而是和 Dashboard 一样每次从 state 重建注入（Pinned 层）—— 天然抗压缩。
+
+### 12.3 边界校验层（tool_router）
+
+`tool_router.call_tool` 在 LLM→MCP 咽喉处增加 `validate_and_sanitize_cell_args()`（部分放行+警告策略）：
+
+| 情况 | 处置 |
+|------|------|
+| 格式合法 + 在注册表 | 放行（accepted） |
+| 格式合法 + 不在注册表 | 标记 `[UNVERIFIED]` 放行（允许设计变更后的新 cell） |
+| 格式非法（device site / bare type / pblock label） | 剔除并记录（rejected） |
+| 全部非法 | 返回结构化富错误，**不调用 MCP** |
+
+**富错误反馈协议**（教会 LLM 纠正，而非静默失败）：
+```json
+{
+  "tool": "rapidwright_optimize_cell_placement",
+  "status": "rejected",
+  "reason": "invalid_cell_names",
+  "invalid_names": ["SLICE_X38Y277"],
+  "rejection_reasons": [{"name": "SLICE_X38Y277", "reason": "device_site"}],
+  "suggested_canonical_names": ["u_core/u_alu/lut1", "u_core/u_alu/lut2"],
+  "guidance": "Cell names must be hierarchical paths (contain '/')... Use names from the [CELL REGISTRY] section..."
+}
+```
+
+校验函数 `_is_valid_cell_name()` 从 `critical_path.py` 提取到 `entities.py`（SSOT），router、parse、MCP 共享同一份校验逻辑。`critical_path.py` 通过 re-export 保持向后兼容。
+
+### 12.4 auto-inject 策略统一
+
+`phase_execute.py` 的"用 state 数据覆盖 LLM 参数"机制统一使用注册表过滤：
+
+| 工具 | auto-inject | 来源 |
+|------|------------|------|
+| `rapidwright_execute_pblock_strategy` | ✅ | `extract_registry_cells_for_inject()`（注册表 + critical paths） |
+| `rapidwright_flatten_lut_cascade` | ✅ | state.timing.critical_paths |
+| `rapidwright_execute_combinational_rebalancing_strategy` | ✅ | state.timing.critical_paths |
+| `rapidwright_execute_lut_muxf_repack_strategy` | ✅ | state.timing.critical_paths |
+| `rapidwright_execute_muxf_tree_reorder_strategy` | ✅ | state.timing.critical_paths |
+| `rapidwright_optimize_cell_placement` | ✅ **新增** | `extract_registry_cells_for_inject()`（注册表 + critical paths） |
+| `rapidwright_optimize_lut_input_cone` | router 校验 | pin 格式校验 |
+
+`extract_registry_cells_for_inject()` 优先取 critical path 上的 cell，再用注册表最近见过的 cell 回填，统一了 pblock 子串过滤与零过滤的不一致。
+
+### 12.5 工具 schema 增强（契约即文档）
+
+所有接收 cell 名的 MCP 工具，在 JSON schema 中补充格式契约：
+- `items.pattern`: `^.+/.+$`（强制层级分隔符）
+- `description`: 明确说明 device site / bare type 名非法，指引 [CELL REGISTRY]
+- `examples`: 给出合法 cell 名示例
+
+涉及参数：`cell_names`、`critical_path_cells`、`critical_paths`（含 dict 格式的 `cells`/`name` 子项）、`hierarchical_input_pins`。
+
+### 12.6 涉及文件
+
+| 文件 | 变更 |
+|------|------|
+| `optimizer/pure/entities.py` | **新增**：EntityRegistry + 校验 + 富错误 + Pinned 渲染 + auto-inject 提取 |
+| `optimizer/state.py` | `OptimizerState` 新增 `entity_registry` 字段 |
+| `optimizer/pure/critical_path.py` | `_is_valid_cell_name` re-export；`update_critical_paths` 同步注册表 |
+| `optimizer/pure/tool_router.py` | `call_tool` 增加 `entity_registry` 参数 + 边界校验 |
+| `optimizer/pure/context_snapshot.py` | **新增** `inject_pinned_cell_registry()` |
+| `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 增加 "CELL NAME CONTRACT" 段，指引 LLM 使用 [CELL REGISTRY]、禁止 device site / bare type 名 |
+| `optimizer/nodes/subgraphs/phase_*.py` | 4 阶段 `_call_phase_llm` 调用 Pinned 注入 + 传 registry |
+| `RapidWrightMCP/server.py` | cell 名参数 schema 增强（pattern/description/examples） |
+| `dashboard/serializer.py` | 无需改动（`dataclasses.asdict` + `_make_json_safe` 自动处理 `entity_registry`，含 set→sorted list 转换） |
+
+---
+
+## 13. Tool 描述增强模式（2026-05 新增）
 
 1. **LIMITATIONS / Contraindications**: 工具 description 标注不适用场景
 2. **RESULT INTERPRETATION**: 指导正确理解工具返回值

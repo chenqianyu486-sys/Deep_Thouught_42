@@ -23,7 +23,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -182,6 +182,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     high_fanout_nets=state.timing.high_fanout_nets,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
+                    entity_registry=state.entity_registry,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[ANALYZE] {tool_name} completed in {tool_elapsed:.1f}s")
@@ -209,6 +210,23 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Track WNS
                 _track_wns_from_result(state, tool_name, result)
+
+                # Sync canonical cell names into the entity registry from
+                # search_cells results (compression-resistant SSOT).
+                if tool_name == "rapidwright_search_cells":
+                    try:
+                        from optimizer.pure.entities import sync_search_cells_result
+                        added = sync_search_cells_result(
+                            state.entity_registry, result,
+                            iteration=state.iteration.current,
+                        )
+                        if added:
+                            logger.info(
+                                f"[ANALYZE] Registered {added} new canonical cell(s) "
+                                f"from search_cells (total={len(state.entity_registry.cells)})"
+                            )
+                    except Exception as e:
+                        logger.debug(f"[ANALYZE] search_cells registry sync failed: {e}")
 
                 # Track dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
@@ -308,6 +326,9 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
         return None
 
     # Inject merged handoff + dashboard as last user message
+    # Inject Pinned cell-registry layer (right after system message),
+    # then merged handoff + dashboard as last user message.
+    inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.ANALYZE)
 
     model = state.model.current_model

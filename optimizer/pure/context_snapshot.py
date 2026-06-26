@@ -7,7 +7,61 @@ The handoff summary is merged into the same message.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .tool_filter import LoopPhase
+
+if TYPE_CHECKING:
+    from ..state import OptimizerState
+
+# Header marker for the Pinned cell-registry layer (compression-resistant).
+CELL_REGISTRY_MARKER = "[CELL REGISTRY]"
+
+
+def inject_pinned_cell_registry(
+    api_messages: list[dict],
+    state: "OptimizerState",
+) -> None:
+    """Inject the canonical cell-name registry as an independent user message
+    right after the system message(s).
+
+    This is the Pinned context layer (Layer 2): rebuilt every turn from
+    state.entity_registry, never enters MessageStore, and survives
+    compression. The LLM reads canonical cell names from here instead of
+    reconstructing them from (compressed) tool outputs — eliminating the
+    "memory reconstruction" failure mode at the EXECUTE boundary.
+
+    Idempotent: any prior [CELL REGISTRY] message is removed before the
+    fresh one is inserted, so it never accumulates across turns.
+    """
+    from .entities import build_registry_snapshot_yaml
+
+    # Remove any existing pinned registry message
+    for i, msg in enumerate(api_messages):
+        if (msg.get("role") == "user"
+                and isinstance(msg.get("content"), str)
+                and msg["content"].lstrip().startswith(CELL_REGISTRY_MARKER)):
+            del api_messages[i]
+            break
+
+    # Only inject when the registry has content OR we are past init_analysis
+    # (so the LLM sees the placeholder + guidance even before cells load).
+    registry = getattr(state, "entity_registry", None)
+    if registry is None:
+        return
+
+    phase = getattr(state.strategy, "current_phase", "") or ""
+    snapshot = build_registry_snapshot_yaml(registry, phase=phase)
+
+    # Insert right after the last system message (Pinned layer position).
+    insert_idx = 0
+    for i, msg in enumerate(api_messages):
+        if msg.get("role") != "system":
+            insert_idx = i
+            break
+    else:
+        insert_idx = len(api_messages)
+    api_messages.insert(insert_idx, {"role": "user", "content": snapshot})
 
 
 def inject_context_snapshot(api_messages: list[dict], snapshot_yaml: str) -> None:

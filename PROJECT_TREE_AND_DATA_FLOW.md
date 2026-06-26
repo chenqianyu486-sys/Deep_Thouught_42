@@ -8,7 +8,7 @@
 fpl26_optimization_contest/
 ├── dcp_optimizer.py              # CLI 入口：V2 状态机启动、模型配置
 ├── optimizer/                    # V2 状态机框架（LangGraph 风格）
-│   ├── state.py                  # OptimizerState + 7 个子切片 dataclass
+│   ├── state.py                  # OptimizerState + 7 个子切片 dataclass + EntityRegistry 实体注册表
 │   ├── deps.py                   # NodeDeps：外部依赖容器
 │   ├── graph.py                  # NodeGraph：节点注册、边注册、run 循环
 │   ├── edges.py                  # 条件边函数 + NodeName 枚举
@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 15 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存）、critical_path.py（关键路径解析 + 数据质量验证）
+│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流、数据质量守卫、冷却逻辑等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -67,14 +67,15 @@ fpl26_optimization_contest/
 ### 2.1 状态模型（顶层结构）
 
 ```
-OptimizerState (可变 dataclass，7 个子切片)
+OptimizerState (可变 dataclass，7 个子切片 + entity_registry 实体注册表)
 ├── TimingState     — WNS/TNS/best_wns/field_freshness(每字段fresh/stale状态)/hold时序/设备容量/拥塞数据/路由状态/控制集/设计信息/CDC/约束/PVT/violation_summary(路径聚类)/failing_endpoint_names
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
 ├── ContextState    — 压缩计数/原始工具输出缓冲/工具结果缓存/LLM 消息日志/FC 决策轨迹/失败策略记录
 ├── ControlState    — 退出条件/DCP 路径/step_state
-└── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
+├── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
+└── entity_registry — EntityRegistry（canonical cell 名 SSOT + Pinned 上下文层，抗压缩；cells/by_module/snapshot_version）
 + 7 模块仪表盘容器 (纯输出 dataclass，由 state_space.py 构建): StateSpace → DashboardGlobalState / DashboardTimingClusters / DashboardPhysicalCongestion / DashboardNetlistQuality / DashboardConstraints / DashboardDynamicGradient / DashboardArchitectureOverview
 ```
 
@@ -155,11 +156,13 @@ _prepare_api_messages():
   1. auto_compact_messages()  ← 去重
   2. 增强系统提示词(scenario hint + skill catalog)
   3. 注入迭代 handoff（迭代边界）
-  4. inject_merged_dashboard() ← 数据 Dashboard 作为最后一条 user 消息
-                                                            ↓
+  4. inject_pinned_cell_registry() ← [CELL REGISTRY] 作为 system 后的独立 user 消息（Pinned 层，每轮重建，抗压缩）
+  5. inject_merged_dashboard() ← 数据 Dashboard 作为最后一条 user 消息
+                                                             ↓
                                                    LLM API Call
 ```
 
+> **分层上下文注入**（STATIC > PINNED > DYNAMIC > EPHEMERAL，详见 [architecture.md §11](architecture.md)）：Pinned 层（[CELL REGISTRY]）由 `state.entity_registry` 每轮重建，不进入 MessageStore，天然抗压缩；为 LLM 提供 canonical cell 名唯一权威来源。
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §1.1-§1.2](architecture.md)。
 
 ### 3.1.1 init_analysis 增强数据提取
@@ -256,6 +259,7 @@ architecture_overview:
 | 保护层 | 机制 |
 |------|------|
 | System 消息 | 压缩前分离，始终前置 |
+| **Pinned cell 注册表（L2）** | **`inject_pinned_cell_registry()` 每轮从 `state.entity_registry` 重建为独立 user 消息（system 之后），不进入 MessageStore，天然抗压缩；LLM 引用 cell 名的唯一权威来源** |
 | WNS/TNS | 上下文 Dashboard（user message，独立于压缩系统） |
 | 最近消息 | `preserve_role_turns=6` 保留原始 API role |
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
@@ -263,7 +267,8 @@ architecture_overview:
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
 | 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录标为 `[BLOCKED]`（TTL 阻断，占位符保留）；`strategy_not_applicable`/`tool_error`/`no_improvement` 完全移出目录；冷却策略在目录中标 `[BLOCKED: cooldown]` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
-| 细胞名验证 | `_is_valid_cell_name()` 过滤非细胞字符串；>50% 无效整条跳过 |
+| **cell 名边界校验** | **`tool_router.call_tool` 在 LLM→MCP 咽喉校验 cell 名（`validate_and_sanitize_cell_args`，部分放行+警告）；全部非法返回富错误（含候选名建议），不调用 MCP** |
+| 细胞名验证 | `_is_valid_cell_name()`（SSOT 在 `entities.py`，`critical_path.py` re-export）过滤非细胞字符串；>50% 无效整条跳过 |
 | TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |
 | 冷却分层 | **策略工具失败**→跳过冷却；**仅辅助工具失败**→应用冷却；阈值 0.050ns |
 
@@ -322,7 +327,7 @@ LLM → MCP tool call → server.py → JPype → Java RapidWright API → Pytho
 
 ### 4.3 MCP 工具路由（tool_router.py）
 
-[optimizer/pure/tool_router.py](optimizer/pure/tool_router.py) — 前缀分发（`vivado_*`/`rapidwright_*`）+ 工具结果缓存 + TCL 提取拦截 + 调用频率限制。
+[optimizer/pure/tool_router.py](optimizer/pure/tool_router.py) — 前缀分发（`vivado_*`/`rapidwright_*`）+ 工具结果缓存 + TCL 提取拦截 + 调用频率限制 + **cell 名边界校验**（`validate_and_sanitize_cell_args`，部分放行+富错误反馈，全部非法时不调用 MCP 而返回候选名建议）。
 
 ## 5. Dashboard 架构
 

@@ -93,6 +93,8 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |
 | 10 | 上下文工程：弱引导 | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。LLM 保留自主决策权 |
+| 10b | 上下文工程：分层上下文管理 | 显式四层注入（STATIC > PINNED > DYNAMIC > EPHEMERAL）；CellNameRegistry 作为 Pinned 层每轮重建注入（绕过压缩），消除 LLM 在 EXECUTE 阶段"记忆重建"cell 名导致的幻觉 |
+| 10c | 上下文工程：实体注册表 SSOT | `EntityRegistry`（`state.entity_registry`）为 canonical cell 名唯一权威来源；解析/search_cells 同步写入，设计修改后 `mark_stale()`；`tool_router` 在 LLM→MCP 边界校验（部分放行+富错误反馈，含候选名建议） |
 
 **验证与安全层面**:
 | # | 原则 | 实现方式 |
@@ -208,12 +210,12 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 Deep_Thouught_42/
 ├── dcp_optimizer.py          # CLI 入口：V2 状态机启动 + 模型配置
-├── optimizer/                # V2 状态机框架（41 文件）
+├── optimizer/                # V2 状态机框架（42 文件）
 │   ├── state.py              # OptimizerState + 7 子切片 dataclass
 │   ├── deps.py               # NodeDeps：外部依赖容器
 │   ├── graph.py / edges.py   # NodeGraph 执行引擎 + 条件边
 │   ├── nodes/                # 9 个节点 + llm_tool_loop 子图（4 阶段）
-│   └── pure/                 # 15 个纯函数模块（可独立单元测试）
+│   └── pure/                 # 16 个纯函数模块（可独立单元测试，含 entities.py 实体注册表）
 ├── strategy_library.py       # 14 种策略及触发条件
 ├── skills/                   # Skill 框架（渐进式三层加载，34 文件）
 ├── RapidWrightMCP/           # RapidWright MCP 服务器（19+ 工具）

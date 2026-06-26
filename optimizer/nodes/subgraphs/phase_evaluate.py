@@ -28,7 +28,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -388,6 +388,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     vivado_session=deps.vivado_session,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
+                    entity_registry=state.entity_registry,
                 )
                 summary = summarize_tool_result(
                     tool_name, result,
@@ -528,6 +529,7 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
         return None
 
     # Inject merged handoff + dashboard as last user message
+    inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.EVALUATE)
 
     model = state.model.current_model

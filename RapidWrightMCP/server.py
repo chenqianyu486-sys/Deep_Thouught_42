@@ -249,8 +249,9 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "hierarchical_input_pins": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of hierarchical input pin names to optimize (e.g., ['module/submodule/inst/pin'])"
+                        "items": {"type": "string", "pattern": "^.+/.+$"},
+                        "description": "Hierarchical input pin names to optimize. MUST contain '/' separator (e.g. 'module/submodule/inst/pin'). Bare pin or type names are NOT valid. Source names from the [CELL REGISTRY] section in your context.",
+                        "examples": ["u_core/u_alu/lut6/I0", "layer0_inst/layer0_N25_inst/data_out[76]_i_19/I1"]
                     }
                 },
                 "required": ["hierarchical_input_pins"]
@@ -487,8 +488,9 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "cell_names": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of cell names to optimize"
+                        "items": {"type": "string", "pattern": "^.+/.+$"},
+                        "description": "Hierarchical cell instance names to optimize. MUST contain '/' separator (e.g. 'u_core/u_alu/lut1'). Device sites (SLICE_X*, DSP*_X*) and bare type names (LUT6, FDRE) are NOT valid. Source names from the [CELL REGISTRY] section in your context.",
+                        "examples": ["u_core/u_alu/lut1", "u_core/u_alu/reg_0/Q_reg[0]"]
                     }
                 },
                 "required": ["cell_names"]
@@ -598,10 +600,10 @@ async def list_tools() -> list[Tool]:
                     },
                     "critical_path_cells": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Critical path cell names for region centering. "
-                                       "Auto-injected by optimizer — optional for LLM.",
-                        "default": None
+                        "items": {"type": "string", "pattern": "^.+/.+$"},
+                        "description": "Critical path cell names for region centering. MUST contain '/' separator (e.g. 'u_core/u_alu/lut1'). Device sites (SLICE_X*) and bare type names are NOT valid. Auto-injected by optimizer from the [CELL REGISTRY] — optional for LLM.",
+                        "default": None,
+                        "examples": ["u_core/u_alu/lut1", "layer0_inst/layer0_N25_inst/data_out[76]_i_19"]
                     },
                     "distance_weight_factor": {
                         "type": "number",
@@ -766,9 +768,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string"}
+                            "items": {"type": "string", "pattern": "^.+/.+$"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "min_depth": {
                         "type": "integer",
@@ -814,9 +816,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string"}
+                            "items": {"type": "string", "pattern": "^.+/.+$"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "directive": {
                         "type": "string",
@@ -861,9 +863,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string"}
+                            "items": {"type": "string", "pattern": "^.+/.+$"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "directive": {
                         "type": "string",
@@ -968,9 +970,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string"}
+                            "items": {"type": "string", "pattern": "^.+/.+$"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Provide at most 10 paths to avoid excessive prompt size."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'). Provide at most 10 paths to avoid excessive prompt size. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "min_cascade_depth": {
                         "type": "integer",
@@ -1151,12 +1153,12 @@ analyze_congestion severity=HIGH.""",
                             "properties": {
                                 "cells": {
                                     "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "List of cell names on the path"
+                                    "items": {"type": "string", "pattern": "^.+/.+$"},
+                                    "description": "List of hierarchical cell names on the path (MUST contain '/')"
                                 }
                             }
                         },
-                        "description": "List of critical path descriptors with cell names"
+                        "description": "List of critical path descriptors with cell names. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "temp_dir": {
                         "type": "string",
@@ -1199,7 +1201,7 @@ analyze_congestion severity=HIGH.""",
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "name": {"type": "string", "description": "Cell name"},
+                                            "name": {"type": "string", "pattern": "^.+/.+$", "description": "Hierarchical cell name (MUST contain '/')"},
                                             "delay": {"type": "number", "description": "Cell delay in ns"},
                                             "type": {"type": "string", "description": "Cell type (LUT6, FDRE, etc.)"},
                                             "fanout": {"type": "integer", "description": "Output fanout count"}

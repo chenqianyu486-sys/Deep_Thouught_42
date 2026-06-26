@@ -19,6 +19,10 @@ from .constants import (
     _TOOL_TIMEOUT_MAX,
     _MCP_ERROR_PATTERNS,
 )
+from .entities import (
+    EntityRegistry,
+    validate_and_sanitize_cell_args,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +73,18 @@ async def call_tool(
     high_fanout_nets: list | None = None,
     tool_cache: dict | None = None,
     design_size_factor: float = 1.0,
+    entity_registry: "EntityRegistry | None" = None,
 ) -> str:
     """Execute a tool call on the appropriate MCP server.
 
     Routes to rapidwright_ or vivado_ session based on tool name prefix.
     Handles internal tools (get_raw_tool_output, get_cached_high_fanout_nets,
     report_step_state).
+
+    LLM->tool boundary validation: when entity_registry is provided, cell-name
+    arguments are validated & sanitized via validate_and_sanitize_cell_args
+    (partial-pass+warn policy). All-invalid names return a structured rejection
+    to the LLM without invoking the MCP tool.
 
     Args:
         tool_name: Full tool name with prefix (e.g., "vivado_place_design").
@@ -85,6 +95,7 @@ async def call_tool(
         iteration: Current iteration number.
         tool_round: Current tool round number.
         high_fanout_nets: Cached high-fanout nets from initial analysis.
+        entity_registry: Canonical cell-name registry for boundary validation.
 
     Returns:
         Tool result as string.
@@ -168,6 +179,33 @@ async def call_tool(
     # Internal tool: report_step_state (safety net)
     if tool_name == "report_step_state":
         return json.dumps({"status": "acknowledged"})
+
+    # ── LLM->tool boundary: validate & sanitize cell-name arguments ──
+    # Partial-pass+warn policy (confirmed decision). Returns a structured
+    # rejection when ALL provided cell names are invalid, without calling MCP.
+    if entity_registry is not None:
+        sanitized_args, cell_error = validate_and_sanitize_cell_args(
+            tool_name, arguments, entity_registry,
+        )
+        if cell_error is not None:
+            logger.warning(
+                f"[ROUTER] Rejected cell-name args for {tool_name}: "
+                f"{cell_error[:300]}"
+            )
+            return cell_error
+        if sanitized_args is not arguments:
+            # Arguments were modified (invalid names stripped); log and proceed
+            dropped = []
+            for k in ("cell_names", "critical_path_cells", "critical_paths", "hierarchical_input_pins"):
+                if k in arguments and k in sanitized_args:
+                    if len(arguments[k]) != len(sanitized_args[k]):
+                        dropped.append(f"{k}:{len(arguments[k])}->{len(sanitized_args[k])}")
+            if dropped:
+                logger.info(
+                    f"[ROUTER] Sanitized cell args for {tool_name}: "
+                    f"{', '.join(dropped)}"
+                )
+            arguments = sanitized_args
 
     # Tool result cache: skip cache for internal/side-effect tools
     if tool_cache is not None and tool_name not in _NO_CACHE_TOOLS:

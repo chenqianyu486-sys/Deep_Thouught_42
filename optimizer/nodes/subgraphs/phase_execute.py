@@ -27,7 +27,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -301,23 +301,33 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
                     had_llm_data = bool(tool_args.get("critical_path_cells"))
                     if state.timing.critical_paths:
-                        cells = []
-                        seen = set()
+                        from optimizer.pure.entities import extract_registry_cells_for_inject
+                        cells = extract_registry_cells_for_inject(
+                            state.entity_registry,
+                            state.timing.critical_paths,
+                        )
                         filtered_count = 0
-                        for cp in state.timing.critical_paths[:10]:
-                            for cell_name in cp.cells:
-                                if cell_name not in seen:
-                                    seen.add(cell_name)
-                                    # Skip names that look like Pblock/constraint names
-                                    # (not valid cell instances — likely data corruption)
-                                    if "pblock" in cell_name.lower():
-                                        filtered_count += 1
-                                        continue
-                                    cells.append(cell_name)
-                                    if len(cells) >= 50:
-                                        break
-                            if len(cells) >= 50:
-                                break
+                        if cells:
+                            logger.info(f"[EXECUTE] Injected {len(cells)} registry cells for {tool_name}")
+                        else:
+                            # Registry had nothing usable; fall back to raw path scan
+                            # with the canonical validator for diagnostics.
+                            from optimizer.pure.entities import is_valid_cell_name as _valid
+                            raw_cells = []
+                            seen = set()
+                            for cp in state.timing.critical_paths[:10]:
+                                for cell_name in cp.cells:
+                                    if cell_name not in seen:
+                                        seen.add(cell_name)
+                                        if not _valid(cell_name):
+                                            filtered_count += 1
+                                            continue
+                                        raw_cells.append(cell_name)
+                                        if len(raw_cells) >= 50:
+                                            break
+                                if len(raw_cells) >= 50:
+                                    break
+                            cells = raw_cells
                         if filtered_count > 0:
                             logger.warning(
                                 f"[EXECUTE] Filtered {filtered_count} non-cell name(s) from "
@@ -346,7 +356,6 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"State data is extracted via the verified "
                                         f"vivado_extract_critical_path_cells tool.")
                             tool_args["critical_path_cells"] = cells
-                            logger.info(f"[EXECUTE] Injected {len(cells)} critical path cells for {tool_name}")
 
                 # Data quality guard: if all critical path cells were filtered
                 # (pblock labels, device sites), skip the MCP call and inform LLM.
@@ -424,6 +433,33 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"State data is extracted via vivado_extract_critical_path_cells.")
                             tool_args["critical_paths"] = paths
                             logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
+
+                # Auto-inject cell_names for optimize_cell_placement from the
+                # entity registry + critical paths. This tool has no prior
+                # auto-inject and relied on LLM memory (the main cell-name
+                # error source). Unified registry-filtered injection replaces
+                # that with verified canonical names.
+                if tool_name == "rapidwright_optimize_cell_placement":
+                    had_llm_data = bool(tool_args.get("cell_names"))
+                    if state.timing.critical_paths or state.entity_registry.cells:
+                        from optimizer.pure.entities import extract_registry_cells_for_inject
+                        cells = extract_registry_cells_for_inject(
+                            state.entity_registry,
+                            state.timing.critical_paths,
+                        )
+                        if cells:
+                            if had_llm_data:
+                                logger.warning(
+                                    f"[EXECUTE] Overriding LLM-provided cell_names "
+                                    f"with {len(cells)} verified registry cells for {tool_name}"
+                                )
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user",
+                                        f"[DATA INTEGRITY] Overriding LLM-provided cell_names "
+                                        f"with {len(cells)} verified cells from the cell registry "
+                                        f"for {tool_name}. Use names from [CELL REGISTRY] in context.")
+                            tool_args["cell_names"] = cells
+                            logger.info(f"[EXECUTE] Injected {len(cells)} registry cells for {tool_name}")
 
                 # Guard: warn when strategy tools are called with empty critical_paths.
                 # This prevents the wasteful chain: strategy→"skipped"→opt_design error→rollback (17s).
@@ -538,6 +574,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     high_fanout_nets=state.timing.high_fanout_nets,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
+                    entity_registry=state.entity_registry,
                 )
                 tool_elapsed = time.time() - tool_start
                 logger.info(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
@@ -597,12 +634,35 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if cell_paths:
                         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
 
+                # Sync canonical cell names into the entity registry from
+                # search_cells results (compression-resistant SSOT).
+                if tool_name == "rapidwright_search_cells":
+                    try:
+                        from optimizer.pure.entities import sync_search_cells_result
+                        added = sync_search_cells_result(
+                            state.entity_registry, result,
+                            iteration=state.iteration.current,
+                        )
+                        if added:
+                            logger.info(
+                                f"[EXECUTE] Registered {added} new canonical cell(s) "
+                                f"from search_cells (total={len(state.entity_registry.cells)})"
+                            )
+                    except Exception as e:
+                        logger.debug(f"[EXECUTE] search_cells registry sync failed: {e}")
+
                 # Mark critical paths stale after layout changes
                 if tool_name in DESIGN_MODIFICATION_TOOLS:
                     state.timing.critical_paths_stale = True
                     # Mark all dashboard fields stale — design has changed
                     for field in state.timing.field_freshness:
                         state.timing.field_freshness[field] = "stale"
+                    # Bump entity registry snapshot version: design changes
+                    # (opt_design/phys_opt/route) can merge/split/rename cells,
+                    # so previously registered canonical names may no longer
+                    # exist. The Pinned layer will show the new version so the
+                    # LLM knows to re-fetch cell names before targeting them.
+                    state.entity_registry.mark_stale()
 
                 # Dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
@@ -1065,6 +1125,9 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
         return None
 
     # Inject merged handoff + dashboard as last user message
+    # Inject Pinned cell-registry layer (right after system message),
+    # then merged handoff + dashboard as last user message.
+    inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.EXECUTE)
 
     model = state.model.current_model

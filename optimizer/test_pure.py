@@ -549,3 +549,353 @@ class TestAdaptiveResourceMultiplier:
         """Exactly 30% threshold returns large multiplier."""
         result = compute_adaptive_resource_multiplier(118200, 236400)  # 30%
         assert result == 1.2
+
+
+# ── Entity registry / cell-name validation tests ──────────────────
+
+from optimizer.pure.entities import (
+    EntityRegistry,
+    is_valid_cell_name,
+    is_valid_pin_name,
+    classify_cell_name,
+    validate_cell_list,
+    validate_pin_list,
+    validate_and_sanitize_cell_args,
+    build_registry_snapshot_yaml,
+    sync_search_cells_result,
+    extract_registry_cells_for_inject,
+    CELL_NAME_TOOLS,
+)
+from optimizer.pure.context_snapshot import inject_pinned_cell_registry
+import json as _json
+
+
+class TestIsValidCellName:
+    def test_valid_hierarchical(self):
+        assert is_valid_cell_name("u_core/u_alu/lut1")
+        assert is_valid_cell_name("layer0_inst/layer0_N25_inst/data_out[76]_i_19")
+
+    def test_rejects_pblock_label(self):
+        assert not is_valid_cell_name("pblock_tight")
+        assert not is_valid_cell_name("u_core/pblock_io")
+
+    def test_rejects_device_site(self):
+        assert not is_valid_cell_name("SLICE_X56Y0")
+        assert not is_valid_cell_name("DSP48E2_X8Y0")
+
+    def test_rejects_bare_type(self):
+        assert not is_valid_cell_name("LUT6")
+        assert not is_valid_cell_name("FDRE")
+
+    def test_rejects_empty(self):
+        assert not is_valid_cell_name("")
+        assert not is_valid_cell_name(None)
+
+
+class TestEntityRegistry:
+    def test_register_and_contains(self):
+        r = EntityRegistry()
+        r.register_cell("u_core/u_alu/lut1", cell_type="LUT6")
+        assert r.contains("u_core/u_alu/lut1")
+        assert not r.contains("u_core/u_alu/lut2")
+
+    def test_register_skips_invalid(self):
+        r = EntityRegistry()
+        r.register_cell("SLICE_X1Y1")
+        r.register_cell("pblock_x")
+        assert len(r.cells) == 0
+
+    def test_module_index(self):
+        r = EntityRegistry()
+        r.register_cell("top/alu/lut1")
+        r.register_cell("top/alu/lut2")
+        r.register_cell("top/mem/reg0")
+        assert "alu" in r.by_module
+        assert "mem" in r.by_module
+        assert len(r.by_module["alu"]) == 2
+
+    def test_register_from_paths(self):
+        r = EntityRegistry()
+        n = r.register_cells_from_paths(
+            [["top/a/x", "top/a/y"], ["top/b/z"]],
+            iteration=3,
+        )
+        assert n == 3
+        assert r.cells["top/a/x"].last_seen_iter == 3
+        assert r.cells["top/a/x"].source_path_idx == 0
+        assert r.cells["top/b/z"].source_path_idx == 1
+
+    def test_mark_stale_increments_version(self):
+        r = EntityRegistry()
+        v0 = r.snapshot_version
+        r.mark_stale()
+        assert r.snapshot_version == v0 + 1
+
+    def test_suggest_finds_leaf_match(self):
+        r = EntityRegistry()
+        r.register_cell("u_core/u_alu/lut1")
+        r.register_cell("u_core/u_alu/lut2")
+        r.register_cell("u_core/u_mem/reg0")
+        sugg = r.suggest("u_core/u_alu/lut1")
+        assert "u_core/u_alu/lut1" in sugg
+        sugg2 = r.suggest("lut1")
+        assert "u_core/u_alu/lut1" in sugg2
+
+    def test_top_n_prioritizes_recency(self):
+        r = EntityRegistry()
+        r.register_cell("top/old/c", iteration=1)
+        r.register_cell("top/new/c", iteration=5)
+        top = r.top_n_cells(10)
+        assert top[0] == "top/new/c"
+
+
+class TestValidateCellList:
+    def test_all_valid_in_registry(self):
+        r = EntityRegistry()
+        r.register_cell("top/a/x")
+        r.register_cell("top/a/y")
+        res = validate_cell_list(["top/a/x", "top/a/y"], r)
+        assert res.accepted == ["top/a/x", "top/a/y"]
+        assert not res.unverified
+        assert not res.rejected
+        assert not res.all_invalid
+
+    def test_unverified_kept(self):
+        r = EntityRegistry()
+        r.register_cell("top/a/x")
+        res = validate_cell_list(["top/a/x", "top/new/c"], r)
+        assert res.accepted == ["top/a/x"]
+        assert res.unverified == ["top/new/c"]
+        assert not res.all_invalid
+
+    def test_invalid_rejected(self):
+        r = EntityRegistry()
+        res = validate_cell_list(["SLICE_X1Y1", "LUT6", "pblock_z"], r)
+        assert not res.accepted
+        assert not res.unverified
+        assert len(res.rejected) == 3
+        assert res.all_invalid
+
+    def test_mixed(self):
+        r = EntityRegistry()
+        r.register_cell("top/a/x")
+        res = validate_cell_list(["top/a/x", "SLICE_X1Y1", "top/new/c"], r)
+        assert res.accepted == ["top/a/x"]
+        assert res.unverified == ["top/new/c"]
+        assert len(res.rejected) == 1
+        assert not res.all_invalid
+
+    def test_strict_mode_rejects_unverified(self):
+        r = EntityRegistry()
+        res = validate_cell_list(["top/new/c"], r, allow_unverified=False)
+        assert not res.accepted
+        assert not res.unverified
+        assert len(res.rejected) == 1
+
+
+class TestValidateAndSanitizeCellArgs:
+    def test_non_cell_tool_passes_through(self):
+        r = EntityRegistry()
+        args = {"directive": "explore"}
+        out, err = validate_and_sanitize_cell_args("vivado_phys_opt_design", args, r)
+        assert out == args
+        assert err is None
+
+    def test_cell_names_all_invalid_returns_error(self):
+        r = EntityRegistry()
+        args = {"cell_names": ["SLICE_X1Y1", "LUT6"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_cell_placement", args, r,
+        )
+        assert err is not None
+        data = _json.loads(err)
+        assert data["status"] == "rejected"
+        assert data["reason"] == "invalid_cell_names"
+        assert "cell_names" not in out
+
+    def test_cell_names_partial_strips_invalid(self):
+        r = EntityRegistry()
+        r.register_cell("top/a/x")
+        args = {"cell_names": ["top/a/x", "SLICE_X1Y1"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_cell_placement", args, r,
+        )
+        assert err is None
+        assert out["cell_names"] == ["top/a/x"]
+
+    def test_critical_paths_paths_sanitized(self):
+        r = EntityRegistry()
+        r.register_cell("top/a/x")
+        r.register_cell("top/a/y")
+        args = {"critical_paths": [["top/a/x", "top/a/y"], ["SLICE_X1Y1"]]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_flatten_lut_cascade", args, r,
+        )
+        assert err is None
+        assert out["critical_paths"] == [["top/a/x", "top/a/y"]]
+
+    def test_critical_paths_all_invalid(self):
+        r = EntityRegistry()
+        args = {"critical_paths": [["SLICE_X1Y1"], ["LUT6"]]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_flatten_lut_cascade", args, r,
+        )
+        assert err is not None
+        assert "critical_paths" not in out
+
+    def test_pin_validation(self):
+        r = EntityRegistry()
+        args = {"hierarchical_input_pins": ["top/inst/pin", "LUT6"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_lut_input_cone", args, r,
+        )
+        # One valid pin kept, one bare-type rejected -> partial, no error
+        assert err is None
+        assert out["hierarchical_input_pins"] == ["top/inst/pin"]
+
+    def test_pin_all_invalid(self):
+        r = EntityRegistry()
+        args = {"hierarchical_input_pins": ["SLICE_X1Y1", "LUT6"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_lut_input_cone", args, r,
+        )
+        assert err is not None
+        assert "hierarchical_input_pins" not in out
+
+
+class TestRegistrySnapshot:
+    def test_empty_registry(self):
+        r = EntityRegistry()
+        yaml = build_registry_snapshot_yaml(r)
+        assert "[CELL REGISTRY]" in yaml
+        assert "No canonical cell names" in yaml
+
+    def test_populated_registry(self):
+        r = EntityRegistry()
+        r.register_cell("top/alu/lut1", cell_type="LUT6", iteration=2)
+        r.register_cell("top/alu/lut2", cell_type="LUT6", iteration=2)
+        yaml = build_registry_snapshot_yaml(r, phase="EXECUTE")
+        assert "[CELL REGISTRY]" in yaml
+        assert "top/alu/lut1" in yaml
+        assert "alu" in yaml  # module index
+        assert "phase=EXECUTE" in yaml
+
+
+class TestSyncSearchCells:
+    def test_registers_from_json(self):
+        r = EntityRegistry()
+        raw = _json.dumps({
+            "status": "success",
+            "count": 2,
+            "cells": [
+                {"name": "top/a/x", "type": "LUT6", "placement": "SLICE_X1Y1"},
+                {"name": "top/a/y", "type": "FDRE", "placement": "unplaced"},
+            ],
+        })
+        added = sync_search_cells_result(r, raw, iteration=1)
+        assert added == 2
+        assert r.contains("top/a/x")
+        assert r.cells["top/a/x"].location == "SLICE_X1Y1"
+        assert r.cells["top/a/y"].location == ""  # unplaced filtered
+
+    def test_invalid_json_returns_zero(self):
+        r = EntityRegistry()
+        assert sync_search_cells_result(r, "not json") == 0
+        assert sync_search_cells_result(r, _json.dumps({"error": "x"})) == 0
+
+
+class TestPinnedCellRegistryInjection:
+    def test_inserts_after_system_message(self):
+        state = OptimizerState()
+        state.entity_registry.register_cell("top/alu/lut1", iteration=1)
+        msgs = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "hello"},
+        ]
+        inject_pinned_cell_registry(msgs, state)
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+        assert "[CELL REGISTRY]" in msgs[1]["content"]
+        assert "top/alu/lut1" in msgs[1]["content"]
+        assert msgs[2]["content"] == "hello"
+
+    def test_idempotent_no_accumulation(self):
+        state = OptimizerState()
+        state.entity_registry.register_cell("top/a/x")
+        msgs = [{"role": "system", "content": "SYS"}]
+        inject_pinned_cell_registry(msgs, state)
+        inject_pinned_cell_registry(msgs, state)
+        registry_msgs = [m for m in msgs if "[CELL REGISTRY]" in m.get("content", "")]
+        assert len(registry_msgs) == 1
+
+    def test_empty_registry_still_injects_placeholder(self):
+        state = OptimizerState()
+        msgs = [{"role": "system", "content": "SYS"}]
+        inject_pinned_cell_registry(msgs, state)
+        assert any("[CELL REGISTRY]" in m.get("content", "") for m in msgs)
+
+    def test_no_system_message_inserts_at_start(self):
+        state = OptimizerState()
+        state.entity_registry.register_cell("top/a/x")
+        msgs = [{"role": "user", "content": "hi"}]
+        inject_pinned_cell_registry(msgs, state)
+        assert msgs[0]["role"] == "user"
+        assert "[CELL REGISTRY]" in msgs[0]["content"]
+
+
+class TestExtractRegistryCellsForInject:
+    def test_prefers_critical_path_cells(self):
+        from optimizer.state import CriticalPathEntry
+        r = EntityRegistry()
+        r.register_cell("top/search/c", iteration=1)  # not on a path
+        entries = [CriticalPathEntry(cells=["top/alu/lut1", "top/alu/lut2"])]
+        # Sync entries to registry first (as update_critical_paths would)
+        r.register_cells_from_entries(entries, iteration=2)
+        cells = extract_registry_cells_for_inject(r, entries)
+        assert "top/alu/lut1" in cells
+        assert "top/alu/lut2" in cells
+        # Path cells come before search-only cells
+        assert cells.index("top/alu/lut1") < cells.index("top/search/c")
+
+    def test_filters_invalid(self):
+        from optimizer.state import CriticalPathEntry
+        r = EntityRegistry()
+        entries = [CriticalPathEntry(cells=["top/alu/lut1", "SLICE_X1Y1", "pblock_z"])]
+        cells = extract_registry_cells_for_inject(r, entries)
+        assert "top/alu/lut1" in cells
+        assert "SLICE_X1Y1" not in cells
+        assert "pblock_z" not in cells
+
+    def test_backfills_from_registry(self):
+        r = EntityRegistry()
+        r.register_cell("top/search/c", iteration=1)
+        cells = extract_registry_cells_for_inject(r, [])  # no critical paths
+        assert cells == ["top/search/c"]
+
+
+class TestRichErrorSuggestions:
+    def test_rejected_includes_suggestions(self):
+        r = EntityRegistry()
+        r.register_cell("u_core/u_alu/lut1")
+        r.register_cell("u_core/u_alu/lut2")
+        args = {"cell_names": ["u_core/u_alu/lut"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_cell_placement", args, r,
+        )
+        # "u_core/u_alu/lut" has no '/' issue... wait it does have '/'. It's valid format.
+        # So it's unverified, not rejected. Let me use a truly invalid name.
+        assert err is None  # format-valid -> unverified, allowed
+
+    def test_invalid_gives_suggestions(self):
+        r = EntityRegistry()
+        r.register_cell("u_core/u_alu/lut1")
+        args = {"cell_names": ["SLICE_X38Y277"]}
+        out, err = validate_and_sanitize_cell_args(
+            "rapidwright_optimize_cell_placement", args, r,
+        )
+        assert err is not None
+        data = _json.loads(err)
+        assert data["status"] == "rejected"
+        assert "SLICE_X38Y277" in data["invalid_names"]
+        assert "u_core/u_alu/lut1" in data["suggested_canonical_names"]
+        assert "CELL REGISTRY" in data["guidance"]

@@ -19,7 +19,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.pure.constants import build_llm_extra_body
 from optimizer.color import green, yellow
 
@@ -174,6 +174,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     iteration=state.iteration.current,
                     tool_round=tool_round,
                     design_size_factor=state.timing.design_size_factor,
+                    entity_registry=state.entity_registry,
                 )
                 summary = summarize_tool_result(
                     tool_name, result,
@@ -255,6 +256,7 @@ async def _call_phase_llm(state, deps, phase_tools):
         return None
 
     # Inject merged handoff + dashboard as last user message
+    inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.SELECT_STRATEGY)
 
     model = state.model.current_model

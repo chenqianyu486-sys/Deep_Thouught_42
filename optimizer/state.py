@@ -12,7 +12,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .pure.entities import EntityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +548,22 @@ class OptimizerState:
     context: ContextState = field(default_factory=ContextState)
     control: ControlState = field(default_factory=ControlState)
     strategy: StrategyState = field(default_factory=StrategyState)
+    # Entity registry: canonical, compression-resistant cell-name SSOT.
+    # Rebuilt into the Pinned context layer each turn (never enters
+    # MessageStore), so cell names survive compression. Validated at the
+    # LLM->tool boundary by tool_router. See optimizer/pure/entities.py.
+    entity_registry: "EntityRegistry" = field(default_factory=lambda: _new_registry())
+
+    @property
+    def registry(self) -> "EntityRegistry":
+        """Alias for entity_registry (concise access)."""
+        return self.entity_registry
+
+
+def _new_registry():
+    """Lazy factory to avoid importing entities.py at module top (circular)."""
+    from .pure.entities import EntityRegistry
+    return EntityRegistry()
 
 
 # ── Dashboard StateSpace (6-module canonical representation) ────────

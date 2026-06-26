@@ -45,65 +45,11 @@ _VALID_PATH_CELL_PREFIXES = (
     "SRL", "SRLC", "SHIFT",
 )
 
-# Patterns that look like device site/coordinate names (NOT valid cell instances)
-_DEVICE_SITE_PATTERNS = re.compile(
-    r'^(SLICE_X\d+Y\d+'
-    r'|DSP\d*_X\d+Y\d+'
-    r'|RAMB\d*_X\d+Y\d+'
-    r'|URAM\d*_X\d+Y\d+'
-    r'|BUFGCE_X\d+Y\d+'
-    r'|MMCM\d*_X\d+Y\d+'
-    r'|PLL\d*_X\d+Y\d+'
-    r'|X\d+Y\d+'
-    r')$', re.IGNORECASE,
-)
-
-
-def _is_valid_cell_name(name: str) -> bool:
-    """Check if a string looks like a valid hierarchical cell instance name.
-
-    Valid cell names are hierarchical paths with at least one '/' separator
-    and alphanumeric leaf names. Rejects pblock labels, device site
-    coordinates, and other non-cell strings that may appear in Vivado
-    output under certain conditions (e.g. PBLOCK-active extraction).
-
-    Examples of valid names:
-      - layer0_reg/data_out_reg[41]
-      - layer0_inst/layer0_N25_inst/data_out[76]_i_19
-      - u_core/u_alu/reg_0
-
-    Examples of invalid names:
-      - pblock_tight          (PBLOCK constraint name)
-      - pblock_io             (PBLOCK constraint name)
-      - SLICE_X56Y0           (device site coordinate)
-      - DSP48E2_X8Y0          (device site)
-    """
-    if not name or not isinstance(name, str):
-        return False
-
-    # Reject pblock labels entirely
-    name_lower = name.lower()
-    if name_lower.startswith("pblock") or "pblock" in name_lower:
-        return False
-
-    # Reject device site coordinates
-    leaf = name.split("/")[-1] if "/" in name else name
-    if _DEVICE_SITE_PATTERNS.match(leaf):
-        return False
-
-    # Must have hierarchical structure (at least one '/')
-    if "/" not in name:
-        return False
-
-    # Each path segment must be non-empty and contain valid characters
-    for segment in name.split("/"):
-        if not segment:
-            return False
-        # Segments should contain at least one alphanumeric character
-        if not re.search(r'[a-zA-Z0-9]', segment):
-            return False
-
-    return True
+# Cell-name validation is canonicalized in optimizer/pure/entities.py (SSOT),
+# shared by critical_path.parse_critical_path_cells (ingress) and
+# tool_router.call_tool (LLM->tool boundary). Re-export here for backward
+# compatibility with existing callers in this module.
+from .entities import is_valid_cell_name as _is_valid_cell_name  # noqa: F401
 
 
 def validate_critical_path_data(
@@ -539,6 +485,24 @@ def update_critical_paths(
         for path in state.timing.critical_paths
         if path.cells
     ]
+
+    # Sync canonical cell names into the entity registry (SSOT + Pinned layer).
+    # The registry is compression-resistant: rebuilt each turn into context,
+    # so the LLM can reference these exact names at the EXECUTE boundary.
+    try:
+        from .entities import EntityRegistry
+        registry: EntityRegistry = state.entity_registry
+        added = registry.register_cells_from_entries(
+            state.timing.critical_paths, iteration=iteration,
+        )
+        if added:
+            logger.info(
+                f"[critical_path] Registered {added} new canonical cell(s) "
+                f"into entity_registry (total={len(registry.cells)})"
+            )
+    except AttributeError:
+        # OptimizerState without entity_registry (older test fixtures) — skip
+        pass
 
     logger.info(
         f"[critical_path] Updated: {len(state.timing.critical_paths)} paths, "

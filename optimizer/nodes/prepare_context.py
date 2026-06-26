@@ -58,6 +58,24 @@ DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
     - Only directional comparison (better/worse) is reliable
     - Always verify with Vivado for final decisions
 
+CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
+  Cell-targeting tools (rapidwright_optimize_cell_placement, rapidwright_*_strategy,
+  rapidwright_optimize_lut_input_cone, etc.) require HIERARCHICAL cell instance names
+  that contain the '/' separator (e.g. 'u_core/u_alu/lut1').
+  - The [CELL REGISTRY] section in your context (injected every turn, right after
+    the system message) is the canonical, compression-resistant source of valid
+    cell names. ALWAYS copy names from there when calling cell-targeting tools.
+  - DO NOT reconstruct cell names from memory or from compressed tool outputs —
+    these are frequently truncated or hallucinated.
+  - Device sites (SLICE_X*, DSP*_X*, RAMB*_X*) and bare type names (LUT6, FDRE)
+    are NOT valid cell names — they will be rejected at the tool boundary.
+  - If you submit invalid names, the tool returns a structured rejection with
+    suggested canonical names from the registry. Use those suggestions to correct
+    and re-issue the call.
+  - After any design modification (place/route/opt_design), the registry is
+    marked stale; re-fetch via vivado_extract_critical_path_cells or
+    rapidwright_search_cells before targeting cells again.
+
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
