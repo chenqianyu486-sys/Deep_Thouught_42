@@ -120,7 +120,22 @@ def _format_readable(entry: dict) -> str:
         tc = entry.get("response_tool_calls", [])
         if tc:
             for t in tc:
-                lines.append(f"  -> Tool call: {t.get('function', {}).get('name', '')}")
+                func_name = t.get("function", {}).get("name", "")
+                lines.append(f"  -> Tool call: {func_name}")
+                func_args = t.get("function", {}).get("arguments", "")
+                if func_args:
+                    try:
+                        args_obj = json.loads(func_args)
+                        formatted_args = json.dumps(args_obj, indent=2, ensure_ascii=False)
+                        if len(formatted_args) > 1500:
+                            formatted_args = formatted_args[:1500] + f"\n       ... [TRUNCATED, total {len(formatted_args)} chars]"
+                        for arg_line in formatted_args.split("\n"):
+                            lines.append(f"       {arg_line}")
+                    except (json.JSONDecodeError, ValueError):
+                        truncated = func_args[:500]
+                        lines.append(f"       Raw: {truncated}")
+                        if len(func_args) > 500:
+                            lines.append(f"       ... [TRUNCATED, total {len(func_args)} chars]")
         usage = entry.get("usage", {})
         if usage:
             lines.append(f"Tokens: {usage.get('total', 0)}  Cost: ${usage.get('cost', 0):.6f}")
@@ -133,8 +148,8 @@ class LLMCallLogger:
     """Logs every LLM call with full state snapshot.
 
     Writes two files to the run directory:
-      - llm_call_history.jsonl  — one JSON object per line (parsable)
-      - llm_call_history.log    — human-readable formatted text
+      - llm_response.jsonl  — one JSON object per line (parsable)
+      - llm_response.log    — human-readable formatted text
     """
 
     def __init__(self):
@@ -153,11 +168,11 @@ class LLMCallLogger:
         os.makedirs(log_dir, exist_ok=True)
 
         self._jsonl_fh = open(
-            os.path.join(log_dir, "llm_call_history.jsonl"),
+            os.path.join(log_dir, "llm_response.jsonl"),
             "a", encoding="utf-8",
         )
         self._readable_fh = open(
-            os.path.join(log_dir, "llm_call_history.log"),
+            os.path.join(log_dir, "llm_response.log"),
             "a", encoding="utf-8",
         )
         logger.info(f"[LLMCallLogger] Logging to {log_dir}")
