@@ -22,7 +22,7 @@ worker:
   history_retrieval_min_importance: 0.5
   fallback_models:
     - "qwen/qwen3.5-flash-02-23"
-  cost_hard_limit: 5.00
+  cost_hard_limit: 10.00
 planner:
   model_tier: "planner"
   model_name: "deepseek/deepseek-v4-pro"
@@ -42,4 +42,25 @@ planner:
   history_retrieval_min_importance: 0.3
   fallback_models:
     - "qwen/qwen3.6-plus"
-  cost_hard_limit: 5.00
+  cost_hard_limit: 10.00
+
+
+# Fallback chain: models to try if primary fails
+# Ordered by preference (first available is used)
+worker_fallback_chain:
+  - deepseek-v4-flash       # Primary: cheap, fast
+  - stepfun-3.5-flash        # Backup: similar capability
+  - xiaomi-mimo-v2-flash     # Backup: similar price point
+
+planner_fallback_chain:
+  - deepseek-v4-pro          # Primary: deep reasoning
+  - qwen3.6-plus             # Backup: strong reasoning
+  - xiaomi-mimo-v2.5-pro     # Backup: alternative provider
+
+# Token budget reduction for cost savings
+worker_token_budget_reduction: 0.80
+planner_token_budget_reduction: 0.90
+
+# Timeout scaling by design size (multiplier)
+design_size_timeout_multiplier: 1.0
+large_design_timeout_multiplier: 1.5

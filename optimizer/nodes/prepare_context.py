@@ -129,4 +129,27 @@ async def prepare_context_node(
             except Exception as e:
                 logger.warning(f"[prepare_context] Handoff injection failed: {e}")
 
+    # Inject cost budget awareness into LLM context
+    cost_used = getattr(getattr(state, "cost", None), "total_spent", 0.0)
+    cost_limit = getattr(getattr(state, "control", None), "cost_hard_limit", 5.0)
+    if cost_limit > 0 and cost_used > 0:
+        budget_pct = min(100 * cost_used / cost_limit, 100)
+        budget_msg = (
+            f"\n[BUDGET] Spent: ${cost_used:.4f} / ${cost_limit:.2f} limit "
+            f"({budget_pct:.0f}% used). Prefer cheaper actions if budget is tight."
+        )
+        deps.compat.add_message("user", budget_msg)
+
+
     return NodeName.LLM_TOOL_LOOP
+
+def get_optimal_context_size(iteration: int) -> int:
+    """Optimal context size in tokens per iteration."""
+    if iteration == 1: return 80000
+    return 50000
+
+def _compute_context_strategy(state) -> str:
+    """Select context assembly strategy."""
+    if state.iteration.current == 1: return "full"
+    if state.iteration.global_no_improvement >= 2: return "minimal"
+    return "normal"

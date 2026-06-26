@@ -28,7 +28,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -330,7 +330,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             state.context.step_state_misses += 1
             if deps.compat is not None:
                 deps.compat.add_message("user",
-                    "[NOTE] report_step_state required. Decide: NEXT_ITERATION, SWITCH_STRATEGY, DONE, or CONTINUE.")
+                    f"[NOTE] report_step_state required. "
+        f"Current best WNS: {state.timing.best_wns}ns "
+        f"(initial: {state.timing.initial_wns}ns). "
+        f"Decide: NEXT_ITERATION, SWITCH_STRATEGY, DONE, or CONTINUE. "
+        f"If current strategy improved WNS significantly, prefer CONTINUE.")
 
         # Execute any evaluation tools
         if message.tool_calls:
@@ -388,7 +392,6 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     vivado_session=deps.vivado_session,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
-                    entity_registry=state.entity_registry,
                 )
                 summary = summarize_tool_result(
                     tool_name, result,
@@ -491,18 +494,10 @@ def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str)
     state.control.done_reason = "switch_strategy"
     if deps.compat is not None:
         current_wns = state.timing.latest_wns
-        current_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
-        baseline_wns = state.timing.baseline_wns
-        baseline_str = f"{baseline_wns:.3f}ns" if baseline_wns is not None else "same as current"
-        best_wns = state.timing.best_wns
-        best_str = f"{best_wns:.3f}ns" if best_wns != float('-inf') else "N/A"
-        best_iter = state.timing.best_wns_iteration or "?"
+        wns_str = f"{current_wns:.3f}ns" if current_wns is not None else "unknown"
         deps.compat.add_message("user",
-            f"[STRATEGY SWITCH] Previous strategy ({state.strategy.current_strategy}) ended.\n"
-            f"  Current WNS={current_str} (previous strategy result, not the start point)\n"
-            f"  Baseline WNS={baseline_str} (iteration start — next strategy starts from here)\n"
-            f"  Best WNS={best_str} (from iteration {best_iter}, saved in best_checkpoint.dcp)\n"
-            f"The system will restore the iteration baseline DCP before the next strategy. "
+            f"[STRATEGY SWITCH] Previous strategy ({state.strategy.current_strategy}) ended. "
+            f"WNS={wns_str}. New iteration starts with fresh context. "
             f"Failed strategies are listed in the dashboard.")
     record_flow_signal(state, "SWITCH_STRATEGY", "switch_strategy", phase="EVALUATE",
                        result_status=state.control.step_state.result_status if state.control.step_state else "")
@@ -536,18 +531,7 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
-    # Extract system message for top-level API parameter (prompt caching).
-    system_text = ""
-    api_clean: list[dict] = []
-    for msg in api_messages:
-        if msg.get("role") == "system" and not system_text:
-            system_text = msg.get("content", "")
-        else:
-            api_clean.append(msg)
-    api_messages = api_clean
-
     # Inject merged handoff + dashboard as last user message
-    inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.EVALUATE)
 
     model = state.model.current_model
@@ -568,11 +552,7 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
                 timeout=600.0,
             )
             if extra_body:
-                if system_text:
-                    extra_body["system"] = system_text
                 kwargs["extra_body"] = extra_body
-            elif system_text:
-                kwargs["extra_body"] = {"system": system_text}
             # Log prompt for observability
             if deps.prompt_logger:
                 deps.prompt_logger.log_prompt(
@@ -629,3 +609,67 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
             state.model.planner_fallback_index = idx + 1
             return fallbacks[idx]
     return None
+
+# Evaluate decision timeout: max time for LLM to make decision
+EVALUATE_DECISION_TIMEOUT_SECONDS = 30
+
+def evaluate_strategy_effectiveness(wns_before: float, wns_after: float) -> str:
+    """Classify strategy effectiveness."""
+    delta = wns_after - wns_before
+    if delta > 0.020: return "effective"
+    if delta > 0.005: return "marginal"
+    if delta > -0.005: return "neutral"
+    return "regressive"
+
+def compute_evaluate_confidence(wns_delta: float, attempt_count: int) -> float:
+    """How confident are we in the evaluation decision?"""
+    if attempt_count >= 3: return 0.9
+    if abs(wns_delta) > 0.050: return 0.95
+    if abs(wns_delta) > 0.010: return 0.7
+    return 0.4
+
+def compute_switch_penalty(strategy: str, switch_count: int) -> float:
+    """Penalty for switching strategies too often."""
+    if switch_count <= 2: return 0.0
+    return (switch_count - 2) * 0.05  # 5% penalty per extra switch
+
+def decide_next_action_simple(wns_delta: float, attempt: int) -> str:
+    """Simple rule-based next action when LLM is uncertain."""
+    if wns_delta > 0.020: return "CONTINUE"
+    if wns_delta > 0.005 and attempt < 3: return "CONTINUE"
+    if attempt >= 3: return "SWITCH_STRATEGY"
+    return "NEXT_ITERATION"
+
+def _compute_evaluation_thresholds(state) -> dict:
+    """Dynamic evaluation thresholds based on progress."""
+    return {"min_improvement_ns": 0.005, "max_attempts_before_switch": 3, "regression_threshold_ns": -0.020}
+
+def _compute_strategy_grade(wns_before: float, wns_after: float) -> str:
+    """Grade a strategy: A+ to F."""
+    delta = wns_after - wns_before
+    if delta > 0.100: return "A+"
+    if delta > 0.050: return "A"
+    if delta > 0.020: return "B"
+    if delta > 0.005: return "C"
+    if delta > -0.010: return "D"
+    return "F"
+
+def _should_retry_strategy(grade: str, attempt: int) -> bool:
+    """Decide if strategy should be retried."""
+    if grade in ("A+", "A"): return True
+    if grade == "B" and attempt < 3: return True
+    if grade == "C" and attempt < 2: return True
+    return False
+
+def _compute_convergence_rate(wns_history: list) -> float:
+    """Rate of WNS convergence per iteration."""
+    if len(wns_history) < 2: return 0.0
+    deltas = [wns_history[i+1] - wns_history[i] for i in range(len(wns_history)-1)]
+    return sum(deltas) / len(deltas)
+
+def _estimate_remaining_improvement(wns_history: list) -> float:
+    """Estimate remaining possible WNS improvement."""
+    if len(wns_history) < 3: return 0.500
+    recent_rate = _compute_convergence_rate(wns_history)
+    if recent_rate <= 0: return 0.0
+    return recent_rate * 3  # 3 more iterations at current rate

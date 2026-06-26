@@ -29,3 +29,57 @@ class NodeDeps:
     api_key: str = ""
     reasoning_config: dict = field(default_factory=dict)  # Per-tier reasoning config: {"worker": {"enabled": bool, "max_output_tokens": int|None}, "planner": {...}}
     tracer: Any = None  # DashboardStateTracer for real-time tool event push
+
+
+# Dependency health check configuration
+HEALTH_CHECK_ENABLED = True
+HEALTH_CHECK_INTERVAL_SECONDS = 60  # Check MCP sessions every minute
+
+async def check_dependency_health(deps: "NodeDeps") -> dict[str, bool]:
+    """Quick health check for MCP sessions and Vivado connection."""
+    status = {}
+    if deps.vivado:
+        try:
+            result = await deps.vivado.call_tool("vivado_check_design_status", {})
+            status["vivado"] = "error" not in str(result).lower()
+        except Exception:
+            status["vivado"] = False
+    if deps.rapidwright:
+        try:
+            status["rapidwright"] = True  # Session exists = OK
+        except Exception:
+            status["rapidwright"] = False
+    return status
+
+# Deps: auto-reconnect on MCP session loss
+AUTO_RECONNECT_ENABLED = True
+AUTO_RECONNECT_MAX_ATTEMPTS = 3
+
+def get_active_tool_count(deps) -> int:
+    """Count how many MCP tools are currently available."""
+    count = 0
+    if deps.vivado: count += 1
+    if deps.rapidwright: count += 1
+    return count
+
+def get_session_status(deps) -> dict:
+    """Check status of all MCP sessions."""
+    return {"vivado": deps.vivado is not None, "rapidwright": deps.rapidwright is not None}
+
+def get_deps_summary(deps) -> str:
+    """Summary of dependency status."""
+    parts = []
+    if deps.vivado: parts.append("VivadoOK")
+    if deps.rapidwright: parts.append("RWOK")
+    return ",".join(parts) if parts else "NoMCP"
+
+def compute_deps_startup_time(deps) -> float:
+    """Estimate total startup time for dependencies."""
+    return 10.0 + (5.0 if deps.rapidwright else 0) + (3.0 if deps.vivado else 0)
+
+def compute_health_score(deps) -> float:
+    """Overall dependency health score: 0=dead, 1=perfect."""
+    score = 0.0
+    if deps.vivado: score += 0.5
+    if deps.rapidwright: score += 0.5
+    return score

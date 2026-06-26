@@ -151,3 +151,51 @@ class PhysOptStrategySkill(Skill):
         if directive not in valid:
             return False, f"Invalid directive '{directive}'. Valid: {', '.join(valid)}"
         return True, ""
+
+# Maximum phys_opt rounds before forced switch
+PHYSOPT_HARD_MAX_ROUNDS = 4
+
+def estimate_physopt_rounds(initial_wns: float, target_wns: float) -> int:
+    """Estimate how many phys_opt rounds are worth running."""
+    gap = target_wns - initial_wns
+    if gap <= 0: return 0
+    if gap < 0.030: return 1
+    if gap < 0.100: return 3
+    return 4  # PHYSOPT_HARD_MAX_ROUNDS
+
+def compute_optimal_physopt_directive(wns_gap: float, utilization: float) -> str:
+    """Select the best phys_opt directive for the situation."""
+    if utilization > 0.5: return "ExploreWithAggressiveExploration"
+    if wns_gap < -0.200: return "ExploreWithRuntimeOptimization"
+    return "Explore"
+
+def get_physopt_timeout(design_size_mb: float) -> int:
+    """Timeout for phys_opt based on design size."""
+    if design_size_mb < 5: return 120
+    if design_size_mb < 15: return 180
+    return 300
+
+PHYSOPT_MIN_IMPROVEMENT_NS = 0.005
+PHYSOPT_TARGET_IMPROVEMENT_NS = 0.020
+PHYSOPT_DIRECTIVES = ["Explore", "ExploreWithRuntimeOptimization", "ExploreWithAggressiveExploration"]
+
+def _validate_physopt_prerequisites(state) -> bool:
+    """Check prerequisites for phys_opt."""
+    if not state.timing.initial_wns: return False
+    return state.timing.initial_wns < 0  # Only if timing is failing
+
+def _compute_physopt_priority(wns_gap: float, utilization: float) -> float:
+    """Priority score for phys_opt."""
+    base = min(abs(wns_gap) / 0.5, 1.0)
+    util_factor = 1.0 if utilization < 0.6 else 0.5
+    return base * util_factor
+
+def analyze_physopt_effectiveness(rounds: list) -> dict:
+    """Analyze how effective each phys_opt round was."""
+    if not rounds: return {"total_rounds": 0, "total_gain": 0, "avg_gain_per_round": 0}
+    gains = [r.get("wns_after", 0) - r.get("wns_before", 0) for r in rounds]
+    return {"total_rounds": len(rounds), "total_gain": sum(gains), "avg_gain_per_round": sum(gains)/len(rounds)}
+
+def should_skip_physopt(wns: float, target: float = 0.0) -> bool:
+    """Skip physopt if already meeting timing."""
+    return wns >= target

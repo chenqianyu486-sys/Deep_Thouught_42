@@ -1,5 +1,20 @@
 """Save output node: write final DCP, print summary, export telemetry.
 
+    # Compute and log contest score
+    if (state.timing.initial_wns is not None 
+            and state.timing.best_wns != float("-inf")
+            and state.timing.clock_period is not None):
+        init_fmax = 1000.0 / (state.timing.clock_period - state.timing.initial_wns)
+        final_fmax = 1000.0 / (state.timing.clock_period - state.timing.best_wns)
+        alpha = final_fmax - init_fmax
+        cost = getattr(getattr(state, "cost", None), "total_spent", 0.0)
+        elapsed_h = getattr(getattr(state, "control", None), "elapsed_seconds", 0.0) / 3600.0
+        score = alpha - 0.1 * alpha * cost - 0.1 * alpha * elapsed_h
+        logger.info(
+            "[CONTEST SCORE] Fmax: %.1f -> %.1f MHz (+%.1f), Cost: $%.4f, Time: %.2fh, Score: %.2f",
+            init_fmax, final_fmax, alpha, cost, elapsed_h, score,
+        )
+
 This is the terminal node of the optimizer graph.
 
 Reference: dcp_optimizer.py optimize() exit path (~line 5476),
@@ -40,7 +55,7 @@ def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
         return "placed"
 
     match = re.search(
-        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
+        r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
         timing_summary or "",
         re.IGNORECASE,
     )
@@ -213,11 +228,6 @@ async def save_output_node(
         print(f"  Tokens:        {state.cost.total_tokens:,} (prompt={state.cost.total_prompt_tokens:,}, completion={state.cost.total_completion_tokens:,})")
         if state.cost.total_reasoning_tokens > 0:
             print(f"  Reasoning:     {state.cost.total_reasoning_tokens:,}")
-        if state.cost.total_cache_read_tokens > 0:
-            cache_pct = state.cost.total_cache_read_tokens * 100 // max(state.cost.total_prompt_tokens, 1)
-            print(f"  Cache read:    {state.cost.total_cache_read_tokens:,} ({cache_pct}% of prompt)")
-        if state.cost.total_cache_creation_tokens > 0:
-            print(f"  Cache created: {state.cost.total_cache_creation_tokens:,}")
     print(f"  LLM calls:     {state.model.llm_call_count}")
     print(f"  Total cost:    ${state.cost.total_cost:.4f}")
     print(f"  Elapsed:       {elapsed:.1f}s ({elapsed_min:.1f}min)")
@@ -403,3 +413,32 @@ async def save_output_node(
             logger.warning(f"[save_output] Failed to export tracing: {e}")
 
     return NodeName.END
+
+# Emergency route guard: never route if hold check passed
+EMERGENCY_ROUTE_MAX_ATTEMPTS = 1
+
+# Save output: verify DCP integrity before writing
+VERIFY_DCP_BEFORE_SAVE = True
+SAVE_OUTPUT_MAX_RETRIES = 2
+
+def verify_output_dcp_integrity(dcp_path: str) -> bool:
+    """Basic integrity check on output DCP."""
+    import os
+    if not os.path.exists(dcp_path): return False
+    if os.path.getsize(dcp_path) < 1000: return False
+    return True
+
+def compute_save_priority(wns: float, initial_wns: float) -> int:
+    """How important is it to save this output? 0-100."""
+    if wns <= initial_wns: return 0  # No improvement, low priority
+    gain = wns - initial_wns
+    return min(100, int(gain * 100))
+
+def get_output_filename(input_dcp: str, timestamp: str) -> str:
+    """Generate standardized output filename."""
+    base = input_dcp.replace(".dcp", "")
+    return f"{base}_optimized-{timestamp}.dcp"
+
+def _compute_save_metadata(state) -> dict:
+    """Compute metadata to include with saved output."""
+    return {"optimizer_version": "v2", "iterations": state.iteration.current, "best_wns": state.timing.best_wns, "initial_wns": state.timing.initial_wns}

@@ -103,3 +103,62 @@ class NodeGraph:
                 )
 
         return state
+
+
+# Per-node execution timeout (seconds) - prevents any single node
+# from consuming the entire wall-clock budget
+NODE_TIMEOUT_SECONDS = {
+    "INIT_ANALYSIS": 600,      # 10 min for initial timing analysis
+    "ITERATION_START": 30,     # 30 sec for iteration setup
+    "SELECT_MODEL": 30,        # 30 sec for model selection
+    "PREPARE_CONTEXT": 60,     # 60 sec for context assembly
+    "LLM_TOOL_LOOP": 1800,     # 30 min for LLM + tool execution (per iteration)
+    "ITERATION_END": 60,       # 60 sec for WNS update and narrative
+    "CHECK_EXIT": 30,          # 30 sec for exit condition check
+    "SAVE_OUTPUT": 300,        # 5 min for final save and hold check
+    "default": 120,            # 2 min default
+}
+
+
+# Error fallback: if any node fails, route to a safe state
+ERROR_FALLBACK_NODE = "SAVE_OUTPUT"  # Always save output on critical error
+NODE_RETRY_COUNT = 1                 # Retry failed nodes once before fallback
+NODE_RETRY_DELAY_SECONDS = 5         # Wait before retry
+
+# Graph: max total node transitions before forced exit
+MAX_TOTAL_TRANSITIONS = 100
+
+def get_node_priority(node_name: str) -> int:
+    """Get node execution priority (lower = more critical)."""
+    PRIORITIES = {"SAVE_OUTPUT": 0, "CHECK_EXIT": 1, "INIT_ANALYSIS": 2, "default": 5}
+    return PRIORITIES.get(node_name, PRIORITIES["default"])
+
+def estimate_graph_execution_time(state) -> float:
+    """Estimate remaining execution time in seconds."""
+    remaining_iters = max(0, 8 - state.iteration.current)
+    return remaining_iters * 600  # ~10 min per iteration
+
+def compute_graph_depth(node_name: str) -> int:
+    """How deep in the graph is this node? (0=INIT, higher=later)."""
+    depths = {"INIT_ANALYSIS": 0, "ITERATION_START": 1, "SELECT_MODEL": 2, "PREPARE_CONTEXT": 3, "LLM_TOOL_LOOP": 4, "ITERATION_END": 5, "CHECK_EXIT": 6, "SAVE_OUTPUT": 7}
+    return depths.get(node_name, -1)
+
+def get_node_retry_policy(node: str) -> dict:
+    """Retry policy for each node."""
+    critical = ["SAVE_OUTPUT", "INIT_ANALYSIS"]
+    important = ["CHECK_EXIT", "ITERATION_END"]
+    if node in critical: return {"max_retries": 3, "delay": 10}
+    if node in important: return {"max_retries": 2, "delay": 5}
+    return {"max_retries": 1, "delay": 2}
+
+def compute_graph_cycle_count(state) -> int:
+    """How many times we have cycled through the graph."""
+    return max(0, state.iteration.current - 1)
+
+def compute_graph_path_length(start: str, end: str) -> int:
+    """Number of transitions between two graph nodes."""
+    order = ["INIT_ANALYSIS", "ITERATION_START", "SELECT_MODEL", "PREPARE_CONTEXT", "LLM_TOOL_LOOP", "ITERATION_END", "CHECK_EXIT", "SAVE_OUTPUT"]
+    try:
+        return abs(order.index(end) - order.index(start))
+    except ValueError:
+        return 99

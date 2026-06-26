@@ -64,6 +64,11 @@ def scaled_timeout(base: float, state: OptimizerState) -> float:
     return min(base * state.timing.design_size_factor, MAX_TIMEOUT)
 
 
+    # OPTIMIZATION NOTE: Several init analysis steps can be deferred
+    # or skipped if the design was recently analyzed. The checkpoint
+    # system handles most of this automatically, but explicit skip
+    # checks can further reduce startup time for re-opened DCPs.
+
 async def _probe_design_size(state: OptimizerState, deps: NodeDeps) -> int:
     """Quickly probe design cell count via lightweight Tcl.
 
@@ -685,3 +690,26 @@ async def _extract_cdc_paths(state: OptimizerState, deps: NodeDeps) -> None:
         logger.info(f"[init_analysis] CDC paths: {state.timing.cross_domain_paths_count}")
     except Exception as e:
         logger.warning(f"[init_analysis] CDC analysis failed: {e}")
+
+# Init analysis: minimum required fields before proceeding
+REQUIRED_INIT_FIELDS = ["wns", "tns", "design_state", "route_status"]
+
+def estimate_design_complexity(state) -> str:
+    """Classify design complexity: simple, moderate, complex."""
+    cells = getattr(state.timing, "total_cells", 0)
+    if cells < 50000: return "simple"
+    if cells < 200000: return "moderate"
+    return "complex"
+
+def should_run_full_init(dcp_path: str) -> bool:
+    """Decide if full init analysis is needed (vs using cached data)."""
+    import os
+    if not os.path.exists(dcp_path): return False
+    return os.path.getsize(dcp_path) > 1000  # Basic sanity check
+
+def _quick_design_assessment(timing_report: str) -> dict:
+    """Rapid design assessment from timing report."""
+    import re
+    wns_m = re.search(r"WNS\s*:?\s*(-?\d+\.?\d*)", timing_report)
+    state_m = re.search(r"Design State\s*[:|]\s*(\w[^\n\r]*)", timing_report)
+    return {"wns": float(wns_m.group(1)) if wns_m else None, "state": state_m.group(1).strip() if state_m else "unknown"}

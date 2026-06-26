@@ -12,10 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .pure.entities import EntityRegistry
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ def parse_design_state(timing_report: str) -> str:
         Defaults to UNPLACED when the field cannot be parsed.
     """
     match = re.search(
-        r"Design\s+State\s*:\s*([^\|\n\r\t]+)",
+        r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
         timing_report or "",
         re.IGNORECASE,
     )
@@ -199,7 +196,6 @@ class TimingState:
     best_wns_tns: Optional[float] = None
     best_wns_failing_endpoints: Optional[int] = None
     latest_wns: Optional[float] = None
-    baseline_wns: Optional[float] = None  # WNS of iteration baseline DCP, refreshed on strategy switch reload
     latest_tns: Optional[float] = None
     latest_failing_endpoints: Optional[int] = None
     prev_best_wns: Optional[float] = None
@@ -317,8 +313,6 @@ class CostState:
     total_tokens: int = 0
     total_reasoning_tokens: int = 0
     total_cost: float = 0.0
-    total_cache_read_tokens: int = 0   # tokens served from prompt cache (OpenRouter/Anthropic)
-    total_cache_creation_tokens: int = 0  # tokens written to prompt cache
     cost_hard_limit: float = 1.0
     api_call_details: list[dict] = field(default_factory=list)
 
@@ -551,22 +545,6 @@ class OptimizerState:
     context: ContextState = field(default_factory=ContextState)
     control: ControlState = field(default_factory=ControlState)
     strategy: StrategyState = field(default_factory=StrategyState)
-    # Entity registry: canonical, compression-resistant cell-name SSOT.
-    # Rebuilt into the Pinned context layer each turn (never enters
-    # MessageStore), so cell names survive compression. Validated at the
-    # LLM->tool boundary by tool_router. See optimizer/pure/entities.py.
-    entity_registry: "EntityRegistry" = field(default_factory=lambda: _new_registry())
-
-    @property
-    def registry(self) -> "EntityRegistry":
-        """Alias for entity_registry (concise access)."""
-        return self.entity_registry
-
-
-def _new_registry():
-    """Lazy factory to avoid importing entities.py at module top (circular)."""
-    from .pure.entities import EntityRegistry
-    return EntityRegistry()
 
 
 # ── Dashboard StateSpace (6-module canonical representation) ────────
@@ -581,7 +559,6 @@ class DashboardGlobalState:
     iteration_count: int = 0
     target_frequency: float = 0.0      # MHz
     wns_setup: Optional[float] = None
-    baseline_wns: Optional[float] = None  # iteration baseline WNS (start point for current strategy)
     tns_setup: Optional[float] = None
     whs_hold: Optional[float] = None
     ths_hold: Optional[float] = None
@@ -762,3 +739,75 @@ class StateSpace:
     constraints_env: DashboardConstraints = field(default_factory=DashboardConstraints)
     dynamic_gradient: DashboardDynamicGradient = field(default_factory=DashboardDynamicGradient)
     architecture_overview: DashboardArchitectureOverview = field(default_factory=DashboardArchitectureOverview)
+
+
+# Quick-lookup WNS improvement helpers (used by check_exit, iteration_end)
+def wns_has_improved(state: "OptimizerState") -> bool:
+    """Check if WNS has improved in the current iteration."""
+    if state.timing.latest_wns is None or state.timing.best_wns == float("-inf"):
+        return False
+    return state.timing.latest_wns > state.timing.best_wns
+
+def wns_is_plateauing(state: "OptimizerState", threshold_ns: float = 0.005) -> bool:
+    """Check if WNS improvement has plateaued."""
+    if state.timing.latest_wns is None or state.timing.best_wns == float("-inf"):
+        return False
+    delta = state.timing.latest_wns - state.timing.best_wns
+    return abs(delta) < threshold_ns
+
+def estimate_remaining_iterations(state) -> int:
+    """Estimate how many more iterations are feasible."""
+    if state.control.wall_clock_timeout <= 0:
+        return 5
+    elapsed = getattr(state.control, "elapsed_seconds", 0)
+    avg_iter_time = 600  # ~10 min per iteration
+    remaining = state.control.wall_clock_timeout - elapsed
+    return max(0, int(remaining / avg_iter_time))
+
+def is_design_routed(state) -> bool:
+    """Check if the current design is fully routed."""
+    ds = getattr(state.timing, "design_state", "")
+    return "routed" in str(ds).lower()
+
+def compute_score_if_exit_now(state) -> float:
+    """What would the contest score be if we exited right now?"""
+    if state.timing.best_wns == float("-inf"): return 0
+    init_fmax = 1000.0 / (1.5 - state.timing.initial_wns) if state.timing.initial_wns else 400
+    curr_fmax = 1000.0 / (1.5 - state.timing.best_wns) if state.timing.best_wns < 1.5 else 9999
+    alpha = curr_fmax - init_fmax
+    cost = getattr(getattr(state, "cost", None), "total_spent", 0)
+    elapsed = getattr(getattr(state, "control", None), "elapsed_seconds", 0) / 3600
+    return alpha - 0.1*alpha*cost - 0.1*alpha*elapsed
+
+def compute_state_health(state) -> dict:
+    """Quick health check on optimizer state."""
+    issues = []
+    if state.timing.initial_wns is None: issues.append("no_initial_wns")
+    if state.timing.best_wns == float("-inf"): issues.append("no_best_wns")
+    if state.control.wall_clock_timeout <= 0: issues.append("no_timeout")
+    return {"healthy": len(issues)==0, "issues": issues}
+
+def is_worth_continuing(state) -> bool:
+    """Quick check if optimization is worth continuing."""
+    if state.timing.best_wns == float("-inf"): return True
+    if state.iteration.global_no_improvement >= 4: return False
+    return True
+
+def get_state_summary(state) -> str:
+    """One-line state summary for logging."""
+    i = state.iteration.current
+    w = state.timing.best_wns
+    g = state.iteration.global_no_improvement
+    return f"iter={i} best_wns={w:.3f} stalls={g}"
+
+def compute_best_possible_fmax(state) -> float:
+    """Theoretical max Fmax if all timing met."""
+    return 1000.0 / state.timing.clock_period if state.timing.clock_period else float("inf")
+
+def initialize_timing_state() -> dict:
+    """Default timing state for a new optimization run."""
+    return {"wns": float("-inf"), "tns": float("-inf"), "failing_endpoints": 0, "clock_period": 0, "design_state": "unknown"}
+
+def create_default_state() -> dict:
+    """Factory for default optimizer state."""
+    return {"iteration": {"current": 0, "global_no_improvement": 0}, "timing": {"best_wns": float("-inf"), "initial_wns": None}, "control": {"done_reason": "", "wall_clock_timeout": 3600}}

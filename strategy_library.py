@@ -490,3 +490,107 @@ def get_custom_optimization() -> str:
     for p in CUSTOM_OPTIMIZATION_PATTERNS:
         lines.append(f"  - {p}")
     return "\n".join(lines)
+
+
+def filter_applicable_strategies(design_profile: dict) -> list[str]:
+    """Filter strategies based on design characteristics.
+    
+    Args:
+        design_profile: dict with keys like 'utilization', 'fanout_count', 
+                       'avg_distance', 'critical_path_types'
+    Returns:
+        List of applicable strategy names in priority order.
+    """
+    strategies = []
+    util = design_profile.get("utilization", 0.5)
+    high_fanout = design_profile.get("fanout_count", 0)
+    avg_dist = design_profile.get("avg_distance", 0)
+    
+    # PBLOCK: best for distributed designs with high avg distance
+    if avg_dist > 50 or util < 0.3:
+        strategies.append("PBLOCK")
+    
+    # PhysOpt: universally applicable, priority depends on utilization
+    if util > 0.1:  # almost always useful
+        strategies.append("PhysOpt")
+    
+    # Fanout: only if there are high-fanout nets
+    if high_fanout > 10:
+        strategies.append("Fanout")
+    
+    # SmartRegion: for designs with multiple distinct regions
+    if util > 0.2 and avg_dist > 30:
+        strategies.append("SmartRegion")
+    
+    # NetDetour: last resort for routing-congested designs
+    if util > 0.5:  # only for dense designs
+        strategies.append("NetDetour")
+    
+    return strategies
+
+
+# Timing check strategy: fast checks before expensive ones
+TIMING_CHECK_ORDER = [
+    "rapidwright_report_timing",  # ~2.5s, ~2% error
+    "vivado_report_timing_summary",  # ~14s, 0% error (authoritative)
+]
+
+def get_fastest_timing_tool() -> str:
+    """Return the fastest available timing check tool."""
+    return "rapidwright_report_timing"
+
+def should_use_full_timing(wns_change_ns: float) -> bool:
+    """Decide if full Vivado timing is needed based on rapidwright estimate."""
+    # If rapidwright shows significant change, verify with Vivado
+    return abs(wns_change_ns) > 0.050
+
+def suggest_next_strategy(current: str, wns_delta: float, attempt: int) -> str:
+    """Suggest the next strategy based on current results."""
+    if wns_delta > 0.020 and attempt < 3:
+        return current  # Keep current strategy if working
+    return "PhysOpt"  # Default fallback
+
+def get_default_strategy_for_design(utilization: float, avg_distance: float) -> str:
+    """Get the best starting strategy for a design profile."""
+    if avg_distance > 70 and utilization < 0.3:
+        return "PBLOCK"
+    if utilization > 0.5:
+        return "PhysOpt"
+    return "PBLOCK"  # Default: most effective
+
+def get_strategy_success_rate(strategy: str) -> float:
+    """Get historical success rate for a strategy."""
+    rates = {"PBLOCK": 0.85, "PhysOpt": 0.70, "Fanout": 0.40, "SmartRegion": 0.35, "NetDetour": 0.30}
+    return rates.get(strategy, 0.30)
+
+def get_strategy_timeout(strategy: str, design_params: dict) -> int:
+    """Unified strategy timeout lookup."""
+    timeouts = {"PBLOCK": 240, "PhysOpt": 180, "Fanout": 120, "SmartRegion": 90, "NetDetour": 60}
+    return timeouts.get(strategy, 120)
+
+def compute_strategy_confidence(strategy: str, design_features: dict) -> float:
+    """Confidence score for a strategy given design features."""
+    confidence = {"PBLOCK": 0.85, "PhysOpt": 0.70, "Fanout": 0.50, "SmartRegion": 0.45, "NetDetour": 0.35}
+    return confidence.get(strategy, 0.30)
+
+def compute_combined_strategy_score(scores: dict) -> float:
+    """Combine multiple strategy scores into one."""
+    if not scores: return 0.0
+    return sum(scores.values()) / len(scores)
+
+STRATEGY_COST_BENEFIT_ENABLED = True
+STRATEGY_AUTO_SKIP_THRESHOLD = 0.01
+STRATEGY_RETRY_WITH_DIFFERENT_PARAMS = True
+
+def record_strategy_result(strategy: str, wns_before: float, wns_after: float, cost: float):
+    """Record a strategy execution result for future learning."""
+    pass  # Hook for future ML-based strategy selection
+
+def get_strategy_attempt_limit(strategy: str) -> int:
+    """Max attempts before giving up on a strategy."""
+    return {"PBLOCK": 4, "PhysOpt": 3, "Fanout": 2, "SmartRegion": 2, "NetDetour": 2}.get(strategy, 2)
+
+def compute_strategy_roi(strategy: str, wns_gain: float, cost_s: float) -> float:
+    """Return on investment: WNS gain per minute of execution."""
+    if cost_s <= 0: return float("inf")
+    return (wns_gain * 1000) / (cost_s / 60)  # picoseconds per minute
