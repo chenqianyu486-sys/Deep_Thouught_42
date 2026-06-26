@@ -1225,6 +1225,21 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
+    # Extract system message for top-level API parameter (prompt caching).
+    # The system prompt is static across calls; passing it as a top-level
+    # parameter lets providers cache it independently of the dynamic
+    # conversation history (messages). The pinned cell registry + merged
+    # dashboard are injected as user messages below.
+    system_text = ""
+    api_clean: list[dict] = []
+    for msg in api_messages:
+        if msg.get("role") == "system":
+            if not system_text:
+                system_text = msg.get("content", "")
+        else:
+            api_clean.append(msg)
+    api_messages = api_clean
+
     # Inject merged handoff + dashboard as last user message
     # Inject Pinned cell-registry layer (right after system message),
     # then merged handoff + dashboard as last user message.
@@ -1249,7 +1264,11 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
                 timeout=600.0,
             )
             if extra_body:
+                if system_text:
+                    extra_body["system"] = system_text
                 kwargs["extra_body"] = extra_body
+            elif system_text:
+                kwargs["extra_body"] = {"system": system_text}
             # Log prompt for observability
             if deps.prompt_logger:
                 deps.prompt_logger.log_prompt(
@@ -1385,6 +1404,14 @@ def _track_cost(state: OptimizerState, response) -> None:
             if completion_details:
                 reasoning = getattr(completion_details, 'reasoning_tokens', 0) or 0
                 state.cost.total_reasoning_tokens += reasoning
+            # Prompt caching metrics (OpenRouter returns these in usage object
+            # when cache: {prompt: true} is set in extra_body)
+            cache_read = getattr(usage, 'cache_read_input_tokens', None)
+            if cache_read is not None:
+                state.cost.total_cache_read_tokens += int(cache_read)
+            cache_create = getattr(usage, 'cache_creation_input_tokens', None)
+            if cache_create is not None:
+                state.cost.total_cache_creation_tokens += int(cache_create)
     except Exception as e:
         logger.debug(f"[EXECUTE] Cost tracking failed: {e}")
 

@@ -252,8 +252,23 @@ def build_llm_extra_body(
 ) -> dict:
     """Build extra_body for LLM API calls with prompt caching + reasoning config.
 
-    Always enables OpenRouter prompt caching so the system prompt prefix
-    is cached across repeated calls, reducing token waste.
+    Prompt caching strategy (two-tier):
+    - Tier 1 (extra_body.cache): Sets ``{"cache": {"prompt": True}}`` for OpenRouter
+      prompt caching. This caches the messages array prefix so repeated system
+      messages + early conversation turns avoid re-encoding across calls.
+      The cache TTL is ~5min on OpenRouter (matches Anthropic prompt cache TTL).
+
+    - Tier 2 (extra_body.system): The static system prompt is further passed as a
+      top-level ``system`` parameter (not as a message in the messages array).
+      This is set by each phase's _call_phase_llm after extracting the system
+      message from the formatted API messages. Separating the static system
+      content from the dynamic conversation history maximizes cache prefix
+      stability — the messages array becomes shorter and changes less between
+      calls, so more of its prefix survives in cache.
+
+    Cache metrics (cache_read_input_tokens, cache_creation_input_tokens) are
+    extracted from the OpenRouter usage response by _track_cost() and logged
+    by LLMCallLogger, providing visibility into cache effectiveness.
     """
     extra: dict = {"cache": {"prompt": True}}
 

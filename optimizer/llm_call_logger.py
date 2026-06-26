@@ -48,6 +48,8 @@ def _extract_snapshot(state) -> dict:
         "total_completion_tokens": state.cost.total_completion_tokens,
         "total_tokens": state.cost.total_tokens,
         "total_reasoning_tokens": state.cost.total_reasoning_tokens,
+        "total_cache_read_tokens": state.cost.total_cache_read_tokens,
+        "total_cache_creation_tokens": state.cost.total_cache_creation_tokens,
         # Control
         "is_done": state.control.is_done,
         "done_reason": state.control.done_reason,
@@ -243,13 +245,15 @@ class LLMCallLogger:
             "response_tool_calls": response_tool_calls,
             "finish_reason": finish_reason,
             "error": error,
-            # Usage
+            # Usage (includes prompt caching metrics from OpenRouter)
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
                 "reasoning_tokens": reasoning_tokens,
                 "cost": cost_val,
+                "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None) if usage else None,
+                "cache_creation_input_tokens": getattr(usage, "cache_creation_input_tokens", None) if usage else None,
             },
         }
         entry.update(state_snapshot)

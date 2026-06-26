@@ -536,6 +536,16 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
+    # Extract system message for top-level API parameter (prompt caching).
+    system_text = ""
+    api_clean: list[dict] = []
+    for msg in api_messages:
+        if msg.get("role") == "system" and not system_text:
+            system_text = msg.get("content", "")
+        else:
+            api_clean.append(msg)
+    api_messages = api_clean
+
     # Inject merged handoff + dashboard as last user message
     inject_pinned_cell_registry(api_messages, state)
     inject_merged_dashboard(api_messages, state, LoopPhase.EVALUATE)
@@ -558,7 +568,11 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
                 timeout=600.0,
             )
             if extra_body:
+                if system_text:
+                    extra_body["system"] = system_text
                 kwargs["extra_body"] = extra_body
+            elif system_text:
+                kwargs["extra_body"] = {"system": system_text}
             # Log prompt for observability
             if deps.prompt_logger:
                 deps.prompt_logger.log_prompt(

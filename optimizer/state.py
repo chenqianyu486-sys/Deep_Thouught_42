@@ -317,6 +317,8 @@ class CostState:
     total_tokens: int = 0
     total_reasoning_tokens: int = 0
     total_cost: float = 0.0
+    total_cache_read_tokens: int = 0   # tokens served from prompt cache (OpenRouter/Anthropic)
+    total_cache_creation_tokens: int = 0  # tokens written to prompt cache
     cost_hard_limit: float = 1.0
     api_call_details: list[dict] = field(default_factory=list)
 

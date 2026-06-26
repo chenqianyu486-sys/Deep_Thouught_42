@@ -213,6 +213,11 @@ async def save_output_node(
         print(f"  Tokens:        {state.cost.total_tokens:,} (prompt={state.cost.total_prompt_tokens:,}, completion={state.cost.total_completion_tokens:,})")
         if state.cost.total_reasoning_tokens > 0:
             print(f"  Reasoning:     {state.cost.total_reasoning_tokens:,}")
+        if state.cost.total_cache_read_tokens > 0:
+            cache_pct = state.cost.total_cache_read_tokens * 100 // max(state.cost.total_prompt_tokens, 1)
+            print(f"  Cache read:    {state.cost.total_cache_read_tokens:,} ({cache_pct}% of prompt)")
+        if state.cost.total_cache_creation_tokens > 0:
+            print(f"  Cache created: {state.cost.total_cache_creation_tokens:,}")
     print(f"  LLM calls:     {state.model.llm_call_count}")
     print(f"  Total cost:    ${state.cost.total_cost:.4f}")
     print(f"  Elapsed:       {elapsed:.1f}s ({elapsed_min:.1f}min)")
