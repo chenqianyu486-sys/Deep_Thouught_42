@@ -330,7 +330,7 @@ class TestStrategyCooldown:
     def test_auto_chain_best_gain_avoids_false_cooldown(self):
         state = self._state_with_strategy_delta(0.0)
         state.timing.latest_wns = -0.500
-        state.timing.best_wns = -0.476
+        state.timing.best_wns = -0.440
 
         _handle_switch_strategy(state, NodeDeps(), "latest timing is stale")
 
@@ -360,7 +360,7 @@ class TestStrategyCooldown:
         assert state.context.failed_strategies == []
 
     def test_switch_keeps_improving_strategy_available(self):
-        state = self._state_with_strategy_delta(0.024)
+        state = self._state_with_strategy_delta(0.060)
 
         _handle_switch_strategy(state, NodeDeps(), "try another strategy")
 
@@ -430,7 +430,7 @@ class TestCheckExitHelpers:
         state.control.wall_clock_timeout = 3600.0
         state.iteration.current = 3
         state.timing.initial_wns = -0.978
-        state.timing.best_wns = -0.970
+        state.timing.best_wns = -0.976
         state.timing.best_wns_iteration = 3
 
         assert _competition_score_guard_reason(state, elapsed=3050.0) == ""

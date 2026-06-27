@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # instead of spending the final budget on low-probability exploration.
 SCORE_GUARD_ELAPSED_FRACTION = 0.70
 SCORE_GUARD_MIN_ITERATION = 2
-SCORE_GUARD_MIN_WNS_GAIN_NS = 0.010
+SCORE_GUARD_MIN_WNS_GAIN_NS = 0.003
 SCORE_GUARD_STALL_LIMIT = 1
 
 
