@@ -121,3 +121,19 @@ When applying PBLOCK strategy, use this exact sequence for maximum effectiveness
 CRITICAL: Steps 4-6 are essential. Skipping them results in UNCHANGED WNS.
 Default multiplier is now 2.0x. Use 1.5x for dense (>40% util) designs.
 
+
+
+## PBLOCK EXECUTION — MANDATORY VIVADO FLOW
+
+After calling rapidwright_execute_pblock_strategy, you MUST execute this Vivado chain:
+1. vivado_run_tcl: "place_design -unplace"
+2. vivado_create_and_apply_pblock (with pblock_ranges from step 1, is_soft=false)
+3. vivado_place_design (directive="Default")
+4. vivado_route_design
+5. rapidwright_report_timing (verify improvement)
+
+The RapidWright tool only plans the pblock — it does NOT modify the design.
+Without the Vivado chain, PBLOCK has ZERO effect (always returns UNCHANGED).
+This chain takes ~180s but is ESSENTIAL for any WNS improvement from PBLOCK.
+
+MULTIPLIER: Always use resource_multiplier=2.0 for this design.
