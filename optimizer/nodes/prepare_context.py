@@ -129,16 +129,19 @@ async def prepare_context_node(
             except Exception as e:
                 logger.warning(f"[prepare_context] Handoff injection failed: {e}")
 
-    # Inject cost budget awareness into LLM context
-    cost_used = getattr(getattr(state, "cost", None), "total_cost", 0.0)
-    cost_limit = getattr(getattr(state, "cost", None), "cost_hard_limit", 1.0)
-    if cost_limit > 0 and cost_used > 0:
-        budget_pct = min(100 * cost_used / cost_limit, 100)
-        budget_msg = (
-            f"\n[BUDGET] Spent: ${cost_used:.4f} / ${cost_limit:.2f} limit "
-            f"({budget_pct:.0f}% used). Prefer cheaper actions if budget is tight."
-        )
-        deps.compat.add_message("user", budget_msg)
+    # 4. Inject cost budget awareness (once, first iteration where cost > 0)
+    if not state.model.budget_injected and deps.compat is not None:
+        cost_used = getattr(getattr(state, "cost", None), "total_cost", 0.0)
+        cost_limit = getattr(getattr(state, "cost", None), "cost_hard_limit", 1.0)
+        if cost_limit > 0 and cost_used > 0:
+            budget_pct = min(100 * cost_used / cost_limit, 100)
+            budget_msg = (
+                f"\n[BUDGET] Spent: ${cost_used:.4f} / ${cost_limit:.2f} limit "
+                f"({budget_pct:.0f}% used). Prefer cheaper actions if budget is tight."
+            )
+            deps.compat.add_message("system", budget_msg)
+            state.model.budget_injected = True
+            logger.info(f"[prepare_context] BUDGET injected (${cost_used:.4f}/{cost_limit:.2f})")
 
 
     return NodeName.LLM_TOOL_LOOP

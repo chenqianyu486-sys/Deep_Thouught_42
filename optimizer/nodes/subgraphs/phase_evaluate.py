@@ -434,7 +434,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 # Mark fields stale after design modification (architectural
                 # symmetry with EXECUTE — EVALUATE allowlist is read-only but
                 # the guard must exist for consistency and future tool additions).
-                if tool_name in DESIGN_MODIFICATION_TOOLS:
+                if tool_name in DESIGN_MODIFICATION_TOOLS:  # pragma: defensive-guard
                     state.timing.critical_paths_stale = True
                     for field in state.timing.field_freshness:
                         state.timing.field_freshness[field] = "stale"

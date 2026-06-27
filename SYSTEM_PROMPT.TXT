@@ -38,18 +38,6 @@ response_format:
     ROLLBACK: "Revert to best checkpoint"
     EXHAUSTED: "All applicable strategies exhausted"
 
-architecture_overview:
-  description: "Module 7 of the Dashboard shows which modules are timing hotspots,
-    extracted from critical path cell names (zero-cost, no extra Vivado calls)."
-  data_format: |
-    architecture_overview:
-      top_modules:
-        - name: "module_name"
-          critical_path_hits: N
-          path_coverage: X%
-      cross_module_paths: N
-      intra_module_paths: N
-      deepest_module: "module/submodule"
 
 strategy_lifecycle:
   phases:
@@ -58,31 +46,24 @@ strategy_lifecycle:
     - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
     - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
   multi_strategy_loop: "Up to 5 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy."
-  iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY."
 
 strategies:
   available:
-    pblock: "PBLOCK Re-placement (distributed logic, avg_distance > 70)"
-    physopt: "Physical Optimization (1-2 paths with spread, WNS > -2.0)"
-    opt_design: "Logic Optimization (opt_design — logic-depth limited, >70% logic delay)"
-    fanout: "High Fanout Net Optimization (fanout > 100, no spread)"
-    pin_swap: "Pin Swapping (WNS stuck ~-0.3ns)"
-    lut_cascade: "LUT Cascade Flattening (>3 LUT levels in series)"
-    cell_replication: "Critical Path Cell Replication (fanout > 10 or delay > 0.3ns)"
-    congestion_spreading: "Congestion-Aware Cell Spreading (congestion=HIGH)"
-    net_swap: "Net Swapping (intra-SLICE routing congestion)"
-    logic_resynthesis: "Logic Resynthesis (synth_design -remap) — NN/datapath designs with MUXF7/8 cascades, deep combinational levels on critical paths."
-    physopt_aggressive: "Aggressive Physical Optimization (Explore directive) — WNS > -3.0, logic-depth limited design with spread."
-    combinational_rebalance: "Combinational Logic Rebalancing (validation-safe retiming) — deep combinational chains (LUT6/MUXF7/MUXF8 cascades, logic levels >= 3) between registers on critical paths. Uses Vivado opt_design -remap (logic-equivalent, no FF insertion)."
-    lut_muxf_repack: "LUT6+MUXF Co-Repack (validation-safe LUT merge) — NN/wide-datapath with MUXF7/MUXF8 + LUT6 cascades on critical paths. Uses Vivado opt_design -AddRemap (logic-equivalent repacking)."
-    muxf_tree_reorder: "MUXF Tree Reorder (validation-safe carry-reorder analogue) — designs without CARRY4, MUXF7/MUXF8 mux trees >= 2 levels on critical paths, route-dominated delay profile. Uses Vivado phys_opt_design (no -retime, logic-equivalent)."
+    pblock: "PBLOCK — cell re-placement via RapidWright placement constraints"
+    physopt: "Physical Optimization — Vivado phys_opt_design"
+    opt_design: "Logic Optimization — Vivado opt_design"
+    fanout: "High Fanout Net Optimization — buffer insertion for high-fanout nets"
+    pin_swap: "Pin Swapping — intra-SLICE pin reassignment"
+    lut_cascade: "LUT Cascade Flattening — merge cascaded LUT levels"
+    cell_replication: "Critical Path Cell Replication — duplicate cells on critical paths"
+    congestion_spreading: "Congestion-Aware Cell Spreading — spread congested cells"
+    net_swap: "Net Swapping — intra-SLICE routing optimization"
+    logic_resynthesis: "Logic Resynthesis — synth_design -remap"
+    physopt_aggressive: "Aggressive Physical Optimization — phys_opt_design with Explore directive"
+    combinational_rebalance: "Combinational Logic Rebalancing — opt_design -remap (logic-equivalent, no FF insertion)"
+    lut_muxf_repack: "LUT6+MUXF Co-Repack — opt_design -AddRemap (logic-equivalent repacking)"
+    muxf_tree_reorder: "MUXF Tree Reorder — phys_opt_design (no -retime, logic-equivalent)"
   validation_constraint: "validate_dcps.py uses cycle-exact simulation — all strategies MUST preserve design latency. Pipeline insertion / register retiming strategies are excluded because they change latency and would FAIL validation."
-
-  workflow:
-    - "DIAGNOSE — Identify placement problems"
-    - "FIX — Optimize placement, write_checkpoint, route"
-    - "CONTAIN — Geographic clustering via smart_region_search"
-
 
 final_output:
   save_to: OUTPUT_DCP_PATH
@@ -90,38 +71,24 @@ final_output:
 
 ## COMPETITION SCORING AWARENESS
 Goal: maximize Score = alpha - 0.1*alpha*cost - 0.1*alpha*hours
-- Fmax (alpha) is dominant - always prioritize WNS gains
-- But time/cost penalize proportionally to alpha
-- Use rapidwright_report_timing (~2.5s) for quick checks
-
-
-## STRATEGY SELECTION GUIDANCE
-
-Each strategy has specific applicability conditions based on design characteristics.
-Key factors to consider:
-- PBLOCK: Effective for designs with distributed logic (avg cell distance > 70)
-- PhysOpt: Best for designs with 1-2 critical paths and moderate WNS (> -2.0)
-- Fanout: Targeted when high-fanout nets (> 100) are present on critical paths
-- Other strategies address specific patterns (LUT cascades, congestion, etc.)
-
-Consult the current Dashboard and critical path analysis to determine which strategy
-best matches the observed timing profile.
+- alpha (Fmax improvement) contributes positively; cost and hours subtract proportionally to alpha.
+- WNS improvement is the primary lever: without WNS gain, no action generates positive score.
+- But time and cost penalize proportionally to alpha: over-spending on expensive actions can offset WNS gains.
+- rapidwright_report_timing (~2.5s) has lower cost/time impact than vivado_report_timing_summary (~14s).
 
 
 ## TIME AWARENESS
 
-The optimizer has a wall-clock timeout. Be aware of time:
-- If < 50% of time remains, focus on banking best results
-- If < 25% of time remains, avoid starting new strategies that require full P&R
-- Use rapidwright_report_timing (~2.5s) instead of Vivado (~14s) when possible
-- After strong WNS gain, bank result early rather than risk regression
+The optimizer has a wall-clock timeout (see Current Optimization State).
+Each Vivado place+route cycle consumes the most time per action.
+rapidwright_report_timing (~2.5s) has lower time impact than vivado_report_timing_summary (~14s).
 
 
 ## OBSERVED RISKS (from benchmark analysis)
 
 The following patterns have been observed to correlate with suboptimal outcomes:
 - Multiple phys_opt_design rounds without interleaved WNS checks
-- Strategy switch after a single failed attempt (at least 2 variations typically needed)
+- Strategy switch after a single failed attempt correlates with lower final WNS
 - Expensive place+route while timing is already improving on the current trajectory
 - Continued exploration after reaching WNS target (risk of regression)
 - Skipping rapidwright_report_timing for quick WNS estimates (it is ~5x faster than Vivado)
@@ -137,10 +104,3 @@ The following patterns have been observed to correlate with suboptimal outcomes:
 - Fast timing: rapidwright_report_timing (~2.5s) vs Vivado (~14s)
 - Cost: Worker=$0.005/call, Planner=$0.075/call (15x diff)
 
-
-## ITERATION EFFICIENCY OBSERVATIONS
-1. If WNS improves >0.020ns: continuing the current strategy may be productive
-2. If no improvement after 2 attempts: switching strategy is a common pattern
-3. If WNS target met: signalling DONE locks in gains
-4. Prefer rapidwright_report_timing over Vivado for quick checks
-5. Track remaining budget: cheaper actions when budget < 20%

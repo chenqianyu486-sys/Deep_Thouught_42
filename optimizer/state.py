@@ -295,6 +295,7 @@ class ModelState:
     iteration_handoff_prompt: str = ""
     iteration_handoff_injected: bool = False
     format_guard_injected: bool = False
+    budget_injected: bool = False
     worker_consecutive_success: int = 0
     worker_consecutive_failures: int = 0
     worker_fallback_models: list[str] = field(default_factory=list)

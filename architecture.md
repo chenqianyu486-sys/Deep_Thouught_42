@@ -666,14 +666,14 @@ WNS_TARGET_THRESHOLD = 0.0
 | 原则 | 实现 |
 |------|------|
 | 描述问题，非处方方案 | `safety_constraints` → `known_risks`（"observed" 替代 "MUST"） |
-| 信任 LLM 领域知识 | 移除 `strategy_implications`、`selection_guide`、`architecture_overview` 解释 |
+| 信任 LLM 领域知识 | 移除 `strategy_implications`、`selection_guide`、`architecture_overview` 解释（2026-06-27 已落实：SYSTEM_PROMPT.TXT 中移除 STRATEGY SELECTION GUIDANCE、architecture_overview、iteration 阈值、workflow 处方） |
 | 单一信息源 | FORMAT_GUARD 不再重复工具 schema 和 lifecycle 描述 |
 | 减少认知负担 | 信号从 9 → 7（移除 RETRY、合并 RESELECT→SWITCH） |
 | 自动化替代指令 | 移除 EXECUTE CONSTRAINT 和 post_actions（auto-chain 已覆盖） |
 
 ### 上下文注入层次
 
-1. **SYSTEM_PROMPT.TXT** (~90行): 角色定义 + known_risks(事实描述) + 策略目录
+1. **SYSTEM_PROMPT.TXT** (~75行): 角色定义 + known_risks(事实描述) + 策略目录
 2. **FORMAT_GUARD** (~4000 字符, 一次性): 行为要求 + EXECUTE工具映射 + 格式禁令 + **CELL NAME CONTRACT**（2026-06 新增：指引 LLM 使用 [CELL REGISTRY]、禁止 device site / bare type 名、说明富错误反馈机制）
 3. **Dashboard** (每轮动态重建): 纯数据无判断标签 + phase-aware过滤 + 最后一条user消息注入
 4. **Tool schema** (按阶段过滤): `filter_tools_for_phase()` 深拷贝+动态patch flow_control enum

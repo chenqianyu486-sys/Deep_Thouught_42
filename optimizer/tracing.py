@@ -95,7 +95,7 @@ def record_score_snapshot(state, label: str = ""):
     final_fmax = 1000.0 / (clock_ns - state.timing.best_wns) if state.timing.best_wns < clock_ns else 9999
     alpha = final_fmax - init_fmax
     
-    cost = getattr(getattr(state, "cost", None), "total_spent", 0.0)
+    cost = getattr(getattr(state, "cost", None), "total_cost", 0.0)
     elapsed = getattr(getattr(state, "control", None), "elapsed_seconds", 0.0)
     
     score = alpha - 0.1 * alpha * cost - 0.1 * alpha * (elapsed / 3600.0)
@@ -118,7 +118,7 @@ def trace_iteration_summary(state) -> str:
     """Generate a one-line summary of an iteration."""
     i = state.iteration.current
     w = state.timing.best_wns
-    c = getattr(getattr(state, "cost", None), "total_spent", 0)
+    c = getattr(getattr(state, "cost", None), "total_cost", 0)
     return f"Iter{i}: WNS={w:.3f}ns Cost=${c:.4f}"
 
 def format_trace_entry(node: str, event: str, data: dict) -> str:

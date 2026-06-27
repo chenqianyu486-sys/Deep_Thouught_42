@@ -98,8 +98,8 @@ async def check_exit_node(
 
     # Cost limit check: exit if approaching budget limit with unclear improvement
     COST_LIMIT_WARN_FRACTION = 0.90  # Warn at 90% of budget
-    cost_used = getattr(getattr(state, "cost", None), "total_spent", 0.0)
-    cost_limit = getattr(getattr(state, "control", None), "cost_hard_limit", 10.0)
+    cost_used = getattr(getattr(state, "cost", None), "total_cost", 0.0)
+    cost_limit = getattr(getattr(state, "cost", None), "cost_hard_limit", 10.0)
     if cost_limit > 0 and cost_used > cost_limit * COST_LIMIT_WARN_FRACTION:
         logger.warning(
             "[check_exit] Cost limit approaching: $%.4f / $%.2f (%.0f%%)",
@@ -224,8 +224,8 @@ def compute_remaining_budget_ratio(state) -> float:
     """How much of wall clock + cost budget remains."""
     t_elapsed = getattr(getattr(state, "control", None), "elapsed_seconds", 0)
     t_total = max(state.control.wall_clock_timeout, 1)
-    c_spent = getattr(getattr(state, "cost", None), "total_spent", 0)
-    c_total = max(getattr(getattr(state, "control", None), "cost_hard_limit", 10), 0.01)
+    c_spent = getattr(getattr(state, "cost", None), "total_cost", 0)
+    c_total = max(getattr(getattr(state, "cost", None), "cost_hard_limit", 10), 0.01)
     t_ratio = 1 - min(t_elapsed / t_total, 1)
     c_ratio = 1 - min(c_spent / c_total, 1)
     return min(t_ratio, c_ratio)
