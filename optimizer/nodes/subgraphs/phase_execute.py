@@ -988,6 +988,24 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         except Exception as e:
                             logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
 
+            # PBLOCK AUTO-CHAIN: execute Vivado flow automatically
+            # The RapidWright analysis only plans; the Vivado chain actually modifies
+            # the design. Test mode proves this sequence achieves WNS -0.446ns.
+            if pblock_ranges := tool_result.get("pblock_ranges", ""):
+                logger.info("[EXECUTE] PBLOCK auto-chain: unplace → pblock → place → route")
+                auto_chain = [
+                    ("vivado_run_tcl", {"command": "place_design -unplace"}),
+                    ("vivado_create_and_apply_pblock", {"pblock_name": "pblock_auto", "ranges": pblock_ranges, "is_soft": False}),
+                    ("vivado_place_design", {"directive": "Default"}),
+                    ("vivado_route_design", {}),
+                ]
+                for chain_tool, chain_args in auto_chain:
+                    await call_tool_fn(chain_tool, chain_args, state, deps)
+                logger.info("[EXECUTE] PBLOCK auto-chain complete — running timing check")
+                await call_tool_fn("vivado_report_timing_summary", {}, state, deps)
+            else:
+                logger.warning("[EXECUTE] PBLOCK: no pblock_ranges in RW result, skipping auto-chain")
+
                 # ── Post-chain verdict re-evaluation ──────────────────────
                 # Analysis-only skills (e.g. pblock_strategy) don't change WNS
                 # themselves — post-eval ran before the chain and saw no change.
