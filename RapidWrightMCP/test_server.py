@@ -33,7 +33,7 @@ def main():
     print_result("initialize_rapidwright", result)
     
     if result.get("status") != "success":
-        print("\n❌ ERROR: Failed to initialize RapidWright.")
+        print("\n[ERROR]: Failed to initialize RapidWright.")
         print("Please ensure:")
         print("  - Java 11+ is installed: java -version")
         print("  - RapidWright is built: make build-rapidwright (from repo root)")
@@ -46,7 +46,7 @@ def main():
     print_result("get_supported_devices", result)
     
     if result.get("status") != "success":
-        print("\n❌ ERROR: Failed to get supported devices.")
+        print("\n[ERROR]: Failed to get supported devices.")
         return 1
     
     # Test 3: Get device info
@@ -71,7 +71,7 @@ def main():
         print_result("get_device_info", result)
         
         if result.get("status") != "success":
-            print(f"\n⚠️  WARNING: Could not get info for {device_to_test}")
+            print(f"\n[WARN]: Could not get info for {device_to_test}")
     else:
         print("\n[3/4] Skipping device info test - no devices available")
     
@@ -87,14 +87,14 @@ def main():
     print("\n[5/6] Testing write_checkpoint with a new design...")
     result = test_write_checkpoint()
     if result != 0:
-        print("\n❌ ERROR: write_checkpoint test failed.")
+        print("\n[ERROR]: write_checkpoint test failed.")
         return 1
     
     # Test 6: Test overwrite behavior
     print("\n[6/6] Testing write_checkpoint overwrite behavior...")
     result = test_write_checkpoint_overwrite()
     if result != 0:
-        print("\n❌ ERROR: write_checkpoint overwrite test failed.")
+        print("\n[ERROR]: write_checkpoint overwrite test failed.")
         return 1
     
     print("\n" + "="*60)
@@ -153,7 +153,7 @@ def test_write_checkpoint():
                 print(f"  ❌ Size mismatch: reported {reported_size}, actual {actual_size}")
                 return 1
             
-            print(f"  ✓ DCP file created successfully ({actual_size} bytes)")
+            print(f"  [OK] DCP file created successfully ({actual_size} bytes)")
             
             # Verify we can read the checkpoint back
             print(f"  Reading checkpoint back to verify...")
@@ -168,10 +168,10 @@ def test_write_checkpoint():
                 print(f"  ❌ Design name mismatch: expected '{design_name}', got '{read_result.get('design_name')}'")
                 return 1
             
-            print(f"  ✓ DCP file verified - design name matches")
+            print(f"  [OK] DCP file verified - design name matches")
             print_result("read_checkpoint (verification)", read_result)
         
-        print("  ✓ write_checkpoint test passed!")
+        print("  [OK] write_checkpoint test passed!")
         return 0
         
     except Exception as e:
@@ -208,7 +208,7 @@ def test_write_checkpoint_overwrite():
                 return 1
             
             first_size = result.get("bytes_written", 0)
-            print(f"  ✓ First write succeeded ({first_size} bytes)")
+            print(f"  [OK] First write succeeded ({first_size} bytes)")
             
             # Second write without overwrite should fail
             print(f"  Second write without overwrite (should fail)...")
@@ -222,7 +222,7 @@ def test_write_checkpoint_overwrite():
                 print(f"  ❌ Expected 'already exists' error, got: {result.get('error')}")
                 return 1
             
-            print(f"  ✓ Second write correctly rejected (file exists)")
+            print(f"  [OK] Second write correctly rejected (file exists)")
             
             # Third write with overwrite=True should succeed
             print(f"  Third write with overwrite=True...")
@@ -232,9 +232,9 @@ def test_write_checkpoint_overwrite():
                 print(f"  ❌ Third write with overwrite failed: {result.get('error')}")
                 return 1
             
-            print(f"  ✓ Third write with overwrite succeeded ({result.get('bytes_written')} bytes)")
+            print(f"  [OK] Third write with overwrite succeeded ({result.get('bytes_written')} bytes)")
         
-        print("  ✓ write_checkpoint overwrite test passed!")
+        print("  [OK] write_checkpoint overwrite test passed!")
         return 0
         
     except Exception as e:
@@ -248,10 +248,10 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n\n⚠️  Test interrupted by user.")
+        print("\n\n[WARN] Test interrupted by user.")
         sys.exit(1)
     except Exception as e:
-        print(f"\n\n❌ ERROR: {e}")
+        print(f"\n\n[ERROR]: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

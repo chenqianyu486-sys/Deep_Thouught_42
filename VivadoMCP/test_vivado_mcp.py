@@ -84,12 +84,12 @@ async def test_open_checkpoint(session: ClientSession, dcp_path: str) -> bool:
     try:
         result = await call_tool(session, "open_checkpoint", {"dcp_path": dcp_path, "timeout": 600})
         if "ERROR" in result.upper() and "successfully" not in result.lower():
-            print(f"✗ Failed: {result[:500]}")
+            print(f"[FAIL] Failed: {result[:500]}")
             return False
-        print(f"✓ Checkpoint opened")
+        print(f"[OK] Checkpoint opened")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -102,12 +102,12 @@ async def test_report_timing_summary(session: ClientSession) -> bool:
         print(f"Result (first 500 chars):\n{result[:500]}...")
         # Verify it contains timing data
         if "WNS" in result or "TNS" in result or "timing" in result.lower():
-            print(f"✓ Timing summary generated")
+            print(f"[OK] Timing summary generated")
             return True
-        print(f"⚠ Unexpected output format")
+        print(f"[WARN] Unexpected output format")
         return True  # Don't fail, just warn
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -122,16 +122,16 @@ async def test_get_wns(session: ClientSession) -> bool:
         # Verify it's a valid number
         try:
             float(wns_val)
-            print(f"✓ WNS retrieved")
+            print(f"[OK] WNS retrieved")
             return True
         except ValueError:
             if wns_val == "PARSE_ERROR":
-                print(f"⚠ PARSE_ERROR (WNS could not be determined)")
+                print(f"[WARN] PARSE_ERROR (WNS could not be determined)")
                 return True  # Don't fail, this is expected in some cases
-            print(f"✗ Invalid WNS value: {wns_val}")
+            print(f"[FAIL] Invalid WNS value: {wns_val}")
             return False
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -142,10 +142,10 @@ async def test_report_route_status(session: ClientSession) -> bool:
     try:
         result = await call_tool(session, "report_route_status", {"timeout": 300})
         print(f"Result (first 500 chars):\n{result[:500]}...")
-        print(f"✓ Route status generated")
+        print(f"[OK] Route status generated")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -156,10 +156,10 @@ async def test_report_utilization(session: ClientSession) -> bool:
     try:
         result = await call_tool(session, "report_utilization_for_pblock", {"timeout": 300})
         print(f"Result (first 500 chars):\n{result[:500]}...")
-        print(f"✓ Utilization report generated")
+        print(f"[OK] Utilization report generated")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -185,12 +185,12 @@ async def test_get_critical_high_fanout_nets(session: ClientSession) -> bool:
         if not net_matches:
             net_matches = re.findall(r"[\"'\\w]+/[\\w\\[\\]]+", result)
         if net_matches:
-            print(f"✓ Found parent nets: {len(net_matches)} nets")
+            print(f"[OK] Found parent nets: {len(net_matches)} nets")
             return True
-        print(f"⚠ No parent nets found (design may have no high fanout nets)")
+        print(f"[WARN] No parent nets found (design may have no high fanout nets)")
         return True  # Don't fail, this is informational
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -207,19 +207,19 @@ async def test_extract_critical_path_cells(session: ClientSession) -> bool:
         })
         # Check if result contains JSON or file was written
         if output_file.exists():
-            print(f"✓ Critical paths written to: {output_file}")
+            print(f"[OK] Critical paths written to: {output_file}")
             return True
         # If result is directly returned as JSON string
         try:
             data = json.loads(result)
-            print(f"✓ Critical paths extracted: {len(data.get('paths', []))} paths")
+            print(f"[OK] Critical paths extracted: {len(data.get('paths', []))} paths")
             return True
         except json.JSONDecodeError:
             print(f"Result (first 500 chars):\n{result[:500]}...")
-            print(f"✓ Critical path cells extracted")
+            print(f"[OK] Critical path cells extracted")
             return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -238,15 +238,15 @@ async def test_place_design(session: ClientSession) -> bool:
         })
         print(f"Result (first 500 chars):\n{result[:500]}...")
         if "ERROR" in result.upper() and "place_design: Running" not in result:
-            print(f"✗ Placement failed")
+            print(f"[FAIL] Placement failed")
             return False
-        print(f"✓ Placement completed")
+        print(f"[OK] Placement completed")
         return True
     except asyncio.TimeoutError:
-        print(f"✗ Placement timed out")
+        print(f"[FAIL] Placement timed out")
         return False
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -261,15 +261,15 @@ async def test_route_design(session: ClientSession) -> bool:
         })
         print(f"Result (first 500 chars):\n{result[:500]}...")
         if "ERROR" in result.upper() and "route_design: Routing" not in result:
-            print(f"✗ Routing failed")
+            print(f"[FAIL] Routing failed")
             return False
-        print(f"✓ Routing completed")
+        print(f"[OK] Routing completed")
         return True
     except asyncio.TimeoutError:
-        print(f"✗ Routing timed out")
+        print(f"[FAIL] Routing timed out")
         return False
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -283,13 +283,13 @@ async def test_phys_opt_design(session: ClientSession) -> bool:
             "timeout": 3600
         })
         print(f"Result (first 500 chars):\n{result[:500]}...")
-        print(f"✓ Physical optimization completed")
+        print(f"[OK] Physical optimization completed")
         return True
     except asyncio.TimeoutError:
-        print(f"✗ phys_opt_design timed out")
+        print(f"[FAIL] phys_opt_design timed out")
         return False
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -311,12 +311,12 @@ async def test_create_and_apply_pblock(session: ClientSession) -> bool:
         })
         print(f"Result:\n{result[:500]}...")
         if "Successfully" in result or "Pblock Created" in result or "pblock_test" in result:
-            print(f"✓ Pblock created and applied")
+            print(f"[OK] Pblock created and applied")
             return True
-        print(f"⚠ Pblock creation returned unexpected result")
+        print(f"[WARN] Pblock creation returned unexpected result")
         return True  # Don't fail, may depend on design
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -333,15 +333,15 @@ async def test_write_edif(session: ClientSession) -> bool:
         })
         print(f"Result:\n{result[:500]}...")
         if output_edif.exists():
-            print(f"✓ EDIF written to: {output_edif}")
+            print(f"[OK] EDIF written to: {output_edif}")
             return True
         if "ERROR" in result.upper():
-            print(f"✗ EDIF export failed")
+            print(f"[FAIL] EDIF export failed")
             return False
-        print(f"⚠ EDIF file not verified on disk")
+        print(f"[WARN] EDIF file not verified on disk")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -358,15 +358,15 @@ async def test_write_verilog_simulation(session: ClientSession) -> bool:
         })
         print(f"Result:\n{result[:500]}...")
         if output_v.exists():
-            print(f"✓ Verilog written to: {output_v}")
+            print(f"[OK] Verilog written to: {output_v}")
             return True
         if "ERROR" in result.upper():
-            print(f"✗ Verilog export failed")
+            print(f"[FAIL] Verilog export failed")
             return False
-        print(f"⚠ Verilog file not verified on disk")
+        print(f"[WARN] Verilog file not verified on disk")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -384,15 +384,15 @@ async def test_write_checkpoint(session: ClientSession) -> bool:
         print(f"Result:\n{result[:500]}...")
         if output_dcp.exists():
             size_kb = output_dcp.stat().st_size // 1024
-            print(f"✓ Checkpoint written: {output_dcp} ({size_kb} KB)")
+            print(f"[OK] Checkpoint written: {output_dcp} ({size_kb} KB)")
             return True
         if "ERROR" in result.upper():
-            print(f"✗ Checkpoint write failed")
+            print(f"[FAIL] Checkpoint write failed")
             return False
-        print(f"⚠ Checkpoint file not verified on disk")
+        print(f"[WARN] Checkpoint file not verified on disk")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -412,12 +412,12 @@ async def test_run_tcl(session: ClientSession) -> bool:
         })
         print(f"Result:\n{result[:500]}...")
         if "Hello from Vivado Tcl" in result or "puts" in result:
-            print(f"✓ Tcl command executed")
+            print(f"[OK] Tcl command executed")
             return True
-        print(f"⚠ Tcl output unexpected")
+        print(f"[WARN] Tcl output unexpected")
         return True  # Don't fail, output format may vary
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -440,12 +440,12 @@ async def test_restart_vivado(session: ClientSession) -> bool:
             "timeout": 600
         })
         if "ERROR" in open_result.upper() and "successfully" not in open_result.lower():
-            print(f"⚠ Vivado restarted but design re-open failed")
+            print(f"[WARN] Vivado restarted but design re-open failed")
             return True  # Don't fail the restart test
-        print(f"✓ Vivado restarted and design re-opened")
+        print(f"[OK] Vivado restarted and design re-opened")
         return True
     except Exception as e:
-        print(f"✗ Exception: {e}")
+        print(f"[FAIL] Exception: {e}")
         return False
 
 
@@ -522,7 +522,7 @@ async def test_vivado_tools(session: ClientSession, dcp_path: str):
     total = len(results)
 
     for name, result in results:
-        status = "✓ PASS" if result else "✗ FAIL"
+        status = "[OK] PASS" if result else "[FAIL] FAIL"
         print(f"  {status}: {name}")
 
     print(f"\nTotal: {passed}/{total} tests passed")
@@ -569,7 +569,7 @@ async def main():
         async with ClientSession(read, write) as session:
             # Initialize the session
             await session.initialize()
-            print(f"✓ Session initialized")
+            print(f"[OK] Session initialized")
 
             # List available tools
             tools = await session.list_tools()
@@ -595,9 +595,9 @@ async def main():
 
             print(f"\n{'='*80}")
             if success:
-                print("✓ ALL TESTS PASSED!")
+                print("[OK] ALL TESTS PASSED!")
             else:
-                print("✗ SOME TESTS FAILED!")
+                print("[FAIL] SOME TESTS FAILED!")
             print(f"{'='*80}")
 
             # Final cleanup - Vivado will be terminated when server exits

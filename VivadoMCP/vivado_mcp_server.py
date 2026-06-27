@@ -553,7 +553,7 @@ def get_critical_high_fanout_nets(
             # First, verify the net exists
             check_cmd = f"get_nets {{{net_name}}}"
             check_result = run_tcl_command(check_cmd, timeout=30.0)
-            logger.info(f"[DEBUG] get_nets for '{net_name[-60:]}...': result='{check_result.strip()[:100]}'")
+            logger.debug(f"get_nets for '{net_name[-60:]}...': result='{check_result.strip()[:100]}'")
             
             # If get_nets returns empty or an error, use original name
             if not check_result.strip() or "ERROR" in check_result.upper() or "WARNING" in check_result.upper():
@@ -565,7 +565,7 @@ def get_critical_high_fanout_nets(
             parent_cmd = f"get_property PARENT [get_nets {{{net_name}}}]"
             parent_result = run_tcl_command(parent_cmd, timeout=30.0)
             parent_name = parent_result.strip()
-            logger.info(f"[DEBUG] PARENT for '{net_name[-60:]}...': result='{parent_name}'")
+            logger.debug(f"PARENT for '{net_name[-60:]}...': result='{parent_name}'")
             
             # Validate the result - should not be empty, should contain '/' for hierarchical nets,
             # and should not look like a Tcl command or error
@@ -576,11 +576,11 @@ def get_critical_high_fanout_nets(
                 not parent_name.startswith('ERROR') and
                 not parent_name.startswith('WARNING')):
                 parent_net_map[net_name] = parent_name
-                logger.info(f"[DEBUG] Using PARENT name: '{parent_name[-80:]}'")
+                logger.debug(f"Using PARENT name: '{parent_name[-80:]}'")
             else:
                 # Use original name if parent lookup returned invalid data
                 parent_net_map[net_name] = net_name
-                logger.info(f"[DEBUG] PARENT invalid, using original: '{net_name[-80:]}'")
+                logger.debug(f"PARENT invalid, using original: '{net_name[-80:]}'")
         except Exception as e:
             # If lookup fails, keep original name
             logger.warning(f"Parent lookup failed for net '{net_name}': {e}")

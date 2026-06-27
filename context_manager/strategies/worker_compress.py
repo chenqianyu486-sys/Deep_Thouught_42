@@ -10,24 +10,9 @@ Designed for fast execution tasks (get_utilization, get_timing, report_power, et
 This compressor balances speed and context completeness.
 """
 
-import logging
 from typing import List
 
 try:
-    from ..logging_config import get_trace_id
-except ImportError:
-    def get_trace_id():
-        return ""
-
-from .yaml_structured_compress import (
-    YAMLStructuredCompressor,
-)
-from ..interfaces import Message, CompressionContext
-
-logger = logging.getLogger(__name__)
-
-
-class WorkerCompressor(YAMLStructuredCompressor):
     """Compression strategy optimized for WORKER model calls.
 
     Worker tasks are routine operations (get_timing, get_utilization, etc.)

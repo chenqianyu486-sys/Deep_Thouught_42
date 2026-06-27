@@ -302,14 +302,14 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
     # Group pins by cell to identify data paths
     cell_groups = _group_pins_by_cell(pin_paths)
     if not cell_groups:
-        logger.warning("[DIAG] _group_pins_by_cell returned 0 groups (pin_paths len=%d)", len(pin_paths))
+        logger.debug("[DIAG] _group_pins_by_cell returned 0 groups (pin_paths len=%d)", len(pin_paths))
 
     results = {}
 
     for in_pin, out_pin, cell_name in cell_groups:
         cell = design.getCell(cell_name)
         if cell is None:
-            logger.warning("[DIAG] Cell '%s' not found in physical design, skipping", cell_name)
+            logger.debug("[DIAG] Cell '%s' not found in physical design, skipping", cell_name)
             continue
 
         max_ratio = 0.0
@@ -339,13 +339,13 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
                                 worst_sink_result = sink_pin_name
                             in_net_detour = ratio
                         else:
-                            logger.warning("[DIAG] No physical net for input %s/%s", cell_name, in_pin)
+                            logger.debug("[DIAG] No physical net for input %s/%s", cell_name, in_pin)
                     else:
                         pin_names = [str(sp.getName()) for sp in cell_site_pins] if cell_site_pins else []
-                        logger.warning("[DIAG] No SitePinInst matching input %s/%s (available: %s)",
+                        logger.debug("[DIAG] No SitePinInst matching input %s/%s (available: %s)",
                                        cell_name, in_pin, pin_names)
                 else:
-                    logger.warning("[DIAG] No SitePinInsts for cell %s", cell_name)
+                    logger.debug("[DIAG] No SitePinInsts for cell %s", cell_name)
             except Exception:
                 pass
 
@@ -373,16 +373,16 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
                                         worst_sink_result = sink_pin_name
                                 out_net_detour = max((_detour_ratio(physical_net, sp)[0] for sp in sink_pins), default=0.0)
                             else:
-                                logger.warning("[DIAG] No sink pins on net %s for cell %s/%s",
+                                logger.debug("[DIAG] No sink pins on net %s for cell %s/%s",
                                                physical_net.getName(), cell_name, out_pin)
                         else:
-                            logger.warning("[DIAG] No physical net for output %s/%s", cell_name, out_pin)
+                            logger.debug("[DIAG] No physical net for output %s/%s", cell_name, out_pin)
                     else:
                         pin_names = [str(sp.getName()) for sp in cell_site_pins] if cell_site_pins else []
-                        logger.warning("[DIAG] No SitePinInst matching output %s/%s (available: %s)",
+                        logger.debug("[DIAG] No SitePinInst matching output %s/%s (available: %s)",
                                        cell_name, out_pin, pin_names)
                 else:
-                    logger.warning("[DIAG] No SitePinInsts for cell %s (output pin)", cell_name)
+                    logger.debug("[DIAG] No SitePinInsts for cell %s (output pin)", cell_name)
             except Exception:
                 pass
 
@@ -403,7 +403,7 @@ def analyze_net_detour(design, pin_paths: list[str], detour_threshold: float = 2
     sorted_results = dict(sorted(results.items(), key=lambda x: x[1].max_detour_ratio, reverse=True))
 
     if not sorted_results:
-        logger.warning("[DIAG] analyze_net_detour: 0 results after processing %d cell groups (threshold=%.1f)",
+        logger.debug("[DIAG] analyze_net_detour: 0 results after processing %d cell groups (threshold=%.1f)",
                        len(cell_groups), detour_threshold)
 
     return sorted_results

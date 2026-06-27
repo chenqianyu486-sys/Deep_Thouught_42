@@ -15,15 +15,12 @@ results without side effects on MCP sessions.
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..state import OptimizerState
-
-logger = logging.getLogger(__name__)
 
 # Patterns that look like device site/coordinate names (NOT valid cell instances)
 _DEVICE_SITE_PATTERNS = re.compile(

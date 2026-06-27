@@ -7,19 +7,11 @@ _filter_tool_result (L1896-1936).
 from __future__ import annotations
 
 import json
-import logging
 import re
 from typing import Optional
 
 from .timing import parse_timing_summary
 from .constants import (
-    RAW_OUTPUT_DIRECT_THRESHOLD,
-    RAW_OUTPUT_SMART_TRUNCATE,
-    SMALL_OUTPUT_THRESHOLD,
-    TOOL_RESULT_TRUNCATE,
-)
-
-logger = logging.getLogger(__name__)
 
 
 def filter_tool_result(tool_name: str, result: str, truncate_limit: int = TOOL_RESULT_TRUNCATE) -> str:

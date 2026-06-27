@@ -12,6 +12,12 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _tool_error(tool_name: str, e: Exception) -> dict:
+    """Log tool error and return error dict. Single call replaces ad-hoc except blocks."""
+    logger.error(f"{tool_name} failed: {type(e).__name__}: {e}")
+    return {"error": str(e)}
+
 # Global state
 _initialized = False
 _current_design = None
@@ -1871,7 +1877,7 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
         return {"error": err}
 
     try:
-        logger.info("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f, pin_paths_sample=%s",
+        logger.debug("[DIAG] analyze_net_detour entry: pin_paths_len=%d, design_loaded=%s, detour_threshold=%.1f, pin_paths_sample=%s",
                     len(pin_paths), _current_design is not None, detour_threshold,
                     str(pin_paths[:3]) if pin_paths else "EMPTY")
 
@@ -1879,7 +1885,7 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
 
         skill = SkillRegistry.get("net_detour")
         if skill is None:
-            logger.warning("[DIAG] analyze_net_detour: skill 'net_detour' not found in registry")
+            logger.debug("[DIAG] analyze_net_detour: skill 'net_detour' not found in registry")
             return {"error": "Skill 'net_detour' not found in registry"}
 
         context = SkillContext(design=_current_design, initialized=True)
@@ -1909,16 +1915,12 @@ def analyze_net_detour(pin_paths: list[str], detour_threshold: float = 2.0) -> D
             "detour_threshold": detour_threshold,
             "results": results_dict
         }
-        logger.info("[DIAG] analyze_net_detour result: status=%s, cells_analyzed=%d",
+        logger.debug("[DIAG] analyze_net_detour result: status=%s, cells_analyzed=%d",
                     result_dict["status"], result_dict["cells_analyzed"])
         return result_dict
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error analyzing net detour: {e}")
-        return {"error": str(e)}
+        return _tool_error("net detour analysis", e)
 
 
 def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
@@ -1982,12 +1984,8 @@ def optimize_cell_placement(cell_names: list[str]) -> Dict[str, Any]:
             "results": results_dict
         }
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error optimizing cell placement: {e}")
-        return {"error": str(e)}
+        return _tool_error("cell placement optimization", e)
 
 
 def smart_region_search(
@@ -2092,12 +2090,8 @@ def smart_region_search(
             "message": result.data["message"]
         }
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error in smart region search: {e}")
-        return {"error": str(e)}
+        return _tool_error("smart region search", e)
 
 
 def _strategy_step_to_dict(step) -> dict:
@@ -2186,12 +2180,8 @@ def analyze_pblock_region(
 
         return result.data
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error analyzing pblock region: {e}")
-        return {"error": str(e)}
+        return _tool_error("pblock region analysis", e)
 
 
 def execute_pblock_strategy(
@@ -2294,12 +2284,8 @@ def execute_pblock_strategy(
 
         return result.data
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error executing pblock strategy: {e}")
-        return {"error": str(e)}
+        return _tool_error("pblock strategy execution", e)
 
 
 def execute_physopt_strategy(
@@ -2347,12 +2333,8 @@ def execute_physopt_strategy(
         plan = result.data
         return _strategy_plan_to_dict(plan)
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error executing physopt strategy: {e}")
-        return {"error": str(e)}
+        return _tool_error("physopt strategy execution", e)
 
 
 def execute_opt_design_strategy(
@@ -2400,12 +2382,8 @@ def execute_opt_design_strategy(
         plan = result.data
         return _strategy_plan_to_dict(plan)
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error executing opt_design strategy: {e}")
-        return {"error": str(e)}
+        return _tool_error("opt_design strategy execution", e)
 
 
 def execute_combinational_rebalancing_strategy(
@@ -2453,12 +2431,8 @@ def execute_combinational_rebalancing_strategy(
         plan = result.data
         return _strategy_plan_to_dict(plan)
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error executing combinational rebalancing strategy: {e}")
-        return {"error": str(e)}
+        return _tool_error("combinational rebalancing strategy", e)
 
 
 def execute_lut_muxf_repack_strategy(
@@ -2724,12 +2698,8 @@ def optimize_pin_swapping(
 
         return result.data
 
-    except ImportError as e:
-        logger.error(f"Could not import skill module: {e}")
-        return {"error": f"Skill module not found: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error in pin swapping: {e}")
-        return {"error": str(e)}
+        return _tool_error("pin swapping", e)
 
 
 def replicate_critical_cells(

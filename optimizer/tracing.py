@@ -110,9 +110,7 @@ def record_score_snapshot(state, label: str = ""):
         "score": score,
     })
 
-# Tracing: log every phase transition for debugging
-TRACE_PHASE_TRANSITIONS = True
-TRACE_TOOL_CALLS = True
+
 
 def trace_iteration_summary(state) -> str:
     """Generate a one-line summary of an iteration."""

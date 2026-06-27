@@ -16,14 +16,10 @@ fails cycle-exact validation. This strategy achieves the same goal
 (shortening critical-path logic depth) via combinational resynthesis only.
 """
 
-import logging
-
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 from skills.strategy_plan import StrategyPlan, StrategyStep
-
-logger = logging.getLogger(__name__)
 
 # Combinational cell types that contribute to logic depth between registers.
 # FFs (FDRE/FDCE/...) and DSP/BRAM break combinational chains.

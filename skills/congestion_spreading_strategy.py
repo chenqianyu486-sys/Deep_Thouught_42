@@ -12,14 +12,11 @@ Two-phase approach:
   2. EXECUTION (MUTATING): Move high-score cells outward, write checkpoint
 """
 
-import logging
 import os
 
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
-
-logger = logging.getLogger(__name__)
 
 
 def _get_cell_nets(cell):

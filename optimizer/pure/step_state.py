@@ -6,11 +6,8 @@ Extracted from dcp_optimizer.py: extract_step_state (L4679-4713).
 from __future__ import annotations
 
 import json
-import logging
 
 from ..state import StepState
-
-logger = logging.getLogger(__name__)
 
 
 def extract_step_state(message) -> StepState | None:

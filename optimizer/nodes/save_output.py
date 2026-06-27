@@ -385,10 +385,10 @@ async def save_output_node(
             revised_dcp=state.control.output_dcp,
         )
         if validation_result["passed"]:
-            print("✓ DCP validation PASSED")
+            print("[OK] DCP validation PASSED")
             logger.info("[save_output] DCP validation passed")
         else:
-            print(f"✗ DCP validation FAILED: {validation_result['error']}")
+            print(f"[FAIL] DCP validation FAILED: {validation_result['error']}")
             logger.warning(
                 f"[save_output] DCP validation failed: {validation_result['error']}"
             )

@@ -6,15 +6,9 @@ _infer_strategy_from_tools (L2460-2485), _append_iteration_narrative (L2487-2525
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 from .constants import TaskCategory, OPTIMIZATION_PATTERNS
-
-if TYPE_CHECKING:
-    from ..state import OptimizerState
-
-logger = logging.getLogger(__name__)
 
 
 def update_iteration_counters(

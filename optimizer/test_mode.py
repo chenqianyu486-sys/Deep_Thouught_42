@@ -277,7 +277,7 @@ class V2TestMode:
         try:
             data = json.loads(raw_result)
         except json.JSONDecodeError as e:
-            print(f"[TEST] ⚠ Skill '{skill_name}' returned non-JSON result: {e}")
+            print(f"[TEST] [WARN] Skill '{skill_name}' returned non-JSON result: {e}")
             self.skill_test_results.append({"skill": skill_name, "success": False, "error": str(e)})
             return {}
 
@@ -288,7 +288,7 @@ class V2TestMode:
         self.skill_test_results.append(entry)
 
         if has_error:
-            print(f"[TEST] ⚠ Skill '{skill_name}' returned error: {data['error']}")
+            print(f"[TEST] [WARN] Skill '{skill_name}' returned error: {data['error']}")
             return data
 
         # Fanout result
@@ -299,16 +299,16 @@ class V2TestMode:
             ckpt = data.get("checkpoint_path", "")
             skipped = data.get("skipped", False)
             if skipped:
-                print(f"[TEST] ✓ Skill '{skill_name}' | skipped: {data.get('message', '')}")
+                print(f"[TEST] [OK] Skill '{skill_name}' | skipped: {data.get('message', '')}")
             else:
-                print(f"[TEST] ✓ Skill '{skill_name}' | optimized: {successful}/{total} nets"
+                print(f"[TEST] [OK] Skill '{skill_name}' | optimized: {successful}/{total} nets"
                       + (f", {failed} failed" if failed else "")
                       + (f" | checkpoint: {ckpt}" if ckpt else ""))
             results = data.get("results", [])
             if results:
                 for r in results[:3]:
                     print(f"[TEST]   - {r.get('net_name', '?')}: "
-                          f"fanout {r.get('original_fanout', '?')} → split_factor {r.get('split_factor', '?')}")
+                          f"fanout {r.get('original_fanout', '?')} -> split_factor {r.get('split_factor', '?')}")
                 if len(results) > 3:
                     print(f"[TEST]   ... and {len(results) - 3} more")
 
@@ -316,9 +316,9 @@ class V2TestMode:
         elif "strategy_name" in data:
             status = data.get("status", "unknown")
             steps = data.get("steps", [])
-            print(f"[TEST] ✓ Skill '{skill_name}' | status: {status} | steps: {len(steps)}")
+            print(f"[TEST] [OK] Skill '{skill_name}' | status: {status} | steps: {len(steps)}")
             for s in steps:
-                mark = " ✓" if s.get("executed") else ""
+                mark = " [OK]" if s.get("executed") else ""
                 print(f"[TEST]   - {s['step_name']} ({s.get('platform', '?')}){mark}")
             if data.get("analysis_summary"):
                 print(f"[TEST]   analysis: {json.dumps(data['analysis_summary'], ensure_ascii=False)[:200]}")
@@ -329,7 +329,7 @@ class V2TestMode:
             region = data.get("region", {})
             er = data.get("estimated_resources", {})
             tr = data.get("target_resources", {})
-            print(f"[TEST] ✓ Skill '{skill_name}' | status: {status}")
+            print(f"[TEST] [OK] Skill '{skill_name}' | status: {status}")
             print(f"[TEST]   region: cols {region.get('col_min')}-{region.get('col_max')}, "
                   f"rows {region.get('row_min')}-{region.get('row_max')}")
             print(f"[TEST]   estimated: {er.get('luts', '?')} LUTs, {er.get('ffs', '?')} FFs, "
@@ -347,7 +347,7 @@ class V2TestMode:
             if data.get("advice"):
                 print(f"[TEST]   advice ({len(data['advice'])}):")
                 for a in data["advice"]:
-                    print(f"[TEST]     • {a}")
+                    print(f"[TEST]     * {a}")
             if data.get("multi_region_suggestions"):
                 mrs = data["multi_region_suggestions"]
                 print(f"[TEST]   multi_region_suggestions ({len(mrs)} groups):")
@@ -360,14 +360,14 @@ class V2TestMode:
                 ns = data["next_steps"]
                 print(f"[TEST]   next_steps ({len(ns)}):")
                 for s in ns:
-                    print(f"[TEST]     → {s}")
+                    print(f"[TEST]     -> {s}")
 
         elif "status" in data:
-            print(f"[TEST] ✓ Skill '{skill_name}' | status: {data.get('status')} | "
+            print(f"[TEST] [OK] Skill '{skill_name}' | status: {data.get('status')} | "
                   f"message: {data.get('message', '')}")
         else:
             top_keys = list(data.keys())[:5]
-            print(f"[TEST] ✓ Skill '{skill_name}' completed | keys: {top_keys}")
+            print(f"[TEST] [OK] Skill '{skill_name}' completed | keys: {top_keys}")
 
         return data
 
@@ -520,7 +520,7 @@ class V2TestMode:
             print(f"Extract critical paths: {result[:2000]}...")
             init_data["critical_paths_file"] = str(critical_paths_file)
         except Exception as e:
-            print(f"[TEST] ⚠ extract_critical_path_cells failed: {e}")
+            print(f"[TEST] [WARN] extract_critical_path_cells failed: {e}")
 
         # Step 6: Analyze critical path spread
         print("\n" + "-" * 60)
@@ -539,7 +539,7 @@ class V2TestMode:
                 "paths_analyzed": spread_data.get("paths_analyzed", 0),
             }
         except Exception as e:
-            print(f"[TEST] ⚠ analyze_critical_path_spread failed: {e}")
+            print(f"[TEST] [WARN] analyze_critical_path_spread failed: {e}")
 
         # Step 7: Device topology
         try:
@@ -567,7 +567,7 @@ class V2TestMode:
                 init_data["device_capacity"] = capacity
                 print(f"[TEST] Device capacity: {capacity}")
         except Exception as e:
-            print(f"[TEST] ⚠ get_device_topology failed: {e}")
+            print(f"[TEST] [WARN] get_device_topology failed: {e}")
 
         # Resource utilization
         try:
@@ -842,7 +842,7 @@ class V2TestMode:
         print("-" * 60)
         all_ok = True
         for label, ok, detail in checks:
-            mark = "✓" if ok else "✗"
+            mark = "[OK]" if ok else "[FAIL]"
             if not ok:
                 all_ok = False
             print(f"  [{mark}] {label}: {detail}")
@@ -934,12 +934,12 @@ class V2TestMode:
                     shared["pin_paths"] = pin_paths_array[0]
                     print(f"[TEST] Prepared pin_paths: {len(shared['pin_paths'])} pins")
                 else:
-                    print(f"[TEST] ⚠ extract_critical_path_pins returned empty pin_paths")
+                    print(f"[TEST] [WARN] extract_critical_path_pins returned empty pin_paths")
                     _dbg = {k: pins_data.get(k) for k in ("debug_has_slack", "debug_report_length", "debug_num_slack_sections", "debug_per_path", "error") if k in pins_data}
                     if _dbg:
                         print(f"[TEST] debug: {_dbg}")
         except Exception as e:
-            print(f"[TEST] ⚠ extract_critical_path_pins failed: {e}")
+            print(f"[TEST] [WARN] extract_critical_path_pins failed: {e}")
 
         # critical_paths: wrap pin_paths as list[dict] for tools that need it
         if "pin_paths" in shared:
@@ -1124,7 +1124,7 @@ class V2TestMode:
                 if data:
                     dep_results[name] = data
             except Exception as e:
-                print(f"[TEST] ⚠ {name} FAILED: {e}")
+                print(f"[TEST] [WARN] {name} FAILED: {e}")
                 self.skill_test_results.append({"skill": name, "success": False, "error": str(e)})
 
             if self._check_test_exit(f"Skill {idx}"):
@@ -1140,7 +1140,7 @@ class V2TestMode:
         print(f"SKILL TEST SUMMARY: {passed}/{total} passed, {failed} failed")
         print(f"{'=' * 60}")
         for r in self.skill_test_results:
-            mark = "✓" if r.get("success") else "✗"
+            mark = "[OK]" if r.get("success") else "[FAIL]"
             print(f"  [{mark}] {r['skill']}")
             if not r.get("success") and r.get("error"):
                 print(f"       {r['error']}")
@@ -1316,7 +1316,7 @@ class V2TestMode:
                     if self.final_wns is not None:
                         diff = abs(get_wns_value - self.final_wns)
                         if diff < 0.01:
-                            print("✓ get_wns matches timing_summary")
+                            print("[OK] get_wns matches timing_summary")
                         else:
                             print(f"WARNING: get_wns differs by {diff:.4f} ns")
                 except ValueError:
@@ -1453,7 +1453,7 @@ class V2TestMode:
                     if self.final_wns is not None:
                         diff = abs(get_wns_value - self.final_wns)
                         if diff < 0.01:
-                            print("✓ get_wns matches timing_summary")
+                            print("[OK] get_wns matches timing_summary")
                         else:
                             print(f"WARNING: get_wns differs by {diff:.4f} ns")
                 except ValueError:
@@ -1506,7 +1506,7 @@ class V2TestMode:
             print(f"TOOL CALL TEST RESULTS: {passed}/{total} passed")
             print(f"{'=' * 60}")
             for r in self.tool_test_results:
-                mark = "✓" if r.get("success") else "✗"
+                mark = "[OK]" if r.get("success") else "[FAIL]"
                 elapsed = r.get("elapsed", 0)
                 print(f"  [{mark}] {r['tool']}  ({elapsed:.1f}s)")
                 if not r.get("success") and r.get("error"):
@@ -1521,7 +1521,7 @@ class V2TestMode:
             print(f"SKILL INVOCATION TEST RESULTS: {passed}/{total} passed")
             print(f"{'=' * 60}")
             for r in self.skill_test_results:
-                mark = "✓" if r.get("success") else "✗"
+                mark = "[OK]" if r.get("success") else "[FAIL]"
                 print(f"  [{mark}] {r['skill']}")
                 if not r.get("success") and r.get("error"):
                     print(f"       error: {r['error']}")

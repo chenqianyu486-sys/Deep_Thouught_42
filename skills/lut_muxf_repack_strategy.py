@@ -17,14 +17,10 @@ Design latency is preserved, so cycle-exact validation (validate_dcps.py)
 passes.
 """
 
-import logging
-
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 from skills.strategy_plan import StrategyPlan, StrategyStep
-
-logger = logging.getLogger(__name__)
 
 _LUT_TYPES = {"LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"}
 _MUXF_TYPES = {"MUXF7", "MUXF8", "MUXF9"}

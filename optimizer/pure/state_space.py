@@ -7,7 +7,6 @@ All functions are pure: they read OptimizerState, produce StateSpace.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,10 +31,6 @@ from ..state import (
     StateSpace,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
-from .timing import compute_violation_summary
-from .tool_filter import LoopPhase
-
-logger = logging.getLogger(__name__)
 
 # Maximum violating paths in StateSpace (user spec says Top 20)
 MAX_VIOLATING_PATHS = 20

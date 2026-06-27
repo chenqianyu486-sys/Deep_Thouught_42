@@ -6,13 +6,10 @@ _generate_worker_handoff (L3123-3174).
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..state import OptimizerState
-
-logger = logging.getLogger(__name__)
 
 
 def build_situation_summary(

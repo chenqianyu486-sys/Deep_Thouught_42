@@ -19,14 +19,10 @@ duplication). No FFs are inserted or moved — latency preserved, so
 cycle-exact validation (validate_dcps.py) passes.
 """
 
-import logging
-
 from skills.base import Skill, SkillResult, SkillCategory, ParameterSpec
 from skills.context import SkillContext
 from skills.skill_decorator import skill
 from skills.strategy_plan import StrategyPlan, StrategyStep
-
-logger = logging.getLogger(__name__)
 
 _MUXF_TYPES = {"MUXF7", "MUXF8", "MUXF9"}
 

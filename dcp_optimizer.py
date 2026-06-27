@@ -33,7 +33,7 @@ except ImportError:
 from context_manager import MemoryManager
 from context_manager.compat import DCPOptimizerCompat
 from context_manager.events import EventBus
-from context_manager.logging_config import setup_logging, PromptLogger
+from context_manager.logging_config import setup_logging, PromptLogger, DynamicLogLevelManager
 from config_loader import get_model_config_loader
 
 # === Model Configuration ===
@@ -47,7 +47,7 @@ DEFAULT_MODEL_WORKER: str = _worker_data.model_name
 
 # === Logging ===
 
-setup_logging(level="INFO", use_json=False)
+setup_logging(level="INFO", use_json=os.environ.get("FPL26_LOG_JSON", "0") == "1")
 logger = logging.getLogger(__name__)
 
 
@@ -590,7 +590,7 @@ Examples:
         args.output_dcp = input_dir / f"{input_stem}_optimized-{timestamp}.dcp"
 
     if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+        DynamicLogLevelManager().set_level("root", "DEBUG")
 
     args.output_dcp.parent.mkdir(parents=True, exist_ok=True)
 
@@ -628,14 +628,6 @@ Examples:
         print("Error: OpenRouter API key required. Set OPENROUTER_API_KEY or use --api-key", file=sys.stderr)
         print("       Use --test-v2 to run test mode without LLM", file=sys.stderr)
         sys.exit(1)
-
-    print(f"FPGA Design Optimization Agent (V2 State Machine)")
-    print(f"==================================================")
-    print(f"Input:       {args.input_dcp.resolve()}")
-    print(f"Output:      {args.output_dcp.resolve()}")
-    print(f"Planner:     {args.model}")
-    print(f"Worker:      {args.model_worker}")
-    print()
 
     success = await optimize_v2(
         input_dcp=args.input_dcp,

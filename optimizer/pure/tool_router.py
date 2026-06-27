@@ -294,7 +294,7 @@ async def call_tool(
                 )
                 if tool_name == "vivado_open_checkpoint":
                     dcp_path = arguments.get("dcp_path", "?")
-                    logger.warning(f"━━━ [DESIGN_LOAD] Vivado design switched to: {dcp_path} ━━━")
+                    logger.warning(f"--- [DESIGN_LOAD] Vivado design switched to: {dcp_path} ---")
                 # Detect MCP error responses — must not be cached and must invalidate cache
                 is_error_response = _is_mcp_error_response(result_text)
                 # Cache logic: error responses and side-effect tools both invalidate cache

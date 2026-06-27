@@ -30,12 +30,8 @@ from typing import Optional, Tuple
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stderr)]
-)
+from context_manager.logging_config import setup_logging, DynamicLogLevelManager
+
 logger = logging.getLogger(__name__)
 
 
@@ -425,7 +421,7 @@ class DCPValidator:
                     "error": str(e),
                     "preflight_report": self.preflight_report,
                 }
-                print(f"\n✗ DCP preflight retry failed: {e}")
+                print(f"\n[FAIL] DCP preflight retry failed: {e}")
                 return False
         else:
             self.preflight_report = {
@@ -435,7 +431,7 @@ class DCPValidator:
         
         # Check if passed
         if "error" in self.structural_report:
-            print(f"\n✗ ERROR: {self.structural_report['error']}")
+            print(f"\n[FAIL] ERROR: {self.structural_report['error']}")
             return False
         
         comparison_result = self.structural_report.get("comparison_result", "FAIL")
@@ -457,7 +453,7 @@ class DCPValidator:
         if info_issues:
             print("\nInformational notes:")
             for issue in info_issues:
-                print(f"  ℹ {issue[5:].strip()}")  # Remove "INFO:" prefix
+                print(f"  [INFO] {issue[5:].strip()}")  # Remove "INFO:" prefix
         
         if not real_issues and not info_issues:
             print("\nNo issues found - designs are structurally compatible")
@@ -466,9 +462,9 @@ class DCPValidator:
         
         print("\n" + "-"*70)
         if self.phase1_passed:
-            print("Phase 1: PASSED ✓")
+            print("Phase 1: PASSED [OK]")
         else:
-            print("Phase 1: FAILED ✗")
+            print("Phase 1: FAILED [FAIL]")
         print("-"*70)
         
         return self.phase1_passed
@@ -736,7 +732,6 @@ proc __vd_find_clock_ports {} {
         # Check for outputs
         if not outputs:
             logger.warning("Design has no outputs - simulation will only verify no crashes occur")
-            print("⚠ Warning: Design has no outputs - limited verification possible")
         
         # Identify clocks. Prefer the constraint-based list from Vivado; fall
         # back to a broadened substring heuristic only if Vivado gave us
@@ -1336,7 +1331,7 @@ endmodule
             "verilog_path": str(golden_v),
             "force": True
         })
-        print(f"✓ Golden model exported: {golden_v.name}")
+        print(f"[OK] Golden model exported: {golden_v.name}")
         
         # Query clock ports while the golden design is still loaded - more
         # robust than guessing from Verilog port names downstream.
@@ -1358,7 +1353,7 @@ endmodule
             "verilog_path": str(revised_v),
             "force": True
         })
-        print(f"✓ Revised model exported: {revised_v.name}")
+        print(f"[OK] Revised model exported: {revised_v.name}")
         
         # Query clock ports for the revised design as well, mainly so we can
         # detect mismatches that would invalidate the testbench (the testbench
@@ -1398,7 +1393,7 @@ endmodule
             golden_info, revised_info, tb_path,
             clock_names=golden_clocks,
         )
-        print(f"✓ Testbench generated: {tb_path.name}")
+        print(f"[OK] Testbench generated: {tb_path.name}")
         
         # Run xsim simulation
         print("\nRunning xsim simulation...")
@@ -1541,12 +1536,12 @@ endmodule
             )
             
             if result.returncode != 0:
-                print(f"\n✗ Compilation failed:")
+                print(f"\n[FAIL] Compilation failed:")
                 print(result.stdout)
                 print(result.stderr)
                 return False
             
-            print("✓ Compilation successful")
+            print("[OK] Compilation successful")
             
             # Elaborate with UNISIM library reference.
             #
@@ -1584,7 +1579,7 @@ endmodule
                 if self._is_encrypted_ip_error(error_output):
                     logger.info("Elaboration failed due to encrypted/SIP IP")
                     print("\n" + "="*70)
-                    print("⚠ PHASE 2 SKIPPED")
+                    print("[WARN] PHASE 2 SKIPPED")
                     print("="*70)
                     print("\nReason: Design contains encrypted or Secure IP blocks")
                     print("        (e.g., PCIe, GTY transceivers) that cannot be")
@@ -1597,12 +1592,12 @@ endmodule
                         "details": "xelab elaboration failed due to missing SIP modules"
                     }
                 
-                print(f"\n✗ Elaboration failed:")
+                print(f"\n[FAIL] Elaboration failed:")
                 print(result.stdout)
                 print(result.stderr)
                 return False
             
-            print("✓ Elaboration successful")
+            print("[OK] Elaboration successful")
             
             def run_xsim(vector_count: int, label: str) -> dict:
                 logger.info(f"Running {label} simulation with xsim ({vector_count} vectors)...")
@@ -1710,7 +1705,7 @@ endmodule
                     if self.infrastructure_failure:
                         print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘ (precheck crashed or did not complete; full run skipped)")
                     else:
-                        print("\nPhase 2: FAILED ✗ (precheck failed; full run skipped)")
+                        print("\nPhase 2: FAILED [FAIL] (precheck failed; full run skipped)")
                     return False
 
             current_step = "xsim (full simulation)"
@@ -1743,17 +1738,17 @@ endmodule
                 self.infrastructure_reason = full_report["infrastructure_reason"]
 
             if self.phase2_passed:
-                print("\nPhase 2: PASSED ✓")
+                print("\nPhase 2: PASSED [OK]")
             elif self.infrastructure_failure:
                 print("\nPhase 2: INFRASTRUCTURE FAILURE ⊘")
             else:
-                print("\nPhase 2: FAILED ✗")
+                print("\nPhase 2: FAILED [FAIL]")
             
             return self.phase2_passed
             
         except subprocess.TimeoutExpired as e:
             timeout_s = getattr(e, "timeout", "?")
-            print(f"\n✗ Timeout in {current_step} after {timeout_s}s")
+            print(f"\n[FAIL] Timeout in {current_step} after {timeout_s}s")
             logger.error(
                 f"subprocess.TimeoutExpired in step '{current_step}' "
                 f"(timeout={timeout_s}s)"
@@ -1768,7 +1763,7 @@ endmodule
             }
             return False
         except Exception as e:
-            print(f"\n✗ Simulation error in {current_step}: {e}")
+            print(f"\n[FAIL] Simulation error in {current_step}: {e}")
             logger.exception(f"Error in step '{current_step}'")
             self.infrastructure_failure = True
             self.infrastructure_reason = f"exception_in_{current_step}"
@@ -1798,7 +1793,7 @@ endmodule
         phase1_passed = await self.phase1_structural_checks()
         
         if not phase1_passed:
-            print("\n⚠ Skipping Phase 2 due to Phase 1 failures")
+            print("\n[WARN] Skipping Phase 2 due to Phase 1 failures")
             elapsed = time.time() - start_time
             self.print_final_report(elapsed)
             return False
@@ -1829,7 +1824,7 @@ endmodule
         print(f"Runtime:     {elapsed_time:.1f} seconds ({elapsed_time/60:.1f} minutes)")
         print()
         
-        print("Phase 1 (Structural): " + ("PASSED ✓" if self.phase1_passed else "FAILED ✗"))
+        print("Phase 1 (Structural): " + ("PASSED [OK]" if self.phase1_passed else "FAILED [FAIL]"))
         if self.structural_report:
             checks_passed = self.structural_report.get("checks_passed", 0)
             checks_total = self.structural_report.get("checks_total", 0)
@@ -1854,7 +1849,7 @@ endmodule
                         f"{precheck_report.get('protocol_mismatch_count', 0)} protocol mismatches"
                     )
         else:
-            print("Phase 2 (Simulation): " + ("PASSED ✓" if self.phase2_passed else "FAILED ✗" if self.phase1_passed else "SKIPPED"))
+            print("Phase 2 (Simulation): " + ("PASSED [OK]" if self.phase2_passed else "FAILED [FAIL]" if self.phase1_passed else "SKIPPED"))
             if self.simulation_report:
                 precheck_report = self.simulation_report.get("precheck_report")
                 if precheck_report:
@@ -1869,11 +1864,11 @@ endmodule
         
         print()
         if self.phase2_skipped:
-            overall_result = "PASSED ✓ (structural only)" if self.phase1_passed else "FAILED ✗"
+            overall_result = "PASSED [OK] (structural only)" if self.phase1_passed else "FAILED [FAIL]"
         elif self.infrastructure_failure:
             overall_result = "INFRASTRUCTURE FAILURE ⊘"
         else:
-            overall_result = "PASSED ✓" if (self.phase1_passed and self.phase2_passed) else "FAILED ✗"
+            overall_result = "PASSED [OK]" if (self.phase1_passed and self.phase2_passed) else "FAILED [FAIL]"
         print(f"Overall Result: {overall_result}")
         print("="*70)
         
@@ -1949,7 +1944,11 @@ Examples:
     )
 
     args = parser.parse_args()
-    
+
+    # Configure logging (standalone script fallback)
+    if not logging.getLogger().handlers:
+        setup_logging(level="INFO")
+
     # Validate inputs
     if not args.golden_dcp.exists():
         print(f"Error: Golden DCP not found: {args.golden_dcp}", file=sys.stderr)
@@ -1960,7 +1959,7 @@ Examples:
         sys.exit(1)
     
     if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+        DynamicLogLevelManager().set_level("root", "DEBUG")
 
     if args.vectors <= 0:
         print("Error: --vectors must be positive", file=sys.stderr)

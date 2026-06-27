@@ -632,7 +632,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             logger.warning(f"[EXECUTE] Failed to save pre-unplace checkpoint: {e}")
 
                 tool_start = time.time()
-                logger.info(f"[EXECUTE] Calling {tool_name}")
+                logger.debug(f"[EXECUTE] Calling {tool_name}")
 
                 # Capture WNS before tool call for post-chain re-evaluation.
                 # Analysis-only skills (e.g. pblock_strategy) don't change WNS
@@ -677,7 +677,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     entity_registry=state.entity_registry,
                 )
                 tool_elapsed = time.time() - tool_start
-                logger.info(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
+                logger.debug(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
                 _pending_tool_count -= 1  # This tool call is no longer pending
 
                 summary = summarize_tool_result(
@@ -1538,7 +1538,7 @@ async def _rapidwright_direction_check(
             # in RW's timing model. This often means the skill found no applicable
             # cells on the critical paths. The caller may check the skill result
             # for more detailed diagnostics.
-            logger.info(f"[PRECHECK] NO_WORK (delta={delta:+.3f}, |delta|<={NO_WORK_EPS}) — skill did not modify design")
+            logger.debug(f"[PRECHECK] NO_WORK (delta={delta:+.3f}, |delta|<={NO_WORK_EPS}) — skill did not modify design")
             return "NO_WORK"
         logger.info(f"[PRECHECK] Direction UNCHANGED (delta={delta:+.3f}, not strictly positive) — skipping Vivado P&R chain")
         return "UNCHANGED"
@@ -1623,7 +1623,7 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         eval_notice += f" TNS={tns:.3f}ns"
     if deps.compat is not None:
         deps.compat.add_message("user", eval_notice)
-    logger.info(f"[EXECUTE] Post-eval: {tool_name} -> WNS={wns:.3f}ns (delta={delta:+.3f}, {verdict})")
+    logger.debug(f"[EXECUTE] Post-eval: {tool_name} -> WNS={wns:.3f}ns (delta={delta:+.3f}, {verdict})")
     return verdict
 
 

@@ -235,13 +235,3 @@ class LightYAML:
         parsed = cls.load(yaml_str)
         return yaml_str, parsed
 
-
-if __name__ == '__main__':
-    # Simple test
-    data = {'name': 'test', 'items': [1, 2, 3]}
-    yaml = LightYAML.dump(data)
-    print("Dump result:")
-    print(yaml)
-    parsed = LightYAML.load(yaml)
-    print("Parsed:", parsed)
-    print("Roundtrip OK:", parsed == data or str(parsed) == str(data))

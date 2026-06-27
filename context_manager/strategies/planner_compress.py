@@ -10,24 +10,9 @@ Designed for complex reasoning tasks (place_design, phys_opt, route_design, etc.
 This compressor prioritizes context completeness for strategic decision-making.
 """
 
-import logging
 from typing import List
 
 try:
-    from ..logging_config import get_trace_id
-except ImportError:
-    def get_trace_id():
-        return ""
-
-from .yaml_structured_compress import (
-    YAMLStructuredCompressor,
-)
-from ..interfaces import Message, CompressionContext
-
-logger = logging.getLogger(__name__)
-
-
-class PlannerCompressor(YAMLStructuredCompressor):
     """Compression strategy optimized for PLANNER model calls.
 
     Planner tasks involve complex reasoning (placement optimization, routing strategy,
