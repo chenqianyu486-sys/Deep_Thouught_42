@@ -113,7 +113,7 @@ async def prepare_context_node(
     # 2. Inject FORMAT_GUARD (once, first iteration)
     if not state.model.format_guard_injected and deps.compat is not None:
         try:
-            deps.compat.add_message("user", FORMAT_GUARD)
+            deps.compat.add_message("system", FORMAT_GUARD)
             state.model.format_guard_injected = True
             logger.info("[prepare_context] FORMAT_GUARD injected")
         except Exception as e:
@@ -130,8 +130,8 @@ async def prepare_context_node(
                 logger.warning(f"[prepare_context] Handoff injection failed: {e}")
 
     # Inject cost budget awareness into LLM context
-    cost_used = getattr(getattr(state, "cost", None), "total_spent", 0.0)
-    cost_limit = getattr(getattr(state, "control", None), "cost_hard_limit", 5.0)
+    cost_used = getattr(getattr(state, "cost", None), "total_cost", 0.0)
+    cost_limit = getattr(getattr(state, "cost", None), "cost_hard_limit", 1.0)
     if cost_limit > 0 and cost_used > 0:
         budget_pct = min(100 * cost_used / cost_limit, 100)
         budget_msg = (

@@ -116,7 +116,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
         else:
             state.context.step_state_misses += 1
-            if deps.compat is not None:
+            if deps.compat is not None and state.context.step_state_misses % 3 == 1:
                 deps.compat.add_message("user", "[NOTE] report_step_state missing. Include it next turn.")
 
         # Execute analysis tools

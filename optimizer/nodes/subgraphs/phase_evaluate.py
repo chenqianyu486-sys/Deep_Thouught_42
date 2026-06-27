@@ -328,7 +328,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
         else:
             state.context.step_state_misses += 1
-            if deps.compat is not None:
+            if deps.compat is not None and state.context.step_state_misses % 3 == 1:
                 deps.compat.add_message("user",
                     "[NOTE] report_step_state required. Decide: NEXT_ITERATION, SWITCH_STRATEGY, DONE, or CONTINUE.")
 
@@ -387,6 +387,9 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
                     raw_tool_outputs=state.context.raw_tool_outputs,
+                    iteration=state.iteration.current,
+                    tool_round=tool_round,
+                    high_fanout_nets=state.timing.high_fanout_nets,
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
                     entity_registry=state.entity_registry,
@@ -403,6 +406,12 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     deps.compat.add_message("tool", summary, {
                         "tool_call_id": tc.id, "name": tool_name,
                     })
+
+                # Store raw output (mirrors ANALYZE/EXECUTE pattern)
+                state.context.raw_tool_outputs[(state.iteration.current, "EVALUATE", tool_round, tool_name)] = result
+                if len(state.context.raw_tool_outputs) > state.context.raw_tool_output_max:
+                    oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[2]))
+                    del state.context.raw_tool_outputs[oldest_key]
 
                 # Track WNS from timing tools
                 if tool_name in ("vivado_report_timing_summary", "vivado_get_wns"):
@@ -421,19 +430,20 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                             state.timing.best_wns = wns
                             state.timing.best_wns_iteration = state.iteration.current
                             state.control.needs_save = True
-                    # Mark fields stale after design modification (architectural
-                    # symmetry with EXECUTE — EVALUATE allowlist is read-only but
-                    # the guard must exist for consistency and future tool additions).
-                    if tool_name in DESIGN_MODIFICATION_TOOLS:
-                        state.timing.critical_paths_stale = True
-                        for field in state.timing.field_freshness:
-                            state.timing.field_freshness[field] = "stale"
-                        state.entity_registry.mark_stale()
-                    # Track dashboard freshness
-                    refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
-                    if refreshable:
-                        for field in refreshable:
-                            state.timing.field_freshness[field] = "fresh"
+
+                # Mark fields stale after design modification (architectural
+                # symmetry with EXECUTE — EVALUATE allowlist is read-only but
+                # the guard must exist for consistency and future tool additions).
+                if tool_name in DESIGN_MODIFICATION_TOOLS:
+                    state.timing.critical_paths_stale = True
+                    for field in state.timing.field_freshness:
+                        state.timing.field_freshness[field] = "stale"
+                    state.entity_registry.mark_stale()
+                # Track dashboard freshness (applies to ALL tools, not just timing)
+                refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
+                if refreshable:
+                    for field in refreshable:
+                        state.timing.field_freshness[field] = "fresh"
 
             if _pending_signal:
                 return LoopPhase.ANALYZE
@@ -453,7 +463,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         else:
             state.context.consecutive_empty_responses = 0
 
-        if deps.compat is not None:
+        if deps.compat is not None and state.context.step_state_misses % 3 == 1:
             wns = state.timing.latest_wns
             wns_str = f"{wns:.3f}ns" if wns is not None else "unknown"
             deps.compat.add_message("user",

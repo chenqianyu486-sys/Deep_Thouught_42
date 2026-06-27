@@ -57,7 +57,7 @@ strategy_lifecycle:
     - "SELECT_STRATEGY: Choose ONE strategy. Only report_step_state and raw-tool-output available."
     - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
     - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
-  multi_strategy_loop: "Up to 3 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy."
+  multi_strategy_loop: "Up to 5 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy."
   iteration: "Delta > 0.1ns then 3-5 rounds diminishing returns → NEXT_ITERATION. No improvement → SWITCH_STRATEGY."
 
 strategies:
@@ -92,15 +92,20 @@ final_output:
 Goal: maximize Score = alpha - 0.1*alpha*cost - 0.1*alpha*hours
 - Fmax (alpha) is dominant - always prioritize WNS gains
 - But time/cost penalize proportionally to alpha
-- EARLY EXIT after strong gain > continuing exploration
 - Use rapidwright_report_timing (~2.5s) for quick checks
 
-STRATEGY PRIORITY:
-1. PBLOCK (+0.532ns avg, 85% success) - try first
-2. PhysOpt (+0.150ns avg, 70% success) - plateaus after 3 rounds  
-3. Fanout (+0.050ns avg, 40% success) - high fanout nets only
-4. SmartRegion (+0.040ns avg, 35% success)
-5. NetDetour (+0.030ns avg, 30% success) - last resort
+
+## STRATEGY SELECTION GUIDANCE
+
+Each strategy has specific applicability conditions based on design characteristics.
+Key factors to consider:
+- PBLOCK: Effective for designs with distributed logic (avg cell distance > 70)
+- PhysOpt: Best for designs with 1-2 critical paths and moderate WNS (> -2.0)
+- Fanout: Targeted when high-fanout nets (> 100) are present on critical paths
+- Other strategies address specific patterns (LUT cascades, congestion, etc.)
+
+Consult the current Dashboard and critical path analysis to determine which strategy
+best matches the observed timing profile.
 
 
 ## TIME AWARENESS
@@ -112,31 +117,30 @@ The optimizer has a wall-clock timeout. Be aware of time:
 - After strong WNS gain, bank result early rather than risk regression
 
 
-## ACTIONS TO AVOID (anti-patterns from benchmark analysis)
+## OBSERVED RISKS (from benchmark analysis)
 
-DO NOT:
-- Run multiple phys_opt_design rounds without checking if WNS improved
-- Switch strategies after a single failed attempt (try at least 2 variations)
-- Use expensive place+route for designs where timing is already improving
-- Continue exploring after reaching WNS target (bank result immediately)
-- Ignore rapidwright_report_timing for quick checks (it's ~5x faster than Vivado)
-- Apply PBLOCK to dense designs (>40% utilization) without reducing multiplier
-- Call vivado_report_timing_summary without first trying rapidwright_report_timing
-- Keep the same strategy for more than 3 rounds without improvement
+The following patterns have been observed to correlate with suboptimal outcomes:
+- Multiple phys_opt_design rounds without interleaved WNS checks
+- Strategy switch after a single failed attempt (at least 2 variations typically needed)
+- Expensive place+route while timing is already improving on the current trajectory
+- Continued exploration after reaching WNS target (risk of regression)
+- Skipping rapidwright_report_timing for quick WNS estimates (it is ~5x faster than Vivado)
+- PBLOCK on dense designs (>40% utilization) without adjusting the multiplier
+- Calling vivado_report_timing_summary without first trying rapidwright_report_timing
+- Keeping the same strategy for more than 3 rounds without measurable improvement
 
 
-## QUICK REFERENCE
-- Best strategy: PBLOCK (85% success) > PhysOpt (70%) > Fanout (40%)
+## PERFORMANCE OBSERVATIONS
+- PBLOCK: historically highest observed success rate across benchmarks
+- PhysOpt: moderate improvement, typically plateaus after 3 rounds
+- Fanout: modest gains, only applicable when high-fanout nets on critical paths
 - Fast timing: rapidwright_report_timing (~2.5s) vs Vivado (~14s)
 - Cost: Worker=$0.005/call, Planner=$0.075/call (15x diff)
-- Exit early: bank results when WNS improves significantly
-- Avoid: >3 phys_opt rounds, switching after single failure
 
 
-## ITERATION EFFICIENCY RULES
-1. First iteration: try PBLOCK (highest success rate)
-2. If WNS improves >0.020ns: continue current strategy
-3. If no improvement after 2 attempts: SWITCH strategy
-4. If WNS target met: signal DONE immediately
-5. Always prefer rapidwright_report_timing over Vivado for quick checks
-6. Track remaining budget: cheaper actions when budget < 20%
+## ITERATION EFFICIENCY OBSERVATIONS
+1. If WNS improves >0.020ns: continuing the current strategy may be productive
+2. If no improvement after 2 attempts: switching strategy is a common pattern
+3. If WNS target met: signalling DONE locks in gains
+4. Prefer rapidwright_report_timing over Vivado for quick checks
+5. Track remaining budget: cheaper actions when budget < 20%

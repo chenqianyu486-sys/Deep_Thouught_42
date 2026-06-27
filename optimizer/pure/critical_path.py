@@ -49,7 +49,9 @@ _VALID_PATH_CELL_PREFIXES = (
 # shared by critical_path.parse_critical_path_cells (ingress) and
 # tool_router.call_tool (LLM->tool boundary). Re-export here for backward
 # compatibility with existing callers in this module.
-from .entities import is_valid_cell_name as _is_valid_cell_name  # noqa: F401
+from .entities import is_valid_cell_name  # noqa: F401
+# Backward-compat alias for test_critical_path_parser.py
+_is_valid_cell_name = is_valid_cell_name
 
 
 def validate_critical_path_data(
@@ -344,13 +346,13 @@ def parse_critical_path_cells(result: str) -> list[dict]:
                 if not raw_cells:
                     total_empty_cells += 1
                 # Filter out invalid cell names (pblock labels, device sites, etc.)
-                valid_cells = [c for c in raw_cells if _is_valid_cell_name(c)]
+                valid_cells = [c for c in raw_cells if is_valid_cell_name(c)]
                 invalid_count = len(raw_cells) - len(valid_cells)
                 total_invalid_cells += invalid_count
                 if invalid_count > 0:
                     logger.debug(
                         f"[critical_path] Filtered {invalid_count}/{len(raw_cells)} invalid cell names "
-                        f"from path (first invalid: {next((c for c in raw_cells if not _is_valid_cell_name(c)), '?')})"
+                        f"from path (first invalid: {next((c for c in raw_cells if not is_valid_cell_name(c)), '?')})"
                     )
                 # Skip path if >50% of cells were filtered (likely entirely contaminated)
                 if len(valid_cells) < 2 or invalid_count >= len(raw_cells) / 2:
@@ -381,7 +383,7 @@ def parse_critical_path_cells(result: str) -> list[dict]:
                 # Legacy format: plain list of cell names
                 raw_cells = [str(c) for c in item]
                 total_cells += len(raw_cells)
-                valid_cells = [c for c in raw_cells if _is_valid_cell_name(c)]
+                valid_cells = [c for c in raw_cells if is_valid_cell_name(c)]
                 invalid_count = len(raw_cells) - len(valid_cells)
                 total_invalid_cells += invalid_count
                 if len(valid_cells) >= 2 and invalid_count < len(raw_cells) / 2:

@@ -3,12 +3,9 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE-APACHE-2.0.txt)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![FPGA](https://img.shields.io/badge/FPGA-Vivado%20%2B%20RapidWright-green)](#)
-[![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V4%20Flash-purple)](#)
 [![Contest](https://img.shields.io/badge/contest-FPL%202026-orange)](#)
 
 **自主 LLM 驱动的 FPGA 时序收敛智能体。** 协调 Vivado 和 RapidWright，迭代优化布局布线（P&R）策略，直至最差负裕量（WNS）>= 0 —— 并提供形式化的逻辑等价性保证。
-
-> 🇬🇧 English version: [README_EN.md](README_EN.md)
 
 ---
 
@@ -331,7 +328,6 @@ Copyright (C) 2026, Advanced Micro Devices, Inc. 保留所有权利。
 ## 致谢
 
 - **Vivado** 和 **RapidWright** (由 AMD/Xilinx 提供) —— EDA 核心基石
-- **DeepSeek V4 Flash** (通过 OpenRouter) —— LLM 推理引擎
 - **MCP (Model Context Protocol)** —— 工具调用基础设施
 - **FPL 2026** —— 推动本项研究的竞赛
 - **Douglas Adams** —— 项目名称的灵感来源
