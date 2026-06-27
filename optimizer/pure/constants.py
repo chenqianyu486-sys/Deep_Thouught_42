@@ -585,3 +585,10 @@ _MCP_ERROR_PATTERNS: tuple[str, ...] = (
     "[ERROR] Vivado process terminated",
     '"error":',      # JSON error from tool_router
 )
+
+
+# Cost control constants
+COST_PER_MHZ_TARGET = 0.01         # Target cost per MHz gained ($)
+COST_HARD_STOP_FRACTION = 0.95     # Stop at 95% of cost budget
+COST_WARN_FRACTION = 0.70          # Warn at 70% of cost budget
+MIN_LLM_EFFICIENCY_SCORE = 5.0     # Min score per dollar of LLM cost

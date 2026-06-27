@@ -1674,7 +1674,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 target_ff_count=arguments.get("target_ff_count", 0),
                 target_dsp_count=arguments.get("target_dsp_count", 0),
                 target_bram_count=arguments.get("target_bram_count", 0),
-                resource_multiplier=arguments.get("resource_multiplier", 1.2),
+                resource_multiplier=arguments.get("resource_multiplier", 2.0),
                 critical_path_cells=arguments.get("critical_path_cells"),
                 distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
             )
