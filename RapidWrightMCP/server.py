@@ -642,8 +642,8 @@ async def list_tools() -> list[Tool]:
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
 
-            NOTE: resource_multiplier defaults to 1.2x (tighter than analyze_pblock_region's 1.5x).
-            Reduce to 1.0x for already-dense designs.""",
+            NOTE: resource_multiplier defaults to 2.0x (matches proven test_mode behavior).
+            Reduce to 1.2x for dense designs (>40% utilization).""",
             inputSchema={
                 "type": "object",
                 "properties": {
