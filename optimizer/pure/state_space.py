@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
+from .tool_filter import LoopPhase
+
 from ..state import (
     CriticalPathEntry,
     DashboardGlobalState,
