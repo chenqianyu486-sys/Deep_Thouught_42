@@ -13,9 +13,9 @@ from typing import Optional
 from .timing import parse_timing_summary
 from .constants import (
     TOOL_RESULT_TRUNCATE,
+    SMALL_OUTPUT_THRESHOLD,
     RAW_OUTPUT_DIRECT_THRESHOLD,
     RAW_OUTPUT_SMART_TRUNCATE,
-    SMALL_OUTPUT_THRESHOLD,
 )
 
 

@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..state import OptimizerState
 
-from .tool_filter import LoopPhase
-
 from ..state import (
     CriticalPathEntry,
     DashboardGlobalState,
@@ -33,6 +31,7 @@ from ..state import (
     StateSpace,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
+from .tool_filter import LoopPhase
 from .timing import compute_violation_summary
 
 # Maximum violating paths in StateSpace (user spec says Top 20)
