@@ -642,7 +642,7 @@ async def list_tools() -> list[Tool]:
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
 
-            NOTE: resource_multiplier defaults to 2.5x (matches proven test_mode behavior).
+            NOTE: resource_multiplier defaults to 2.0x (matches proven test_mode behavior).
             Reduce to 1.2x for dense designs (>40% utilization).""",
             inputSchema={
                 "type": "object",
@@ -1662,7 +1662,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     target_ff_count=arguments["target_ff_count"],
                     target_dsp_count=arguments.get("target_dsp_count", 0),
                     target_bram_count=arguments.get("target_bram_count", 0),
-                    resource_multiplier=arguments.get("resource_multiplier", 1.8),
+                    resource_multiplier=arguments.get("resource_multiplier", 1.5),
                     critical_path_cells=arguments.get("critical_path_cells"),
                     distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
                 )
@@ -1674,7 +1674,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 target_ff_count=arguments.get("target_ff_count", 0),
                 target_dsp_count=arguments.get("target_dsp_count", 0),
                 target_bram_count=arguments.get("target_bram_count", 0),
-                resource_multiplier=2.5,  # FORCED: multiplier 2.5 for contest optimization
+                resource_multiplier=2.0,  # FORCED: multiplier 2.0 for contest optimization
                 critical_path_cells=arguments.get("critical_path_cells"),
                 distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
             )
