@@ -12,7 +12,10 @@ This compressor prioritizes context completeness for strategic decision-making.
 
 from typing import List
 
-try:
+from .yaml_structured_compress import YAMLStructuredCompressor
+
+
+class PlannerCompressor(YAMLStructuredCompressor):
     """Compression strategy optimized for PLANNER model calls.
 
     Planner tasks involve complex reasoning (placement optimization, routing strategy,

@@ -12,7 +12,10 @@ This compressor balances speed and context completeness.
 
 from typing import List
 
-try:
+from .yaml_structured_compress import YAMLStructuredCompressor
+
+
+class WorkerCompressor(YAMLStructuredCompressor):
     """Compression strategy optimized for WORKER model calls.
 
     Worker tasks are routine operations (get_timing, get_utilization, etc.)

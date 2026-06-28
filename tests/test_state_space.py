@@ -32,7 +32,7 @@ class TestBuildGlobalState:
         """Minimal state produces default/None StateSpace fields."""
         state = make_state()
         space = build_state_space(state)
-        assert space.global_state.current_stage == "PLACEMENT"
+        assert space.global_state.current_stage == "PLACEMENT_UNPLACED"
         assert space.global_state.iteration_count == 0
         assert space.global_state.wns_setup is None
         assert space.global_state.lut_utilization is None
