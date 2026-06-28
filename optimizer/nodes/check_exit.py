@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Contest score is dominated by Fmax improvement, but cost and wall-clock
 # penalties scale with that improvement. Late in the run, bank a verified gain
 # instead of spending the final budget on low-probability exploration.
-SCORE_GUARD_ELAPSED_FRACTION = 0.70
+SCORE_GUARD_ELAPSED_FRACTION = 0.50
 SCORE_GUARD_MIN_ITERATION = 2
 SCORE_GUARD_MIN_WNS_GAIN_NS = 0.003
 SCORE_GUARD_STALL_LIMIT = 1

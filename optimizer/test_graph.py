@@ -398,7 +398,7 @@ class TestCheckExitHelpers:
         state.timing.best_wns = -0.435
         state.timing.best_wns_iteration = 3
 
-        assert _competition_score_guard_reason(state, elapsed=2400.0) == ""
+        assert _competition_score_guard_reason(state, elapsed=1500.0) == ""
 
     def test_score_guard_banks_stalled_older_best(self):
         state = OptimizerState()
