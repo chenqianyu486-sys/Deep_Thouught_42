@@ -33,6 +33,7 @@ from ..state import (
     StateSpace,
 )
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
+from .timing import compute_violation_summary
 
 # Maximum violating paths in StateSpace (user spec says Top 20)
 MAX_VIOLATING_PATHS = 20
