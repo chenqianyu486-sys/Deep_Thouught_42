@@ -115,6 +115,30 @@ SKILL_TOOL_MAP: dict[str, str] = {v.execute_tool: v.skill_id for v in STRATEGY_M
 WORKER_UPGRADE_THRESHOLD = 2       # Cumulative failures before upgrade
 WORKER_DOWNGRADE_THRESHOLD = 3     # Worker consecutive successes before downgrade
 GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit (balanced: give enough time for optimization)
+PR_DIRECTIVE_COMBINATIONS = [
+    ("Explore", "Explore", "default_after_physopt"),
+    ("ExtraTimingOpt", "NoTimingRelaxation", "logic_depth_limited"),
+    ("WLBlockPlacement", "HigherDelayCost", "congestion_medium"),
+    ("SpreadLogic_high", "Explore", "congestion_high"),
+    ("ExtraPostPlacementOpt", "Default", "wns_stuck"),
+    ("AltSpreadLogic_high", "LowerDelayCost", "spread_needed"),
+    ("Default", "HigherDelayCost", "route_critical"),
+    ("Explore", "NoTimingRelaxation", "aggressive_setup"),
+]
+
+NETLIST_MODIFYING_STRATEGIES = frozenset({
+    "Fanout", "LUTCascade", "CellReplication", "NetSwap",
+    "OptDesign", "LogicResynthesis", "CombinationalRebalance",
+    "LUTMUXFRepack", "MUXFTreeReorder",
+})
+
+PLACEMENT_ONLY_STRATEGIES = frozenset({"PBLOCK", "CongestionSpreading", "PinSwap"})
+
+PHYS_OPT_ONLY_STRATEGIES = frozenset({"PhysOpt", "PhysOptAggressive", "CongestionRouteExplore"})
+
+HOLD_VIOLATION_THRESHOLD_NS = -0.050
+MAX_ACCEPTABLE_ROUTE_ERRORS = 0
+
 WNS_TARGET_THRESHOLD = 0.0         # WNS target (0.0 ns = timing convergence)
 WNS_ROLLBACK_THRESHOLD: float = 0.050  # 50ps: trigger rollback when latest_wns falls this far below best_wns
 MAX_STRATEGY_CYCLES = 5            # Max strategy cycles per iteration (increased from 3 for more strategy exploration)

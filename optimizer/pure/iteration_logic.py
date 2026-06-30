@@ -142,3 +142,25 @@ def build_iteration_narrative(
         "outcome": outcome,
         "result_status": result_status,
     }
+
+
+def prescreen_strategies(state, available_strategies):
+    """Filter obviously inapplicable strategies based on dashboard data.
+    Reduces LLM decision space and avoids wasted tool calls."""
+    filtered = []
+    t = state.timing
+    for strat in available_strategies:
+        ok = True
+        if strat in ("CongestionSpreading", "CongestionRouteExplore"):
+            cong = getattr(t, "congestion_level", None)
+            if cong and cong.upper() in ("LOW", "NONE"):
+                ok = False
+        if strat in ("Fanout", "CellReplication"):
+            hfn = getattr(t, "high_fanout_nets", None)
+            if not hfn or len(hfn) == 0:
+                mf = getattr(t, "max_fanout", 0) or 0
+                if mf < 50:
+                    ok = False
+        if ok:
+            filtered.append(strat)
+    return filtered if filtered else available_strategies

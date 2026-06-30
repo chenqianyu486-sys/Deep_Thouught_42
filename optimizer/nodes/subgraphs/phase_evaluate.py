@@ -26,7 +26,7 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
@@ -53,6 +53,17 @@ def detect_rollback_needed(state: OptimizerState) -> bool:
         return False
     return state.timing.latest_wns < state.timing.best_wns - WNS_ROLLBACK_THRESHOLD
 
+
+
+def detect_hold_violation_rollback(state):
+    """Check if hold timing violated after optimization (competition requires hold >= 0)."""
+    if state.timing.hold_wns is None:
+        return False
+    if state.control.best_checkpoint_path is None:
+        return False
+    if not state.control.best_checkpoint_path.exists():
+        return False
+    return state.timing.hold_wns < HOLD_VIOLATION_THRESHOLD_NS
 
 def _strategy_wns_delta_since_entry(state: OptimizerState) -> float | None:
     """Return best WNS gain since the current strategy entered EXECUTE.
@@ -198,7 +209,21 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.strategy.current_strategy = ""
         state.control.done_reason = "rollback"
         state.control.post_rollback_analyze = True
-        record_flow_signal(state, "ROLLBACK", "rollback_auto", phase="EVALUATE")
+        record_flow_signal(state, "ROLLBACK", "rollback_auto_wns", phase="EVALUATE")
+        return LoopPhase.ANALYZE
+
+    # Auto-detect hold violation and request rollback
+    if detect_hold_violation_rollback(state):
+        logger.warning(yellow(
+            "[EVALUATE] HOLD VIOLATION: WHS=%.3fns < threshold=%.3fns - rolling back"
+            % (state.timing.hold_wns, HOLD_VIOLATION_THRESHOLD_NS)
+        ))
+        state.strategy.current_phase = ""
+        state.strategy.current_strategy = ""
+        state.control.done_reason = "rollback"
+        state.control.post_rollback_analyze = True
+        record_flow_signal(state, "ROLLBACK", "rollback_hold_violation", phase="EVALUATE",
+                           result_status="hold_whs=%.3f" % state.timing.hold_wns)
         return LoopPhase.ANALYZE
 
     while True:
