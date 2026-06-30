@@ -8,6 +8,7 @@ Uses the rapidwright pip package for JPype integration, with RAPIDWRIGHT_PATH
 and CLASSPATH pointing to the local RapidWright git submodule for Java classes.
 """
 import logging
+import os
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -2970,6 +2971,16 @@ def route_design_rwroute(
     Returns:
         dict with status, message, elapsed_seconds
     """
+    # RWRoute policy check: disabled by default (QoR concern per reference doc)
+    if not os.environ.get("RAPIDWRIGHT_ENABLE_RWROUTE"):
+        return {"error": (
+            "RWRoute is disabled on this design.\n"
+            "Reference (Vivado_RapidWright_Usage_Reference.md §3.4): RWRoute QoR is 5-10% "
+            "lower than Vivado route_design; suitable for fast iteration/prototyping, not final sign-off.\n"
+            "Current project policy: use Vivado route_design for all routing to preserve QoR.\n"
+            "To re-enable, set environment variable RAPIDWRIGHT_ENABLE_RWROUTE=1."
+        )}
+
     global _current_design
 
     if not _initialized:

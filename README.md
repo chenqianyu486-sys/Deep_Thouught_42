@@ -15,7 +15,7 @@
 - **保证逻辑等价性。** 每次优化均由 `validate_dcps.py`（结构差异比对 + 功能仿真）进行验证，确保设计行为永不改变。
 - **双重架构。** V2 状态机用于保障生产环境的可靠性；V1 对话循环已弃用并移除。
 - **实时可观测性。** 包含 20 个面板的 Web 仪表盘 —— 7 模块 StateSpace（Agent 数据输入层）+ 13 个旧版详情面板。每个流控决策、WNS 轨迹和 LLM 调用均可追踪。
-- **14 种验证安全策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、NetSwap、OptDesign、LogicResynthesis、PhysOptAggressive，以及 3 个直击层间组合逻辑瓶颈的新策略：CombinationalRebalance（验证安全的 retiming——通过逻辑等价重综合重平衡 LUT6/MUXF7/MUXF8 级联深度，不插 FF）、LUTMUXFRepack（LUT6+MUXF 联合重打包，针对超过 6 输入 LUT 物理上限的 NN/宽数据通路锥）、MUXFTreeReorder（MUXF7/MUXF8 树重排——无 CARRY4 设计的 carry-reorder 对应物）。插入新流水线 FF 的策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）因会改变设计延迟、无法通过逐周期功能仿真验证，已从策略目录中排除。
+- **16 种验证安全策略。** PBLOCK、PhysOpt、Fanout、PinSwap、LUTCascade、CellReplication、CongestionSpreading、NetSwap、OptDesign、LogicResynthesis、PhysOptAggressive，以及 3 个直击层间组合逻辑瓶颈的新策略：CombinationalRebalance（验证安全的 retiming——通过逻辑等价重综合重平衡 LUT6/MUXF7/MUXF8 级联深度，不插 FF）、LUTMUXFRepack（LUT6+MUXF 联合重打包，针对超过 6 输入 LUT 物理上限的 NN/宽数据通路锥）、MUXFTreeReorder（MUXF7/MUXF8 树重排——无 CARRY4 设计的 carry-reorder 对应物）、PlaceRouteDirectiveExplore（Place&Route指令探索，WNS停滞时扩探索空间）、CongestionRouteExplore（拥塞感知路由指令探索）。插入新流水线 FF 的策略（RegisterRetiming、SmartRetiming、PhysOpt+RegisterRetiming）因会改变设计延迟、无法通过逐周期功能仿真验证，已从策略目录中排除。
 
 ---
 
@@ -107,7 +107,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **策略与迭代层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 18 | 编码领域知识 | 14 种策略带有触发条件；LLM 自主选择 |
+| 18 | 编码领域知识 | 16 种策略带有触发条件；LLM 自主选择 |
 | 19 | 多策略循环 | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`) |
 | 20 | TTL 策略重试 | `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮后自动解封 |
 | 21 | 冷却逻辑分层 | 区分策略工具错误 vs 辅助工具错误；Improvement 阈值 0.050ns |
@@ -137,6 +137,10 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | **CombinationalRebalance** | 寄存器间深组合链（LUT6/MUXF7/MUXF8 级联，逻辑级数 >= 3） | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
 | **LUTMUXFRepack** | NN/宽数据通路，MUXF7/MUXF8 + LUT6 级联在关键路径上 | Vivado (opt_design -AddRemap，通过 RapidWright 定点分析 + 自动链式) |
 | **MUXFTreeReorder** | 无 CARRY4 的 NN 设计，MUXF7/MUXF8 树 >= 2 级在关键路径上，布线延迟主导 | Vivado (phys_opt_design 无 -retime，通过 RapidWright 定点分析 + 自动链式) |
+| **PlaceRouteDirectiveExplore** | WNS停滞（近2轮 |delta|<0.05ns），指令组合未充分探索 | Vivado（Place&Route指令探索） |
+| **CongestionRouteExplore** | 拥塞分析 severity=MEDIUM/HIGH，WNS > -1.0，拥塞场景路由指令未探索 | Vivado（拥塞感知路由指令探索） |
+
+新增 `report_qor_suggestions`（ML驱动策略建议）、`report_high_fanout_nets`（高扇出网络原生报告）和 `set_incremental_checkpoint`（增量编译，可省30-50%迭代时间）等专用工具。place_design 和 route_design 现已接入安全指令白名单，新增 AddRemap 至 opt_design 安全指令列表（修复LUTMUXFRepack策略），RWRoute 禁用状态已文档化并增加环境变量开关。
 
 ---
 
@@ -213,7 +217,7 @@ Deep_Thouught_42/
 │   ├── graph.py / edges.py   # NodeGraph 执行引擎 + 条件边
 │   ├── nodes/                # 9 个节点 + llm_tool_loop 子图（4 阶段）
 │   └── pure/                 # 16 个纯函数模块（可独立单元测试，含 entities.py 实体注册表）
-├── strategy_library.py       # 14 种策略及触发条件
+├── strategy_library.py       # 16 种策略及触发条件
 ├── skills/                   # Skill 框架（渐进式三层加载，34 文件）
 ├── RapidWrightMCP/           # RapidWright MCP 服务器（19+ 工具）
 ├── VivadoMCP/                # Vivado MCP 服务器（20+ 工具）

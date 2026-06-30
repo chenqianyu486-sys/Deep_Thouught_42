@@ -564,16 +564,42 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 ---
 
-## 8. phys_opt_design 安全守卫
+## 8. 重定时安全守卫（phys_opt / place_design / route_design）
+
+阻止 `AlternateFlowWithRetiming`、`AddRetime` 等指令（双层防护）；place_design/route_design 新增 PLACE_SAFE_DIRECTIVES/ROUTE_SAFE_DIRECTIVES 安全指令白名单
 
 **VivadoMCP 服务端守卫**:
 ```python
 BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
 BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
 SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", ...}
+
+# place_design/route_design 指令白名单（2026-06 新增）
+# 实际定义见 VivadoMCP/vivado_mcp_server.py L87-L112
+PLACE_SAFE_DIRECTIVES = {"Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
+    "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
+    "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
+    "EarlyBlockPlacement", "LateBlockPlacement", "NetDelay_high", "NetDelay_medium",
+    "NetDelay_low", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
+    "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
+    "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
+    "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
+    "Performance_ExtraTimingOpt", "Performance_NetDelay_high", "Performance_NetDelay_medium",
+    "Performance_NetDelay_low", "Performance_RefinePlacement", "Performance_WLBlockPlacement",
+}
+ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelayCost", "LowerDelayCost",
+    "NoTimingRelaxation", "RuntimeOptimized", "Quick", "FlowQuick",
+    "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
+    "Performance_NetDelay_medium", "Performance_NetDelay_low",
+    "Performance_RefinePlacement", "Performance_WLBlockPlacement",
+    "Congestion_Explore", "Congestion_NetDelay_high", "Congestion_NetDelay_medium",
+    "Congestion_NetDelay_low", "SSI_Explore", "SSI_Quick",
+    "Area_Default", "Area_Explore", "AlternateRoutability",
+}
 ```
 
-**call_tool 入口守卫**: 检查 directive 参数和 retime/interconnect_retime 布尔选项。
+**call_tool 入口守卫**: 检查 directive 参数和 retime/interconnect_retime 布尔选项。place_design/route_design 指令需在 SAFE_DIRECTIVES 白名单中方可执行。
 
 ---
 
@@ -598,11 +624,13 @@ tool call 入口:
 WORKER_HARD_LIMIT = 220K, WORKER_TOKEN_BUDGET = 200K
 PLANNER_HARD_LIMIT = 600K, PLANNER_TOKEN_BUDGET = 500K
 
-# Dashboard 新鲜度追踪 (工具→影响字段映射)
+# Dashboard 新鲜度追踪 (工具→影响字段映射, 2026-06 新增 vivado_report_qor_suggestions/vivado_report_high_fanout_nets)
 DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_report_utilization_for_pblock": {"resource_utilization"},
     "vivado_get_critical_high_fanout_nets": {"high_fanout_nets"},
     "rapidwright_analyze_critical_path_spread": {"critical_path_spread"},
+    "vivado_report_qor_suggestions": {"qor_suggestions"},
+    "vivado_report_high_fanout_nets": {"high_fanout_nets"},
 }
 
 # init_analysis 自适应超时
@@ -670,6 +698,7 @@ WNS_TARGET_THRESHOLD = 0.0
 | 单一信息源 | FORMAT_GUARD 不再重复工具 schema 和 lifecycle 描述 |
 | 减少认知负担 | 信号从 9 → 7（移除 RETRY、合并 RESELECT→SWITCH） |
 | 自动化替代指令 | 移除 EXECUTE CONSTRAINT 和 post_actions（auto-chain 已覆盖） |
+| 编码领域知识 | 16 种策略带有触发条件 |
 
 ### 上下文注入层次
 
@@ -817,3 +846,19 @@ EntityRegistry
 4. **`llm_hint` 运行时注入**: 当工具返回异常结果时注入提示
 5. **SYSTEM_PROMPT.TXT 策略排序约束**: 策略目录的排列顺序规则
 6. **~~strategy_library.py SKILL_GUIDANCE 增强字段~~**（已移除，死代码清理）
+
+---
+
+## 14. 工具链优化（2026-06 新增）
+
+本组变更围绕工具链安全性、策略覆盖面和编译流程效率进行系统性增强。
+
+| 编号 | 类别 | 变更 | 说明 |
+|------|------|------|------|
+| A1 | 安全 | place_design/route_design 白名单 | 新增 `PLACE_SAFE_DIRECTIVES` / `ROUTE_SAFE_DIRECTIVES` 安全指令白名单，阻止不安全 directive（详见 §8） |
+| A2 | 安全 | AddRemap 加入 OPT_SAFE_DIRECTIVES | `vivado_opt_design` 的 `AddRemap` 指令加入安全白名单，允许 LLM 在逻辑优化阶段使用重映射 |
+| A3 | 策略 | PlaceRouteDirectiveExplore + CongestionRouteExplore | 新增两种布线/拥塞相关策略，扩展策略库覆盖范围 |
+| B1 | 工具 | report_qor_suggestions 专用工具 | 封装 Vivado `report_qor_suggestions` 为独立 MCP 工具，供 LLM 获取优化建议（Dashboard 字段: qor_suggestions） |
+| B2 | 工具 | report_high_fanout_nets 专用工具 | 封装 Vivado `report_high_fanout_nets` 为独立 MCP 工具，供 LLM 诊断高扇出网络（Dashboard 字段: high_fanout_nets） |
+| C2 | 编译 | set_incremental_checkpoint 增量编译支持 | 新增 `set_incremental_checkpoint` 工具，支持增量编译流程以加速多轮迭代 |
+| C3 | 编译 | RWRoute 环境变量开关 | 提供环境变量控制 RapidWright 路由引擎（RWRoute）的启用/禁用，灵活适配不同设计场景 |

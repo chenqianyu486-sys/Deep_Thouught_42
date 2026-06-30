@@ -12,6 +12,7 @@ wsl.localhostUbuntuhomeqianyufpl26_optimization_contestdashboardstatic/
 .codeartsdoer/
 .arts/
 temp/
+.trae/
 
 # DCP validation temporary directories
 dcp_validation_*/

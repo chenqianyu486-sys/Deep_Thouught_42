@@ -29,7 +29,7 @@ fpl26_optimization_contest/
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
 ├── validate_dcps.py              # DCP 等价性验证器
-├── strategy_library.py           # 14 种策略库（含 LogicResynthesis、PhysOptAggressive、CombinationalRebalance、LUTMUXFRepack、MUXFTreeReorder）
+├── strategy_library.py           # 16 种策略库（含LogicResynthesis、PhysOptAggressive、CombinationalRebalance、LUTMUXFRepack、MUXFTreeReorder、PlaceRouteDirectiveExplore、CongestionRouteExplore）
 ├── Makefile                      # 构建自动化
 ├── SYSTEM_PROMPT.TXT             # 系统提示词
 ├── CLAUDE.md                     # 项目指令文件

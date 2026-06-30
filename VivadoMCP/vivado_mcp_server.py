@@ -78,6 +78,37 @@ OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "ExploreWithAreaDuplication",
     "ExploreSequentialArea", "NoBramOptimization",
     "NoDspOptimization", "RuntimeOptimized", "DataSpreadMem",
+    "AddRemap",
+})
+
+# place_design safe directives whitelist (consistent with OPT_SAFE_DIRECTIVES).
+# Any directive not in this set is rejected for defense-in-depth.
+# Explicitly excludes retiming-related directives (AddRetime, Performance_Retiming, etc.)
+PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
+    "Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
+    "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
+    "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
+    "EarlyBlockPlacement", "LateBlockPlacement", "NetDelay_high", "NetDelay_medium",
+    "NetDelay_low", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
+    "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
+    "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
+    "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
+    "Performance_ExtraTimingOpt", "Performance_NetDelay_high", "Performance_NetDelay_medium",
+    "Performance_NetDelay_low", "Performance_RefinePlacement",
+    "Performance_WLBlockPlacement",
+})
+# Note: "Conggestion_Default" (typo with double g in source docs) is intentionally excluded.
+
+ROUTE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
+    "Default", "Explore", "AggressiveExplore", "HigherDelayCost", "LowerDelayCost",
+    "NoTimingRelaxation", "RuntimeOptimized", "Quick", "FlowQuick",
+    "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
+    "Performance_NetDelay_medium", "Performance_NetDelay_low",
+    "Performance_RefinePlacement", "Performance_WLBlockPlacement",
+    "Congestion_Explore", "Congestion_NetDelay_high", "Congestion_NetDelay_medium",
+    "Congestion_NetDelay_low", "SSI_Explore", "SSI_Quick",
+    "Area_Default", "Area_Explore", "AlternateRoutability",
 })
 
 # TCL security primitives (blocked-command detection, safe quoting,
@@ -1623,6 +1654,40 @@ async def list_tools():
             }
         ),
         Tool(
+            name="report_qor_suggestions",
+            description="Get QoR suggestions from Vivado (ML-driven strategy recommendations). Returns structured suggestions with categories and descriptions. READ-ONLY, does not modify the design.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 120)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="report_high_fanout_nets",
+            description="Get high fanout nets report from Vivado. Returns structured list of nets with fanout counts and driver cells. READ-ONLY, does not modify the design.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "min_fanout": {
+                        "type": "number",
+                        "description": "Minimum fanout threshold (default: 100)"
+                    },
+                    "max_nets": {
+                        "type": "number",
+                        "description": "Maximum number of nets to report (default: 50)"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 120)"
+                    }
+                }
+            }
+        ),
+        Tool(
             name="get_wns",
             description="DEPRECATED in optimization loop — WNS is shown in Dashboard Module 1 at every turn. Do NOT call this in ANALYZE/EVALUATE phases.",
             inputSchema={
@@ -1637,7 +1702,7 @@ async def list_tools():
         ),
         Tool(
             name="place_design",
-            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing.",
+            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing. Safe directives: Default, Explore, ExtraTimingOpt, WLBlockPlacement, ExtraPostPlacementOpt, AltSpreadLogic, SpreadLogic, EarlyBlockPlacement, LateBlockPlacement, NetDelay, SSI_SpreadLogic, Quick, RuntimeOptimized, FlowQuick, FlowRuntimeOptimized, Congestion_*, Area_Explore*, Performance_* (excluding retiming variants).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1654,7 +1719,7 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets.",
+            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets. Safe directives: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_*, Congestion_*, SSI_Explore/Quick, Area_Default/Explore, AlternateRoutability.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1675,7 +1740,7 @@ async def list_tools():
         ),
         Tool(
             name="run_tcl",
-            description="Execute a Tcl command in Vivado. Use ONLY for strategy-specific commands (e.g., detailed path reporting). Do NOT use for ad-hoc timing analysis — use report_timing_summary instead.",
+            description="Execute a Tcl command in Vivado. Use ONLY for strategy-specific commands (e.g., detailed path reporting). Do NOT use for ad-hoc timing analysis — use report_timing_summary instead. RECOMMENDED reports via run_tcl: 'report_clock_interaction' (CDC analysis), 'report_critical_paths' (path decomposition), 'report_pipeline_analysis' (pipeline bottlenecks), 'report_design_analysis -congestion' (detailed congestion), 'report_methodology' (methodology checks). Use the dedicated tools for 'report_qor_suggestions' and 'report_high_fanout_nets' instead of run_tcl.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1744,6 +1809,24 @@ async def list_tools():
                     }
                 },
                 "required": ["edif_path"]
+            }
+        ),
+        Tool(
+            name="set_incremental_checkpoint",
+            description="Set an incremental checkpoint (.dcp) reference for Vivado to use during implementation. Incremental compile can reduce iteration time by 30-50%. Only use when design changes are small (<5% cell change) and the previous round showed WNS improvement >0.1ns. READ-ONLY metadata operation, does not modify the design.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "dcp_path": {
+                        "type": "string",
+                        "description": "Path to the reference .dcp checkpoint file"
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 60)"
+                    }
+                },
+                "required": ["dcp_path"]
             }
         ),
         Tool(
@@ -2301,6 +2384,15 @@ async def call_tool(name: str, arguments: dict):
                 else:
                     if any(c in directive for c in "{}[];\n"):
                         return [TextContent(type="text", text=f"Error: directive contains unsafe characters: {directive!r}")]
+                    # Whitelist check - defense-in-depth against unknown directives
+                    if directive not in PLACE_SAFE_DIRECTIVES:
+                        return [TextContent(
+                            type="text",
+                            text=(
+                                f"Error: Directive '{directive}' is not in the safe place_design directive list. "
+                                f"Allowed directives: {', '.join(sorted(PLACE_SAFE_DIRECTIVES))}"
+                            )
+                        )]
                     cmd += f" -directive {tcl_quote(directive)}"
             output = run_tcl_command(cmd, timeout=timeout)
             # Detect Vivado errors — return JSON error so chain execution can detect failure
@@ -2325,6 +2417,15 @@ async def call_tool(name: str, arguments: dict):
             if directive:
                 if any(c in directive for c in "{}[];\n"):
                     return [TextContent(type="text", text=f"Error: directive contains unsafe characters: {directive!r}")]
+                # Whitelist check - defense-in-depth against unknown directives
+                if directive not in ROUTE_SAFE_DIRECTIVES:
+                    return [TextContent(
+                        type="text",
+                        text=(
+                            f"Error: Directive '{directive}' is not in the safe route_design directive list. "
+                            f"Allowed directives: {', '.join(sorted(ROUTE_SAFE_DIRECTIVES))}"
+                        )
+                    )]
                 cmd += f" -directive {tcl_quote(directive)}"
             if reuse:
                 cmd += " -reuse"
@@ -2347,15 +2448,82 @@ async def call_tool(name: str, arguments: dict):
             output = restart_vivado_process()
             return [TextContent(type="text", text=output)]
         
+        elif name == "report_qor_suggestions":
+            timeout = arguments.get("timeout", 120)
+            raw = run_tcl_command("report_qor_suggestions -return_string", timeout=timeout)
+            # Parse suggestions into structured format
+            suggestions = []
+            current = {}
+            for line in raw.split("\n"):
+                line_stripped = line.strip()
+                if not line_stripped:
+                    if current:
+                        suggestions.append(current)
+                        current = {}
+                    continue
+                m_sug = re.match(r'Suggestion\s*:\s*(.+)', line_stripped, re.IGNORECASE)
+                if m_sug:
+                    if current:
+                        suggestions.append(current)
+                    current = {"suggestion": m_sug.group(1).strip()}
+                    continue
+                m_cat = re.match(r'Category\s*:\s*(.+)', line_stripped, re.IGNORECASE)
+                if m_cat and current:
+                    current["category"] = m_cat.group(1).strip()
+                    continue
+                m_desc = re.match(r'Description\s*:\s*(.+)', line_stripped, re.IGNORECASE)
+                if m_desc and current:
+                    current["description"] = m_desc.group(1).strip()
+                    continue
+            if current:
+                suggestions.append(current)
+            result = {"suggestions": suggestions, "raw": raw}
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "report_high_fanout_nets":
+            min_fanout = arguments.get("min_fanout", 100)
+            max_nets = arguments.get("max_nets", 50)
+            timeout = arguments.get("timeout", 120)
+            raw = run_tcl_command(
+                f"report_high_fanout_nets -return_string -fanout_pins -max_nets {max_nets}",
+                timeout=timeout
+            )
+            # Parse into structured format
+            nets = []
+            for line in raw.split("\n"):
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith("#"):
+                    continue
+                parts = line_stripped.split()
+                if len(parts) >= 2:
+                    try:
+                        fanout = int(parts[-1])
+                        if fanout >= min_fanout:
+                            nets.append({"net": parts[0], "fanout": fanout, "driver": " ".join(parts[1:-1]) if len(parts) > 2 else ""})
+                    except ValueError:
+                        pass
+            result = {"nets": nets, "raw": raw}
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
         elif name == "get_critical_high_fanout_nets":
             num_paths = arguments.get("num_paths", 50)
             min_fanout = arguments.get("min_fanout", 100)
             exclude_clocks = arguments.get("exclude_clocks", True)
             timeout = arguments.get("timeout", 600)
-            
+
             output = get_critical_high_fanout_nets(num_paths, min_fanout, exclude_clocks, timeout)
             return [TextContent(type="text", text=output)]
         
+        elif name == "set_incremental_checkpoint":
+            dcp_path = arguments["dcp_path"]
+            timeout = arguments.get("timeout", 60)
+            output = run_tcl_command(
+                f"set_property incremental_checkpoint {{{dcp_path}}} [get_runs impl_1]",
+                timeout=timeout
+            )
+            result = {"status": "set", "incremental_checkpoint": dcp_path, "output": output.strip()}
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
         elif name == "write_edif":
             edif_path = arguments["edif_path"]
             force = arguments.get("force", False)

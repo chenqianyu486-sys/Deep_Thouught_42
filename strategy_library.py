@@ -52,7 +52,7 @@ STRATEGIES = {
         ],
     },
     "PhysOpt": {
-        "name": "Physical Optimization",
+        "name": "Physical Optimization (can try ExploreWithHoldFix for hold violations, AlternateReplication for high fanout, AggressiveFanoutOpt for fanout>1000)",
         "trigger": "1-2 paths with spread",
         "sequence": [
             {"step": "phys_opt_design", "platform": "Vivado", "params": None},
@@ -61,7 +61,7 @@ STRATEGIES = {
         ],
     },
     "OptDesign": {
-        "name": "Logic Optimization (opt_design)",
+        "name": "Logic Optimization (opt_design) (can try ExploreSequentialArea for sequential area optimization, DataSpreadMem for memory spreading)",
         "trigger": "Logic-depth limited design (>70% logic delay), "
                    "6-7 LUT levels on critical paths",
         "ff_prerequisite": "",
@@ -314,6 +314,33 @@ STRATEGIES = {
              "note": "Auto-chained: evaluate timing"},
         ],
     },
+    "PlaceRouteDirectiveExplore": {
+        "name": "Place & Route Directive Exploration (no retiming)",
+        "trigger": "WNS stuck in recent iterations (last 2 rounds |delta| < 0.05ns), "
+                   "and place/route directive combinations have not been fully explored",
+        "sequence": [
+            {"step": "place_design", "platform": "Vivado",
+             "params": {"directive": "Explore"},
+             "note": "Re-place with Explore directive (wider optimization net)"},
+            {"step": "route_design", "platform": "Vivado",
+             "params": {"directive": "Explore"},
+             "note": "Re-route with Explore directive"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Evaluate timing after directive exploration"},
+        ],
+    },
+    "CongestionRouteExplore": {
+        "name": "Congestion-Aware Route Directive Exploration",
+        "trigger": "analyze_congestion severity=MEDIUM/HIGH, WNS > -1.0, "
+                   "and route directives have not been explored for congestion",
+        "sequence": [
+            {"step": "route_design", "platform": "Vivado",
+             "params": {"directive": "Congestion_Explore"},
+             "note": "Re-route with congestion-aware directive"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Evaluate timing after congestion-aware routing"},
+        ],
+    },
 }
 
 # Map from _infer_strategy_from_tools labels to STRATEGIES keys
@@ -335,6 +362,8 @@ STRATEGY_LABEL_MAP = {
     "CombinationalRebalance": "CombinationalRebalance",
     "LUTMUXFRepack": "LUTMUXFRepack",
     "MUXFTreeReorder": "MUXFTreeReorder",
+    "PlaceRouteDirectiveExplore": "PlaceRouteDirectiveExplore",
+    "CongestionRouteExplore": "CongestionRouteExplore",
 }
 
 # ── Validation Compatibility ────────────────────────────────────
@@ -362,6 +391,8 @@ STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
     "CombinationalRebalance": True,   # opt_design -remap, logic-equivalent, NO FF insert
     "LUTMUXFRepack": True,           # opt_design -AddRemap, logic-equivalent, NO FF insert
     "MUXFTreeReorder": True,         # phys_opt_design (no -retime), logic-equivalent, NO FF insert
+    "PlaceRouteDirectiveExplore": True,   # placement+route only, no logic change
+    "CongestionRouteExplore": True,       # routing only, no logic change
 }
 
 SKILL_EXECUTION_PATTERN = [
