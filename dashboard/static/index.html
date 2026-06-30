@@ -102,7 +102,7 @@ table.transitions tr:hover { background: #12122a; }
 .eval-result.REGRESSION { color: #ff6666; }
 .eval-result.UNCHANGED { color: #ffaa44; }
 
-/* ── 6-Module StateSpace panels ──────────────────────────────── */
+/* ── 7-Module StateSpace panels ──────────────────────────────── */
 .module-section { border-left: 3px solid #7c8aff; padding-left: 10px; margin-bottom: 10px; }
 .module-section h2 { border-bottom: none; margin-bottom: 4px; }
 .module-section .module-label { font-size: 10px; color: #7c8aff; text-transform: uppercase; letter-spacing: 2px; }
@@ -143,12 +143,41 @@ table.transitions tr:hover { background: #12122a; }
     <span class="status-dot" id="statusDot"></span>
     <span id="statusText" style="font-size:13px">Disconnected</span>
   </div>
+
+  <!-- Module 7: Architecture Overview -->
+  <div class="panel module-section">
+    <div class="module-label">Module 7</div>
+    <h2>Architecture Overview</h2>
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="label">Deepest Module</div>
+        <div class="value" style="font-size:13px" id="ssArchDeepestModule">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Total Cells Analyzed</div>
+        <div class="value" id="ssArchTotalCells">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Cross-Module Paths</div>
+        <div class="value" id="ssArchCrossPaths">--</div>
+      </div>
+      <div class="stat">
+        <div class="label">Intra-Module Paths</div>
+        <div class="value" id="ssArchIntraPaths">--</div>
+      </div>
+      <div class="stat wide">
+        <div class="label">Top Modules (Critical Path Heatmap)</div>
+        <div id="ssArchTopModules" style="margin-top:4px;max-height:200px;overflow-y:auto"><div class="empty-state">No architecture data</div></div>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <div class="grid">
 
   <!-- ═══════════════════════════════════════════════════════════ -->
-  <!-- 6-Module StateSpace Dashboard (Agent Data Input Layer)      -->
+  <!-- 7-Module StateSpace Dashboard (Agent Data Input Layer)      -->
   <!-- ═══════════════════════════════════════════════════════════ -->
 
   <!-- Module 1: Global State & Targets -->
@@ -636,7 +665,7 @@ function updateDashboard(d) {
     if (d.timing) updateTimingLight(d.timing);
     return;
   }
-  // 6-Module StateSpace (canonical dashboard representation)
+  // 7-Module StateSpace (canonical dashboard representation)
   if (d.state_space) updateStateSpace(d.state_space);
   // Legacy panels (unchanged)
   if (d.timing) updateTiming(d.timing);
@@ -677,7 +706,7 @@ function formatNum(n, decimals=3) {
   return Number(n).toFixed(decimals);
 }
 
-// ── 6-Module StateSpace update ──────────────────────────────────
+// ── 7-Module StateSpace update ──────────────────────────────────
 function updateStateSpace(ss) {
   if (!ss) return;
 
@@ -847,6 +876,31 @@ function updateStateSpace(ss) {
     const status = dg.action_status;
     $('ssActionStatus').textContent = status || 'PENDING';
     $('ssActionStatus').className = 'value ' + (status === 'Success' ? 'positive' : (status === 'Failed' ? 'negative' : ''));
+  }
+
+  // Module 7: Architecture Overview
+  const ao = ss.architecture_overview;
+  if (ao) {
+    $("ssArchDeepestModule").textContent = ao.deepest_module || "--";
+    $("ssArchTotalCells").textContent = ao.total_cells_analyzed != null ? ao.total_cells_analyzed : "--";
+    $("ssArchCrossPaths").textContent = ao.cross_module_paths != null ? ao.cross_module_paths : "--";
+    $("ssArchIntraPaths").textContent = ao.intra_module_paths != null ? ao.intra_module_paths : "--";
+
+    // Top modules heatmap
+    const modules = ao.top_modules;
+    if (modules && modules.length > 0) {
+      let html = "";
+      for (const m of modules) {
+        const hits = m.critical_path_hits || 0;
+        const pct = m.cell_distribution_pct != null ? (m.cell_distribution_pct * 100).toFixed(1) : "--";
+        const cls = hits < 3 ? "low" : (hits <= 10 ? "med" : "high");
+        const barW = m.cell_distribution_pct != null ? Math.min(100, m.cell_distribution_pct * 100).toFixed(0) : 0;
+        html += `<div class="list-item"><span style="color:#ccc">${(m.name || "?").substring(0, 35)}</span> <span class="tag ${cls}" style="font-size:10px">hits=${hits}</span> <div class="util-bar" style="margin-top:2px"><div class="util-track"><div class="util-fill ${cls}" style="width:${barW}%"></div></div><span class="util-pct">${pct}%</span></div></div>`;
+      }
+      $("ssArchTopModules").innerHTML = html;
+    } else {
+      $("ssArchTopModules").innerHTML = `<div class="empty-state">No module data</div>`;
+    }
   }
 }
 

@@ -47,6 +47,7 @@ def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> st
         best_iteration < state.iteration.current
         and state.iteration.global_no_improvement >= SCORE_GUARD_STALL_LIMIT
     )
+
     if not improved_this_iteration and not stalled_after_best:
         return ""
 
@@ -63,20 +64,6 @@ def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> st
         f"remaining={remaining / 60:.1f}min"
     )
 
-
-
-    # Check if initial timing already meets constraints - skip all optimization
-    if (state.timing.initial_wns is not None 
-            and state.timing.initial_wns >= 0.0
-            and state.control.done_reason != "timing_already_met"):
-        logger.info(
-            "[check_exit] Setup timing already met (WNS=%.3fns). "
-            "Exiting early to save time and cost.",
-            state.timing.initial_wns,
-        )
-        state.control.done_reason = "timing_already_met"
-        record_flow_signal(state, "SYSTEM_EXIT", "timing_already_met", phase="CHECK_EXIT")
-        return NodeName.SAVE_OUTPUT
 async def check_exit_node(
     state: OptimizerState, deps: NodeDeps
 ) -> str:
@@ -95,6 +82,19 @@ async def check_exit_node(
     Returns:
         Next node name (edge after_check_exit resolves final destination).
     """
+
+    # Check if initial timing already meets constraints - skip all optimization
+    if (state.timing.initial_wns is not None
+            and state.timing.initial_wns >= 0.0
+            and state.control.done_reason != "timing_already_met"):
+        logger.info(
+            "[check_exit] Setup timing already met (WNS=%.3fns). "
+            "Exiting early to save time and cost.",
+            state.timing.initial_wns,
+        )
+        state.control.done_reason = "timing_already_met"
+        record_flow_signal(state, "SYSTEM_EXIT", "timing_already_met", phase="CHECK_EXIT")
+        return NodeName.SAVE_OUTPUT
 
     # Cost limit check: exit if approaching budget limit with unclear improvement
     COST_LIMIT_WARN_FRACTION = 0.90  # Warn at 90% of budget
@@ -201,6 +201,7 @@ async def check_exit_node(
         f"no_improve={state.iteration.global_no_improvement}, "
         f"cost=${state.cost.total_cost:.4f}"
     )
+
     return NodeName.CHECK_EXIT
 
 # Check exit: absolute maximum wall clock ratio

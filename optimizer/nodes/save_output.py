@@ -23,8 +23,6 @@ from ..pure.timing import parse_hold_timing, parse_timing_summary
 from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
-from ..pure.trajectory import format_trajectory_summary
-from ..color import green
 
 logger = logging.getLogger(__name__)
 

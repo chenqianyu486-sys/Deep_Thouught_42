@@ -49,7 +49,7 @@ from .nodes import (
 def build_optimizer_graph(tracer: StateTracer | None = None) -> NodeGraph:
     """Build and return the complete optimizer graph.
 
-    All 8 nodes are wired with deterministic and conditional edges.
+    All 9 nodes are wired with deterministic and conditional edges.
     """
     graph = NodeGraph(tracer=tracer)
 

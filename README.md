@@ -85,7 +85,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **数据与上下文层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 24 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
+| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 23 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
 | 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |
@@ -211,7 +211,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 ```
 Deep_Thouught_42/
 ├── dcp_optimizer.py          # CLI 入口：V2 状态机启动 + 模型配置
-├── optimizer/                # V2 状态机框架（42 文件）
+├── optimizer/                # V2 状态机框架（45 文件）
 │   ├── state.py              # OptimizerState + 7 子切片 dataclass
 │   ├── deps.py               # NodeDeps：外部依赖容器
 │   ├── graph.py / edges.py   # NodeGraph 执行引擎 + 条件边
@@ -219,7 +219,7 @@ Deep_Thouught_42/
 │   └── pure/                 # 16 个纯函数模块（可独立单元测试，含 entities.py 实体注册表）
 ├── strategy_library.py       # 16 种策略及触发条件
 ├── skills/                   # Skill 框架（渐进式三层加载，34 文件）
-├── RapidWrightMCP/           # RapidWright MCP 服务器（19+ 工具）
+├── RapidWrightMCP/           # RapidWright MCP 服务器（39 工具）
 ├── VivadoMCP/                # Vivado MCP 服务器（20+ 工具）
 ├── context_manager/          # 内存/压缩管理（EventBus + yaml_structured 压缩器）
 ├── dashboard/                # Web 仪表盘（aiohttp + WebSocket，20 面板）

@@ -22,7 +22,7 @@ worker:
   history_retrieval_min_importance: 0.5
   fallback_models:
     - "qwen/qwen3.5-flash-02-23"
-  cost_hard_limit: 10.00
+  cost_hard_limit: 1.00
 planner:
   model_tier: "planner"
   model_name: "deepseek/deepseek-v4-pro"
@@ -42,7 +42,7 @@ planner:
   history_retrieval_min_importance: 0.3
   fallback_models:
     - "qwen/qwen3.6-plus"
-  cost_hard_limit: 10.00
+  cost_hard_limit: 1.00
 
 
 # Fallback chain: models to try if primary fails

@@ -1,4 +1,4 @@
-"""StateSpace builder: transforms OptimizerState into the canonical 6-module
+"""StateSpace builder: transforms OptimizerState into the canonical 7-module
 dashboard representation consumed by both the web UI (via serializer) and
 the LLM context (via context_snapshot).
 
@@ -506,7 +506,7 @@ def format_state_space_for_llm(
     evaluation_result: str = "",
     state: OptimizerState | None = None,
 ) -> str:
-    """Format the 6-module StateSpace as YAML for LLM context injection.
+    """Format the 7-module StateSpace as YAML for LLM context injection.
 
     Phase-aware: only modules enabled in PHASE_STATESPACE_MODULES are shown.
     Appended as the last user message for maximum attention weight.

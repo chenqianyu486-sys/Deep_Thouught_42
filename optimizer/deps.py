@@ -38,13 +38,13 @@ HEALTH_CHECK_INTERVAL_SECONDS = 60  # Check MCP sessions every minute
 async def check_dependency_health(deps: "NodeDeps") -> dict[str, bool]:
     """Quick health check for MCP sessions and Vivado connection."""
     status = {}
-    if deps.vivado:
+    if deps.vivado_session:
         try:
-            result = await deps.vivado.call_tool("vivado_check_design_status", {})
+            result = await deps.vivado_session.call_tool("vivado_check_design_status", {})
             status["vivado"] = "error" not in str(result).lower()
         except Exception:
             status["vivado"] = False
-    if deps.rapidwright:
+    if deps.rapidwright_session:
         try:
             status["rapidwright"] = True  # Session exists = OK
         except Exception:
@@ -58,28 +58,28 @@ AUTO_RECONNECT_MAX_ATTEMPTS = 3
 def get_active_tool_count(deps) -> int:
     """Count how many MCP tools are currently available."""
     count = 0
-    if deps.vivado: count += 1
-    if deps.rapidwright: count += 1
+    if deps.vivado_session: count += 1
+    if deps.rapidwright_session: count += 1
     return count
 
 def get_session_status(deps) -> dict:
     """Check status of all MCP sessions."""
-    return {"vivado": deps.vivado is not None, "rapidwright": deps.rapidwright is not None}
+    return {"vivado": deps.vivado_session is not None, "rapidwright": deps.rapidwright_session is not None}
 
 def get_deps_summary(deps) -> str:
     """Summary of dependency status."""
     parts = []
-    if deps.vivado: parts.append("VivadoOK")
-    if deps.rapidwright: parts.append("RWOK")
+    if deps.vivado_session: parts.append("VivadoOK")
+    if deps.rapidwright_session: parts.append("RWOK")
     return ",".join(parts) if parts else "NoMCP"
 
 def compute_deps_startup_time(deps) -> float:
     """Estimate total startup time for dependencies."""
-    return 10.0 + (5.0 if deps.rapidwright else 0) + (3.0 if deps.vivado else 0)
+    return 10.0 + (5.0 if deps.rapidwright_session else 0) + (3.0 if deps.vivado_session else 0)
 
 def compute_health_score(deps) -> float:
     """Overall dependency health score: 0=dead, 1=perfect."""
     score = 0.0
-    if deps.vivado: score += 0.5
-    if deps.rapidwright: score += 0.5
+    if deps.vivado_session: score += 0.5
+    if deps.rapidwright_session: score += 0.5
     return score
