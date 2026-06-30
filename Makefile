@@ -71,7 +71,7 @@ COLOR_RED := \033[0;31m
 COLOR_BLUE := \033[0;34m
 COLOR_RESET := \033[0m
 
-.PHONY: setup build-rapidwright run_optimizer run_optimizer_dashboard test test-unit test-skills test-quick validate validate_demo validate-submission run-submission clean veryclean help
+.PHONY: setup build-rapidwright run_optimizer run_optimizer_dashboard test test-unit test-skills test-quick validate validate_demo validate-submission clean veryclean help
 
 # Default target
 help:
@@ -79,9 +79,8 @@ help:
 	@echo ""
 	@echo "Competition workflow (FPL'26):"
 	@echo "  make setup SKIP_EXAMPLES=1                        # One-time setup on AWS instance"
-	@echo "  make run_optimizer DCP=fpl26_contest_benchmarks/benchmark1.dcp"
-	@echo "  make run_optimizer DCP=fpl26_contest_benchmarks/benchmark2.dcp"
-	@echo "  make validate-submission DCP=fpl26_contest_benchmarks/benchmark1.dcp"
+	@echo "  make run_optimizer DCP=<your_benchmark>.dcp"
+	@echo "  make validate-submission DCP=<your_benchmark>.dcp"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  setup                - Install dependencies, build RapidWright, download example DCPs"
@@ -225,6 +224,9 @@ setup:
 	fi
 	@echo ""
 	
+	@printf "$(COLOR_YELLOW)RapidWright submodule status:$(COLOR_RESET)\n"
+	@git submodule status RapidWright/ || echo "  (submodule not initialized)"
+	@echo ""
 	@printf "$(COLOR_YELLOW)[6/9] Building RapidWright from source...$(COLOR_RESET)\n"
 	@$(MAKE) build-rapidwright
 	@echo ""
@@ -618,9 +620,6 @@ validate-submission:
 	printf "$(COLOR_GREEN)Validating: $(DCP) vs $$OPTIMIZED$(COLOR_RESET)\n"; \
 	$(PYTHON) validate_dcps.py "$(DCP)" "$$OPTIMIZED"
 
-run-submission:
-	@echo "Running submission...[Will be implemented later]"
-	
 # Clean target: Remove run directories and Vivado-generated .Xil directories
 clean:
 	@printf "$(COLOR_YELLOW)Cleaning generated files...$(COLOR_RESET)\n"

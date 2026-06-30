@@ -98,6 +98,7 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **无持久化**: 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
 - **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
 - **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
+- **比赛时钟处理（clk_fpl26contest）**: `init_analysis` 显式通过 `get_clocks -quiet clk_fpl26contest` + `get_property PERIOD` 提取比赛标准时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。符合 FPL26 比赛每个 benchmark 包含 `clk_fpl26contest` 创建时钟的约束。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`strategy_catalog` 排除机制**: `strategy_ineffective`（TTL 阻断）和冷却策略不在 catalog 中移除，而是标为 `[BLOCKED]` 占位符（含剩余轮数/原因）。`strategy_not_applicable`、`tool_error`、`no_improvement` 完全移出 catalog（可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共23个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。

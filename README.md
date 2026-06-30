@@ -149,10 +149,10 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 依赖项 | 最低版本 | 用途 |
 |------------|-----------------|---------|
 | Python | 3.10+ | 智能体运行时 |
-| Vivado | 2024.1+ | 布局布线、时序分析、Tcl 脚本编写 |
+| Vivado | 2025.1+ | 布局布线、时序分析、Tcl 脚本编写 |
 | Java (JRE) | 11+ | RapidWright 运行时 |
 | RapidWright | (作为子模块捆绑) | 单元级操作 |
-| OpenRouter API | — | LLM 访问 (DeepSeek V4 Flash) |
+| OpenRouter API | — | LLM 访问 (DeepSeek V4 Pro) |
 
 ---
 
@@ -283,7 +283,7 @@ Deep_Thouught_42/
 # 验证 Vivado 是否可访问
 which vivado
 # 如有需要，加载 Vivado 环境变量
-source /opt/Xilinx/Vivado/2024.1/settings64.sh
+source /opt/Xilinx/Vivado/2025.1/settings64.sh
 ```
 
 ### `OPENROUTER_API_KEY not set`（未设置 OPENROUTER_API_KEY）
