@@ -72,66 +72,22 @@ PHYSOPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 
 # opt_design directive that performs retiming - blocked (breaks functional equivalence)
 OPT_BLOCKED_DIRECTIVES: frozenset[str] = frozenset({"AddRetime"})
-
-# TCL commands that can execute arbitrary code or perform I/O - blocked in
-# LLM-facing TCL execution. `source`/`eval`/`subst` can bypass the `exec` guard
-# (e.g. `eval {exec ls}`); `load` loads shared libraries; `open`/`socket` do I/O.
-_BLOCKED_TCL_COMMANDS: frozenset[str] = frozenset({
-    "exec", "source", "eval", "subst", "load", "open", "socket",
-    "cd", "pwd", "exit",
+# opt_design safe directives whitelist (consistent with PHYSOPT_SAFE_DIRECTIVES).
+# Any directive not in this set is rejected - defense in depth.
+OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
+    "Default", "Explore", "ExploreWithAreaDuplication",
+    "ExploreSequentialArea", "NoBramOptimization",
+    "NoDspOptimization", "RuntimeOptimized", "DataSpreadMem",
 })
 
-# Splits a TCL script into statements: newline / semicolon / open-bracket
-# (open-bracket starts command substitution, e.g. `set x [exec ls]`).
-_TCL_COMMAND_SPLIT_RE = re.compile(r'[\n;\[]')
-
-
-def _contains_blocked_tcl_command(command: str) -> bool:
-    """Detect blocked TCL commands anywhere in the script.
-
-    Catches all common bypass forms of the old `startswith("exec ")` guard:
-      - line-start:        ``exec ls``
-      - semicolon-split:   ``puts hi; exec ls``
-      - command subst:     ``set x [exec ls]``
-      - multi-line:        ``set x 5\nexec ls``
-    """
-    for stmt in _TCL_COMMAND_SPLIT_RE.split(command):
-        stmt = stmt.strip()
-        if not stmt or stmt.startswith("#"):
-            continue
-        first_token = stmt.split(None, 1)[0].lower()
-        if first_token in _BLOCKED_TCL_COMMANDS:
-            return True
-    return False
-
-
-def tcl_quote(value: str) -> str:
-    """Safely wrap a value as a TCL brace-quoted literal.
-
-    Brace quoting treats the content as a literal string. A value containing
-    ``}`` cannot be safely represented this way, so we raise rather than risk
-    breaking the brace balance (which would enable injection).
-    """
-    if '}' in value:
-        raise ValueError(f"Cannot safely quote value containing '}}': {value!r}")
-    return "{" + value + "}"
-
-
-def _tcl_line_is_complete(line: str) -> bool:
-    """Lightweight Python-side check: is this single line a complete TCL command?
-
-    Replaces the previous `info complete { {line} }` call which was vulnerable
-    to injection via crafted lines like ``}; exec rm -rf /; {``. Checks brace
-    and bracket balance plus absence of trailing-backslash continuation. Full
-    TCL syntax validation is deferred to actual execution.
-    """
-    if line.rstrip().endswith('\\'):
-        return False
-    if line.count('{') != line.count('}'):
-        return False
-    if line.count('[') != line.count(']'):
-        return False
-    return True
+# TCL security primitives (blocked-command detection, safe quoting,
+# line completeness check) live in tcl_security.py for independent unit testing.
+from tcl_security import (
+    BLOCKED_TCL_COMMANDS,
+    contains_blocked_tcl_command,
+    tcl_quote,
+    tcl_line_is_complete,
+)
 
 
 def _is_truthy(val) -> bool:
@@ -329,10 +285,10 @@ def _run_single_tcl(proc, command: str, timeout: float) -> str:
     # Block dangerous TCL commands (exec, source, eval, subst, load, etc.)
     # anywhere in the script — not just at line start. This catches all
     # bypass forms: `;exec`, `[exec]`, `eval {exec ls}`, multi-line, etc.
-    if _contains_blocked_tcl_command(command):
+    if contains_blocked_tcl_command(command):
         return (
             f"[BLOCKED] Command contains a blocked TCL command "
-            f"(one of: {', '.join(sorted(_BLOCKED_TCL_COMMANDS))}). "
+            f"(one of: {', '.join(sorted(BLOCKED_TCL_COMMANDS))}). "
             "Use Vivado Tcl commands only (report_*, get_*, set_property, etc.)."
         )
 
@@ -374,8 +330,10 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
     sequentially in the same Vivado session (variables persist across lines).
 
     For multi-line scripts, a syntax pre-check is performed using
-    'info complete' (no side effects). If a line fails during execution,
-    the function returns a structured error instead of raising an exception.
+    tcl_line_is_complete (Python-side, no side effects). Single-line
+    commands also receive the same completeness check. If a line fails
+    during execution, the function returns a structured error instead of
+    raising an exception.
 
     Args:
         command: Tcl command(s) to execute
@@ -398,7 +356,7 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
         # passes but `;` separates commands). The Python-side check is safe and
         # also faster (no pexpect round-trip per line).
         for i, line in enumerate(cmd_lines):
-            if not _tcl_line_is_complete(line):
+            if not tcl_line_is_complete(line):
                 return (
                     f"[ERROR] Multi-line script validation failed at line {i+1}.\n"
                     f"Line content: {line[:200]}\n"
@@ -421,6 +379,11 @@ def run_tcl_command(command: str, timeout: Optional[float] = None) -> str:
                 return "\n".join(outputs)
         return "\n".join(outputs)
     else:
+        # P4: Single-line commands also get completeness pre-check to avoid
+        # Vivado waiting for an unclosed brace -> pexpect timeout -> session restart.
+        stripped = command.strip()
+        if stripped and not tcl_line_is_complete(stripped):
+            return f"[ERROR] Incomplete Tcl command (unbalanced braces/brackets or trailing backslash): {stripped[:200]}"
         return _run_single_tcl(proc, command, effective_timeout)
 
 
@@ -2336,6 +2299,8 @@ async def call_tool(name: str, arguments: dict):
                 if directive.lower() == "unplace":
                     cmd += " -unplace"
                 else:
+                    if any(c in directive for c in "{}[];\n"):
+                        return [TextContent(type="text", text=f"Error: directive contains unsafe characters: {directive!r}")]
                     cmd += f" -directive {tcl_quote(directive)}"
             output = run_tcl_command(cmd, timeout=timeout)
             # Detect Vivado errors — return JSON error so chain execution can detect failure
@@ -2358,6 +2323,8 @@ async def call_tool(name: str, arguments: dict):
 
             cmd = "route_design"
             if directive:
+                if any(c in directive for c in "{}[];\n"):
+                    return [TextContent(type="text", text=f"Error: directive contains unsafe characters: {directive!r}")]
                 cmd += f" -directive {tcl_quote(directive)}"
             if reuse:
                 cmd += " -reuse"
@@ -2615,8 +2582,9 @@ async def call_tool(name: str, arguments: dict):
             directive = arguments.get("directive", "Explore")
             retarget = arguments.get("retarget", True)
 
-            # No safety guard needed: opt_design has NO retiming options
-            # (unlike phys_opt_design which has AlternateFlowWithRetiming, AddRetime)
+            # Safety guards below: (1) AddRetime directive blocked (retiming breaks
+            # functional equivalence), (2) directive whitelist (OPT_SAFE_DIRECTIVES),
+            # (3) -retarget suppressed when -directive is active ([Vivado_Tcl 4-167]).
 
             # Get WNS before opt_design for delta reporting
             wns_before = None
@@ -2641,7 +2609,18 @@ async def call_tool(name: str, arguments: dict):
                             f"retiming (breaks design correctness)."
                         )
                     )]
+                if directive not in OPT_SAFE_DIRECTIVES:
+                    return [TextContent(
+                        type="text",
+                        text=(
+                            f"Error: Directive {directive!r} is not in the safe directive list. "
+                            f"Allowed directives: {', '.join(sorted(OPT_SAFE_DIRECTIVES))}"
+                        )
+                    )]
                 cmd += f" -directive {tcl_quote(directive)}"
+                # Vivado rejects -directive + -retarget together ([Vivado_Tcl 4-167]).
+                # The directive implies equivalent retargeting, so suppress -retarget.
+                retarget = False
             if retarget:
                 cmd += " -retarget"
 
