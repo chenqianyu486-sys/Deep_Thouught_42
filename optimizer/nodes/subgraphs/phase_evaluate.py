@@ -26,7 +26,7 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, PULSE_WIDTH_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES, EQUIVALENCE_FF_CHANGE_THRESHOLD, EQUIVALENCE_LUT_CHANGE_THRESHOLD
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 from optimizer.color import green, yellow
@@ -455,6 +455,52 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                             state.timing.best_wns = wns
                             state.timing.best_wns_iteration = state.iteration.current
                             state.control.needs_save = True
+                        # Check hold violations
+                        hold_wns = timing.get("hold_wns")
+                        if hold_wns is not None and hold_wns < HOLD_VIOLATION_THRESHOLD_NS:
+                            logger.warning(
+                                f"[EVALUATE] SEVERE HOLD VIOLATION detected: hold_wns={hold_wns:.3f}ns, "
+                                f"failing={timing.get('hold_failing')}. This may fail validation."
+                            )
+                        # Check pulse width violations
+                        wpws = timing.get("wpws")
+                        if wpws is not None and wpws < PULSE_WIDTH_VIOLATION_THRESHOLD_NS:
+                            logger.warning(
+                                f"[EVALUATE] SEVERE PULSE WIDTH VIOLATION detected: wpws={wpws:.3f}ns, "
+                                f"failing={timing.get('wpws_failing')}. This may fail validation."
+                            )
+
+
+                        # Resource equivalence check
+                        if state.timing.baseline_resource_utilization and state.timing.resource_utilization:
+                            baseline_res = state.timing.baseline_resource_utilization
+                            current_res = state.timing.resource_utilization
+                            ff_baseline = baseline_res.get('FF', 0)
+                            ff_current = current_res.get('FF', 0)
+                            if ff_baseline > 0:
+                                ff_ratio = abs(ff_current - ff_baseline) / ff_baseline
+                                if ff_ratio > EQUIVALENCE_FF_CHANGE_THRESHOLD:
+                                    logger.warning(
+                                        f"[EVALUATE] RESOURCE EQUIVALENCE WARNING: FF count changed by {ff_ratio:.2%} "
+                                        f"(baseline={ff_baseline}, current={ff_current}, threshold={EQUIVALENCE_FF_CHANGE_THRESHOLD:.2%})"
+                                    )
+                            lut_baseline = baseline_res.get('LUT', 0)
+                            lut_current = current_res.get('LUT', 0)
+                            if lut_baseline > 0:
+                                lut_ratio = abs(lut_current - lut_baseline) / lut_baseline
+                                if lut_ratio > EQUIVALENCE_LUT_CHANGE_THRESHOLD:
+                                    logger.warning(
+                                        f"[EVALUATE] RESOURCE EQUIVALENCE WARNING: LUT count changed by {lut_ratio:.2%} "
+                                        f"(baseline={lut_baseline}, current={lut_current}, threshold={EQUIVALENCE_LUT_CHANGE_THRESHOLD:.2%})"
+                                    )
+                            for res_type in ['DSP', 'BRAM', 'URAM']:
+                                base_val = baseline_res.get(res_type, 0)
+                                curr_val = current_res.get(res_type, 0)
+                                if base_val != curr_val:
+                                    logger.error(
+                                        f"[EVALUATE] RESOURCE EQUIVALENCE VIOLATION: {res_type} count changed! "
+                                        f"baseline={base_val}, current={curr_val}. This indicates logical non-equivalence!"
+                                    )
 
                 # Mark fields stale after design modification (architectural
                 # symmetry with EXECUTE — EVALUATE allowlist is read-only but

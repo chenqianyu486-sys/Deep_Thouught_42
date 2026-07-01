@@ -215,6 +215,7 @@ class TimingState:
     critical_paths_iteration: int = 0
     critical_paths_stale: bool = False
     resource_utilization: Optional[dict] = None
+    baseline_resource_utilization: Optional[dict] = None
     field_freshness: dict[str, str] = field(default_factory=dict)
     # Tracks freshness status per dashboard field: "fresh" | "stale".
     # Initialized by init_analysis, updated by DASHBOARD_REFRESH_MAP on tool call,

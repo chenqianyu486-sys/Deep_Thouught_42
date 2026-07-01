@@ -19,7 +19,7 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
-from ..pure.timing import parse_hold_timing, parse_timing_summary
+from ..pure.timing import parse_hold_timing, parse_pulse_width, parse_timing_summary
 from ..pure.trajectory import format_trajectory_summary
 from ..color import green
 
@@ -250,6 +250,46 @@ async def save_output_node(
         except Exception as e:
             logger.warning(f"[save_output] Hold timing check failed: {e}")
 
+        try:
+            logger.info("[save_output] Checking pulse width...")
+            pw_report = await call_tool_fn(
+                "vivado_report_timing_summary",
+                {},
+                deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
+            )
+            pw = parse_pulse_width(pw_report)
+            if pw.get("wpws") is not None:
+                if pw["wpws"] < 0:
+                    logger.warning(
+                        f"[save_output] PULSE WIDTH VIOLATED: WPWS={pw['wpws']:.3f}ns, "
+                        f"failing={pw.get('wpws_failing')}, TNS={pw.get('wpws_tns'):.3f}ns"
+                    )
+                else:
+                    logger.info(f"[save_output] Pulse width MET: WPWS={pw['wpws']:.3f}ns")
+        except Exception as e:
+            logger.warning(f"[save_output] Pulse width check failed: {e}")
+
+
+    # Resource utilization comparison vs baseline
+    if state.timing.baseline_resource_utilization and state.timing.resource_utilization:
+        baseline = state.timing.baseline_resource_utilization
+        current = state.timing.resource_utilization
+        logger.info("[save_output] === Resource Utilization Comparison (Baseline vs Final) ===")
+        for res_type in ['LUT', 'FF', 'DSP', 'BRAM', 'URAM']:
+            base_val = baseline.get(res_type, 0)
+            curr_val = current.get(res_type, 0)
+            delta = curr_val - base_val
+            if base_val > 0:
+                pct = (delta / base_val) * 100
+                logger.info(
+                    f"[save_output]   {res_type:5s}: baseline={base_val:>8d}, final={curr_val:>8d}, delta={delta:>+8d} ({pct:>+6.2f}%)"
+                )
+            else:
+                logger.info(
+                    f"[save_output]   {res_type:5s}: baseline={base_val:>8d}, final={curr_val:>8d}, delta={delta:>+8d}"
+                )
+        logger.info("[save_output] ========================================================")
     # Guard: check design is routed before saving DCP.
     if state.control.output_dcp and deps.vivado_session and delivery_ready:
         try:

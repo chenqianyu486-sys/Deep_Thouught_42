@@ -52,6 +52,10 @@ def parse_timing_summary(timing_report: str) -> dict:
         result["hold_wns"] = hold.get("hold_wns")
         result["hold_tns"] = hold.get("hold_tns")
         result["hold_failing"] = hold.get("hold_failing")
+        pulse = parse_pulse_width(timing_report)
+        result["wpws"] = pulse.get("wpws")
+        result["wpws_tns"] = pulse.get("wpws_tns")
+        result["wpws_failing"] = pulse.get("wpws_failing")
         return result
 
     for data_line in lines[header_idx + 1:]:
@@ -78,6 +82,10 @@ def parse_timing_summary(timing_report: str) -> dict:
     result["hold_wns"] = hold.get("hold_wns")
     result["hold_tns"] = hold.get("hold_tns")
     result["hold_failing"] = hold.get("hold_failing")
+    pulse = parse_pulse_width(timing_report)
+    result["wpws"] = pulse.get("wpws")
+    result["wpws_tns"] = pulse.get("wpws_tns")
+    result["wpws_failing"] = pulse.get("wpws_failing")
 
     return result
 
@@ -614,4 +622,21 @@ def parse_hold_timing(timing_text: str) -> dict:
         result["hold_failing"] = int(m.group(1))
         result["hold_wns"] = float(m.group(2))
         result["hold_tns"] = float(m.group(3))
+    return result
+
+def parse_pulse_width(timing_text: str) -> dict:
+    """Parse pulse width slack section from report_timing_summary output.
+
+    Vivado's report_timing_summary includes a Pulse Width section that
+    reports minimum pulse width violations (WPWS).
+
+    Returns:
+        dict with keys: wpws, wpws_tns, wpws_failing (None if parse fails).
+    """
+    result = {"wpws": None, "wpws_tns": None, "wpws_failing": None}
+    m = re.search(r"Pulse\s*Width\s*:\s*(\d+)\s+Failing.*?Worst\s+Slack\s+(-?\d+\.?\d*)ns.*?Total\s+Violation\s+(-?\d+\.?\d*)ns", timing_text, re.DOTALL)
+    if m:
+        result["wpws_failing"] = int(m.group(1))
+        result["wpws"] = float(m.group(2))
+        result["wpws_tns"] = float(m.group(3))
     return result

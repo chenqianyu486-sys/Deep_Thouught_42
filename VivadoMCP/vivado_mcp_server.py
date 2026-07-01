@@ -63,7 +63,7 @@ _last_dcp_path: Optional[str] = None
 
 # PhysOpt safety guard: block retiming directives that cause functional errors
 PHYSOPT_BLOCKED_DIRECTIVES: frozenset[str] = frozenset({"AlternateFlowWithRetiming", "AddRetime"})
-PHYSOPT_BLOCKED_BOOL_OPTIONS: frozenset[str] = frozenset({"retime", "interconnect_retime"})
+PHYSOPT_BLOCKED_BOOL_OPTIONS: frozenset[str] = frozenset({"retime", "interconnect_retime", "insert_negative_edge_ffs", "restruct_opt"})
 PHYSOPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
     "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",

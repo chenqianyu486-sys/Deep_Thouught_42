@@ -13,6 +13,8 @@ import pytest
 from tcl_security import (
     BLOCKED_TCL_COMMANDS,
     contains_blocked_tcl_command,
+    contains_retiming_command,
+    contains_equivalence_unsafe_command,
     tcl_quote,
     tcl_line_is_complete,
 )
@@ -260,3 +262,52 @@ class TestInjectionVectors:
     def test_directive_injection_attempt(self):
         with pytest.raises(ValueError):
             tcl_quote("Explore}; exec ls; {Explore")
+
+class TestRetimingBlocked:
+    """Verify retiming-related TCL patterns are blocked."""
+
+    def test_add_retime(self):
+        assert contains_retiming_command("phys_opt_design -directive AddRetime")
+        assert contains_blocked_tcl_command("phys_opt_design -directive AddRetime")
+
+    def test_alternate_flow_with_retiming(self):
+        assert contains_retiming_command("AlternateFlowWithRetiming")
+        assert contains_blocked_tcl_command("AlternateFlowWithRetiming")
+
+    def test_retime_flag(self):
+        assert contains_retiming_command("opt_design -retime")
+        assert contains_blocked_tcl_command("opt_design -retime")
+
+    def test_interconnect_retime(self):
+        assert contains_retiming_command("interconnect_retime")
+        assert contains_blocked_tcl_command("interconnect_retime")
+
+    def test_performance_retiming(self):
+        assert contains_retiming_command("Performance_Retiming")
+        assert contains_blocked_tcl_command("Performance_Retiming")
+
+    def test_blocked_tcl_catches_retiming(self):
+        assert contains_blocked_tcl_command("puts hi; phys_opt_design -directive AddRetime")
+
+
+class TestEquivalenceUnsafeBlocked:
+    """Verify equivalence-unsafe TCL patterns are blocked."""
+
+    def test_remove_cell_bracket(self):
+        assert contains_equivalence_unsafe_command("remove_cell [get_cells *]")
+        assert contains_blocked_tcl_command("remove_cell [get_cells *]")
+
+    def test_eco_remove_cell(self):
+        assert contains_equivalence_unsafe_command("eco -remove_cell [get_cells u0]")
+        assert contains_blocked_tcl_command("eco -remove_cell [get_cells u0]")
+
+    def test_eco_rename_net(self):
+        assert contains_equivalence_unsafe_command("eco -rename_net [get_nets n1] new_net")
+        assert contains_blocked_tcl_command("eco -rename_net [get_nets n1] new_net")
+
+    def test_write_verilog_mode_design(self):
+        assert contains_equivalence_unsafe_command("write_verilog -mode design out.v")
+        assert contains_blocked_tcl_command("write_verilog -mode design out.v")
+
+    def test_blocked_tcl_catches_equiv_unsafe(self):
+        assert contains_blocked_tcl_command("puts hi; remove_cell [get_cells *]")

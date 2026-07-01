@@ -42,6 +42,8 @@ def contains_blocked_tcl_command(command: str) -> bool:
             return True
     if contains_retiming_command(command):
         return True
+    if contains_equivalence_unsafe_command(command):
+        return True
     return False
 
 
@@ -84,3 +86,15 @@ RETIMING_BLOCKED_RE = re.compile('|'.join(RETIMING_BLOCKED_PATTERNS), re.IGNOREC
 
 def contains_retiming_command(command):
     return bool(RETIMING_BLOCKED_RE.search(command))
+
+EQUIVALENCE_UNSAFE_PATTERNS = [
+    r'remove_cell\s*\[',
+    r'eco\b.*\bremove_cell\b',
+    r'eco\b.*\brename_net\b',
+    r'write_verilog\s+-mode\s+design\b',
+]
+EQUIVALENCE_UNSAFE_RE = re.compile('|'.join(EQUIVALENCE_UNSAFE_PATTERNS), re.IGNORECASE)
+
+def contains_equivalence_unsafe_command(command):
+    return bool(EQUIVALENCE_UNSAFE_RE.search(command))
+

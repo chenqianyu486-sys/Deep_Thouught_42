@@ -245,6 +245,9 @@ async def init_analysis_node(
                 )
                 state.timing.resource_utilization = parse_resource_utilization(util_report)
                 logger.info(f"[init_analysis] Resource utilization: {state.timing.resource_utilization}")
+                state.timing.baseline_resource_utilization = state.timing.resource_utilization.copy() if state.timing.resource_utilization else None
+                if state.timing.baseline_resource_utilization:
+                    logger.info(f"i[init_analysis] Baseline resources saved: {state.timing.baseline_resource_utilization}")
                 _mark_checkpoint(state, "util_done")
 
             # Step B6: Critical path cells (for spread analysis later)
