@@ -549,7 +549,6 @@ _TOOL_TIMEOUT_DEFAULTS: dict[str, float] = {
     # Fast read-only queries (< 60s base)
     "vivado_get_wns": 30.0,
     "vivado_search_cells": 60.0,
-    "vivado_get_resource_counts": 60.0,
     "vivado_get_cached_high_fanout_nets": 10.0,
     "rapidwright_get_device_topology": 30.0,
     "rapidwright_get_design_info": 30.0,

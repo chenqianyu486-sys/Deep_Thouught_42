@@ -69,19 +69,83 @@ Restart Cursor after saving.
 
 ## Available Tools
 
+### Device & Checkpoint
 | Tool | Description |
 |------|-------------|
 | `initialize_rapidwright` | Initialize RapidWright (must be called first) |
 | `get_supported_devices` | List all supported FPGA devices |
 | `get_device_info` | Get detailed information about a specific device |
+| `get_device_topology` | Get FPGA device topology (tile grid, clock regions) |
 | `read_checkpoint` | Load a Vivado Design Checkpoint (.dcp) file |
 | `write_checkpoint` | Save design to a .dcp file |
 | `get_design_info` | Get statistics about the loaded design |
+
+### Search
+| Tool | Description |
+|------|-------------|
 | `search_cells` | Search for cells by name or type |
-| `get_tile_info` | Get information about a specific tile |
 | `search_sites` | Search for sites by type on a device |
-| `optimize_lut_input_cone` | Optimize LUT chains by combining into single LUTs |
+| `get_tile_info` | Get information about a specific tile |
+
+### Analysis
+| Tool | Description |
+|------|-------------|
+| `analyze_critical_path_spread` | Analyze Manhattan distance spread of critical path cells |
+| `analyze_congestion` | Score congestion per tile region (0-1 scale) |
+| `analyze_congestion_spreading` | Identify cells for congestion relief |
+| `analyze_net_detour` | Analyze net detour ratios on critical paths |
+| `analyze_fabric_for_pblock` | Analyze FPGA fabric for optimal pblock region |
+| `analyze_pblock_region` | Read-only pblock resource analysis |
+| `report_timing` | Approximate timing via RapidWright model (~2% error) |
+| `estimate_timing` | Estimate timing impact of proposed changes |
+| `compare_designs` | Structural comparison between two designs |
+
+### Fanout & LUT Optimization
+| Tool | Description |
+|------|-------------|
+| `optimize_lut_input_cone` | Combine chained LUTs into single LUTs |
 | `optimize_fanout_batch` | Batch split high fanout nets by replicating drivers |
+
+### Placement & Congestion
+| Tool | Description |
+|------|-------------|
+| `optimize_cell_placement` | Move specific cells to reduce path delay |
+| `smart_region_search` | Weighted-distance region search for optimal placement |
+| `execute_congestion_spreading` | Spread cells from congested areas |
+| `flatten_lut_cascade` | Flatten LUT cascades to reduce logic depth |
+| `replicate_critical_cells` | Replicate high-delay cells to reduce fanout |
+| `optimize_pin_swapping` | Swap LUT input pins to faster physical pins |
+| `analyze_net_swapping` | Identify equivalent nets for intra-SLICE swapping |
+| `execute_net_swapping` | Swap equivalent nets between BEL pins |
+
+### Strategy Workflows
+| Tool | Description |
+|------|-------------|
+| `execute_pblock_strategy` | Complete PBLOCK workflow (auto-chains Vivado tools) |
+| `execute_physopt_strategy` | PhysOpt workflow with pre/post timing capture |
+| `execute_opt_design_strategy` | opt_design workflow with auto place/route chain |
+| `execute_fanout_strategy` | Fanout optimization + checkpoint workflow |
+| `execute_combinational_rebalancing_strategy` | Combinational logic rebalancing |
+| `execute_lut_muxf_repack_strategy` | LUT + MUXF repacking |
+| `execute_muxf_tree_reorder_strategy` | MUXF tree reordering |
+
+### Pblock Utilities
+| Tool | Description |
+|------|-------------|
+| `convert_fabric_region_to_pblock` | Convert tile coordinates to pblock range strings |
+
+### Cross-server Integration
+- Analysis tools (`analyze_critical_path_spread`, `analyze_net_detour`) take input from **VivadoMCP** `extract_critical_path_cells` / `extract_critical_path_pins`.
+- Mutation tools instruct LLM to call **VivadoMCP** `open_checkpoint` → `place_design`/`route_design` → `report_timing_summary`.
+- The returned `pblock_ranges` should be passed as the `ranges` parameter to VivadoMCP `create_and_apply_pblock`.
+
+### Removed / Blocked Tools
+| Tool | Status |
+|------|--------|
+| `route_design_rwroute` | Removed — RWRoute degrades timing |
+| `analyze_register_retiming` | Blocked — breaks functional equivalence |
+| `execute_register_retiming` | Blocked — breaks functional equivalence |
+| `smart_retiming` | Blocked — breaks functional equivalence |
 
 ## Example Usage
 
@@ -150,7 +214,7 @@ After:   Input -> LUT6 -> Output                   (1 logic level)
 
 **Parameters:**
 - `hierarchical_input_pins`: List of pins to optimize (e.g., `["top/cpu/alu/result[0]"]`)
-- `output_dcp_path`: Optional path to save the optimized design
+  The tool automatically saves checkpoints to the working directory.
 
 **Limitations:**
 - Maximum 6 inputs (LUT6 is the largest)

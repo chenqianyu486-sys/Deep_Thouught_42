@@ -261,7 +261,7 @@ async def list_tools() -> list[Tool]:
             name="optimize_fanout_batch",
             description="Batch optimize multiple high fanout nets by splitting them into multiple driven nets. "
                         "Reduces API calls by processing multiple nets in one call. "
-                        "split_factor is calculated internally: fanout/100 (min 3, max 8)",
+                        "split_factor is calculated by tiered heuristic: fanout<200→k=2, 200-500→k=2-3, 500-1500→k=3-5, >1500→k=5-8",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -478,7 +478,7 @@ async def list_tools() -> list[Tool]:
             ⚠️ DESIGN CONSISTENCY WARNING:
             This tool MODIFIES the design (moves cells, changes routing).
             After using this tool, you MUST:
-            1. Run vivado_validate_timing to verify timing
+            1. Run validate_timing (VivadoMCP 工具) to verify timing
             2. Run rapidwright_compare_designs to verify structural consistency
             3. Verify functional equivalence before submission
 
@@ -556,7 +556,7 @@ async def list_tools() -> list[Tool]:
             - is_soft_recommended (bool): True when utilization density > 80%.
             - next_steps (list): Vivado commands to execute (only present when capacity_ok=true).
 
-            Prerequisite: call vivado_report_utilization_for_pblock first to get
+            Prerequisite: call report_utilization_for_pblock (VivadoMCP 工具) first to get
             current LUT/FF/DSP/BRAM counts.
             Input: resource counts from Vivado utilization report.
             Output: region coordinates, pblock_ranges string, estimated resources,
@@ -571,7 +571,7 @@ async def list_tools() -> list[Tool]:
             - Default 1.5x provides 50%% headroom. For already-congested designs, this may
               over-allocate and produce an unnecessarily large pblock, reducing timing benefit.
             - Reduce to 1.0x-1.2x if the design has high utilization or if you want a tighter region.
-            - The returned pblock_ranges are ready for direct use in vivado_create_and_apply_pblock.""",
+            - The returned `pblock_ranges` value should be passed as the `ranges` parameter to VivadoMCP `create_and_apply_pblock`.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -619,12 +619,12 @@ async def list_tools() -> list[Tool]:
             name="execute_pblock_strategy",
             description="""Execute complete PBLOCK workflow: analyze FPGA fabric and prepare for automated Vivado chaining.
 
-            This is the PREFERRED tool for PBLOCK strategy — do NOT use vivado_run_tcl for this workflow.
+            This is the PREFERRED tool for PBLOCK strategy — do NOT use run_tcl (VivadoMCP 工具) for this workflow.
             After this tool succeeds, the system will AUTOMATICALLY chain the following Vivado tools:
-              1. vivado_place_design -unplace
-              2. vivado_create_and_apply_pblock (with returned pblock_ranges, is_soft from recommendation)
-              3. vivado_place_design (re-place within constraint)
-              4. vivado_route_design
+              1. place_design -unplace (VivadoMCP 工具)
+              2. create_and_apply_pblock (VivadoMCP 工具, with returned pblock_ranges, is_soft from recommendation)
+              3. place_design (VivadoMCP 工具, re-place within constraint)
+              4. route_design (VivadoMCP 工具)
 
             SELF-CONTAINED: Resource counts (LUT/FF) are auto-detected from the loaded design
             when not explicitly provided. You can call this tool directly with no arguments.
@@ -636,14 +636,15 @@ async def list_tools() -> list[Tool]:
             - capacity_ok: only proceed if true
             - deficit: per-type resource shortfall (LUT/FF/DSP/BRAM)
             - is_soft_recommended: auto-set based on utilization density (>80% = soft constraint)
-            - pblock_ranges, pblock_name, region: ready for Vivado tool chain
+            - pblock_ranges, pblock_name, region: the returned pblock_ranges value should be passed as the
+              `ranges` parameter to VivadoMCP `create_and_apply_pblock`
 
             ORDERING: For distributed designs (avg_distance > 70), run this BEFORE
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
 
-            NOTE: resource_multiplier defaults to 2.0x (matches proven test_mode behavior).
-            Reduce to 1.2x for dense designs (>40% utilization).""",
+            NOTE: resource_multiplier defaults to 1.2 (tighter regions; matches schema default).
+            analyze_pblock_region uses 1.5 for looser analysis-time buffer.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -887,8 +888,8 @@ async def list_tools() -> list[Tool]:
 
             Runs optimize_fanout_batch and write_checkpoint in RapidWright to split
             high fanout nets, then reports optimization results.
-            After this, run vivado_open_checkpoint, vivado_place_design,
-            vivado_route_design, and vivado_report_timing_summary in Vivado.
+            After this, run open_checkpoint, place_design,
+            route_design, and report_timing_summary (全部为 VivadoMCP 工具) in Vivado.
 
             MUTATING: modifies design net topology and writes checkpoint file.
             Trigger: High fanout nets present (fanout > 100), no path spread.
@@ -950,8 +951,8 @@ async def list_tools() -> list[Tool]:
 
             MUTATING: merges LUT cells and writes checkpoint files.
             Trigger: Critical paths have >3 LUT levels in series (logic depth bottleneck).
-            After this, run vivado_open_checkpoint, vivado_route_design,
-            vivado_report_timing_summary to verify WNS improvement.
+            After this, run open_checkpoint, route_design,
+            report_timing_summary (全为 VivadoMCP 工具) to verify WNS improvement.
 
             LIMITATIONS:
             - NOT suitable for neural network / wide-datapath designs where logic cones
@@ -1061,8 +1062,8 @@ MUTATING: modifies cell placement and writes checkpoint file.
 Internally analyzes congestion, scores candidates, then moves the highest-scoring
 cells outward using spiral site search.
 
-After this, call vivado_open_checkpoint, vivado_route_design,
-vivado_report_timing_summary to verify timing.
+After this, call open_checkpoint, route_design,
+report_timing_summary (全为 VivadoMCP 工具) to verify timing.
 
 Trigger: analyze_congestion_spreading identified candidates AND
 analyze_congestion severity=HIGH.""",
@@ -1093,38 +1094,16 @@ analyze_congestion severity=HIGH.""",
             }
         ),
         Tool(
-            name="route_design_rwroute",
-            description="""[DEPRECATED - DO NOT USE] RWRoute 布线质量差，会导致时序严重退化。
-
-请使用 Vivado 的 route_design 工具代替。RWRoute 对此设计会将 WNS 从 -0.356ns 退化到 -2.411ns。
-
-如果看到此工具，请忽略并使用 VivadoMCP 的 route_design。""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "directive": {
-                        "type": "string",
-                        "description": "布线策略: TimingDriven(时序驱动,默认) / NonTimingDriven(非时序驱动)",
-                        "default": "TimingDriven"
-                    },
-                    "timeout_minutes": {
-                        "type": "integer",
-                        "description": "预留超时参数(分钟,默认360), 实际由 JVM 控制",
-                        "default": 360
-                    }
-                }
-            }
-        ),
-        Tool(
             name="report_timing",
-            description="""使用 RapidWright 内置时序模型报告近似时序 (~2% 误差).
+            description="""Report approximate timing using RapidWright's built-in timing model (~2% error margin).
 
-通过 TimingGraph.getMaxDelayPath() 计算最差数据路径延迟,
-与设计时钟周期要求比较得出近似 WNS。
+Computes worst-case data path delay via TimingGraph.getMaxDelayPath() and
+compares against the design clock period to derive approximate WNS.
 
-用于优化探索期间的快速反馈, 但最终结果务必用 Vivado 的 report_timing_summary 验证。
+For fast feedback during optimization exploration. Final timing verification
+MUST use VivadoMCP report_timing_summary.
 
-返回 WNS(纳秒)、最大延迟和时钟周期(皮秒)。""",
+Returns WNS (ns), max delay (ps), and clock period (ps).""",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -1140,7 +1119,7 @@ analyze_congestion severity=HIGH.""",
 
             MUTATING: changes cell pin connections, writes checkpoint file.
             Trigger: WNS stuck around -0.3ns, LUT input pins have delay variation.
-            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+            After this, call open_checkpoint, route_design, report_timing_summary (全为 VivadoMCP 工具).
 
             Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre_swap_checkpoint.""",
             inputSchema={
@@ -1184,7 +1163,7 @@ analyze_congestion severity=HIGH.""",
 
             MUTATING: changes net topology, writes checkpoint file.
             Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout.
-            After this, call vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.
+            After this, call open_checkpoint, route_design, report_timing_summary (全为 VivadoMCP 工具).
 
             Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre-replication checkpoint.
             Max 10 cells replicated per call (safety cap).""",
@@ -1241,15 +1220,12 @@ analyze_congestion severity=HIGH.""",
         ),
         Tool(
             name="analyze_register_retiming",
-            description="""[FORBIDDEN] This tool identifies register retiming candidates. Retiming changes register
-pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
+            description="""[FORBIDDEN - always returns error] Retiming analysis — always blocked.
+Retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation.
 
-READ-ONLY analysis. Parses critical path pin data from Vivado to find segments
-where combinational delay exceeds threshold, and identifies optimal insertion
-points for pipeline registers.
-
-NOTE: Even the analysis phase is FORBIDDEN because it implies intention to retime.
-All retiming (analyze + execute) violates contest rules on functional equivalence.""",
+This tool is part of the framework strategy table only. LLM must NOT call it.
+Calling it returns a FORBIDDEN error. Use analyze_critical_path_spread or
+analyze_net_detour for non-destructive critical path analysis instead.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1274,11 +1250,11 @@ All retiming (analyze + execute) violates contest rules on functional equivalenc
         ),
         Tool(
             name="execute_register_retiming",
-            description="""[FORBIDDEN] This tool inserts pipeline registers (retiming). Retiming changes register
-pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
+            description="""[FORBIDDEN - always returns error] Pipeline register insertion — always blocked.
+Retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation.
 
-Previously: Insert pipeline registers on deep combinational chains to reduce critical path delay.
-This tool is now hard-blocked at the handler level.""",
+This tool is part of the framework strategy table only. LLM must NOT call it.
+Calling it returns a FORBIDDEN error.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1308,11 +1284,11 @@ This tool is now hard-blocked at the handler level.""",
         ),
         Tool(
             name="smart_retiming",
-            description="""[FORBIDDEN] This tool performs smart register retiming. Retiming changes register
-pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
+            description="""[FORBIDDEN - always returns error] Smart register retiming — always blocked.
+Retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation.
 
-Previously: Smart register retiming with incremental verification and auto-rollback.
-This tool is now hard-blocked at the handler level.""",
+This tool is part of the framework strategy table only. LLM must NOT call it.
+Calling it returns a FORBIDDEN error.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1402,8 +1378,8 @@ MUTATING: modifies net connections, intra-site routing, writes checkpoint file.
 Swaps input nets between LUT cell pairs identified by analyze_net_swapping.
 Only swaps between cells with identical INIT strings (logic-safe).
 
-After this, call vivado_open_checkpoint, vivado_route_design,
-vivado_report_timing_summary to verify timing.
+After this, call open_checkpoint, route_design,
+report_timing_summary (全为 VivadoMCP 工具) to verify timing.
 
 LIMITATIONS: Only works within a single SLICE. Only swaps between cells with
 matching INIT strings. If WNS regresses > 0.05ns after reroute, rollback to
@@ -1745,13 +1721,6 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 temp_dir=arguments.get("temp_dir", "temp"),
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "congestion_spread"),
             )
-
-        elif name == "route_design_rwroute":
-            result = {
-                "error": "RWRoute is disabled — it causes severe timing degradation on this design. "
-                         "Use Vivado's route_design tool instead.",
-                "recommendation": "Use VivadoMCP route_design for routing."
-            }
 
         elif name == "report_timing":
             result = rw.report_timing()

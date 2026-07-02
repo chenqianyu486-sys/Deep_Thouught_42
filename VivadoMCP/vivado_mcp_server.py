@@ -1772,7 +1772,7 @@ async def list_tools():
         ),
         Tool(
             name="get_wns",
-            description="DEPRECATED in optimization loop — WNS is shown in Dashboard Module 1 at every turn. Do NOT call this in ANALYZE/EVALUATE phases.",
+            description="INTERNAL: Used by optimizer framework (rollback/test_mode) for WNS verification. LLM should prefer `report_timing_summary` for full timing context.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1791,7 +1791,9 @@ async def list_tools():
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "description": "Placement directive (e.g., 'Default', 'Explore', 'Quick')"
+                        "enum": list(PLACE_SAFE_DIRECTIVES),
+                        "default": "Default",
+                        "description": "Placement directive. See enum for all valid values."
                     },
                     "timeout": {
                         "type": "number",
@@ -1808,7 +1810,9 @@ async def list_tools():
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "description": "Routing directive (e.g., 'Default', 'Explore', 'Quick')"
+                        "enum": list(ROUTE_SAFE_DIRECTIVES),
+                        "default": "Default",
+                        "description": "Routing directive. See enum for all valid values."
                     },
                     "reuse": {
                         "type": "boolean",
@@ -1953,26 +1957,7 @@ async def list_tools():
 
             Pass the returned LUT, FF (and optional DSP, BRAM) counts to
             analyze_pblock_region or execute_pblock_strategy as target_* parameters.
-            Use get_resource_counts for a simpler JSON-only version.""",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "timeout": {
-                        "type": "number",
-                        "description": "Timeout in seconds (default: 300)"
-                    }
-                }
-            }
-        ),
-        Tool(
-            name="get_resource_counts",
-            description="""DEPRECATED in optimization loop — utilization is shown in Dashboard Module 1 (lut_utilization, ff_utilization, etc.) at every turn. Do NOT call this in ANALYZE phase.
-
-            Legacy: returns structured resource counts (LUT, FF, DSP, BRAM) as JSON:
-            {\"lut\": 30839, \"ff\": 1660, \"dsp\": 0, \"bram\": 0}
-
-            Use this instead of running raw Tcl (foreach/get_cells) for resource queries.
-            Returns only the used count — use report_utilization_for_pblock for full utilization details.""",
+            Use report_utilization_for_pblock for full utilization details.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1998,7 +1983,7 @@ async def list_tools():
                 "properties": {
                     "num_paths": {
                         "type": "number",
-                        "description": "Number of critical paths to extract (default: 10)"
+                        "description": "Number of critical paths to extract (default: 10). Pin-level extraction is more verbose than cell-level; extract_critical_path_cells defaults to 50."
                     },
                     "output_file": {
                         "type": "string",
@@ -2108,28 +2093,21 @@ async def list_tools():
             Post-place optimizations (default): fanout optimization, placement optimization, LUT restructure, 
             critical-cell optimization, DSP/BRAM/URAM register optimization.
             
-            Post-route optimizations (default): placement optimization, routing optimization, LUT restructure, 
+            Post-route optimizations (default): placement optimization, routing optimization, LUT restructure,
             critical-cell optimization.
-            
+
             NOTE: Using specific optimization options disables default optimizations - only specified ones run.
-            The directive option is incompatible with specific optimization options.""",
+            The directive option is incompatible with specific optimization options.
+
+            NOTE: Retiming (-retime) is permanently blocked to preserve functional equivalence.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "description": """Physical optimization directive. Only one can be specified at a time, and incompatible with other options:
-                        - Default: Run phys_opt_design with default settings
-                        - Explore: Multiple passes with replication for very high fanout nets, SLR crossing optimization, and critical path optimization
-                        - ExploreWithHoldFix: Multiple passes including hold violation fixing, SLR crossing optimization, and replication for very high fanout nets
-                        - ExploreWithAggressiveHoldFix: Multiple passes with aggressive hold violation fixing, SLR crossing optimization, and replication
-                        - AggressiveExplore: Similar to Explore but with more aggressive algorithms; includes SLR crossing optimization that may temporarily degrade WNS
-                        - AlternateReplication: Use different algorithms for performing critical cell replication
-                        - AggressiveFanoutOpt: Use different algorithms for fanout-related optimizations with more aggressive goals
-                        - AlternateFlowWithRetiming: [BLOCKED - breaks functional equivalence] DO NOT USE. Use AlternateReplication instead.
-                        - AddRetime: [BLOCKED - breaks functional equivalence] DO NOT USE. Register retiming changes pipeline latency.
-                        - RuntimeOptimized: Reduced set of optimizations (fanout_opt, critical_cell_opt, placement_opt, bram_enable_opt) for shortest runtime
-                        - RQS: Select directive from report_qor_suggestions strategy (requires RQS file)"""
+                        "enum": list(PHYSOPT_SAFE_DIRECTIVES),
+                        "default": "Default",
+                        "description": "Physical optimization directive. See enum for all valid values. Retiming directives (AddRetime, AlternateFlowWithRetiming) are BLOCKED."
                     },
                     "fanout_opt": {
                         "type": "boolean",
@@ -2206,10 +2184,6 @@ async def list_tools():
                     "aggressive_hold_fix": {
                         "type": "boolean",
                         "description": "Aggressively insert data path delay to fix hold time violations (considers more violations than standard hold fix)"
-                    },
-                    "retime": {
-                        "type": "boolean",
-                        "description": "[BLOCKED - breaks functional equivalence] Re-time registers forward through combinational logic to balance path delays. DO NOT USE."
                     },
                     "force_replication_on_nets": {
                         "type": "string",
@@ -2666,11 +2640,6 @@ async def call_tool(name: str, arguments: dict):
             output = report_utilization_for_pblock(timeout)
             return [TextContent(type="text", text=output)]
 
-        elif name == "get_resource_counts":
-            timeout = arguments.get("timeout", 300)
-            output = get_resource_counts(timeout)
-            return [TextContent(type="text", text=output)]
-        
         elif name == "create_and_apply_pblock":
             pblock_name = arguments["pblock_name"]
             ranges = arguments["ranges"]

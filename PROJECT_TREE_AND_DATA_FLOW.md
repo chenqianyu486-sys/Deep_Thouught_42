@@ -304,7 +304,7 @@ VivadoMCP 服务端 + dcp_optimizer.py 入口双层守卫，阻止以下指令�
 
 ### 4.1 VivadoMCP
 
-[VivadoMCP/vivado_mcp_server.py](VivadoMCP/vivado_mcp_server.py) — 通过 pexpect 管理 Vivado Tcl 子进程，约 20+ 工具。
+[VivadoMCP/vivado_mcp_server.py](VivadoMCP/vivado_mcp_server.py) — 通过 pexpect 管理 Vivado Tcl 子进程，24 个工具（不含已移除的 get_resource_counts）。
 
 [VivadoMCP/tcl_security.py](VivadoMCP/tcl_security.py) — TCL 安全原语（blocked-command 检测、安全引号、行完整性检查），从 vivado_mcp_server.py 抽取以便独立单元测试。
 
@@ -319,7 +319,7 @@ LLM → MCP tool call → vivado_mcp_server.py → pexpect → vivado -mode tcl
 
 ### 4.2 RapidWrightMCP
 
-[RapidWrightMCP/server.py](RapidWrightMCP/server.py) + [rapidwright_tools.py](RapidWrightMCP/rapidwright_tools.py) — 通过 JPype 桥接 Java RapidWright API，19+ 工具。
+[RapidWrightMCP/server.py](RapidWrightMCP/server.py) + [rapidwright_tools.py](RapidWrightMCP/rapidwright_tools.py) — 通过 JPype 桥接 Java RapidWright API，40 个工具（不含已移除的废弃工具 route_design_rwroute）。
 
 ```
 LLM → MCP tool call → server.py → JPype → Java RapidWright API → Python dict
