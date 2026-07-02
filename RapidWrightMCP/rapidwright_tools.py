@@ -922,7 +922,10 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
     Args:
         net_configs: List of {"net_name": str, "fanout": int}
                      fanout is used to calculate split_factor internally:
-                     split_factor = max(3, min(8, fanout // 100))
+                     fanout <200   -> k=2
+                     fanout 200-500  -> k=2-3
+                     fanout 500-1500 -> k=3-5
+                     fanout >1500    -> k=5-8
 
     Returns:
         Dictionary with batch optimization results:
@@ -1001,9 +1004,19 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
                         f"Resolved net '{net_name}' -> '{resolved_name}'"
                     )
 
-                # Calculate split_factor: fanout/100, min 3, max 8
+                # Calculate split_factor per Reference Doc:
+                #   fanout 200-500  -> k=2-3
+                #   fanout 500-1500 -> k=3-5
+                #   fanout >1500    -> k=5-8
                 original_fanout = net.getFanOut()
-                split_factor = max(3, min(8, original_fanout // 100))
+                if original_fanout < 200:
+                    split_factor = 2
+                elif original_fanout <= 500:
+                    split_factor = max(2, min(3, original_fanout // 200))
+                elif original_fanout <= 1500:
+                    split_factor = max(3, min(5, original_fanout // 300))
+                else:
+                    split_factor = max(5, min(8, original_fanout // 300))
 
                 logger.info(f"Optimizing net '{resolved_name}' with fanout {original_fanout} into {split_factor} parts")
 

@@ -1241,17 +1241,15 @@ analyze_congestion severity=HIGH.""",
         ),
         Tool(
             name="analyze_register_retiming",
-            description="""Identify FF-to-FF segments with deep combinational logic for register retiming.
+            description="""[FORBIDDEN] This tool identifies register retiming candidates. Retiming changes register
+pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
 
 READ-ONLY analysis. Parses critical path pin data from Vivado to find segments
 where combinational delay exceeds threshold, and identifies optimal insertion
 points for pipeline registers.
 
-Use this BEFORE execute_register_retiming to identify which paths would benefit
-from register insertion.
-
-Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs).
-Empty result = no deep chains found (valid diagnosis, not a failure).""",
+NOTE: Even the analysis phase is FORBIDDEN because it implies intention to retime.
+All retiming (analyze + execute) violates contest rules on functional equivalence.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1276,18 +1274,11 @@ Empty result = no deep chains found (valid diagnosis, not a failure).""",
         ),
         Tool(
             name="execute_register_retiming",
-            description="""Insert pipeline registers on deep combinational chains to reduce critical path delay.
+            description="""[FORBIDDEN] This tool inserts pipeline registers (retiming). Retiming changes register
+pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
 
-MUTATING: creates new FF cells, modifies net topology, writes checkpoint file.
-Uses RapidWright ECOTools to insert FFs inline on specific critical paths.
-Targeted approach - only inserts on identified segments, safer than Vivado global retiming.
-
-After this, call vivado_open_checkpoint, vivado_route_design,
-vivado_report_timing_summary to verify timing.
-
-LIMITATIONS: Not suitable for paths crossing clock domain boundaries.
-Max 5 FF insertions per call (safety cap).
-If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint.""",
+Previously: Insert pipeline registers on deep combinational chains to reduce critical path delay.
+This tool is now hard-blocked at the handler level.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1317,27 +1308,11 @@ If WNS regresses > 0.05ns after reroute, rollback to pre-retiming checkpoint."""
         ),
         Tool(
             name="smart_retiming",
-            description="""Smart register retiming with incremental verification and auto-rollback.
+            description="""[FORBIDDEN] This tool performs smart register retiming. Retiming changes register
+pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest.
 
-Scores and prioritizes retiming candidates (by chain depth × |slack| / ln(fanout+1)),
-inserts pipeline FFs one at a time, verifies each with RapidWright timing estimation
-(~2.5s), and automatically rolls back degradations.
-
-MUTATING: creates new FF cells, modifies net topology, writes checkpoint files.
-After completion, post_actions include Vivado steps for final sign-off.
-
-ADVANTAGE over execute_register_retiming: verifies each insertion incrementally,
-auto-rolls back degradations, scores and deduplicates candidates.
-
-Trigger: WNS stuck, critical paths have deep combinational chains (>2 LUTs)
-between pipeline registers, FF>0 required.
-
-	⚠️ DESIGN CONSISTENCY WARNING:
-	This tool MODIFIES the design (creates new FFs, changes net topology).
-	After using this tool, you MUST:
-	1. Run vivado_validate_timing to verify timing
-	2. Run rapidwright_compare_designs to verify structural consistency
-	3. Verify functional equivalence before submission""",
+Previously: Smart register retiming with incremental verification and auto-rollback.
+This tool is now hard-blocked at the handler level.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1803,41 +1778,16 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 )
 
         elif name == "analyze_register_retiming":
-            if "critical_paths" not in arguments:
-                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
-            else:
-                result = rw.analyze_register_retiming(
-                    critical_paths=arguments["critical_paths"],
-                    delay_threshold=arguments.get("delay_threshold", 0.5),
-                    min_chain_depth=arguments.get("min_chain_depth", 2),
-                )
+            # FORBIDDEN: retiming changes pipeline latency, breaks cycle-exact equivalence
+            result = {"error": "FORBIDDEN: analyze_register_retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest."}
 
         elif name == "execute_register_retiming":
-            if "retiming_candidates" not in arguments:
-                result = {"error": "Missing required parameter: retiming_candidates. Provide candidates from analyze_register_retiming."}
-            else:
-                result = rw.execute_register_retiming(
-                    retiming_candidates=arguments["retiming_candidates"],
-                    max_retiming_ops=arguments.get("max_retiming_ops", 5),
-                    temp_dir=arguments.get("temp_dir", "temp"),
-                    checkpoint_prefix=arguments.get("checkpoint_prefix", "register_retime"),
-                )
+            # FORBIDDEN: retiming changes pipeline latency, breaks cycle-exact equivalence
+            result = {"error": "FORBIDDEN: execute_register_retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest."}
 
         elif name == "smart_retiming":
-            if "critical_paths" not in arguments:
-                result = {"error": "Missing required parameter: critical_paths. Provide path data from extract_critical_path_pins."}
-            else:
-                result = rw.smart_retiming(
-                    critical_paths=arguments["critical_paths"],
-                    max_ops=arguments.get("max_ops", 5),
-                    min_chain_depth=arguments.get("min_chain_depth", 2),
-                    wns_threshold=arguments.get("wns_threshold", -0.3),
-                    verify_each=arguments.get("verify_each", True),
-                    auto_rollback=arguments.get("auto_rollback", True),
-                    temp_dir=arguments.get("temp_dir", "temp"),
-                    checkpoint_prefix=arguments.get("checkpoint_prefix", "smart_retime"),
-                    max_fanout_for_insertion=arguments.get("max_fanout_for_insertion", 50),
-                )
+            # FORBIDDEN: retiming changes pipeline latency, breaks cycle-exact equivalence
+            result = {"error": "FORBIDDEN: smart_retiming changes register pipeline latency and will FAIL cycle-exact equivalence validation. DO NOT USE in this contest."}
 
         elif name == "analyze_net_swapping":
             result = rw.analyze_net_swapping(

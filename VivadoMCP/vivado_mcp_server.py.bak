@@ -134,42 +134,11 @@ def _is_truthy(val) -> bool:
     return False
 
 
-def _safe_float(value: str) -> float | None:
-    """Safely parse float, returning None on failure."""
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def _safe_int(value: str) -> int | None:
-    """Safely parse int, returning None on failure."""
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return None
-
-
 def _parse_timing_summary(report: str) -> dict:
-    """Extract WNS, TNS, WHS, THS, TPWS, and failing endpoints from report_timing_summary output.
-
-    Uses column-index based parsing: locates the header line by 'WNS(ns)',
-    determines column positions from header tokens, then reads the first data
-    line using those positions. This is robust against different Vivado output
-    formats and column ordering.
-
-    Returns dict with all fields optional (None if parsing fails):
-    - wns / tns / whs / ths / tpws: float or None
-    - failing_endpoints / hold_failing_endpoints: int or None
-    """
-    result: dict = {
-        "wns": None, "tns": None, "failing_endpoints": None,
-        "whs": None, "ths": None, "hold_failing_endpoints": None,
-        "tpws": None,
-    }
+    """Extract WNS, TNS, and failing endpoints from report_timing_summary output."""
+    result: dict = {"wns": None, "tns": None, "failing_endpoints": None}
     lines = report.split('\n')
 
-    # Locate header line containing column names
     header_idx = -1
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -189,73 +158,21 @@ def _parse_timing_summary(report: str) -> dict:
     if header_idx == -1:
         return result
 
-    # Parse header tokens to build column index map
-    header_tokens = lines[header_idx].split()
-    col_indices: dict[str, int] = {}
-    for field in ("WNS", "TNS", "WHS", "THS", "TPWS"):
-        for idx, tok in enumerate(header_tokens):
-            # Match field prefix (e.g. "WNS(ns)" or "Worst...WNS")
-            if field in tok.upper():
-                # For failing_endpoints count, it's always the column after TNS
-                if field == "TNS":
-                    # The "Failing Endpoints" column used to be named differently
-                    pass
-                col_indices[field] = idx
-                break
-
-    # Find first data line (non-empty, non-separator after header)
-    data_line = None
-    for line in lines[header_idx + 1:]:
-        stripped = line.strip()
+    for data_line in lines[header_idx + 1:]:
+        stripped = data_line.strip()
         if not stripped or stripped.startswith('---') or stripped.startswith('==='):
             continue
         if any(x in stripped for x in ['Command:', 'INFO:', 'WARNING:', 'ERROR:', 'Attempting', 'Got license', 'Common 17-']):
             continue
-        data_line = stripped
-        break
-
-    if data_line is None:
-        return result
-
-    parts = data_line.split()
-    if len(parts) < 2:
-        return result
-
-    # Assign values by column index (if index exists and data is available)
-    wns_idx = col_indices.get("WNS")
-    tns_idx = col_indices.get("TNS")
-    whs_idx = col_indices.get("WHS")
-    ths_idx = col_indices.get("THS")
-    tpws_idx = col_indices.get("TPWS")
-
-    if wns_idx is not None and len(parts) > wns_idx:
-        result["wns"] = _safe_float(parts[wns_idx])
-    if tns_idx is not None and len(parts) > tns_idx:
-        result["tns"] = _safe_float(parts[tns_idx])
-        # failing_endpoints is the column right after TNS
-        if len(parts) > tns_idx + 1:
-            result["failing_endpoints"] = _safe_int(parts[tns_idx + 1])
-    if whs_idx is not None and len(parts) > whs_idx:
-        result["whs"] = _safe_float(parts[whs_idx])
-    if ths_idx is not None and len(parts) > ths_idx:
-        result["ths"] = _safe_float(parts[ths_idx])
-        # hold_failing_endpoints is the column right after THS
-        if len(parts) > ths_idx + 1:
-            result["hold_failing_endpoints"] = _safe_int(parts[ths_idx + 1])
-    if tpws_idx is not None and len(parts) > tpws_idx:
-        result["tpws"] = _safe_float(parts[tpws_idx])
-
-    # Fallback: if WHS/THS detection was missed, try falling through with
-    # a regex on the entire report
-    if result["whs"] is None:
-        whs_match = re.search(r'WHS(?:\(ns\))?:\s*(-?[\d.]+)', report)
-        if whs_match:
-            result["whs"] = _safe_float(whs_match.group(1))
-    if result["ths"] is None:
-        ths_match = re.search(r'THS(?:\(ns\))?:\s*(-?[\d.]+)', report)
-        if ths_match:
-            result["ths"] = _safe_float(ths_match.group(1))
-
+        parts = stripped.split()
+        if len(parts) >= 3:
+            try:
+                result["wns"] = float(parts[0])
+                result["tns"] = float(parts[1])
+                result["failing_endpoints"] = int(parts[2])
+                break
+            except (ValueError, IndexError):
+                continue
     return result
 
 
@@ -1785,7 +1702,7 @@ async def list_tools():
         ),
         Tool(
             name="place_design",
-            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing. Full whitelist: Default, Explore, ExtraTimingOpt, WLBlockPlacement, ExtraPostPlacementOpt, AltSpreadLogic_high/_medium/_low, SpreadLogic_high/_medium/_low, EarlyBlockPlacement, LateBlockPlacement, NetDelay_high/_medium/_low, SSI_SpreadLogic_high/_low, Quick, RuntimeOptimized, FlowQuick, FlowRuntimeOptimized, Congestion_Default/_SpreadLogic_high/_medium/_low, Area_Explore/_ExploreWithRemap/_ExploreSequentialArea, Performance_Explore/_ExplorePostRoute/_ExtraTimingOpt/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement. NOTE: Performance_Retiming and AddRetime are EXCLUDED (breaks equivalence).",
+            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing. Safe directives: Default, Explore, ExtraTimingOpt, WLBlockPlacement, ExtraPostPlacementOpt, AltSpreadLogic, SpreadLogic, EarlyBlockPlacement, LateBlockPlacement, NetDelay, SSI_SpreadLogic, Quick, RuntimeOptimized, FlowQuick, FlowRuntimeOptimized, Congestion_*, Area_Explore*, Performance_* (excluding retiming variants).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1802,7 +1719,7 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, Congestion_Explore/_NetDelay_high/_medium/_low, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives).",
+            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets. Safe directives: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_*, Congestion_*, SSI_Explore/Quick, Area_Default/Explore, AlternateRoutability.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2126,8 +2043,8 @@ async def list_tools():
                         - AggressiveExplore: Similar to Explore but with more aggressive algorithms; includes SLR crossing optimization that may temporarily degrade WNS
                         - AlternateReplication: Use different algorithms for performing critical cell replication
                         - AggressiveFanoutOpt: Use different algorithms for fanout-related optimizations with more aggressive goals
-                        - AlternateFlowWithRetiming: [BLOCKED - breaks functional equivalence] DO NOT USE. Use AlternateReplication instead.
-                        - AddRetime: [BLOCKED - breaks functional equivalence] DO NOT USE. Register retiming changes pipeline latency.
+                        - AlternateFlowWithRetiming: Perform more aggressive replication and DSP/BRAM optimization with register retiming enabled
+                        - AddRetime: Performs the default phys_opt_design flow and adds register retiming
                         - RuntimeOptimized: Reduced set of optimizations (fanout_opt, critical_cell_opt, placement_opt, bram_enable_opt) for shortest runtime
                         - RQS: Select directive from report_qor_suggestions strategy (requires RQS file)"""
                     },
@@ -2149,15 +2066,15 @@ async def list_tools():
                     },
                     "insert_negative_edge_ffs": {
                         "type": "boolean",
-                        "description": "[BLOCKED - breaks functional equivalence] Insert negative edge triggered FFs for hold optimization. DO NOT USE."
+                        "description": "Insert negative edge triggered FFs for hold optimization"
                     },
                     "restruct_opt": {
                         "type": "boolean",
-                        "description": "[BLOCKED - breaks functional equivalence] Advanced LUT restructure optimization to reduce logic levels and delay on critical signals. DO NOT USE."
+                        "description": "Advanced LUT restructure optimization to reduce logic levels and delay on critical signals"
                     },
                     "interconnect_retime": {
                         "type": "boolean",
-                        "description": "[BLOCKED - breaks functional equivalence] Perform interconnect retiming by moving/replicating FF or LUT-FF pairs (Versal only). DO NOT USE."
+                        "description": "Perform interconnect retiming by moving/replicating FF or LUT-FF pairs (Versal only)"
                     },
                     "lut_opt": {
                         "type": "boolean",
@@ -2209,7 +2126,7 @@ async def list_tools():
                     },
                     "retime": {
                         "type": "boolean",
-                        "description": "[BLOCKED - breaks functional equivalence] Re-time registers forward through combinational logic to balance path delays. DO NOT USE."
+                        "description": "Re-time registers forward through combinational logic to balance path delays (property-driven)"
                     },
                     "force_replication_on_nets": {
                         "type": "string",
@@ -2249,10 +2166,9 @@ async def list_tools():
         Tool(
             name="physopt_and_route",
             description="""Run phys_opt_design + route_design as an atomic combined operation.
-Captures pre- and post-optimization timing (WNS/TNS/WHS/THS). Use this tool
-for PhysOpt-based tuning. Returns JSON with pre/post timing
-summaries. Only safe directives are allowed; retiming directives blocked.
-Retiming (AddRetime/AlternateFlowWithRetiming) causes functional errors.""",
+Captures pre- and post-optimization timing (WNS/TNS). Use this tool for the
+PhysOpt+RegisterRetiming combined strategy. Returns JSON with pre/post timing
+summaries. Only safe directives are allowed; retiming directives blocked.""",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2280,26 +2196,20 @@ The optimizer framework auto-chains place_design -> route_design -> report_timin
 after this tool via SKILL_CHAIN_ACTIONS.
 
 Directives:
-  - Default: Default optimization
   - Explore (default): Balanced optimization for UltraScale+
-  - ExploreWithAreaDuplication: Area-focused optimization
+  - ExploreArea: Area-focused optimization
   - ExploreSequentialArea: Area-focused with sequential awareness
-  - NoBramOptimization: Disable BRAM optimization
-  - NoDspOptimization: Disable DSP optimization
   - RuntimeOptimized: Fast optimization for large designs
-  - DataSpreadMem: Optimize memory data spreading
   - AddRemap: Aggressive LUT remapping (may reduce logic levels)
 
-BLOCKED directive (causes functional errors - DO NOT use):
-  - AddRetime: [BLOCKED] Retiming changes pipeline structure, breaks functional equivalence
-
-All directives in the whitelist above are safe for functional correctness.""",
+opt_design has NO retiming options -- it is fully safe for functional correctness.
+Unlike phys_opt_design, there are no blocked directives.""",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "enum": ["Default", "Explore", "ExploreWithAreaDuplication", "ExploreSequentialArea", "NoBramOptimization", "NoDspOptimization", "RuntimeOptimized", "DataSpreadMem", "AddRemap"],
+                        "enum": ["Default", "Explore", "ExploreArea", "ExploreSequentialArea", "RuntimeOptimized", "AddRemap"],
                         "default": "Explore",
                         "description": "opt_design directive. Explore: balanced. AddRemap: aggressive LUT remapping."
                     },
@@ -2421,30 +2331,14 @@ async def call_tool(name: str, arguments: dict):
             # Run a quick command first to flush any leftover output from previous commands
             run_tcl_command("puts {route_status_start}", timeout=5)
             output = run_tcl_command("report_route_status -return_string", timeout=timeout)
-            # Parse basic status fields into structured JSON
-            is_placed = "Placed" in output if output else False
-            is_routed = "Routed" in output if output else False
-            result = {
-                "is_placed": is_placed,
-                "is_routed": is_routed,
-                "route_errors": 0,
-                "unrouted_nets": 0,
-                "raw_report": output[:2000] if output else "",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
-
+            return [TextContent(type="text", text=output)]
+        
         elif name == "report_timing_summary":
             timeout = arguments.get("timeout", 300)
             # Run a quick command first to flush any leftover output from previous commands
             run_tcl_command("puts {timing_summary_start}", timeout=5)
             output = run_tcl_command("report_timing_summary -return_string", timeout=timeout)
-            parsed = _parse_timing_summary(output)
-            # Return JSON with key fields + raw excerpt for debugging
-            result = {
-                **parsed,
-                "raw_report": output[:2000] if output else "",
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return [TextContent(type="text", text=output)]
         
         elif name == "get_wns":
             timeout = arguments.get("timeout", 60)
@@ -2618,14 +2512,7 @@ async def call_tool(name: str, arguments: dict):
             timeout = arguments.get("timeout", 600)
 
             output = get_critical_high_fanout_nets(num_paths, min_fanout, exclude_clocks, timeout)
-            # Return JSON wrapper with structured metadata + raw text for LLM parsing
-            result = {
-                "num_paths_analyzed": num_paths,
-                "min_fanout_threshold": min_fanout,
-                "clock_nets_excluded": exclude_clocks,
-                "raw_output": output,
-            }
-            return [TextContent(type="text", text=json.dumps(result, indent=2))]
+            return [TextContent(type="text", text=output)]
         
         elif name == "set_incremental_checkpoint":
             dcp_path = arguments["dcp_path"]
@@ -2964,13 +2851,8 @@ async def call_tool(name: str, arguments: dict):
             response = {
                 "wns": parsed.get("wns"),
                 "tns": parsed.get("tns"),
-                "whs": parsed.get("whs"),
-                "ths": parsed.get("ths"),
-                "tpws": parsed.get("tpws"),
                 "failing_endpoints": parsed.get("failing_endpoints"),
-                "hold_failing_endpoints": parsed.get("hold_failing_endpoints"),
                 "timing_met": parsed.get("wns") is not None and parsed.get("wns") >= 0,
-                "hold_met": parsed.get("whs") is None or parsed.get("whs", 0) >= 0,
                 "raw_report": timing_report[:2000] if timing_report else "",
             }
             return [TextContent(type="text", text=json.dumps(response, indent=2))]
