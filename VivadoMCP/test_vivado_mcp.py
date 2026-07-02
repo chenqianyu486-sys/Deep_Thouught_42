@@ -237,7 +237,8 @@ async def test_place_design(session: ClientSession) -> bool:
             "timeout": 3600
         })
         print(f"Result (first 500 chars):\n{result[:500]}...")
-        if "ERROR" in result.upper() and "place_design: Running" not in result:
+        # Detect real errors: JSON error wrapper OR Vivado ERROR: line at start-of-line
+        if result.startswith('{"error"') or re.search(r'(?:^|\n)ERROR: \[', result):
             print(f"[FAIL] Placement failed")
             return False
         print(f"[OK] Placement completed")
@@ -260,7 +261,8 @@ async def test_route_design(session: ClientSession) -> bool:
             "timeout": 21600  # 6 hours
         })
         print(f"Result (first 500 chars):\n{result[:500]}...")
-        if "ERROR" in result.upper() and "route_design: Routing" not in result:
+        # Detect real errors: JSON error wrapper OR Vivado ERROR: line at start-of-line
+        if result.startswith('{"error"') or re.search(r'(?:^|\n)ERROR: \[', result):
             print(f"[FAIL] Routing failed")
             return False
         print(f"[OK] Routing completed")
