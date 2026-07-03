@@ -55,6 +55,30 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     # the whole analysis phase, leaving the log header's phase/strategy blank).
     state.strategy.current_phase = "ANALYZE"
 
+    # ── Auto-refresh stale timing data on ANALYZE entry ──
+    if state.timing.field_freshness.get("timing_summary") == "stale":
+        try:
+            _refresh = await call_tool_fn(
+                tool_name="vivado_report_timing_summary", arguments={},
+                rapidwright_session=deps.rapidwright_session,
+                vivado_session=deps.vivado_session,
+                raw_tool_outputs=state.context.raw_tool_outputs,
+                iteration=state.iteration.current,
+                tool_round=0,
+                tool_cache=state.context.tool_cache,
+                design_size_factor=state.timing.design_size_factor,
+                entity_registry=state.entity_registry,
+            )
+            _parsed = parse_timing_summary(_refresh)
+            if _parsed and "wns" in _parsed:
+                state.timing.latest_wns = _parsed["wns"]
+                state.timing.latest_tns = _parsed.get("tns")
+                state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
+                state.timing.field_freshness["timing_summary"] = "fresh"
+                logger.info(f"[ANALYZE] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
+        except Exception as _e:
+            logger.warning(f"[ANALYZE] Auto-refresh failed: {_e}")
+
     while True:
         tool_round += 1
         state.iteration.tool_round = tool_round

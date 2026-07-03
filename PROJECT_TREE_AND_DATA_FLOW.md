@@ -106,12 +106,14 @@ llm_tool_loop_node (调度器)
   │  仅分析工具(~17个，含探索性执行工具)   极简工具(~4个)
   │  首轮最多8轮(Dashboard已预填)  最多6轮
   │  后续迭代最多12轮
+  │  [2026-07] 阶段入口自动刷新 stale WNS (vivado_report_timing_summary)
   │
   ├── SELECT_STRATEGY ─→ EXECUTE
   │  Dashboard+Handoff决策  极简工具(~4个,仅report_step_state+raw_tool_output)
   │  raw_tool_outputs侧缓冲(键=iteration+phase+round+tool_name)    可见ANALYZE/EVALUATE阶段原始工具结果
   │  可查询                              默认最多6轮；仅纯数据描述，无策略推荐引导
   │  Dashboard含9个模块(新增 design_structure+recent_analysis)
+  │  [2026-07] 阶段入口自动刷新 stale WNS；FORMAT_GUARD 含策略-工具映射表
   │
   ├── EXECUTE ─────────→ EVALUATE
   │  链式动作+事后评估    评估工具(~7个, 不含vivado_get_wns)
@@ -121,6 +123,7 @@ llm_tool_loop_node (调度器)
   │  策略短冷却            无提升/预检拒绝后，本迭代内禁止重复
   │  设计一致性验证工具(4个)  LLM可自主验证设计状态
   │  独立RapidWright工具(19个)  LLM可自主选择工具组合
+  │  [2026-07] 指令黑名单回退；检查点重载跳过优化
   │
   └── EVALUATE → (exit) 或 SELECT_STRATEGY 或 ANALYZE
       DONE/WNS>=0 → ITERATION_END
@@ -166,8 +169,8 @@ _prepare_api_messages():
 > **分层上下文注入**（STATIC > PINNED > FORMAT_GUARD > DYNAMIC > EPHEMERAL，详见 [architecture.md §11](architecture.md)）：
 > - **STATIC**（L0）：`SYSTEM_PROMPT.TXT`，启动时注入，作为首个 system message 经 `extra_body[system]` 传入 API（provider 可缓存）。
 > - **PINNED**（L2）：`[CELL REGISTRY]` 由 `state.entity_registry` 每轮重建，不进入 MessageStore，天然抗压缩；附带 `stale`/`fresh` 新鲜度标记与 `iter=N` 版本号。为 LLM 提供 canonical cell 名唯一权威来源。
-> - **FORMAT_GUARD**（L1）：每 phase 按 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，由 `inject_merged_dashboard()` 注入为 system message（幂等，marker 去重）。包含输出格式、Cell Name Contract、设计一致性验证流程、禁止事项、phase-gated tool 可用性。
-> - **DYNAMIC**（L3）：7 模块 StateSpace Dashboard，作为最后一条 user 消息注入。非 EXECUTE/EVALUATE 阶段抑制 `current_strategy` 残留；时钟名从 `critical_paths[0].clock.source_clock` 提取。
+> - **FORMAT_GUARD**（L1）：每 phase 按 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，由 `inject_merged_dashboard()` 注入为 system message（幂等，marker 去重）。包含输出格式、Cell Name Contract、设计一致性验证流程、**STALE DATA HANDLING 指令（2026-07 新增）**、禁止事项、phase-gated tool 可用性。SELECT_STRATEGY 阶段还额外注入策略-工具映射表（`_STRATEGY_MAPPING_LINES`，2026-07 恢复）。
+> - **DYNAMIC**（L3）：7 模块 StateSpace Dashboard + **`strategy_outcomes:` 策略结果表（2026-07 新增）**，作为最后一条 user 消息注入。非 EXECUTE/EVALUATE 阶段抑制 `current_strategy` 残留；时钟名从 `critical_paths[0].clock.source_clock` 提取。
 > - **EPHEMERAL**：tool result summaries、handoff prompts、budget messages。
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §1.1-§1.2](architecture.md)。
 

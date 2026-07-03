@@ -156,6 +156,14 @@ STRATEGY_DEFAULT_DIRECTIVES: dict[str, tuple[str | None, str | None]] = {
     "rapidwright_flatten_lut_cascade": ("ExtraTimingOpt", "NoTimingRelaxation"),
 }
 
+# Directives known to fail due to licensing or tool limitations.
+# When an LLM provides one of these, the auto-chain silently falls back to
+# the strategy's default directive instead of passing the failing directive
+# through to Vivado, saving a full P&R cycle.
+KNOWN_BROKEN_DIRECTIVES: frozenset[str] = frozenset({
+    "Performance_ExtraTimingOpt",  # Requires Extra Timing license not in contest env
+})
+
 NETLIST_MODIFYING_STRATEGIES = frozenset({
     "Fanout", "LUTCascade", "CellReplication", "NetSwap",
     "OptDesign", "LogicResynthesis", "CombinationalRebalance",

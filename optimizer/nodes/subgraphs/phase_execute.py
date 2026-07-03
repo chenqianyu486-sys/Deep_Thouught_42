@@ -24,7 +24,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -190,14 +190,23 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
             f"reloading iteration start DCP: {iter_ckpt}"
         )
 
-    # 1. Reload baseline DCP into Vivado
-    await call_tool_fn(
-        "vivado_open_checkpoint",
-        {"dcp_path": str(iter_ckpt.resolve())},
-        deps.rapidwright_session,
-        deps.vivado_session,
-        design_size_factor=state.timing.design_size_factor,
-    )
+    # ── Skip reopen if Vivado already has this checkpoint loaded ──
+    _resolved_path = str(iter_ckpt.resolve())
+    if state.control.current_dcp_path and str(state.control.current_dcp_path) == _resolved_path:
+        logger.info(
+            f"[EXECUTE] Vivado already has baseline DCP loaded ({_resolved_path}) — "
+            f"skipping reopen (saves ~27s)"
+        )
+    else:
+        # 1. Reload baseline DCP into Vivado
+        await call_tool_fn(
+            "vivado_open_checkpoint",
+            {"dcp_path": _resolved_path},
+            deps.rapidwright_session,
+            deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        state.control.current_dcp_path = iter_ckpt.resolve()
 
     # 2. Refresh timing summary to get fresh baseline WNS
     timing_result = await call_tool_fn(
@@ -1822,6 +1831,31 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     args["directive"] = place_def
                 elif target_tool == "vivado_route_design" and route_def:
                     args["directive"] = route_def
+
+        # ── Directive blacklist check ──────────────────────────────
+        # If the resolved directive is known-broken (e.g. licensing issue),
+        # silently fall back to the strategy's default directive from
+        # STRATEGY_DEFAULT_DIRECTIVES, saving ~17s per failed attempt.
+        if "directive" in args and args["directive"] in KNOWN_BROKEN_DIRECTIVES:
+            _fallback = STRATEGY_DEFAULT_DIRECTIVES.get(tool_name)
+            _replacement = None
+            if target_tool == "vivado_place_design" and _fallback and _fallback[0]:
+                _replacement = _fallback[0]
+            elif target_tool == "vivado_route_design" and _fallback and _fallback[1]:
+                _replacement = _fallback[1]
+            if _replacement:
+                logger.warning(
+                    f"[DIRECTIVE] '{args['directive']}' is blacklisted (known licensing issue). "
+                    f"Falling back to '{_replacement}' for {tool_name}"
+                )
+                args["directive"] = _replacement
+            else:
+                # Remove directive entirely — let Vivado use its default
+                logger.warning(
+                    f"[DIRECTIVE] '{args['directive']}' is blacklisted, "
+                    f"no fallback found — removing directive"
+                )
+                del args["directive"]
 
         # Handle route reuse: keep -reuse only if design has been routed
         if args.pop("reuse", False):

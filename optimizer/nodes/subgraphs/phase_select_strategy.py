@@ -18,6 +18,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
+from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
@@ -53,12 +54,37 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         logger.info("[SELECT_STRATEGY] Override suppressed: PBLOCK is currently blocked")
     elif _strategy_was_already_selected and state.iteration.current <= 1:
         logger.info("[SELECT_STRATEGY] Override suppressed: strategy already selected this iteration")
+    state.strategy.current_phase = "SELECT_STRATEGY"
     max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.SELECT_STRATEGY, 6)
     tool_round = 0
     state.context.consecutive_empty_responses = 0
     tools_called: list[str] = []
     llm_summary = ""
     assistant_content = ""
+
+    # ── Auto-refresh stale timing data on SELECT_STRATEGY entry ──
+    if state.timing.field_freshness.get("timing_summary") == "stale":
+        try:
+            _refresh = await call_tool_fn(
+                tool_name="vivado_report_timing_summary", arguments={},
+                rapidwright_session=deps.rapidwright_session,
+                vivado_session=deps.vivado_session,
+                raw_tool_outputs=state.context.raw_tool_outputs,
+                iteration=state.iteration.current,
+                tool_round=0,
+                tool_cache=state.context.tool_cache,
+                design_size_factor=state.timing.design_size_factor,
+                entity_registry=state.entity_registry,
+            )
+            _parsed = parse_timing_summary(_refresh)
+            if _parsed and "wns" in _parsed:
+                state.timing.latest_wns = _parsed["wns"]
+                state.timing.latest_tns = _parsed.get("tns")
+                state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
+                state.timing.field_freshness["timing_summary"] = "fresh"
+                logger.info(f"[SELECT_STRATEGY] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
+        except Exception as _e:
+            logger.warning(f"[SELECT_STRATEGY] Auto-refresh failed: {_e}")
 
     while True:
         tool_round += 1

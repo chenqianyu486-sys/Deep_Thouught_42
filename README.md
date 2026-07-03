@@ -85,13 +85,15 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **数据与上下文层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 23 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells` |
+| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 23 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells`；**FORMAT_GUARD 增加 `STALE DATA HANDLING` 章节明确指示 LLM 过期数据必须先刷新再做决策（2026-07）；ANALYZE/SELECT_STRATEGY 阶段入口自动调用 `vivado_report_timing_summary` 刷新过期 WNS（2026-07）** |
 | 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |
 | 10 | 上下文工程：弱引导 | 系统提示词和 FORMAT_GUARD 描述问题和约束，而非处方解决方案。LLM 保留自主决策权 |
 | 10b | 上下文工程：分层上下文管理 | 显式四层注入（STATIC > PINNED > DYNAMIC > EPHEMERAL）；CellNameRegistry 作为 Pinned 层每轮重建注入（绕过压缩），消除 LLM 在 EXECUTE 阶段"记忆重建"cell 名导致的幻觉 |
 | 10c | 上下文工程：实体注册表 SSOT | `EntityRegistry`（`state.entity_registry`）为 canonical cell 名唯一权威来源；解析/search_cells 同步写入，设计修改后 `mark_stale()`，rollback 后 `clear()`；`tool_router` 在 LLM→MCP 边界校验（设计修改工具强制严格模式，拒绝注册表外名） |
+| 10d | 上下文工程：策略结果表（2026-07） | Dashboard 末尾新增 `strategy_outcomes:` YAML 区块，分 `successful`（从 `optimization_history` 读取，含 WNS delta）和 `failed`（从 `failed_strategies` 读取，含阻塞原因和剩余轮数）两个子节。每次 LLM 调用可见，消除策略重复选择 |
+| 10e | 上下文工程：策略-工具映射恢复（2026-07） | 在 SELECT_STRATEGY 阶段的 FORMAT_GUARD 中注入 `_STRATEGY_MAPPING_LINES`，让 LLM 在选择策略前就能验证执行工具是否存在，避免选择 CellReplication 等无对应工具的策略 |
 
 **验证与安全层面**:
 | # | 原则 | 实现方式 |
@@ -103,6 +105,8 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 15 | Unplace 自动回滚 | 追踪 `place_design -unplace`，阶段退出时若未恢复则从 checkpoint 回滚 |
 | 16 | Vivado 执行工具错误检测 | MCP 服务器检测 `ERROR: [` 文本，返回 JSON `{"error": "..."}` |
 | 17 | retiming 安全守卫 | 阻止 `AlternateFlowWithRetiming`、`AddRetime` 等指令（双层防护） |
+| 17b | 指令黑名单 + 自动回退（2026-07） | `KNOWN_BROKEN_DIRECTIVES` 列出因许可问题已知失败的指令（如 `Performance_ExtraTimingOpt`）；auto-chain 中检测到黑名单指令时自动回退到策略默认指令，避免 ~17 秒的失败 P&R 循环 |
+| 17c | 检查点重载优化（2026-07） | `_reload_baseline_on_switch()` 在调用 `vivado_open_checkpoint` 前检查 `current_dcp_path` 是否已匹配目标检查点；若已加载则跳过重新打开，节省 ~27 秒/次 |
 
 **策略与迭代层面**:
 | # | 原则 | 实现方式 |

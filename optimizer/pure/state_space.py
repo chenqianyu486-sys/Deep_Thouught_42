@@ -932,6 +932,50 @@ def format_state_space_for_llm(
         lines.append(f"  evaluation: {evaluation_result}")
     lines.append("")
 
+    # ── Strategy Outcome Table (structured history) ──────────────────
+    # Structured history of all tried strategies with WNS deltas,
+    # shown every turn so the LLM can see what was already attempted.
+    if state:
+        lines.append("strategy_outcomes:")
+        lines.append("  successful:")
+        opt_history = state.context.optimization_history
+        if opt_history:
+            for rec in opt_history:
+                delta = rec.wns_after - rec.wns_before
+                lines.append(
+                    f"    - strategy: {rec.strategy}"
+                    f"\n      iteration: {rec.iteration}"
+                    f"\n      wns_before: {rec.wns_before:.3f}"
+                    f"\n      wns_after: {rec.wns_after:.3f}"
+                    f"\n      delta: {delta:+.3f}"
+                )
+        else:
+            lines.append("      (none yet)")
+        lines.append("  failed:")
+        failed = state.context.failed_strategies
+        if failed:
+            # Show only the most recent entry per strategy
+            seen = {}
+            for fs in failed:
+                s = fs.strategy if hasattr(fs, 'strategy') else str(fs)
+                it = fs.iteration if hasattr(fs, 'iteration') else 0
+                if s not in seen or it > seen[s].iteration:
+                    seen[s] = fs
+            for strategy, fs in sorted(seen.items()):
+                reason = fs.reason if hasattr(fs, 'reason') else "unknown"
+                blocked_info = ""
+                if hasattr(fs, 'blocked_until_iter') and fs.blocked_until_iter > state.iteration.current:
+                    blocked_info = f" (blocked until iter {fs.blocked_until_iter})"
+                it = fs.iteration if hasattr(fs, 'iteration') else 0
+                lines.append(
+                    f"    - strategy: {strategy}"
+                    f"\n      iteration: {it}"
+                    f"\n      reason: {reason}{blocked_info}"
+                )
+        else:
+            lines.append("      (none)")
+    lines.append("")
+
     # ── Applied optimizations (persisted in best_checkpoint) ──────────
     if state:
         opt_history = state.context.optimization_history

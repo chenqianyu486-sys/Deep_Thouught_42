@@ -82,6 +82,18 @@ DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
     - Only directional comparison (better/worse) is reliable
     - Always verify with Vivado for final decisions
 
+STALE DATA HANDLING — CRITICAL:
+  Dashboard fields marked `[stale]` mean the design was modified after that
+  data was collected — they are NOT current. Before any timing-related decision:
+  1. WNS/TNS marked `[stale]` MUST be refreshed via vivado_report_timing_summary
+     before evaluating improvement or making strategy decisions.
+  2. Critical paths marked `[stale]` MUST be re-extracted via
+     vivado_extract_critical_path_cells before any cell-targeting operation.
+  3. `[fresh]` means the data was collected or refreshed in the current context.
+     Trust `[fresh]` data for your decisions.
+  4. Ignoring stale data leads to wrong strategy decisions. When uncertain,
+     refresh before deciding.
+
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
@@ -101,7 +113,14 @@ _PHASE_GUIDES: dict[str, str] = {
     LoopPhase.SELECT_STRATEGY.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
   - SELECT_STRATEGY: pick exactly one strategy_name via report_step_state.
     Execution tools are NOT available here. Review the strategy_catalog in
-    the Dashboard and the handoff findings, then signal your choice.""",
+    the Dashboard and the handoff findings, then signal your choice.
+
+Strategy-to-tool mapping (for your reference when choosing):
+{_STRATEGY_MAPPING_LINES}
+
+NOTE: A strategy listed here has a corresponding execution tool in the
+EXECUTE phase. CellReplication only becomes available during EXECUTE after
+you have selected it and the phase transitions.""",
 
     LoopPhase.EXECUTE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
   - EXECUTE_STRATEGY: only the selected strategy's primary tool(s) are exposed.

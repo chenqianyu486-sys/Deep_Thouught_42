@@ -523,6 +523,12 @@ state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
 
 当 `best_checkpoint_path` 不存在或已被删除时，fallback 到迭代开始 DCP，确保策略切换加载的基线始终包含当前迭代的所有修改。
 
+### 4.15 检查点重载跳过优化（2026-07）
+
+`_reload_baseline_on_switch()` 中每次策略切换都会调用 `vivado_open_checkpoint`（约 27 秒）。对于连续执行多个策略的迭代，同一最佳检查点被反复重载。
+
+优化：在调用 `vivado_open_checkpoint` 前检查 `state.control.current_dcp_path` 是否已匹配目标检查点路径。若已匹配（`str(state.control.current_dcp_path) == str(iter_ckpt.resolve())`），跳过重新加载，仅刷新时序报告。`current_dcp_path` 在 `vivado_open_checkpoint` 成功执行后更新，auto-chain 中同样更新（`phase_execute.py` L1869-1871）。每次跳过节省约 27 秒。
+
 ---
 
 ## 5. 工具输出摘要化 + 历史自动裁剪
@@ -707,6 +713,13 @@ ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelay
 
 **call_tool 入口守卫**: 检查 directive 参数和 retime/interconnect_retime 布尔选项。place_design/route_design 指令需在 SAFE_DIRECTIVES 白名单中方可执行。
 
+### 8.1 指令黑名单 + 自动回退（2026-07 新增）
+
+`KNOWN_BROKEN_DIRECTIVES: frozenset[str]`（定义在 `optimizer/pure/constants.py`）记录因许可/环境限制已知失败的指令。当前黑名单：
+- `Performance_ExtraTimingOpt` — 需要 Extra Timing license，竞赛环境不可用
+
+在 `phase_execute.py` 的 `_execute_chain_actions()` 中，指令解析（Tier-1 LLM 提供 + Tier-2 策略默认）后增加黑名单检查：若 `args["directive"]` 在黑名单中，静默回退到 `STRATEGY_DEFAULT_DIRECTIVES` 中对应策略的默认指令，并记录 WARNING 日志。回退优先级：place→`place_def`，route→`route_def`；若无对应回退值则移除 `directive` 参数，让 Vivado 使用默认值。每次回退避免约 17 秒的失败 P&R 循环。
+
 ---
 
 ## 9. 心跳日志系统
@@ -859,6 +872,10 @@ CONSECUTIVE_NO_PROGRESS_LIMIT = 3
 - **P5**：Module 5 时钟名从 `critical_paths[0].clock.source_clock` 提取，不再硬编码 `clk_fpl26contest`。
 - **P6**：Cell Registry 附带 `stale`/`fresh` 标记和 `iter=N` 版本号。
 - **P4**：`compact_tool_summary()` 作为共享函数统一 dashboard/handoff 的 tool result 摘要，优先 JSON 解析。
+- **P8 — STALE DATA HANDLING 指令**：`BASE_FORMAT_GUARD` 新增完整章节，明确指示 LLM：WNS/TNS 标记 `[stale]` 必须先调用 `vivado_report_timing_summary` 刷新再评估；Critical paths 标记 `[stale]` 必须先调用 `vivado_extract_critical_path_cells` 再执行 cell-targeting 操作。
+- **P9 — 阶段入口自动 WNS 刷新**：ANALYZE 和 SELECT_STRATEGY 阶段入口自动检查 `field_freshness["timing_summary"] == "stale"`，若是则自动调用 `vivado_report_timing_summary` 刷新 WNS/TNS/FE 并置为 `fresh`。无需 LLM 介入，消除 50+ 轮连续 stale 数据决策风险。
+- **P10 — Strategy Outcome Table**：Dashboard 末尾新增 `strategy_outcomes:` YAML 区块，含 `successful`（从 `optimization_history` 读取，含 WNS delta）和 `failed`（从 `failed_strategies` 读取，按策略去重显示最新记录）两节。每轮可见，消除策略重复选择。
+- **P11 — 策略-工具映射恢复**：`_STRATEGY_MAPPING_LINES` 从 EXECUTE 独占扩展为 SELECT_STRATEGY 阶段也可见，LLM 选择策略前即可验证工具是否存在。
 
 **Pinned 层（L2）是关键**：LLM 在 EXECUTE 阶段调用 `optimize_cell_placement` 等工具时，不再依赖"几轮前看过的、已被压缩的工具输出"来回忆 cell 名，而是直接看到 Pinned 层注册表提供的规范化名。把"记忆重建"降级为"复制粘贴"，从根上消除 cell 名幻觉。Pinned 层由 `inject_pinned_cell_registry()` 每轮移除并重新插入（幂等，不累积），不进入 MessageStore，天然抗压缩。
 
