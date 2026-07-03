@@ -236,7 +236,7 @@ architecture_overview:
 
 **LLM 防歧义注解**: 所有 N/A 和空列表带机器可读原因——`"N/A(initial_state)"`、`"N/A(no_io_ports)"`、`[]  # no_high_fanout_nets_found`。纯数据无判断标签。每次通过 `build_state_space()` 重建，不进入 MessageStore，同时通过 WebSocket 推送到前端。
 
-**设计状态标注（DesignState 枚举）**: 从 `Design State` 字段解析为 `UNPLACED` / `PLACED` / `ROUTED` 三级，Dashboard 根据状态显示对应粒度的准确性警告。未布线时 Level 1 RW 预检查自动跳过。
+**设计状态标注（DesignState 枚举）**: 从 `Design State` 字段解析为 `UNPLACED` / `PLACED` / `ROUTED` 三级，Dashboard 根据状态显示对应粒度的准确性警告。未布线时 Level 1 RW 预检查自动跳过。解析失败时返回 `None` 并保留上次已知状态（2026-07 修复：避免 `physopt_and_route` 后误判为 UNPLACED、对真实 WNS 误报线负载估计）；`route_design`/`physopt_and_route` 后显式置 `ROUTED`。
 
 ### 3.2.1 新增模块
 

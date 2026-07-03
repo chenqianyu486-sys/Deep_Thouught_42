@@ -8,6 +8,7 @@ _is_valid_wns (L957), _compute_timing_hash (L979).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 
@@ -25,6 +26,32 @@ def parse_timing_summary(timing_report: str) -> dict:
         clock_domains: list of per-clock {clock, wns, tns, failing_endpoints, total_endpoints}
         hold_wns / hold_tns / hold_failing: hold timing from parse_hold_timing()
     """
+    # The Vivado MCP tool wraps report_timing_summary as JSON with pre-parsed
+    # fields (wns/tns/whs/ths/tpws) plus a truncated raw_report excerpt. Use
+    # the MCP's pre-parsed values when available — they come from the full
+    # (untruncated) report and are more reliable than re-parsing the excerpt.
+    try:
+        wrapped = json.loads(timing_report)
+        if isinstance(wrapped, dict) and "wns" in wrapped:
+            wns = wrapped.get("wns")
+            if wns is not None:
+                return {
+                    "wns": wns,
+                    "tns": wrapped.get("tns"),
+                    "failing_endpoints": wrapped.get("failing_endpoints"),
+                    "hold_wns": wrapped.get("whs"),
+                    "hold_tns": wrapped.get("ths"),
+                    "hold_failing": wrapped.get("hold_failing_endpoints"),
+                    "wpws": wrapped.get("tpws"),
+                    "wpws_tns": None,
+                    "wpws_failing": None,
+                    "clock_domains": _parse_clock_domains(wrapped.get("raw_report") or ""),
+                }
+            # MCP parser returned wns=None — fall back to text parsing on raw_report
+            timing_report = wrapped.get("raw_report") or timing_report
+    except (json.JSONDecodeError, TypeError):
+        pass
+
     result = {"wns": None, "tns": None, "failing_endpoints": None}
     lines = timing_report.split('\n')
 

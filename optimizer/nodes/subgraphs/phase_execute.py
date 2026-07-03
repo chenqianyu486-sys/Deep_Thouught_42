@@ -1116,7 +1116,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         # Track consecutive empty responses (no content AND no tool calls)
         if not assistant_content.strip() and not message.tool_calls:
             state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 3:
+            if state.context.consecutive_empty_responses >= 2:
                 logger.warning(
                     f"[EXECUTE] {state.context.consecutive_empty_responses} consecutive "
                     f"empty responses, forcing EXEC_DONE"
@@ -1308,8 +1308,17 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
     if tool_name not in ("vivado_report_timing_summary", "vivado_phys_opt_design",
                          "vivado_route_design", "vivado_get_wns", "vivado_physopt_and_route"):
         return
-    if tool_name != "vivado_report_timing_summary":
-        state.timing.design_state = DesignState.UNPLACED  # clear stale state for non-timing tools
+    # Tools that route the design always leave it ROUTED. phys_opt_design
+    # operates on a placed/routed design and preserves that state. Previously
+    # every non-timing-report tool clobbered design_state to UNPLACED, which
+    # falsely triggered the "WNS based on wireload estimates" dashboard warning
+    # right after a real post-route WNS was captured (e.g. physopt_and_route).
+    if tool_name in ("vivado_route_design", "vivado_physopt_and_route"):
+        state.timing.design_state = DesignState.ROUTED
+    elif tool_name == "vivado_phys_opt_design":
+        # phys_opt preserves routing; only upgrade if we had no placement info
+        if state.timing.design_state == DesignState.UNPLACED:
+            state.timing.design_state = DesignState.PLACED
     # Try JSON path for physopt_and_route
     wns = None
     tns = None
@@ -1332,7 +1341,12 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
         # has the "Design State" header — other tools (phys_opt, route) always show
         # post-state as routed/placed and would give misleading state info.
         if tool_name == "vivado_report_timing_summary":
-            state.timing.design_state = parse_design_state(raw_result)
+            parsed_ds = parse_design_state(raw_result)
+            if parsed_ds is not None:
+                state.timing.design_state = parsed_ds
+            # else: report lacked a "Design State" header — preserve the last
+            # known state rather than flipping to UNPLACED (which would falsely
+            # mark a real post-route WNS as a wireload estimate).
             if state.timing.design_state != DesignState.ROUTED:
                 logger.warning(
                     f"[EXECUTE] WARNING: Timing report from "
@@ -1349,7 +1363,16 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
         if fe is not None:
             state.timing.latest_failing_endpoints = fe
             refresh_violation_summary(state)
-        if wns > state.timing.best_wns:
+        # Only advance best_wns / trigger checkpoint save when the WNS comes
+        # from a routed design. A non-routed report_timing_summary returns
+        # optimistic wireload estimates; saving them as "best" would corrupt
+        # the rollback checkpoint. route_design / physopt_and_route always
+        # operate on a routed design, so they are not gated here.
+        advance_best = wns > state.timing.best_wns
+        if (tool_name == "vivado_report_timing_summary"
+                and state.timing.design_state != DesignState.ROUTED):
+            advance_best = False
+        if advance_best:
             state.timing.best_wns = wns
             state.timing.best_wns_iteration = state.iteration.current
             state.timing.best_wns_tns = tns
@@ -1586,7 +1609,11 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     )
     # Detect false-positive timing from unplaced/unrouted designs
     design_state = parse_design_state(timing_result)
-    state.timing.design_state = design_state
+    if design_state is not None:
+        state.timing.design_state = design_state
+    else:
+        # Report lacked a "Design State" header — preserve last known state.
+        design_state = state.timing.design_state
     if design_state != DesignState.ROUTED:
         logger.warning(
             f"[EXECUTE] WARNING: Timing report from "

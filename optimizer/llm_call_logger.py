@@ -17,9 +17,18 @@ logger = logging.getLogger(__name__)
 
 def _extract_snapshot(state) -> dict:
     """Extract key state fields from OptimizerState into a flat dict."""
+    # Display strategy: fall back to the most recent phase_history entry when
+    # current_strategy is empty (e.g. during ANALYZE after a CONTINUE/ROLLBACK
+    # clear). This keeps the log header informative instead of showing a bare
+    # "Strategy: " for every ANALYZE call.
+    display_strategy = state.strategy.current_strategy
+    if not display_strategy and state.strategy.phase_history:
+        display_strategy = state.strategy.phase_history[-1].strategy or ""
     return {
         # Timing
         "latest_wns": state.timing.latest_wns,
+        "baseline_wns": state.timing.baseline_wns,
+        "wns_freshness": state.timing.field_freshness.get("timing_summary", ""),
         "best_wns": state.timing.best_wns,
         "initial_wns": state.timing.initial_wns,
         "latest_tns": state.timing.latest_tns,
@@ -34,6 +43,7 @@ def _extract_snapshot(state) -> dict:
         "strategy_sequence": list(state.iteration.strategy_sequence),
         # Strategy
         "current_strategy": state.strategy.current_strategy,
+        "display_strategy": display_strategy,
         "current_phase": state.strategy.current_phase,
         "evaluation_result": state.strategy.evaluation_result,
         "evaluation_wns_delta": state.strategy.evaluation_wns_delta,
@@ -109,7 +119,19 @@ def _format_readable(entry: dict) -> str:
     lines = []
     lines.append("=" * 80)
     lines.append(f"LLM Call #{entry['call_id']}  |  {entry['phase']}  |  Iteration {entry['iteration']}")
-    lines.append(f"Model: {entry['model']}  |  WNS: {entry['latest_wns']}  |  Strategy: {entry['current_strategy']}")
+    # WNS line: show freshness tag + baseline so stale/regressed WNS is obvious
+    # at a glance (a bare stale number previously misled readers into thinking
+    # the LLM was acting on current data). Strategy falls back to last active.
+    wns_val = entry.get('latest_wns')
+    wns_str = f"{wns_val:.3f}" if wns_val is not None else "N/A"
+    freshness = entry.get('wns_freshness') or ""
+    fresh_tag = f" [{freshness}]" if freshness else ""
+    baseline_val = entry.get('baseline_wns')
+    baseline_str = f"  baseline={baseline_val:.3f}" if baseline_val is not None else ""
+    strategy_str = entry.get('display_strategy') or entry.get('current_strategy') or ""
+    lines.append(
+        f"Model: {entry['model']}  |  WNS: {wns_str}{fresh_tag}{baseline_str}  |  Strategy: {strategy_str}"
+    )
     lines.append("-" * 80)
     if entry.get("error"):
         lines.append(f"ERROR: {entry['error'][:500]}")
@@ -140,7 +162,7 @@ def _format_readable(entry: dict) -> str:
                             lines.append(f"       ... [TRUNCATED, total {len(func_args)} chars]")
         usage = entry.get("usage", {})
         if usage:
-            lines.append(f"Tokens: {usage.get('total', 0)}  Cost: ${usage.get('cost', 0):.6f}")
+            lines.append(f"Tokens: {usage.get('total_tokens', 0)}  Cost: ${usage.get('cost', 0):.6f}")
     lines.append("=" * 80)
     lines.append("")
     return "\n".join(lines)
@@ -207,6 +229,7 @@ class LLMCallLogger:
         finish_reason = None
         prompt_tokens = completion_tokens = total_tokens = reasoning_tokens = 0
         cost_val = 0.0
+        usage = None  # bound only when response has usage; referenced in entry dict below
 
         if response and not error:
             try:

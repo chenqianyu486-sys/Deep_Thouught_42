@@ -54,10 +54,12 @@ async def iteration_end_node(
     """
     # Determine WNS improvement
     wns_improved = False
-    if state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
+    if (state.timing.best_wns > float('-inf')
+            and state.timing.prev_best_wns is not None
+            and state.timing.prev_best_wns > float('-inf')):
         wns_improved = state.timing.best_wns > state.timing.prev_best_wns
-    elif state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is None:
-        wns_improved = True  # First valid WNS
+    elif state.timing.best_wns > float('-inf'):
+        wns_improved = True  # First valid WNS (prev is None or -inf)
 
     is_rollback = state.control.done_reason == "rollback"
 
@@ -83,7 +85,7 @@ async def iteration_end_node(
         # Record iteration outcome signal
         if wns_improved:
             record_flow_signal(state, "ITERATION_IMPROVED",
-                               f"wns_delta={state.timing.best_wns - state.timing.prev_best_wns:.3f}" if state.timing.prev_best_wns is not None else "initial_improvement",
+                               f"wns_delta={state.timing.best_wns - state.timing.prev_best_wns:.3f}" if (state.timing.prev_best_wns is not None and state.timing.prev_best_wns > float('-inf')) else "initial_improvement",
                                phase="ITERATION_END",
                                strategy=strategy_label)
             # ⚡ Competition requirement: save best result to output DCP incrementally
@@ -138,9 +140,13 @@ async def iteration_end_node(
         if state.strategy.current_strategy:
             if wns_improved:
                 state.strategy.evaluation_result = "IMPROVED"
-                if state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
+                if (state.timing.best_wns > float('-inf')
+                        and state.timing.prev_best_wns is not None
+                        and state.timing.prev_best_wns > float('-inf')):
                     state.strategy.evaluation_wns_delta = state.timing.best_wns - state.timing.prev_best_wns
-            elif state.timing.best_wns > float('-inf') and state.timing.prev_best_wns is not None:
+            elif (state.timing.best_wns > float('-inf')
+                    and state.timing.prev_best_wns is not None
+                    and state.timing.prev_best_wns > float('-inf')):
                 delta = state.timing.best_wns - state.timing.prev_best_wns
                 if delta < -0.001:
                     state.strategy.evaluation_result = "REGRESSION"
@@ -285,6 +291,20 @@ def _determine_failure_reason(state: OptimizerState, strategy_label: str) -> str
                 continue
             output_lower = raw_output.lower() if raw_output else ""
             if any(regex.search(output_lower) for regex in _EMPTY_RESULT_REGEXES):
+                # Check if this strategy already failed with tool_error before.
+                # First empty result = transient (retriable), but repeated means
+                # the design genuinely doesn't match the strategy's target pattern.
+                prior_empty = [
+                    f for f in state.context.failed_strategies
+                    if f.strategy == strategy_label and f.reason == "tool_error"
+                ]
+                if prior_empty:
+                    logger.info(
+                        f"[iteration_end] Repeated empty result in {tool_name} "
+                        f"(strategy={strategy_label}), escalating to "
+                        f"strategy_ineffective (TTL={3})"
+                    )
+                    return "strategy_ineffective"
                 logger.info(
                     f"[iteration_end] Empty result detected in {tool_name}, "
                     f"using tool_error (retriable) instead of strategy_ineffective"

@@ -448,6 +448,19 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
+    # Auto-chain: LUT cascade flattening mutates the RW netlist and writes a
+    # post-flatten DCP. Open it in Vivado and re-place + re-route to get a real
+    # post-route WNS (RW estimate_timing is ~0.2ns pessimistic and unreliable
+    # for strategy evaluation). Skipped automatically when the skill returns
+    # status="skipped"/"no_action" (no cascades or wide input cones).
+    "rapidwright_flatten_lut_cascade": [
+        {"tool": "vivado_open_checkpoint",
+         "args_from_skill": {"dcp_path": "post_checkpoint_path"}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+    ],
 }
 
 

@@ -549,7 +549,14 @@ def format_state_space_for_llm(
         lines.append("global_state:")
         lines.append(f"  current_stage: {gs.current_stage or 'UNKNOWN'}")
         if gs.design_state == DesignState.UNPLACED:
-            lines.append("  # WARNING: Design is unplaced — WNS based on wireload estimates, may be highly inaccurate")
+            # Defensive guard: only trust the UNPLACED→wireload story when we
+            # have no real WNS at all. A non-None wns_setup alongside UNPLACED
+            # almost always means a stale/parse-failed design_state (e.g. after
+            # physopt_and_route) rather than a true synthesis-only estimate.
+            if gs.wns_setup is None:
+                lines.append("  # WARNING: Design is unplaced — WNS based on wireload estimates, may be highly inaccurate")
+            else:
+                lines.append("  # NOTE: design_state=unplaced but a WNS value is present — treat WNS as approximate; verify with vivado_check_design_status if uncertain")
         elif gs.design_state == DesignState.PLACED:
             lines.append("  # WARNING: Design has placement only — WNS based on estimated routing delays")
         lines.append(f"  iteration_count: {gs.iteration_count}")

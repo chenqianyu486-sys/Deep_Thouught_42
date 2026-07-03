@@ -34,11 +34,25 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     """
 
 
-    # HARD RULE: First iteration ALWAYS tries PBLOCK (85% success, +0.532ns avg gain)
-    # This ensures the best strategy is tried first, maximizing contest score.
-    if state.iteration.current <= 1:
+    # HARD RULE: First iteration ALWAYS tries PBLOCK (85% success, +0.532ns avg gain),
+    # but only on the FIRST strategy selection of iteration 1 — skip if a strategy was
+    # already selected this iteration (phase_history entry exists), or if PBLOCK is
+    # currently blocked (iteration-level block or TTL-based ineffective block).
+    _pblock_blocked = (
+        "PBLOCK" in state.iteration.blocked_strategies
+        or "PBLOCK" in _get_permanently_blocked_strategies(state)
+    )
+    _strategy_was_already_selected = any(
+        e.iteration == state.iteration.current and e.phase == "SELECT_STRATEGY"
+        for e in state.strategy.phase_history
+    )
+    if state.iteration.current <= 1 and not _strategy_was_already_selected and not _pblock_blocked:
         logger.info("[SELECT_STRATEGY] Override: forcing PBLOCK as first strategy")
         state.strategy.current_strategy = "PBLOCK"
+    elif _pblock_blocked and state.iteration.current <= 1:
+        logger.info("[SELECT_STRATEGY] Override suppressed: PBLOCK is currently blocked")
+    elif _strategy_was_already_selected and state.iteration.current <= 1:
+        logger.info("[SELECT_STRATEGY] Override suppressed: strategy already selected this iteration")
     max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.SELECT_STRATEGY, 6)
     tool_round = 0
     state.context.consecutive_empty_responses = 0
@@ -230,6 +244,10 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         key_findings={
             "strategy_name": state.strategy.current_strategy,
             "wns_before": state.timing.latest_wns,
+            # Explicit rationale so the chosen strategy's reasoning survives
+            # into EXECUTE/EVALUATE even if the prose summary is trimmed —
+            # prevents the LLM from re-deriving (and contradicting) it later.
+            "rationale": (state.strategy.strategy_rationale or "")[:300],
         },
         message_count=tool_round,
         design_stage=getattr(state.timing, 'current_stage', ''),

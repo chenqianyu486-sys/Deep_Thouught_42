@@ -34,6 +34,32 @@ Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
 Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
 
+PHASE-GATED TOOL AVAILABILITY — CRITICAL:
+  The tool set changes per phase. The phase label in the [PHASE — Context &
+  Dashboard] header is the AUTHORITATIVE current phase (your report_step_state
+  .strategy_phase is advisory and does NOT drive routing).
+  - ANALYZE: only diagnostic/read-only tools are exposed. Execution tools
+    (rapidwright_execute_*, vivado_place/route/phys_opt_design) are NOT
+    available here. Do NOT attempt to execute a strategy during ANALYZE —
+    you will see "tool not found". Finish analysis (ANALYZE_DONE) first.
+  - SELECT_STRATEGY: pick exactly one strategy_name via report_step_state.
+  - EXECUTE_STRATEGY: only the selected strategy's primary tool(s) are exposed.
+  - EVALUATE: read-only tools to assess the WNS delta and decide next.
+
+PBLOCK AUTO-CHAIN BEHAVIOR:
+  rapidwright_execute_pblock_strategy auto-chains: unplace → place_design
+  (Explore) → route_design (Explore). It therefore tears down and rebuilds
+  the existing place/route. On an already-routed design this can land on an
+  equal-or-worse result with zero WNS delta — that is a fair "no improvement"
+  outcome, NOT a tool error. If PBLOCK yields delta ≈ 0 once, do NOT re-select
+  it the same iteration; switch strategies.
+
+RESPONSIVENESS — REASON BEFORE ACTING:
+  Always include a brief reasoning line in the text body before/alongside tool
+  calls. An empty text body with only tool calls wastes a turn and is treated
+  as a no-op (2 consecutive empty responses force-exit the phase). State what
+  you observed and what you are about to do.
+
 DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
   The competition requires STRICT design logic equivalence. Any optimization must preserve
   functional correctness. Use validation tools to verify consistency after modifications.

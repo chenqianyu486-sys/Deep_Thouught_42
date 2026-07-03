@@ -50,6 +50,10 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     assistant_content = ""
     state.context.tool_phase_call_counts.clear()
     state.context.consecutive_empty_responses = 0
+    # Persist the active phase so the LLM call-log header, dashboard, and
+    # state_transitions reflect ANALYZE (previously current_phase stayed "" for
+    # the whole analysis phase, leaving the log header's phase/strategy blank).
+    state.strategy.current_phase = "ANALYZE"
 
     while True:
         tool_round += 1
@@ -250,7 +254,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         # Track consecutive empty responses (no content AND no tool calls)
         if not assistant_content.strip() and not message.tool_calls:
             state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 3:
+            if state.context.consecutive_empty_responses >= 2:
                 logger.warning(
                     f"[ANALYZE] {state.context.consecutive_empty_responses} consecutive "
                     f"empty responses, forcing ANALYZE_DONE"

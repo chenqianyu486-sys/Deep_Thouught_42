@@ -345,19 +345,37 @@ class TestStrategyCooldown:
         assert state.iteration.blocked_strategies == ["PBLOCK"]
         assert state.context.failed_strategies == []
 
-    def test_switch_skips_cooldown_when_tool_errors_present(self):
-        """Tool crash (e.g. MCP exception) means strategy didn't get a fair
-        execution chance — don't penalize it with iteration-level cooldown."""
+    def test_switch_skips_cooldown_on_unmeasured_strategy_crash(self):
+        """A genuine strategy-tool crash leaves no measurable WNS (delta=None),
+        so the strategy gets a fair retry chance — no iteration cooldown."""
+        state = self._state_with_strategy_delta(0.0)
+        # best_wns=-inf → _strategy_wns_delta_since_entry returns None (unmeasured)
+        state.timing.best_wns = float('-inf')
+        state.iteration.tool_errors.append({
+            "tool": "rapidwright_execute_pblock_strategy",
+            "result": "Error: UnboundLocalError: cannot access local variable 're'",
+        })
+
+        _handle_switch_strategy(state, NodeDeps(), "crash")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
+    def test_switch_applies_cooldown_on_measured_no_improvement_with_soft_error(self):
+        """A strategy that produced a measurable WNS (delta=0.0) executed
+        fairly — even if its tool summary contained the word 'Error' (e.g.
+        vivado_place_design reporting 'already placed' is a soft no-op, not a
+        crash). Cooldown must apply to prevent same-iteration re-selection
+        loops (PlaceRouteDirectiveExplore → PhysOptAggressive → repeat)."""
         state = self._state_with_strategy_delta(0.0)
         state.iteration.tool_errors.append({
             "tool": "vivado_place_design",
-            "result": "Error: UnboundLocalError: cannot access local variable 're'",
+            "result": "Error: design already placed, no action taken",
         })
 
         _handle_switch_strategy(state, NodeDeps(), "no improvement")
 
-        assert state.iteration.blocked_strategies == []
-        assert state.context.failed_strategies == []
+        assert state.iteration.blocked_strategies == ["PBLOCK"]
 
     def test_switch_keeps_improving_strategy_available(self):
         state = self._state_with_strategy_delta(0.060)

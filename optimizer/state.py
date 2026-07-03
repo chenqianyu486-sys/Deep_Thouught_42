@@ -32,15 +32,20 @@ class DesignState:
     ROUTED = "routed"         # Fully placed and routed — full timing accuracy
 
 
-def parse_design_state(timing_report: str) -> str:
+def parse_design_state(timing_report: Optional[str]) -> Optional[str]:
     """Parse Design State from a Vivado timing report.
 
     Args:
         timing_report: Raw text output from vivado_report_timing_summary.
 
     Returns:
-        One of DesignState.UNPLACED, DesignState.PLACED, DesignState.ROUTED.
-        Defaults to UNPLACED when the field cannot be parsed.
+        One of DesignState.UNPLACED, DesignState.PLACED, DesignState.ROUTED,
+        or None when the field cannot be parsed. Returning None (instead of
+        silently defaulting to UNPLACED) lets callers preserve the last known
+        good state — a false UNPLACED flips the dashboard into a misleading
+        "WNS based on wireload estimates" warning even when the WNS is a real
+        post-route number (observed after vivado_physopt_and_route, whose
+        report lacks a "Design State" header).
     """
     match = re.search(
         r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
@@ -55,7 +60,7 @@ def parse_design_state(timing_report: str) -> str:
             return DesignState.PLACED
         if "optimized" in state:
             return DesignState.UNPLACED
-    return DesignState.UNPLACED
+    return None
 
 
 # ── Control signals ─────────────────────────────────────────────

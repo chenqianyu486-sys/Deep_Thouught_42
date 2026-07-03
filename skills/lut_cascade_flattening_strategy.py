@@ -30,6 +30,28 @@ def _is_lut_cell(cell) -> bool:
         return False
 
 
+def _has_cin_connection(design, cell_name: str) -> bool:
+    """Check if a LUT cell has a connected CIN (cascade input) port.
+
+    In Xilinx UltraScale/UltraScale+ architectures, a LUT that participates
+    in a LUT cascade has its CIN pin connected to the previous LUT's O6
+    output. A LUT without a CIN connection is not in cascade mode and
+    flattening it would be ineffective or harmful.
+    """
+    try:
+        netlist = design.getNetlist()
+        # Use the EDIF netlist to find the cell's port instances
+        hcell = netlist.getHierCellInstFromName(cell_name)
+        if hcell is None:
+            return False
+        for port_inst in hcell.getInst().getPortInsts():
+            if port_inst.getName() == "CIN" and port_inst.getNet() is not None:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _find_lut_cascades(design, critical_paths: list[list[str]],
                        min_depth: int = 3) -> list[dict]:
     """Analyze critical paths to find LUT cascade chains.
@@ -61,17 +83,27 @@ def _find_lut_cascades(design, critical_paths: list[list[str]],
                 cell = None
 
             if cell is not None and _is_lut_cell(cell):
-                current_chain.append(cell_name)
+                # Require CIN connection for cascade continuation (except first LUT)
+                if current_chain and not _has_cin_connection(design, cell_name):
+                    # LUT without CIN breaks the cascade chain
+                    if len(current_chain) > min_depth:
+                        cascades.append({
+                            "path_index": path_idx,
+                            "depth": len(current_chain),
+                            "cell_names": list(current_chain),
+                            "source_cell": current_chain[0],
+                        })
+                    # Start a new potential cascade from this LUT
+                    current_chain = [cell_name]
+                else:
+                    current_chain.append(cell_name)
             else:
                 # Non-LUT cell breaks the chain
                 if len(current_chain) > min_depth:
-                    # Found a cascade — use the input pin of the last LUT
-                    # (the one feeding into the destination)
                     cascades.append({
                         "path_index": path_idx,
                         "depth": len(current_chain),
                         "cell_names": list(current_chain),
-                        # The optimization target: first LUT's input drives the cascade
                         "source_cell": current_chain[0],
                     })
                 current_chain = []
@@ -146,6 +178,7 @@ def execute_lut_cascade_flattening(
     if not critical_paths:
         return {
             "cascades_found": 0,
+            "status": "skipped",
             "skipped": True,
             "message": "No critical paths provided",
         }
@@ -156,6 +189,7 @@ def execute_lut_cascade_flattening(
     if not cascades:
         return {
             "cascades_found": 0,
+            "status": "skipped",
             "skipped": True,
             "message": f"No LUT cascades deeper than {min_cascade_depth} found",
         }
@@ -186,6 +220,7 @@ def execute_lut_cascade_flattening(
     if not pins_to_optimize:
         return {
             "cascades_found": len(cascades),
+            "status": "no_action",
             "optimized_count": 0,
             "checkpoint_path": ckpt_path,
             "failure_reason": "wide_input_cones",

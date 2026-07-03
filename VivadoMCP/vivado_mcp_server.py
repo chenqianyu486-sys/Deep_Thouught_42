@@ -827,13 +827,16 @@ def extract_critical_path_cells(
 
     # ── Data path node regexes (D1: per-node delay breakdown) ──
     # Cell line: "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)" — Location + CellType + optional (Prop_)
-    RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\)\s*$')
+    RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\).*$')
     # Cell line without Prop_ (endpoint cell, pin on same line): "    DSP48E2_X10Y46  DSP_A_B_DATA  r  cell/pin"
-    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(\S+)')
+    # Optional PBlock column after r/f flag (Vivado inserts it when cells are assigned to a pblock)
+    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(?:\S+\s+)?(\S+)')
     # Delay line: "                              0.079  0.108 r  cell/pin"
-    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(\S+)')
+    # Optional PBlock column after r/f flag
+    RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(?:\S+\s+)?(\S+)')
     # Net line: "                         net (fo=28, routed)          0.357     0.465    netname"
-    RE_NET_LINE     = re.compile(r'^\s*net\s+\(fo=(\d+),\s*(\w+)\)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(\S+)')
+    # Optional PBlock column before net name
+    RE_NET_LINE     = re.compile(r'^\s*net\s+\(fo=(\d+),\s*(\w+)\)\s+(\d+\.?\d*)\s+(\d+\.?\d*)\s+(?:\S+\s+)?(\S+)')
 
     # Pin suffixes for stripping cell names from pin references
     PIN_SUFFIXES = ('/C', '/D', '/Q', '/O', '/CE', '/R', '/S', '/CLR', '/PRE',
@@ -1549,13 +1552,16 @@ def create_and_apply_pblock(
         try:
             logger.info(f"Pblock creation attempt {attempt+1}/{max_expansion_attempts+1}")
             
-            # Delete existing pblock if it exists (for retry attempts)
+            # Always attempt to delete existing pblock before creating — handles
+            # reuse of the same name from a prior iteration (attempt 0) as well
+            # as retries with expanded ranges (attempt > 0).
+            try:
+                run_tcl_command(f"delete_pblocks [get_pblocks {pblock_name}]", timeout=10.0)
+            except Exception:
+                pass  # Pblock may not exist on first-ever call — safe to ignore
+            
             if attempt > 0:
-                try:
-                    run_tcl_command(f"delete_pblocks [get_pblocks {pblock_name}]", timeout=10.0)
-                    result_lines.append(f"\n=== Retry attempt {attempt} with expanded pblock ===")
-                except Exception:
-                    pass  # Pblock might not exist
+                result_lines.append(f"\n=== Retry attempt {attempt} with expanded pblock ===")
             
             # Create the pblock
             create_cmd = f"create_pblock {pblock_name}"

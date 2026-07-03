@@ -13,7 +13,7 @@ import json
 import logging
 import time
 
-from ..state import OptimizerState, parse_design_state
+from ..state import OptimizerState, DesignState, parse_design_state
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.critical_path import parse_critical_path_cells, update_critical_paths
@@ -185,8 +185,10 @@ async def init_analysis_node(
                 result["timing_report"] = timing_report
                 timing_info = parse_timing_summary(timing_report)
 
-                # Parse design physical implementation state from Design State field
-                state.timing.design_state = parse_design_state(timing_report)
+                # Parse design physical implementation state from Design State field.
+                # At init, a None (unparseable) genuinely means unknown → UNPLACED.
+                parsed_ds = parse_design_state(timing_report)
+                state.timing.design_state = parsed_ds if parsed_ds is not None else DesignState.UNPLACED
                 logger.info(
                     f"[init_analysis] Design state: {state.timing.design_state}"
                 )
@@ -678,19 +680,48 @@ async def _extract_constraints(state: OptimizerState, deps: NodeDeps) -> None:
 
 
 async def _extract_cdc_paths(state: OptimizerState, deps: NodeDeps) -> None:
-    """Count cross-clock-domain timing paths."""
+    """Count cross-clock-domain timing paths.
+
+    For single-clock designs CDC=0 is correct (no cross-clock paths possible).
+    For multi-clock designs, runs report_clock_interaction and counts
+    lines containing 'Unconstrained' as a best-effort unsafe CDC count.
+    """
     try:
-        # TODO: report_timing has no -cross_clock flag. For single-clock
-        # designs CDC=0 is correct. For multi-clock designs, replace with
-        # report_clock_interaction -return_string and a dedicated parser.
-        cdc_report = await call_tool_fn(
+        # Step 1: count clocks in the design
+        clock_result = await call_tool_fn(
             "vivado_run_tcl",
-            {"command": "set cdc {}; catch {report_timing -cross_clock -max_paths 100 -return_string} cdc; puts $cdc"},
+            {"command": "llength [get_clocks]"},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
-        state.timing.cross_domain_paths_count = parse_cdc_paths(cdc_report)
-        logger.info(f"[init_analysis] CDC paths: {state.timing.cross_domain_paths_count}")
+        clock_count = 0
+        if clock_result and clock_result.strip():
+            try:
+                clock_count = int(clock_result.strip().split()[0])
+            except ValueError:
+                pass
+
+        if clock_count <= 1:
+            # Single-clock (or no clock) design — no cross-clock paths possible
+            state.timing.cross_domain_paths_count = 0
+            logger.info(f"[init_analysis] CDC paths: 0 ({clock_count} clock(s) in design)")
+            return
+
+        # Step 2: multi-clock design — use report_clock_interaction
+        cdc_report = await call_tool_fn(
+            "vivado_run_tcl",
+            {"command": "report_clock_interaction -return_string"},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        # Simple count: lines containing "Unconstrained" indicate unsafe CDC paths
+        count = 0
+        if cdc_report:
+            for line in cdc_report.split('\n'):
+                if 'Unconstrained' in line:
+                    count += 1
+        state.timing.cross_domain_paths_count = count
+        logger.info(f"[init_analysis] CDC paths: {count} ({clock_count} clocks)")
     except Exception as e:
         logger.warning(f"[init_analysis] CDC analysis failed: {e}")
 
