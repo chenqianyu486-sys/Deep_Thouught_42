@@ -284,7 +284,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     )
     state.strategy.analysis_summary = llm_summary
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, handoff, tool_cache=state.context.tool_cache)
+    await transition_phase(deps, LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path))
     return LoopPhase.SELECT_STRATEGY
 
 

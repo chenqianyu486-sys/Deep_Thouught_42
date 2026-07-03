@@ -15,6 +15,14 @@ from optimizer.pure.tool_filter import LoopPhase
 
 logger = logging.getLogger(__name__)
 
+# Module-level variable to track the last design fingerprint across transitions.
+# When design_fingerprint is provided and unchanged, the tool cache is preserved
+# (design hasn't changed — cached results are still valid). This avoids flushing
+# cached timing data during EVALUATE → CONTINUE → ANALYZE cycles when no
+# design modification occurred. Callers that don't pass a fingerprint (None)
+# get the original always-clear behavior for backward compatibility.
+_last_design_fingerprint: str | None = None
+
 
 @dataclass
 class PhaseHandoff:
@@ -131,6 +139,7 @@ async def transition_phase(
     to_phase: LoopPhase,
     handoff: PhaseHandoff,
     tool_cache: dict | None = None,
+    design_fingerprint: str | None = None,
 ) -> None:
     """Archive current phase messages and start a fresh message segment.
 
@@ -143,6 +152,10 @@ async def transition_phase(
         from_phase: Phase that just completed.
         to_phase: Phase that is starting.
         handoff: Structured context from the completed phase.
+        tool_cache: Optional dict to clear on transition.
+        design_fingerprint: Optional design-state fingerprint. When provided and
+            unchanged from the last transition, tool_cache is preserved (no clear).
+            When None (default), always clear for backward compatibility.
     """
     if deps.compat is None or deps.memory_manager is None:
         return
@@ -179,10 +192,19 @@ async def transition_phase(
             current_count,
         )
 
-        # 5. Clear phase-local tool cache
+        # 5. Conditionally clear phase-local tool cache.
+        #    When design_fingerprint is provided and unchanged from the last
+        #    transition, the cache is preserved (design hasn't changed, cached
+        #    results are still valid). When design_fingerprint is None (caller
+        #    doesn't support it yet), always clear for backward compatibility.
         if tool_cache is not None:
-            tool_cache.clear()
-            logger.debug("[phase_handoff] Tool cache cleared")
+            global _last_design_fingerprint
+            if design_fingerprint is not None and design_fingerprint == _last_design_fingerprint:
+                logger.debug("[phase_handoff] Design unchanged — preserving tool cache")
+            else:
+                tool_cache.clear()
+                _last_design_fingerprint = design_fingerprint
+                logger.debug("[phase_handoff] Tool cache cleared")
 
     except Exception as e:
         logger.warning(f"[phase_handoff] Transition failed (non-critical): {e}")

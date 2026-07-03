@@ -109,11 +109,15 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 |---|-----------|----------------|
 | 18 | 编码领域知识 | 16 种策略带有触发条件；LLM 自主选择 |
 | 19 | 多策略循环 | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`) |
-| 20 | TTL 策略重试 | `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮后自动解封 |
+| 20 | TTL 策略重试（按原因分级） | `strategy_ineffective`→1 轮、`strategy_not_applicable`→2 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（立即重试） |
 | 21 | 冷却逻辑分层 | 区分策略工具错误 vs 辅助工具错误；Improvement 阈值 0.050ns |
 | 22 | 工具结果缓存 | 同 phase 内相同参数自动命中缓存；执行工具后自动失效 |
 | 23 | 工具调用频率限制 | `search_cells` 最多 3 次/phase，`vivado_run_tcl` 最多 2 次/phase |
-| 24 | 收益递减自动检测 | 同一策略最近 2+ 次使用且每次 |delta| < 0.020ns 时标记为 `no_improvement` |
+| 24 | 收益递减自动检测 | 同一策略最近 2+ 次使用且每次 |delta| < 0.020ns 时标记为 `no_improvement`（TTL=3 轮） |
+| 25 | 连续无进展检测 | EVALUATE 阶段连续 3 次无进展评估后强制 `SWITCH_STRATEGY` |
+| 26 | 优化历史追踪 | 每次 `best_checkpoint` 更新时记录策略名/WNS 前后对比/迭代号，注入 handoff 和 Dashboard |
+| 27 | 迭代开始 checkpoint | 每迭代开始时自动保存 DCP 快照，作为 `_reload_baseline_on_switch` 的次要回退基线 |
+| 28 | 设计指纹缓存 | `transition_phase` 通过 `design_fingerprint` 比较决定是否保留 tool cache；设计未变更时跨阶段缓存保留 |
 
 > 完整实现级技术细节见 [architecture.md](architecture.md)。
 

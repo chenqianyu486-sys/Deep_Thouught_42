@@ -591,6 +591,16 @@ def format_state_space_for_llm(
         lines.append(f"  best_wns: {_annotated_val(gs.best_wns, '{:.3f}', 'initial_state')}")
         if gs.best_wns_iteration is not None:
             lines.append(f"  best_wns_iteration: {gs.best_wns_iteration}")
+        if state:
+            iterations_remaining = state.iteration.max_iterations - state.iteration.current
+            lines.append(f"  iterations_remaining: {iterations_remaining}")
+            budget_used = state.cost.total_cost
+            budget_remaining = max(0.0, state.cost.cost_hard_limit - state.cost.total_cost)
+            lines.append(f"  budget_used: ${budget_used:.4f}")
+            lines.append(f"  budget_remaining: ${budget_remaining:.4f}")
+            if state.timing.best_wns != float('-inf'):
+                wns_gap = 0.0 - state.timing.best_wns
+                lines.append(f"  wns_gap_to_zero: {wns_gap:.3f}ns  # positive = still negative slack to close")
         if gs.whs_hold is not None:
             lines.append(f"  whs_hold: {gs.whs_hold:.3f}{_tag('timing_summary')}")
         if gs.ths_hold is not None:
@@ -920,6 +930,21 @@ def format_state_space_for_llm(
         lines.append(f"  current_strategy: {current_strategy}")
     if evaluation_result and evaluation_result != "PENDING":
         lines.append(f"  evaluation: {evaluation_result}")
+    lines.append("")
+
+    # ── Applied optimizations (persisted in best_checkpoint) ──────────
+    if state:
+        opt_history = state.context.optimization_history
+        lines.append("applied_optimizations:")
+        if opt_history:
+            for rec in opt_history:
+                strategy = rec.strategy
+                wns_before = rec.wns_before
+                wns_after = rec.wns_after
+                iteration = rec.iteration
+                lines.append(f"  - {strategy}: {wns_before:.3f}ns -> {wns_after:.3f}ns (iter {iteration})")
+        else:
+            lines.append("  (none yet)")
     lines.append("")
 
     # ── Skill guidance (EXECUTE phase) ─────────────────────────────

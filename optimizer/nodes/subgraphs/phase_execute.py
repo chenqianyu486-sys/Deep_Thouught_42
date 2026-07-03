@@ -15,7 +15,7 @@ import time
 
 from pathlib import Path
 
-from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, record_flow_signal, record_strategy_failure, DesignState, parse_design_state
+from optimizer.state import OptimizerState, PhaseEntry, ToolCallRecord, LLMCallRecord, OptimizationAppliedRecord, record_flow_signal, record_strategy_failure, DesignState, parse_design_state
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, filter_tools_for_phase, get_phase_max_rounds
@@ -176,11 +176,19 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
     be wrong. This function reloads the baseline DCP, refreshes timing, marks
     all state stale, and injects a LLM notification.
     """
-    iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
-    logger.info(
-        f"[EXECUTE] Strategy re-entry ({state.strategy.current_strategy}), "
-        f"reloading baseline DCP: {iter_ckpt}"
-    )
+    best_path = state.control.best_checkpoint_path
+    if best_path is not None and best_path.exists():
+        iter_ckpt = best_path
+        logger.info(
+            f"[EXECUTE] Strategy re-entry ({state.strategy.current_strategy}), "
+            f"reloading best checkpoint DCP: {iter_ckpt}"
+        )
+    else:
+        iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
+        logger.info(
+            f"[EXECUTE] Strategy re-entry ({state.strategy.current_strategy}), "
+            f"reloading iteration start DCP: {iter_ckpt}"
+        )
 
     # 1. Reload baseline DCP into Vivado
     await call_tool_fn(
@@ -798,6 +806,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                     state.control.needs_save = True
                                 delta = new_wns - prev_wns if prev_wns is not None else 0.0
                                 verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
+                                if verdict in ("UNCHANGED", "REGRESSED"):
+                                    if state.strategy.current_strategy not in state.iteration.blocked_strategies:
+                                        state.iteration.blocked_strategies.append(state.strategy.current_strategy)
                                 post_eval_verdict = verdict
                                 eval_notice = f"[EVAL] After {tool_name}: WNS={new_wns:.3f}ns (delta={delta:+.3f}ns vs previous). {verdict}."
                                 if new_tns is not None:
@@ -1189,7 +1200,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         stalled_strategies=list(state.iteration.blocked_strategies),
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff, tool_cache=state.context.tool_cache)
+    await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path))
     return LoopPhase.EVALUATE
 
 
@@ -1389,6 +1400,14 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
             design_size_factor=state.timing.design_size_factor,
         )
         state.control.best_checkpoint_path = ckpt_path
+        state.context.optimization_history.append(OptimizationAppliedRecord(
+            strategy=state.strategy.current_strategy,
+            params="",
+            wns_before=state.timing.prev_best_wns,
+            wns_after=state.timing.best_wns,
+            iteration=state.iteration.current,
+            checkpoint_path=str(state.control.best_checkpoint_path),
+        ))
         logger.info(f"Saved best checkpoint: WNS={state.timing.best_wns:.3f}ns")
     except Exception as e:
         logger.warning(f"Failed to save best checkpoint: {e}")
@@ -1632,6 +1651,9 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
 
     delta = wns - prev_wns if prev_wns is not None else 0.0
     verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
+    if verdict in ("UNCHANGED", "REGRESSED"):
+        if state.strategy.current_strategy not in state.iteration.blocked_strategies:
+            state.iteration.blocked_strategies.append(state.strategy.current_strategy)
     eval_notice = (
         f"[EVAL] After {tool_name}: WNS={wns:.3f}ns "
         f"(delta={delta:+.3f}ns vs previous). {verdict}."

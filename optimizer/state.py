@@ -383,6 +383,17 @@ class FailedStrategyRecord:
 
 
 @dataclass
+class OptimizationAppliedRecord:
+    """Record of a strategy successfully applied and persisted in best_checkpoint."""
+    strategy: str = ""
+    params: str = ""           # short param summary (truncated 200 chars)
+    wns_before: float = 0.0
+    wns_after: float = 0.0
+    iteration: int = 0
+    checkpoint_path: str = ""
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -403,6 +414,10 @@ class ContextState:
     flow_control_log_max: int = 100
     # Failed strategy tracking (canonical source in V2, replaces MemoryManager._failed_strategies)
     failed_strategies: list[FailedStrategyRecord] = field(default_factory=list)
+    # History of successfully applied optimizations (persisted in best_checkpoint)
+    optimization_history: list[OptimizationAppliedRecord] = field(default_factory=list)
+    # Consecutive iterations without best_wns improvement (for exit gating)
+    consecutive_no_progress: int = 0
     # Tool result cache: tool_name:args_hash -> (round, result). Cleared on phase transition.
     tool_cache: dict[str, tuple[int, str]] = field(default_factory=dict)
     # Per-phase tool call counters for rate limiting. Reset at each phase entry.
@@ -458,6 +473,25 @@ class StrategyState:
 # ── Flow control helpers ────────────────────────────────────────
 
 
+def _ttl_for_reason(reason: str, current: int) -> int:
+    """Compute blocked_until_iter based on failure reason.
+
+    TTL scheme (per reason):
+      - strategy_ineffective → short cooldown (1 iteration)
+      - strategy_not_applicable → medium cooldown (2 iterations)
+      - no_improvement → longer cooldown (3 iterations)
+      - tool_error / anything else → no TTL (immediate retriable)
+    """
+    if reason == "strategy_ineffective":
+        return current + 1
+    elif reason == "strategy_not_applicable":
+        return current + 2
+    elif reason == "no_improvement":
+        return current + 3
+    else:  # tool_error, data_quality_error, unknown, etc.
+        return current
+
+
 def record_strategy_failure(
     state: OptimizerState,
     strategy: str,
@@ -471,12 +505,8 @@ def record_strategy_failure(
     Replaces MemoryManager.record_failure() / DCPOptimizerCompat.record_failure()
     as the canonical V2 path.
 
-    TTL: Only `strategy_ineffective` entries get TTL-blocked for STRATEGY_RETRY_TTL
-    iterations. `strategy_not_applicable` entries are recorded for observability but
-    NOT blocked (immediate unblock), allowing the LLM to retry after the design
-    changes. `tool_error` / `no_improvement` entries also bypass TTL blocking.
+    TTL (per-reason cooldown): see _ttl_for_reason for the complete scheme.
     """
-    STRATEGY_RETRY_TTL = 3  # iterations before a blocked strategy can be retried
     existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
     if existing:
         # Refresh reason and blocked_until_iter on re-failure so TTL
@@ -486,10 +516,7 @@ def record_strategy_failure(
         entry.tool = tool
         entry.iteration = state.iteration.current
         entry.detail = (detail or "")[:200]
-        if reason == "strategy_ineffective":
-            entry.blocked_until_iter = state.iteration.current + STRATEGY_RETRY_TTL
-        else:
-            entry.blocked_until_iter = state.iteration.current
+        entry.blocked_until_iter = _ttl_for_reason(reason, state.iteration.current)
         logger.warning(
             "[FAILED_STRATEGY] Updated: %s (reason=%s, tool=%s, blocked_until_iter=%d)",
             strategy, reason, tool, entry.blocked_until_iter,
@@ -497,14 +524,7 @@ def record_strategy_failure(
                    "blocked_until": entry.blocked_until_iter},
         )
         return
-    # strategy_not_applicable = skill found no matching cells → not a real failure,
-    # don't block with TTL (the strategy may become applicable after other optimizations).
-    # Other reasons (tool_error, no_improvement) also bypass TTL.
-    # Only strategy_ineffective gets the full TTL block.
-    if reason == "strategy_ineffective":
-        blocked_until_iter = state.iteration.current + STRATEGY_RETRY_TTL
-    else:
-        blocked_until_iter = state.iteration.current
+    blocked_until_iter = _ttl_for_reason(reason, state.iteration.current)
     entry = FailedStrategyRecord(
         strategy=strategy,
         reason=reason,

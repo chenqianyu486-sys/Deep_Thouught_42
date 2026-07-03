@@ -104,6 +104,20 @@ def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> st
     return "\n".join(lines)
 
 
+def _format_optimization_history(history: list) -> str:
+    """Format optimization_history into an "Applied optimizations" section."""
+    if not history:
+        return "\nAPPLIED OPTIMIZATIONS (in best_checkpoint):\n  (none yet)"
+    lines = ["\nAPPLIED OPTIMIZATIONS (in best_checkpoint):"]
+    for rec in history:
+        strategy = rec.strategy if isinstance(rec.strategy, str) else (rec.get("strategy", "?"))
+        wns_before = rec.wns_before if isinstance(rec.wns_before, float) else rec.get("wns_before", 0.0)
+        wns_after = rec.wns_after if isinstance(rec.wns_after, float) else rec.get("wns_after", 0.0)
+        iteration = rec.iteration if isinstance(rec.iteration, int) else rec.get("iteration", 0)
+        lines.append(f"  - {strategy}: {wns_before:.3f}ns -> {wns_after:.3f}ns (iter {iteration})")
+    return "\n".join(lines)
+
+
 def _generate_planner_handoff(
     state: OptimizerState,
     current_wns: float | None,
@@ -116,6 +130,7 @@ def _generate_planner_handoff(
     - Failed strategies (excluded strategies with reasons)
     - Status signals (no-improvement count, same-strategy streak)
     - Exit reason from the previous iteration
+    - Applied optimizations from best_checkpoint history
 
     WNS/TNS/FE, critical paths, and design signals are in the Dashboard
     (injected per-LLM-call) and are NOT duplicated here.
@@ -123,16 +138,15 @@ def _generate_planner_handoff(
     exit_reason = state.control.done_reason or ""
     exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
 
+    rollback_notice = ""
     if exit_reason == "rollback":
         best_iter = state.timing.best_wns_iteration or "?"
         best_str = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
-        return f"""--- Iteration {state.iteration.current + 1} Handoff ---
-
-{exit_line}
+        rollback_notice = f"""{exit_line}
 DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter}.
   WNS restored to: {best_str}ns
-TRAJECTORY:
-  (rollback entry excluded — previous best stands)"""
+
+"""
 
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
     status = build_status_signal(
@@ -140,13 +154,13 @@ TRAJECTORY:
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
     )
     status_section = f"\nSTATUS:\n{status}\n" if status else ""
+    opt_history = _format_optimization_history(state.context.optimization_history)
 
     return f"""--- Iteration {state.iteration.current + 1} Handoff ---
 
-{exit_line}
-TRAJECTORY:
+{rollback_notice}TRAJECTORY:
 {trajectory}
-{status_section}{_format_failed_strategies(failed_strategies or [])}"""
+{status_section}{_format_failed_strategies(failed_strategies or [])}{opt_history}"""
 
 
 def _generate_worker_handoff(
@@ -162,14 +176,15 @@ def _generate_worker_handoff(
     exit_reason = state.control.done_reason or ""
     exit_line = f"EXIT_REASON: {exit_reason}" if exit_reason else ""
 
+    rollback_notice = ""
     if exit_reason == "rollback":
         best_iter = state.timing.best_wns_iteration or "?"
         best_str = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
-        return f"""--- Iteration {state.iteration.current + 1} ---
-
-{exit_line}
+        rollback_notice = f"""{exit_line}
 DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter}.
-  WNS restored to: {best_str}ns"""
+  WNS restored to: {best_str}ns
+
+"""
 
     trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=5)
     status = build_status_signal(
@@ -177,13 +192,13 @@ DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
     )
     status_section = f"\n{status}" if status else ""
+    opt_history = _format_optimization_history(state.context.optimization_history)
 
     return f"""--- Iteration {state.iteration.current + 1} ---
 
-{exit_line}
-TRAJECTORY:
+{rollback_notice}TRAJECTORY:
 {trajectory}
-{status_section}{_format_failed_strategies(failed_strategies or [])}"""
+{status_section}{_format_failed_strategies(failed_strategies or [])}{opt_history}"""
 
 
 def _count_consecutive_same_strategy(strategy_sequence: list[str]) -> int:

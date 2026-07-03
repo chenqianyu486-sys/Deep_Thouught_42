@@ -101,9 +101,9 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
   - **解析失败保留策略（2026-07，P1 修复）**: `parse_design_state()` 在 `Design State` 字段缺失时返回 `None` 而非默认 `UNPLACED`，调用方保留上次已知状态。`vivado_route_design`/`vivado_physopt_and_route` 执行后显式置 `ROUTED`（它们必然产生已布线结果），`vivado_phys_opt_design` 保留原状态。修复了 `physopt_and_route` 后误翻转为 UNPLACED、对真实布线后 WNS 误报"线负载估计"的灾难性 bug（见 run-20260703_142810）。Dashboard 警告加守卫：`design_state=UNPLACED` 但存在真实 `wns_setup` 时降级为温和提示，不再误报线负载。
 - **比赛时钟处理**: `init_analysis` 通过 `get_clocks` + `get_property PERIOD` 提取时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。Dashboard Module 5 的时钟名从 `state.timing.critical_paths[0].clock.source_clock` 动态提取（2026-07 修复，此前硬编码 `clk_fpl26contest`），无 critical_paths 时回退到该默认名。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_catalog` 排除机制**: `strategy_ineffective`（TTL 阻断）和冷却策略不在 catalog 中移除，而是标为 `[BLOCKED]` 占位符（含剩余轮数/原因）。`strategy_not_applicable`、`tool_error`、`no_improvement` 完全移出 catalog（可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
+- **`strategy_catalog` 排除机制（2026-07 更新）**: `strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=2）在 catalog 中标为 `[BLOCKED]` 占位符（含剩余轮数/原因）；`tool_error` 完全移出 catalog（无 TTL，可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共23个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
-- **TTL 机制**: `strategy_ineffective` 策略在 `STRATEGY_RETRY_TTL=3` 轮迭代后自动解封（`blocked_until_iter` 字段）。`strategy_not_applicable` 及其他 reason 无 TTL 阻断（`blocked_until_iter=current`），可在下一轮立即重试。`record_strategy_failure` 去重时刷新 `blocked_until_iter`（2026-06-27 修复：之前去重后不刷新，导致反复失败策略永久不再被阻断）。
+- **TTL 机制（按原因分级，2026-07 重构）**: `_ttl_for_reason()` 函数统一计算各失败原因的冷却期（`blocked_until_iter` 字段）：`strategy_ineffective`→1 轮、`strategy_not_applicable`→2 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（`blocked_until_iter=current`，立即重试）。`record_strategy_failure` 去重时刷新 `blocked_until_iter`。
 
 ---
 
@@ -186,7 +186,7 @@ class CriticalPathEntry:
 | TCL 关键路径提取拦截 | `tool_router.py:vivado_run_tcl` 内容匹配 | 检测 `get_timing_paths`+`get_cells` 模式，返回 `[AUTO-GUIDANCE]` |
 | PBLOCK 数据质量提前退出 | `phase_execute.py` | `critical_path_cells` 全部过滤时跳过 MCP，记录 `data_quality_error` |
 | 冷却逻辑分层 | `phase_evaluate.py` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
-| 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective` + 冷却策略标为 `[BLOCKED]` 占位符；`tool_error`/`no_improvement` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
+| 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective`（TTL=1）+ `no_improvement`（TTL=3）+ `strategy_not_applicable`（TTL=2）标为 `[BLOCKED]` 占位符；`tool_error` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
 | 空结果模式匹配 | `iteration_end.py` | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久排除） |
 | Improvement 阈值 | `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | 低于 50ps 视为无改善 |
 
@@ -372,12 +372,13 @@ class StepState:
 | 策略中断检测 | `execution_failure` |
 | 工具返回空结果 | `tool_error` |
 
-**`_EMPTY_RESULT_PATTERNS` 空结果模式匹配**：当 LLM 调用 `SWITCH_STRATEGY` 且工具输出包含 `"0 candidates"` / `"no candidates"` / `"optimized_count": 0` 等模式时，归类为 `tool_error`（冷却后可重试）而非 `strategy_ineffective`（永久排除）。
+**`_EMPTY_RESULT_PATTERNS` 空结果模式匹配**：当 LLM 调用 `SWITCH_STRATEGY` 且工具输出包含 `"0 candidates"` / `"no candidates"` / `"optimized_count": 0` 等模式时，归类为 `tool_error`（无 TTL，立即重试）而非 `strategy_ineffective`（1 轮冷却）。
 
-**分级过滤逻辑**：
-- `reason="strategy_ineffective"` → 永久排除
-- `reason ∈ {tool_error, execution_failure}` → 冷却 2 个迭代后可重试
-- `reason = "data_quality_error"` → 冷却 3 个迭代（同 `strategy_ineffective`）
+**按原因分级 TTL（2026-07 `_ttl_for_reason()` 函数统一计算）**：
+- `reason="strategy_ineffective"` → `blocked_until_iter = current + 1`（1 轮冷却）
+- `reason="strategy_not_applicable"` → `blocked_until_iter = current + 2`（2 轮冷却）
+- `reason="no_improvement"` → `blocked_until_iter = current + 3`（3 轮冷却）
+- `reason ∈ {tool_error, execution_failure, unknown}` → `blocked_until_iter = current`（无 TTL，立即重试）
 
 **冷却逻辑分层**（`_cool_down_current_strategy_if_stalled()`）：
 1. 定义 `STRATEGY_TOOL_NAMES` 常量，包含 16 个策略执行工具
@@ -393,9 +394,21 @@ class StepState:
 - CongestionSpreading → 工具名含 `congestion_spread`
 - PlaceRoute → 工具名含 `place_design` 或 `route_design`
 
+### 4.4.1 策略自动阻断（Post-eval UNCHANGED/REGRESSED，2026-07）
+
+`phase_execute.py` 的 `_post_eval_hook()` 和直接工具评估段中，当 post-eval verdict 为 `UNCHANGED` 或 `REGRESSED` 时，自动将当前策略加入 `state.iteration.blocked_strategies`，阻止本迭代内同一策略的重复执行：
+
+```python
+if verdict in ("UNCHANGED", "REGRESSED"):
+    if state.strategy.current_strategy not in state.iteration.blocked_strategies:
+        state.iteration.blocked_strategies.append(state.strategy.current_strategy)
+```
+
+**设计意图**：策略执行后 WNS 无改善或倒退 → 继续使用该策略预计不会带来益处。自动阻断替代 LLM 的判断，减少因 LLM 重复无效策略导致的工具调用浪费。
+
 ### 4.5 report_step_state 格式提醒（双重提醒）
 
-**提醒 1 — System Message（每 phase 注入，phase-specific）**: FORMAT_GUARD 由 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，在 `inject_merged_dashboard()` 中注入为 system message（幂等 marker 去重）。包含输出格式、EXECUTE 工具映射（仅 EXECUTE phase）、DESIGN CONSISTENCY 要求、CELL NAME CONTRACT。
+**提醒 1 — System Message（每 phase 注入，phase-specific）**: FORMAT_GUARD 由 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，在 `inject_merged_dashboard()` 中注入为 system message（幂等 marker 去重）。包含输出格式、EXECUTE 工具映射（仅 EXECUTE phase）、DESIGN CONSISTENCY 要求、CELL NAME CONTRACT。EVALUATE addendum 新增决策指引表（2026-07），预编码各 verdict 对应的推荐 flow_control 信号（IMPROVED→CONTINUE/SWITCH, UNCHANGED→SWITCH, REGRESSED→SWITCH/ROLLBACK），减少 LLM 决策迷茫。
 
 **提醒 2 — 工具 schema 自描述**: `report_step_state` 工具的 parameters 定义包含完整描述，`filter_tools_for_phase()` 按阶段动态 patch flow_control enum。
 
@@ -429,7 +442,86 @@ DeepSeek V4 Flash 在长上下文场景下可能产生"沉默退化"——65% �
 
 ### 4.10 多策略循环
 
-`MAX_STRATEGY_CYCLES=5`。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制（3 轮迭代后自动解封）而非永久阻止。
+`MAX_STRATEGY_CYCLES=5`。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因分级（`strategy_ineffective` 1 轮 / `strategy_not_applicable` 2 轮 / `no_improvement` 3 轮后自动解封；`tool_error` 无 TTL），而非永久阻止。
+
+### 4.11 连续无进展自动检测（2026-07）
+
+EVALUATE 阶段新增 `consecutive_no_progress` 计数器。每次评估后计算当前策略的 WNS delta（与进入 EVALUATE 时相比）：delta < `STRATEGY_IMPROVEMENT_EPSILON_NS`（0.050ns）则 `consecutive_no_progress += 1`，否则重置为 0。当计数 >= 3 时：
+
+```python
+if state.context.consecutive_no_progress >= 3:
+    flow_signal = "SWITCH_STRATEGY"  # 强制切换，不等 LLM 决策
+```
+
+触发后记录日志警告 `"[EVALUATE] 3 consecutive no-progress evaluations — forcing SWITCH_STRATEGY"`。
+
+### 4.12 优化历史追踪（2026-07）
+
+**数据结构**（`optimizer/state.py` 新增 `OptimizationAppliedRecord`）：
+
+```python
+@dataclass
+class OptimizationAppliedRecord:
+    strategy: str = ""
+    params: str = ""           # 短参摘要（200字截断）
+    wns_before: float = 0.0
+    wns_after: float = 0.0
+    iteration: int = 0
+    checkpoint_path: str = ""
+```
+
+**触发时机**：`_save_best_checkpoint()` 每次保存新的 `best_checkpoint.dcp` 时追加记录到 `state.context.optimization_history`：
+
+```python
+state.context.optimization_history.append(OptimizationAppliedRecord(
+    strategy=state.strategy.current_strategy,
+    params="",
+    wns_before=state.timing.prev_best_wns,
+    wns_after=state.timing.best_wns,
+    iteration=state.iteration.current,
+    checkpoint_path=str(state.control.best_checkpoint_path),
+))
+```
+
+**消费方**：
+- **Handoff**（`pure/handoff.py`）：`_format_optimization_history()` 在 planner/worker handoff 末尾追加 `APPLIED OPTIMIZATIONS` 段落
+- **Dashboard**（`pure/state_space.py`）：`applied_optimizations` 独立段落，列出每条记录的 `strategy: WNS_before→WNS_after (iter N)`
+
+### 4.13 设计指纹缓存保留（2026-07）
+
+**动机**：EVALUATE→CONTINUE→ANALYZE 循环中，若设计未被修改，跨阶段清理 tool cache 会导致已缓存的时序数据不必要丢失，增加重复 MCP 调用。
+
+**机制**（`nodes/subgraphs/phase_handoff.py`）：
+
+```python
+# 模块级变量追踪上次指纹
+_last_design_fingerprint: str | None = None
+
+if design_fingerprint is not None and design_fingerprint == _last_design_fingerprint:
+    # 设计未变更 → 保留缓存
+    pass  # tool_cache 不被清除
+else:
+    tool_cache.clear()
+    _last_design_fingerprint = design_fingerprint
+```
+
+所有四阶段（ANALYZE、SELECT_STRATEGY、EXECUTE、EVALUATE）的 `transition_phase()` 调用均传入 `design_fingerprint=str(state.control.best_checkpoint_path)`。向后兼容：`design_fingerprint=None`（旧调用方）保持原有的始终清除行为。
+
+### 4.14 迭代开始 Checkpoint（2026-07）
+
+`iteration_start_node` 在每个迭代开始时自动保存当前设计状态到 `iteration_{iter}_start.dcp`，作为 `_reload_baseline_on_switch` 的回退基线：
+
+```python
+iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
+await call_tool_fn("vivado_write_checkpoint", {"dcp_path": str(iter_ckpt.resolve()), ...})
+state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
+```
+
+**加载优先级**（在 `_reload_baseline_on_switch` 中）：
+1. `state.control.best_checkpoint_path`（最佳 checkpoint，优先）
+2. `iteration_{iter}_start.dcp`（迭代开始快照，回退）
+
+当 `best_checkpoint_path` 不存在或已被删除时，fallback 到迭代开始 DCP，确保策略切换加载的基线始终包含当前迭代的所有修改。
 
 ---
 
@@ -697,6 +789,15 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
 MAX_TOOL_ROUNDS_PER_ITERATION = 80
 GLOBAL_NO_IMPROVEMENT_LIMIT = 3
 WNS_TARGET_THRESHOLD = 0.0
+
+# 失败策略 TTL（2026-07 `_ttl_for_reason()` 统一计算）
+# strategy_ineffective → current + 1
+# strategy_not_applicable → current + 2
+# no_improvement → current + 3
+# tool_error / execution_failure / unknown → current（无 TTL）
+
+# 连续无进展检测阈值（2026-07）
+CONSECUTIVE_NO_PROGRESS_LIMIT = 3
 ```
 
 ---
@@ -746,7 +847,7 @@ WNS_TARGET_THRESHOLD = 0.0
 | 层 | 生命周期 | 内容 | 注入位置 |
 |------|---------|------|---------|
 | L0 STATIC | 不变（top-level `system` 参数） | SYSTEM_PROMPT.TXT（角色/规则/启发式，~110行） | `extra_body[system]`，provider 可缓存 |
-| L1 FORMAT_GUARD | 每 phase 重建（system message） | BASE 格式要求 + Cell Name Contract + 设计一致性 + per-phase addendum（tool 可用性/PBLOCK 行为等） | 首个 system message 之后，幂等 marker 去重 |
+| L1 FORMAT_GUARD | 每 phase 重建（system message） | BASE 格式要求 + Cell Name Contract + 设计一致性 + per-phase addendum（tool 可用性/PBLOCK 行为/EVALUATE 决策指引等） | 首个 system message 之后，幂等 marker 去重 |
 | L2 PINNED | 每轮重建，绕过压缩 | **CellNameRegistry 快照**（canonical cell 名 + 模块索引 + stale/fresh 标记 + iter 版本号） | system 之后，独立 user 消息 |
 | L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace（非 EXECUTE/EVALUATE 阶段抑制 current_strategy；时钟名从 critical_paths 提取） | 最后一条 user 消息 |
 | L4 EPHEMERAL | 受压缩管理（preserve_role_turns=6） | 最近对话轮次 + 压缩后 YAML 历史 | 消息列表主体 |

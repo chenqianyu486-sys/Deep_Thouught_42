@@ -284,6 +284,19 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             flow_signal = step_state.flow_control
             llm_summary = assistant_content
 
+            # ── Consecutive no-progress tracking ──
+            delta = _strategy_wns_delta_since_entry(state)
+            if delta is not None and delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
+                state.context.consecutive_no_progress = 0
+            elif delta is not None:
+                state.context.consecutive_no_progress += 1
+                if state.context.consecutive_no_progress >= 3:
+                    logger.warning(
+                        f"[EVALUATE] {state.context.consecutive_no_progress} consecutive "
+                        f"no-progress evaluations — forcing SWITCH_STRATEGY"
+                    )
+                    flow_signal = "SWITCH_STRATEGY"
+
             # Handle terminal signals
             if flow_signal == "DONE":
                 _handle_done(state, deps, assistant_content)

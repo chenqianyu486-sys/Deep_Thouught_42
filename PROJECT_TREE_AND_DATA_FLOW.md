@@ -72,7 +72,7 @@ OptimizerState (可变 dataclass，7 个子切片 + entity_registry 实体注册
 ├── IterationState  — 迭代计数/no_improvement/工具名列表/narratives
 ├── ModelState      — 模型选择/fallback/交接提示词
 ├── CostState       — token 用量/成本追踪
-├── ContextState    — 压缩计数/原始工具输出缓冲/工具结果缓存/LLM 消息日志/FC 决策轨迹/失败策略记录
+├── ContextState    — 压缩计数/原始工具输出缓冲/工具结果缓存/LLM 消息日志/FC 决策轨迹/失败策略记录/优化历史(optimization_history)/连续无进展计数(consecutive_no_progress)
 ├── ControlState    — 退出条件/DCP 路径/step_state
 ├── StrategyState   — 4 阶段策略生命周期（current_phase/策略/阶段历史/评估结果）
 └── entity_registry — EntityRegistry（canonical cell 名 SSOT + Pinned 上下文层，抗压缩；cells/by_module/snapshot_version）
@@ -127,11 +127,12 @@ llm_tool_loop_node (调度器)
       SWITCH_STRATEGY → SELECT_STRATEGY (多策略循环, 最多5轮/迭代)
       NEXT_ITERATION/ROLLBACK → ITERATION_END
       CONTINUE → ANALYZE
+      [auto] 连续3次无进展 → 强制 SWITCH_STRATEGY
 ```
 
-**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制区分处理：`strategy_ineffective`（3 轮后解封）、`strategy_not_applicable`（无 TTL，下轮可重试）、`tool_error`（无 TTL，始终可重试）。
+**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因区分处理：`strategy_ineffective`（1 轮后解封）、`strategy_not_applicable`（2 轮后解封）、`no_improvement`（3 轮后解封）、`tool_error`（无 TTL，始终可重试）。EVALUATE 阶段还新增连续无进展检测：连续 3 次评估无改善时自动强制 `SWITCH_STRATEGY`。
 
-阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。
+阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。切换时通过 `design_fingerprint`（当前 `best_checkpoint_path`）判断设计是否变更：若指纹不变（设计未修改过），tool cache 被保留避免 EVALUATE→CONTINUE→ANALYZE 循环中缓存数据不必要的丢失。
 
 > 阶段内完整消息流程、压缩细节、handoff 格式见 [architecture.md §1](architecture.md)。
 
@@ -198,6 +199,8 @@ global_state:
   current_stage: PLACEMENT;  iteration_count: 5;  target_frequency: 300.0
   wns_setup: -0.523 [fresh];  tns_setup: -12.340 [fresh];  whs_hold: 0.045 [fresh]
   lut_utilization: 49.16% [fresh];  ff_utilization: 19.66% [fresh]
+  iterations_remaining: 5;  budget_used: $0.2350;  budget_remaining: $0.7650
+  wns_gap_to_zero: 0.523ns  # positive = still negative slack to close
 
 # Module 2: Timing Path Clusters
 timing_clusters:
@@ -237,6 +240,8 @@ architecture_overview:
 
 **新鲜度标记**: Dashboard 中每个数据字段后显示 `[fresh]` 或 `[stale]` 标记，由 `field_freshness: dict[str, str]` 逐字段追踪。`init_analysis` 完成后全部初始化为 `[fresh]`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `[fresh]`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共 24 个，2026-06-27 补充 5 个）执行后全部字段降级为 `[stale]`（EXECUTE 和 EVALUATE 对称处理）。LLM 根据标记决定是否信任数据或重新获取。
 
+**StateSpace 新增字段**: Module 1 新增 `iterations_remaining`、`budget_used`、`budget_remaining`、`wns_gap_to_zero`，帮助 LLM 评估优化进度和剩余预算。Dashboard 末尾新增 `applied_optimizations` 独立段落，列出成功应用于 `best_checkpoint` 的策略历史（策略名 + WNS 前后对比 + 迭代号）。
+
 **Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块——ANALYZE 看 7 模块（M5 隐藏），SELECT_STRATEGY 看 9 模块（新增 M4b `design_structure` + M8 `recent_analysis`），EXECUTE/EVALUATE 看 M1 + M2b (紧凑摘要) + M6。
 
 **LLM 防歧义注解**: 所有 N/A 和空列表带机器可读原因——`"N/A(initial_state)"`、`"N/A(no_io_ports)"`、`[]  # no_high_fanout_nets_found`。纯数据无判断标签。每次通过 `build_state_space()` 重建，不进入 MessageStore，同时通过 WebSocket 推送到前端。
@@ -270,7 +275,7 @@ architecture_overview:
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
 | 调用频率限制 | 超限返回 `[RATE LIMITED]`（`search_cells`:3, `vivado_run_tcl`:2 等） |
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
-| 策略 catalog 排除 | 仅 `strategy_ineffective` 失败策略从目录标为 `[BLOCKED]`（TTL 阻断，占位符保留）；`strategy_not_applicable`/`tool_error`/`no_improvement` 完全移出目录；冷却策略在目录中标 `[BLOCKED: cooldown]` |
+| 策略 catalog 排除 | 按原因分级：`tool_error` 永久移出目录（无 TTL，立即重试）；`strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=2）从目录标为 `[BLOCKED]` 占位符（含剩余轮数）；冷却策略在目录中标 `[BLOCKED: cooldown]` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
 | **cell 名边界校验** | **`tool_router.call_tool` 在 LLM→MCP 咽喉校验 cell 名（`validate_and_sanitize_cell_args`，部分放行+警告，2026-06-27 新增 `allow_unverified` 参数）；全部非法返回富错误（含候选名建议），不调用 MCP；设计修改工具强制 strict 模式（拒绝 unverified 名）** |
 | 细胞名验证 | `_is_valid_cell_name()`（SSOT 在 `entities.py`，`critical_path.py` re-export）过滤非细胞字符串；>50% 无效整条跳过 |
@@ -373,3 +378,6 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 - **429 降级**: fallback 轮询→耗尽→切层级→清空
 - **DCP 验证**: Phase 1 结构对比(RapidWright) + Phase 2 功能仿真(Vivado xsim, 200向量)。每5次迭代中间验证。详见 [architecture.md §6](architecture.md)
 - **工具输出摘要化**: 大输出提取WNS/TNS摘要 + `raw_output_truncated: true`；小型(<3KB)直通嵌入。侧缓冲 FIFO 50条。详见 [architecture.md §5](architecture.md)
+- **迭代开始 checkpoint**: `iteration_start` 节点自动保存 `iteration_{iter}_start.dcp` 作为 rollback 基线；`_reload_baseline_on_switch` 优先从 `best_checkpoint_path` 恢复，回退到 iteration start DCP
+- **设计指纹缓存**: `transition_phase` 接收 `design_fingerprint`（`best_checkpoint_path` 字符串）判断设计是否变更；指纹不变时 tool cache 跨阶段保留，避免 EVALUATE→CONTINUE→ANALYZE 循环中不必要的缓存失效
+- **优化历史追踪**: `optimization_history`（`OptimizationAppliedRecord` 列表，含 strategy/params/wns_before/wns_after/iteration/checkpoint_path）在每次保存 `best_checkpoint` 时追加记录，注入 handoff 和 Dashboard

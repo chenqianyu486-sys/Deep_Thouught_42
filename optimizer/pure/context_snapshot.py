@@ -163,19 +163,22 @@ def inject_merged_dashboard(
     space = build_state_space(state)
 
     # Build exclusion and blocked-strategy sets.
-    # Reasons that are always retriable → hard-exclude from catalog entirely.
+    # Hard-exclude: tool_error is permanent/immediate (no TTL).
     _hard_exclude: list[str] = [
         fs.strategy for fs in state.context.failed_strategies
-        if fs.reason in ("strategy_not_applicable", "tool_error", "no_improvement")
+        if fs.reason in ("tool_error",)
     ] if state.context.failed_strategies else []
 
-    # Reasons that merit a [BLOCKED] placeholder so the LLM understands why.
+    # TTL-persistent blocks: strategies with a finite cooldown that unblocks
+    # after a specific number of iterations.
+    #   strategy_ineffective  → TTL=1
+    #   no_improvement        → TTL=3
+    #   strategy_not_applicable → TTL=2
+    # Each entry shows remaining iterations until re-available.
     _blocked: dict[str, str] = {}
-
-    # TTL-persistent blocks (strategy_ineffective, unblocks after N iterations).
     if state.context.failed_strategies:
         for fs in state.context.failed_strategies:
-            if fs.reason == "strategy_ineffective":
+            if fs.reason in ("strategy_ineffective", "no_improvement", "strategy_not_applicable"):
                 remaining = max(0, fs.blocked_until_iter - state.iteration.current)
                 if remaining > 0:
                     _blocked[fs.strategy] = f"unblocks in {remaining} iter"

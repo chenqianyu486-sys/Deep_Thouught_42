@@ -158,7 +158,14 @@ PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
   physopt/muxf_tree take route_directive only.""",
 
     LoopPhase.EVALUATE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
-  - EVALUATE: read-only tools to assess the WNS delta and decide next.""",
+   - EVALUATE: read-only tools to assess the WNS delta and decide next.
+
+DECISION GUIDANCE (choose flow_control based on verdict):
+   - verdict=IMPROVED: choose CONTINUE (keep refining same strategy) or SWITCH_STRATEGY.
+   - verdict=UNCHANGED: choose SWITCH_STRATEGY (same strategy is now blocked this iteration; CONTINUE will not help) or NEXT_ITERATION.
+   - verdict=REGRESSED: choose SWITCH_STRATEGY, or ROLLBACK if WNS regressed beyond threshold (auto-rollback may trigger).
+   - If consecutive strategies yield no improvement, choose EXHAUSTED to end this iteration.
+   - Do NOT choose CONTINUE after UNCHANGED — re-analyzing an unchanged design wastes budget.""",
 }
 
 
