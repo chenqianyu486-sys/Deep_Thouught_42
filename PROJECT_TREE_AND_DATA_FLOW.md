@@ -305,6 +305,10 @@ VivadoMCP 服务端 + dcp_optimizer.py 入口双层守卫，阻止以下指令�
 - `AlternateFlowWithRetiming`、`AddRetime`（retiming 改变流水线结构）
 - `retime=true`、`interconnect_retime=true`（布尔选项）
 
+### 3.9 Auto-chain Directive Tuning
+
+自动链（`SKILL_CHAIN_ACTIONS`）扩展支持LLM可调布局布线指令：8个技能包装器（pblock、physopt、opt_design、combinational_rebalancing、lut_muxf_repack、muxf_tree_reorder、fanout、flatten_lut_cascade）现接受可选的 `place_directive`/`route_directive` 参数，通过 `_attach_chain_directives()` 注入链式动作；LLM可在 `PLACE_SAFE_DIRECTIVES`/`ROUTE_SAFE_DIRECTIVES` 白名单内自由选择，省略时回退为"Explore"。修复了 `_strategy_plan_to_dict`（`RapidWrightMCP/rapidwright_tools.py`）中opt/physopt指令因嵌套于 `analysis_summary` 内而被忽略、始终回退为"Explore"的bug。白名单在VivadoMCP服务端强制执行，register_retiming因破坏周期精确等价性而排除。现在这一机制升级为三层回退：LLM 显式传入 > 策略默认值 > 硬编码 "Explore"。策略默认值通过 `STRATEGY_DEFAULT_DIRECTIVES` 字典（`optimizer/pure/constants.py`）激活 `PR_DIRECTIVE_COMBINATIONS` 场景目录，为各策略链匹配典型瓶颈指令对。例如：`opt_design`/`combinational_rebalancing`/`flatten_lut_cascade` → `("ExtraTimingOpt", "NoTimingRelaxation")`；`physopt`/`muxf_tree` → `("Explore", "Explore")`；`pblock`/`fanout` → `(None, "NoTimingRelaxation")`（路由专用）。三层回退逻辑位于 `_execute_chain_actions`（`optimizer/nodes/subgraphs/phase_execute.py`），通过 `"args_from_skill" in step` 守卫保护不含 `args_from_skill` 的特殊步骤（如 pblock "unplace"）。
+
 ## 4. MCP 服务器架构
 
 ### 4.1 VivadoMCP

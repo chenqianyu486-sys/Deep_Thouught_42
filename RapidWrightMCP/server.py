@@ -683,7 +683,22 @@ async def list_tools() -> list[Tool]:
                         "description": "Distance weight in region scoring (0.3 default). "
                                        "Higher = prefer regions closer to critical path cells.",
                         "default": 0.3
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 }
             }
         ),
@@ -710,7 +725,14 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "Whether the design is currently routed",
                         "default": True
-                    }
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 }
             }
         ),
@@ -737,7 +759,22 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "Retarget logic to equivalent primitives",
                         "default": True
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 }
             }
         ),
@@ -787,7 +824,22 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "Retarget logic to equivalent primitives (e.g., LUT5->LUT6 merge)",
                         "default": True
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 },
                 "required": ["critical_paths"]
             }
@@ -830,7 +882,22 @@ async def list_tools() -> list[Tool]:
                         "type": "boolean",
                         "description": "Retarget LUT5 -> LUT6 merge candidates. Safe — does not change function.",
                         "default": True
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 },
                 "required": ["critical_paths"]
             }
@@ -877,7 +944,14 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Minimum MUXF run depth (consecutive MUXF7/MUXF8 cells) to target",
                         "default": 2
-                    }
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 },
                 "required": ["critical_paths"]
             }
@@ -937,7 +1011,22 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Checkpoint filename prefix",
                         "default": "fanout_opt"
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 },
                 "required": ["nets"]
             }
@@ -989,7 +1078,22 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Checkpoint filename prefix",
                         "default": "lut_cascade"
-                    }
+                    },
+                    "place_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's place_design directive (default Explore). "
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
+                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
+                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
+                                        "Omit to use default Explore.",
+                    },
+                    "route_directive": {
+                        "type": "string",
+                        "description": "Optional override for the auto-chain's route_design directive (default Explore). "
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
+                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                    },
                 },
                 "required": ["critical_paths"]
             }
@@ -1628,18 +1732,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 resource_multiplier=2.0,  # FORCED: multiplier 2.0 for contest optimization
                 critical_path_cells=arguments.get("critical_path_cells"),
                 distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
+                place_directive=arguments.get("place_directive"),
+                route_directive=arguments.get("route_directive"),
             )
 
         elif name == "execute_physopt_strategy":
             result = rw.execute_physopt_strategy(
                 directive=arguments.get("directive", "Default"),
                 design_is_routed=arguments.get("design_is_routed", True),
+                route_directive=arguments.get("route_directive"),
             )
 
         elif name == "execute_opt_design_strategy":
             result = rw.execute_opt_design_strategy(
                 directive=arguments.get("directive", "Explore"),
                 retarget=arguments.get("retarget", True),
+                place_directive=arguments.get("place_directive"),
+                route_directive=arguments.get("route_directive"),
             )
 
         elif name == "execute_combinational_rebalancing_strategy":
@@ -1651,6 +1760,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     min_depth=arguments.get("min_depth", 3),
                     directive=arguments.get("directive", "Explore"),
                     retarget=arguments.get("retarget", True),
+                    place_directive=arguments.get("place_directive"),
+                    route_directive=arguments.get("route_directive"),
                 )
 
         elif name == "execute_lut_muxf_repack_strategy":
@@ -1661,6 +1772,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     critical_paths=arguments["critical_paths"],
                     directive=arguments.get("directive", "AddRemap"),
                     retarget=arguments.get("retarget", True),
+                    place_directive=arguments.get("place_directive"),
+                    route_directive=arguments.get("route_directive"),
                 )
 
         elif name == "execute_muxf_tree_reorder_strategy":
@@ -1671,6 +1784,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     critical_paths=arguments["critical_paths"],
                     directive=arguments.get("directive", "Explore"),
                     min_tree_depth=arguments.get("min_tree_depth", 2),
+                    route_directive=arguments.get("route_directive"),
                 )
 
         elif name == "execute_fanout_strategy":
@@ -1678,6 +1792,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 nets=arguments["nets"],
                 temp_dir=arguments.get("temp_dir", "temp"),
                 checkpoint_prefix=arguments.get("checkpoint_prefix", "fanout_opt"),
+                place_directive=arguments.get("place_directive"),
+                route_directive=arguments.get("route_directive"),
             )
 
         elif name == "flatten_lut_cascade":
@@ -1689,6 +1805,8 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     min_cascade_depth=arguments.get("min_cascade_depth", 3),
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "lut_cascade"),
+                    place_directive=arguments.get("place_directive"),
+                    route_directive=arguments.get("route_directive"),
                 )
 
         elif name == "analyze_congestion":

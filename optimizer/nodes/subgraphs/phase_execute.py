@@ -24,7 +24,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -1775,11 +1775,31 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
     for step in chain:
         target_tool = step["tool"]
         args = dict(step.get("args", {}))
+        directive_from_skill = False
         for key, skill_key in step.get("args_from_skill", {}).items():
             if isinstance(skill_key, str) and skill_key in skill_result_data:
                 args[key] = skill_result_data[skill_key]
+                if key == "directive":
+                    directive_from_skill = True
             elif isinstance(skill_key, bool):
                 args[key] = skill_key
+
+        # Tier-2 fallback: per-strategy default directive profile (smarter
+        # than universal "Explore"). Only applies when (a) the LLM did not
+        # override the directive via the skill result, (b) the step is a
+        # place/route step, and (c) the step supports directive override
+        # (has args_from_skill — this guards the pblock "unplace" step and
+        # any other special directive like "unplace" from being clobbered).
+        if (not directive_from_skill
+                and target_tool in ("vivado_place_design", "vivado_route_design")
+                and "args_from_skill" in step):
+            defaults = STRATEGY_DEFAULT_DIRECTIVES.get(tool_name)
+            if defaults:
+                place_def, route_def = defaults
+                if target_tool == "vivado_place_design" and place_def:
+                    args["directive"] = place_def
+                elif target_tool == "vivado_route_design" and route_def:
+                    args["directive"] = route_def
 
         # Handle route reuse: keep -reuse only if design has been routed
         if args.pop("reuse", False):

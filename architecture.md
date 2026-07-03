@@ -272,6 +272,18 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
 ```
 > **数据完整性保护（2026-06）**: LLM 可能通过 TCL 提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。**2026-06 增强**：注入逻辑统一改用 `extract_registry_cells_for_inject()`（注册表 + critical paths），替换原 pblock 子串过滤与零过滤的不一致实现；`rapidwright_optimize_cell_placement` 新增同源 auto-inject（详见 §12.4）。
 
+### 3.5 Auto-chain Directive Tuning
+
+The Vivado place-and-route auto-chain mechanism now supports LLM-tunable place/route directives. Two changes were implemented:
+
+**Bug fix — opt/physopt directive passthrough**: `_strategy_plan_to_dict` in `RapidWrightMCP/rapidwright_tools.py` previously only emitted `directive`/`retarget` nested under `analysis_summary`, but the chain executor (`SKILL_CHAIN_ACTIONS` in `optimizer/pure/constants.py`) performs flat top-level key lookup — so the LLM's chosen `opt_design`/`phys_opt_design` directive was silently lost and always fell back to `"Explore"`. Fixed by flattening `directive`, `retarget`, `place_directive`, `route_directive` from `analysis_summary` to the top level in `_strategy_plan_to_dict`.
+
+**New feature — LLM-tunable place/route directives**: The eight skill wrappers (pblock, physopt, opt_design, combinational_rebalancing, lut_muxf_repack, muxf_tree_reorder, fanout, flatten_lut_cascade) now accept optional `place_directive`/`route_directive` arguments. A new helper `_attach_chain_directives()` echoes them into the skill result JSON at top level. The chain steps in `SKILL_CHAIN_ACTIONS` gained `args_from_skill: {"directive": "place_directive"}` / `{"directive": "route_directive"}` mappings, so the LLM's value overrides the hardcoded `"Explore"` when present, and `"Explore"` remains the fallback when omitted. The LLM is guided via a new `"PLACE/ROUTE DIRECTIVE TUNING"` section in the EXECUTE phase prompt (`optimizer/nodes/prepare_context.py`). Safe directive whitelists (`PLACE_SAFE_DIRECTIVES`/`ROUTE_SAFE_DIRECTIVES` in `VivadoMCP/vivado_mcp_server.py`) are enforced at the MCP server level.
+
+**Design choice**: "full freedom + safety fallback" — the LLM can freely pick any whitelisted directive per call; when it omits, the chain falls back to `Explore`. The `register_retiming` chain was skipped (FORBIDDEN — breaks cycle-exact equivalence).
+
+**Tier-2 strategy-default fallback (NEW)**: When the LLM omits the `place_directive`/`route_directive` parameters, the chain executor (`_execute_chain_actions` in `optimizer/nodes/subgraphs/phase_execute.py`) now consults `STRATEGY_DEFAULT_DIRECTIVES` in `optimizer/pure/constants.py` before falling back to hardcoded `"Explore"`. This dict maps each strategy's chain key to a `(place_default, route_default)` tuple drawn from the `PR_DIRECTIVE_COMBINATIONS` scenario catalog, matching each strategy's typical bottleneck. For example: `opt_design`/`combinational_rebalancing`/`flatten_lut_cascade` → `("ExtraTimingOpt", "NoTimingRelaxation")` for logic-depth-limited designs; `physopt`/`muxf_tree` → `("Explore", "Explore")`; `pblock`/`fanout` → route-only `(None, "NoTimingRelaxation")`. A guard — `"args_from_skill" in step` — prevents the special pblock "unplace" step (`directive: "unplace"` with no `args_from_skill`) from being overridden. `place=None` indicates that strategy's chain has no `place_design` step. This activates the previously-dormant `PR_DIRECTIVE_COMBINATIONS` catalog as a live mechanism, establishing a three-tier precedence: LLM override > strategy default > hardcoded `"Explore"`.
+
 ---
 
 ## 4. 迭代控制实现细节

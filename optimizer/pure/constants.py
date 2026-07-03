@@ -126,6 +126,36 @@ PR_DIRECTIVE_COMBINATIONS = [
     ("Explore", "NoTimingRelaxation", "aggressive_setup"),
 ]
 
+# Per-strategy default (place, route) directive profile — tier-2 fallback.
+# When the LLM omits place_directive/route_directive in a skill call, the
+# auto-chain executor applies these strategy-appropriate defaults instead of
+# the universal "Explore" (tier 3). LLM-provided directives (tier 1) still
+# take precedence. Scenarios sourced from PR_DIRECTIVE_COMBINATIONS above.
+# All values are within PLACE_SAFE_DIRECTIVES / ROUTE_SAFE_DIRECTIVES
+# (enforced at the VivadoMCP server level).
+# place=None means the chain has no place_design step for that strategy.
+STRATEGY_DEFAULT_DIRECTIVES: dict[str, tuple[str | None, str | None]] = {
+    # pblock: clusters critical-path cells into a tight region; route must
+    # not relax timing targets.
+    "rapidwright_execute_pblock_strategy": ("Explore", "NoTimingRelaxation"),
+    # physopt: incremental placement optimization; balanced re-route
+    # (matches PR_DIRECTIVE_COMBINATIONS "default_after_physopt").
+    "rapidwright_execute_physopt_strategy": ("Explore", "Explore"),
+    # opt_design: logic-depth reduction → ExtraTimingOpt place + hold timing.
+    # (matches "logic_depth_limited")
+    "rapidwright_execute_opt_design_strategy": ("ExtraTimingOpt", "NoTimingRelaxation"),
+    # combinational rebalancing: logic-depth → same as opt_design.
+    "rapidwright_execute_combinational_rebalancing_strategy": ("ExtraTimingOpt", "NoTimingRelaxation"),
+    # lut_muxf repack: logic-depth/structure optimization → same profile.
+    "rapidwright_execute_lut_muxf_repack_strategy": ("ExtraTimingOpt", "NoTimingRelaxation"),
+    # muxf tree reorder: phys_opt + route only (no place step) → place unused.
+    "rapidwright_execute_muxf_tree_reorder_strategy": (None, "Explore"),
+    # fanout: net-delay reduction; route holds timing targets.
+    "rapidwright_execute_fanout_strategy": ("Explore", "NoTimingRelaxation"),
+    # flatten lut cascade: logic-depth reduction → same as opt_design.
+    "rapidwright_flatten_lut_cascade": ("ExtraTimingOpt", "NoTimingRelaxation"),
+}
+
 NETLIST_MODIFYING_STRATEGIES = frozenset({
     "Fanout", "LUTCascade", "CellReplication", "NetSwap",
     "OptDesign", "LogicResynthesis", "CombinationalRebalance",
@@ -364,6 +394,9 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 
+# place_design/route_design steps accept an optional directive override via
+# args_from_skill (keys: place_directive / route_directive in the skill result).
+# When absent, the hardcoded "Explore" in args is used as fallback.
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
         {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
@@ -373,8 +406,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
              "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
          }},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: open checkpoint written by retiming, then route so WNS eval triggers.
@@ -389,8 +424,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_fanout_strategy": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: after opt_design modifies netlist, must re-place + re-route.
@@ -399,8 +436,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_opt_design_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -410,8 +449,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_combinational_rebalancing_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -419,8 +460,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_lut_muxf_repack_strategy": [
         {"tool": "vivado_opt_design",
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -429,7 +472,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_muxf_tree_reorder_strategy": [
         {"tool": "vivado_phys_opt_design",
          "args_from_skill": {"directive": "directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
@@ -441,7 +485,8 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive"}},
         # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
         # If UNCHANGED, chain gate (P0) skips remaining steps.
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
     # Auto-chain: LUT cascade flattening mutates the RW netlist and writes a
@@ -452,8 +497,10 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_flatten_lut_cascade": [
         {"tool": "vivado_open_checkpoint",
          "args_from_skill": {"dcp_path": "post_checkpoint_path"}},
-        {"tool": "vivado_place_design", "args": {"directive": "Explore"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],

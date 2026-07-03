@@ -142,6 +142,10 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 
 新增 `report_qor_suggestions`（ML驱动策略建议）、`report_high_fanout_nets`（高扇出网络原生报告）和 `set_incremental_checkpoint`（增量编译，可省30-50%迭代时间）等专用工具。place_design 和 route_design 现已接入安全指令白名单，新增 AddRemap 至 opt_design 安全指令列表（修复LUTMUXFRepack策略），RWRoute 禁用状态已文档化并增加环境变量开关。
 
+LLM可调布局布线指令：8个技能包装器（pblock、physopt、opt_design、combinational_rebalancing、lut_muxf_repack、muxf_tree_reorder、fanout、flatten_lut_cascade）现支持可选的 `place_directive`/`route_directive` 参数，通过 `_attach_chain_directives()` 辅助函数注入自动链。LLM可在白名单内自由选择指令，省略时回退为"Explore"。修复了 `_strategy_plan_to_dict` 中opt/physopt指令因嵌套于 `analysis_summary` 内而被忽略、始终回退为"Explore"的bug。安全指令白名单（`PLACE_SAFE_DIRECTIVES`/`ROUTE_SAFE_DIRECTIVES`）在VivadoMCP服务端强制执行，register_retiming自动链因破坏周期精确等价性而排除。
+
+现新增三层回退机制：LLM 显式传入 > 策略默认值 > 硬编码 "Explore"。当 LLM 省略指令时，`_execute_chain_actions`（`optimizer/nodes/subgraphs/phase_execute.py`）优先查询 `STRATEGY_DEFAULT_DIRECTIVES`（定义于 `optimizer/pure/constants.py`），为各策略匹配 `PR_DIRECTIVE_COMBINATIONS` 场景中的典型瓶颈指令对。例如 `opt_design`/`combinational_rebalancing`/`flatten_lut_cascade` → `("ExtraTimingOpt", "NoTimingRelaxation")`（逻辑深度受限设计）；`physopt`/`muxf_tree` → `("Explore", "Explore")`；`pblock`/`fanout` → 仅路由 `(None, "NoTimingRelaxation")`。特殊 pblock "unplace" 步骤因缺少 `args_from_skill` 而受 `"args_from_skill" in step` 守卫保护，不会被策略默认值覆盖。`place=None` 表示该策略链不含 place_design 步骤。
+
 ---
 
 ## 先决条件

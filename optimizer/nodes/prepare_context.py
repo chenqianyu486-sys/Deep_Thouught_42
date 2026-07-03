@@ -124,7 +124,38 @@ PBLOCK MANDATORY VIVADO FLOW:
   design. Without the auto-chained Vivado place+route, PBLOCK has ZERO effect
   (always returns UNCHANGED). The auto-chain handles this for you; do NOT
   skip it. Refer to skill_guidance in the Dashboard for the current chain
-  and multiplier values.""",
+  and multiplier values.
+
+PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
+  Skill tools (rapidwright_execute_*_strategy, rapidwright_flatten_lut_cascade)
+  accept optional place_directive / route_directive arguments that override the
+  auto-chain's default "Explore". Omit them to use the safe default. Only pass
+  values from the safe whitelists; invalid values abort the chain and waste a
+  full P&R run.
+
+  Place directives — pick by the CURRENT dominant bottleneck:
+    - Explore (default, balanced)
+    - ExtraTimingOpt / Performance_ExtraTimingOpt — logic-depth-limited paths
+    - Performance_Explore / Performance_RefinePlacement — WNS stuck, squeeze placement
+    - Congestion_SpreadLogic_high/medium/low — congestion-bound (check severity)
+    - NetDelay_high/medium/low — long-net / inter-SLR delay dominated
+    - Area_Explore — area-pressure limited
+    - SSI_SpreadLogic_high/low — multi-SLR designs
+  Route directives — pick by bottleneck:
+    - Explore (default, balanced)
+    - AggressiveExplore / HigherDelayCost — timing-critical, squeeze delay
+    - NoTimingRelaxation — prevent router from relaxing timing targets
+    - Congestion_Explore / Congestion_NetDelay_high/medium/low — congestion-bound
+    - Performance_Explore — general performance route
+    - SSI_Explore — multi-SLR (cross-SLR) designs
+    - AlternateRoutability — routability-congested
+
+  Guidance: match the directive to the dominant bottleneck reported in the
+  Dashboard (congestion level, critical-path type, WNS slack distribution).
+  When unsure, OMIT and let default Explore run. Do NOT cycle random
+  directives hoping to get lucky — each failed chain costs a full P&R run.
+  Not every skill tool accepts both; pblock/opt/fanout/flatten take both,
+  physopt/muxf_tree take route_directive only.""",
 
     LoopPhase.EVALUATE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
   - EVALUATE: read-only tools to assess the WNS delta and decide next.""",

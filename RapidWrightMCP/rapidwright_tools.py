@@ -2121,7 +2121,18 @@ def _strategy_step_to_dict(step) -> dict:
 
 
 def _strategy_plan_to_dict(plan) -> dict:
-    """Convert a StrategyPlan dataclass to a plain dict for JSON serialization."""
+    """Convert a StrategyPlan dataclass to a plain dict for JSON serialization.
+
+    Chain-passable params (directive, retarget, place_directive, route_directive)
+    are flattened to top level so the auto-chain executor's flat key lookup
+    (args_from_skill in phase_execute.py) can read them. They remain duplicated
+    under analysis_summary for LLM readability.
+    """
+    asm = plan.analysis_summary if isinstance(plan.analysis_summary, dict) else {}
+    flat_chain_params = {
+        k: asm[k] for k in ("directive", "retarget", "place_directive", "route_directive")
+        if k in asm
+    }
     return {
         "strategy_name": plan.strategy_name,
         "status": plan.status,
@@ -2130,7 +2141,28 @@ def _strategy_plan_to_dict(plan) -> dict:
         "analysis_summary": plan.analysis_summary,
         "steps": [_strategy_step_to_dict(s) for s in plan.steps],
         "error_details": plan.error_details,
+        **flat_chain_params,
     }
+
+
+def _attach_chain_directives(
+    result: dict,
+    place_directive: str | None,
+    route_directive: str | None,
+) -> dict:
+    """Attach LLM-provided place/route directives to a skill result dict.
+
+    Only attaches when not None — absent keys let the auto-chain fall back to
+    its hardcoded 'Explore' default. Used by wrappers that return custom dicts
+    (pblock/fanout/flatten) which don't go through _strategy_plan_to_dict.
+    """
+    if not isinstance(result, dict):
+        return result
+    if place_directive is not None:
+        result["place_directive"] = place_directive
+    if route_directive is not None:
+        result["route_directive"] = route_directive
+    return result
 
 
 def analyze_pblock_region(
@@ -2206,6 +2238,8 @@ def execute_pblock_strategy(
     resource_multiplier: float = 1.2,
     critical_path_cells: list[str] | None = None,
     distance_weight_factor: float = 0.3,
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Execute full PBLOCK workflow: analyze region + prepare for Vivado chaining.
 
@@ -2296,7 +2330,7 @@ def execute_pblock_strategy(
                 error_msg = result.data.get("message") if isinstance(result.data, dict) else None
             return {"error": error_msg or "Unknown error"}
 
-        return result.data
+        return _attach_chain_directives(result.data, place_directive, route_directive)
 
     except Exception as e:
         return _tool_error("pblock strategy execution", e)
@@ -2305,6 +2339,7 @@ def execute_pblock_strategy(
 def execute_physopt_strategy(
     directive: str = "Default",
     design_is_routed: bool = True,
+    route_directive: str | None = None,
 ) -> dict:
     """Generate PhysOpt execution plan for Vivado.
 
@@ -2345,7 +2380,7 @@ def execute_physopt_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return _attach_chain_directives(_strategy_plan_to_dict(plan), None, route_directive)
 
     except Exception as e:
         return _tool_error("physopt strategy execution", e)
@@ -2354,6 +2389,8 @@ def execute_physopt_strategy(
 def execute_opt_design_strategy(
     directive: str = "Explore",
     retarget: bool = True,
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Generate opt_design execution plan for Vivado.
 
@@ -2394,7 +2431,7 @@ def execute_opt_design_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
 
     except Exception as e:
         return _tool_error("opt_design strategy execution", e)
@@ -2405,6 +2442,8 @@ def execute_combinational_rebalancing_strategy(
     min_depth: int = 3,
     directive: str = "Explore",
     retarget: bool = True,
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Validation-safe combinational rebalancing (no FF insert).
 
@@ -2443,7 +2482,7 @@ def execute_combinational_rebalancing_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
 
     except Exception as e:
         return _tool_error("combinational rebalancing strategy", e)
@@ -2453,6 +2492,8 @@ def execute_lut_muxf_repack_strategy(
     critical_paths: list[list[str]],
     directive: str = "AddRemap",
     retarget: bool = True,
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Validation-safe LUT6+MUXF co-repack (no FF insert).
 
@@ -2490,7 +2531,7 @@ def execute_lut_muxf_repack_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")
@@ -2504,6 +2545,7 @@ def execute_muxf_tree_reorder_strategy(
     critical_paths: list[list[str]],
     directive: str = "Explore",
     min_tree_depth: int = 2,
+    route_directive: str | None = None,
 ) -> dict:
     """Validation-safe MUXF tree reorder (no FF insert, no -retime).
 
@@ -2541,7 +2583,7 @@ def execute_muxf_tree_reorder_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _strategy_plan_to_dict(plan)
+        return _attach_chain_directives(_strategy_plan_to_dict(plan), None, route_directive)
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")
@@ -2555,6 +2597,8 @@ def execute_fanout_strategy(
     nets: list[dict],
     temp_dir: str = "temp",
     checkpoint_prefix: str = "fanout_opt",
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Execute fanout optimization directly.
 
@@ -2597,7 +2641,7 @@ def execute_fanout_strategy(
         if not result.success:
             return {"error": result.error or "Unknown error"}
 
-        return result.data  # Already a plain dict
+        return _attach_chain_directives(result.data, place_directive, route_directive)
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")
@@ -2612,6 +2656,8 @@ def flatten_lut_cascade(
     min_cascade_depth: int = 3,
     temp_dir: str = "temp",
     checkpoint_prefix: str = "lut_cascade",
+    place_directive: str | None = None,
+    route_directive: str | None = None,
 ) -> dict:
     """Flatten LUT cascades on critical paths using LUTInputConeOpt.
 
@@ -2655,7 +2701,7 @@ def flatten_lut_cascade(
         if not result.success:
             return {"error": result.error or "Unknown error"}
 
-        return result.data  # Already a plain dict
+        return _attach_chain_directives(result.data, place_directive, route_directive)
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")
