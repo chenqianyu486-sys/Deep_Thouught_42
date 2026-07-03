@@ -158,7 +158,7 @@ MAX_STRATEGY_CYCLES = 5            # Max strategy cycles per iteration (increase
 #
 # See the plan at docs/plans/p-r-rollback-abundant-puffin.md for
 # the three-level funnel design (RW pre-check → Place-Only → Full P&R).
-RAPIDWRIGHT_PRECHECK_ENABLED: bool = True
+RAPIDWRIGHT_PRECHECK_ENABLED: bool = False  # Disabled: trust LLM strategy selection, run full P&R
 # Directional regression threshold: when post-skill RapidWright WNS
 # estimate falls this far below the pre-skill Vivado WNS baseline,
 # treat the change as likely harmful and skip the P&R chain.
@@ -176,7 +176,7 @@ RAPIDWRIGHT_PRECHECK_REGRESS_THRESHOLD: float = 0.080  # Widened from 50ps to 80
 # Skills suitable for place-only check are those whose auto-chain
 # includes a vivado_place_design step (pblock, fanout, opt_design).
 # Skills without place_design (physopt, register_retiming) skip this.
-PLACE_ONLY_CHECK_ENABLED: bool = True
+PLACE_ONLY_CHECK_ENABLED: bool = False  # Disabled: trust LLM strategy selection, always run full P&R chain
 
 # Threshold for place-only WNS regression. When place-only WNS falls
 # this far below the pre-skill baseline, skip the remaining route steps.
@@ -331,14 +331,10 @@ def build_llm_extra_body(
 # When post-eval shows UNCHANGED, the chain is skipped in favor of a
 # lightweight validation (place_design without pblock). This prevents
 # wasting ~3 min on a strategy that didn't modify the netlist.
-HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset({
-    # NOTE: rapidwright_execute_pblock_strategy is intentionally excluded.
-    # The skill is analysis-only (returns pblock_ranges); the actual
-    # netlist mutation happens via the SKILL_CHAIN_ACTIONS chain
-    # (unplace → create_pblock → place → route). The chain must always
-    # run regardless of post-eval verdict.
-    "rapidwright_execute_fanout_strategy",
-})
+# Disabled: trust LLM strategy selection, always run the full P&R chain
+# so strategies get real P&R validation rather than being skipped on a
+# post-eval UNCHANGED verdict.
+HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset()
 
 # Names of tools that perform the actual optimization work (strategy tools).
 # Used by EVALUATE cooling logic to distinguish strategy-tool errors (which
