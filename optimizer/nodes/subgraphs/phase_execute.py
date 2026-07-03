@@ -27,7 +27,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -1225,19 +1225,11 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
-    # Extract system message for top-level API parameter (prompt caching).
-    # The system prompt is static across calls; passing it as a top-level
-    # parameter lets providers cache it independently of the dynamic
-    # conversation history (messages). The pinned cell registry + merged
-    # dashboard are injected as user messages below.
-    system_text = ""
-    api_clean: list[dict] = []
-    for msg in api_messages:
-        if msg.get("role") == "system" and not system_text:
-            system_text = msg.get("content", "")
-        else:
-            api_clean.append(msg)
-    api_messages = api_clean
+    # Extract the first system message for the top-level API ``system``
+    # parameter (prompt caching). The static system prompt is cached by the
+    # provider; remaining system messages (FORMAT_GUARD, handoff, budget)
+    # stay in the conversation as system-role messages.
+    system_text, api_messages = extract_system_message(api_messages)
 
     # Inject merged handoff + dashboard as last user message
     # Inject Pinned cell-registry layer (right after system message),

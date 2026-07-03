@@ -394,13 +394,25 @@ class TestStrategyLifecycle:
     def test_strategy_lifecycle_shown(self, sample_space):
         text = format_state_space_for_llm(
             space=sample_space,
-            phase=LoopPhase.ANALYZE,
+            phase=LoopPhase.EXECUTE,
             current_strategy="PhysOpt",
             evaluation_result="IMPROVED",
         )
         assert "strategy_lifecycle:" in text
         assert "current_strategy: PhysOpt" in text
         assert "evaluation: IMPROVED" in text
+
+    def test_analyze_suppresses_stale_strategy(self, sample_space):
+        """P3: ANALYZE phase must not show current_strategy even if passed."""
+        text = format_state_space_for_llm(
+            space=sample_space,
+            phase=LoopPhase.ANALYZE,
+            current_strategy="PhysOpt",
+            evaluation_result="IMPROVED",
+        )
+        assert "strategy_lifecycle:" in text
+        assert "current_strategy: PhysOpt" not in text
+        assert "evaluation: IMPROVED" not in text
 
     def test_no_strategy_lifecycle_when_empty(self, sample_space):
         """strategy_lifecycle is ALWAYS shown (for blocked lists).

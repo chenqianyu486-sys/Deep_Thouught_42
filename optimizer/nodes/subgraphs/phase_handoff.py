@@ -163,17 +163,15 @@ async def transition_phase(
             except Exception as e:
                 logger.debug(f"[phase_handoff] Archive failed (non-critical): {e}")
 
-        # 3. Get the system message (first message) to preserve
-        system_msg = None
-        for m in current_messages:
-            if hasattr(m, 'role') and m.role.value == "system":
-                system_msg = m
-                break
-
-        # 4. Clear working memory and restore system message
+        # 4. Clear working memory and restore ALL system messages.
+        #    Only restoring the first would lose FORMAT_GUARD / handoff_prompt /
+        #    budget messages injected after the static SYSTEM_PROMPT.TXT, leaving
+        #    the LLM without critical per-iteration constraints in later phases.
+        system_msgs = [m for m in current_messages
+                       if hasattr(m, 'role') and m.role.value == "system"]
         deps.memory_manager._working_memory.clear()
-        if system_msg is not None:
-            deps.memory_manager._working_store.add(system_msg)
+        for sm in system_msgs:
+            deps.memory_manager._working_store.add(sm)
 
         logger.info(
             "[phase_handoff] %s -> %s: %d messages archived",

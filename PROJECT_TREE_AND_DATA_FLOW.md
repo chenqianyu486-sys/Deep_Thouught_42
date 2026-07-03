@@ -18,13 +18,13 @@ fpl26_optimization_contest/
 │   │   ├── init_analysis.py      # 初始化分析
 │   │   ├── iteration_start.py    # 迭代开始
 │   │   ├── select_model.py       # 模型选择
-│   │   ├── prepare_context.py    # 上下文准备
+│   │   ├── prepare_context.py    # 上下文准备（FORMAT_GUARD 拆分为 BASE + per-phase addendum，由 inject_merged_dashboard 注入）
 │   │   ├── iteration_end.py      # 迭代结束
 │   │   ├── check_exit.py         # 退出检查
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入）
+│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview；时钟名从 critical_paths 提取，非硬编码）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + stale/fresh 标记 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入 + per-phase FORMAT_GUARD 注入 + 共享 extract_system_message）、tool_summary.py（tool result 摘要 + compact_tool_summary 共享函数）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流、数据质量守卫、冷却逻辑等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -162,7 +162,12 @@ _prepare_api_messages():
                                                    LLM API Call
 ```
 
-> **分层上下文注入**（STATIC > PINNED > DYNAMIC > EPHEMERAL，详见 [architecture.md §11](architecture.md)）：Pinned 层（[CELL REGISTRY]）由 `state.entity_registry` 每轮重建，不进入 MessageStore，天然抗压缩；为 LLM 提供 canonical cell 名唯一权威来源。
+> **分层上下文注入**（STATIC > PINNED > FORMAT_GUARD > DYNAMIC > EPHEMERAL，详见 [architecture.md §11](architecture.md)）：
+> - **STATIC**（L0）：`SYSTEM_PROMPT.TXT`，启动时注入，作为首个 system message 经 `extra_body[system]` 传入 API（provider 可缓存）。
+> - **PINNED**（L2）：`[CELL REGISTRY]` 由 `state.entity_registry` 每轮重建，不进入 MessageStore，天然抗压缩；附带 `stale`/`fresh` 新鲜度标记与 `iter=N` 版本号。为 LLM 提供 canonical cell 名唯一权威来源。
+> - **FORMAT_GUARD**（L1）：每 phase 按 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，由 `inject_merged_dashboard()` 注入为 system message（幂等，marker 去重）。包含输出格式、Cell Name Contract、设计一致性验证流程、禁止事项、phase-gated tool 可用性。
+> - **DYNAMIC**（L3）：7 模块 StateSpace Dashboard，作为最后一条 user 消息注入。非 EXECUTE/EVALUATE 阶段抑制 `current_strategy` 残留；时钟名从 `critical_paths[0].clock.source_clock` 提取。
+> - **EPHEMERAL**：tool result summaries、handoff prompts、budget messages。
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §1.1-§1.2](architecture.md)。
 
 ### 3.1.1 init_analysis 增强数据提取

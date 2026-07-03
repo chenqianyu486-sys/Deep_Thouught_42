@@ -460,3 +460,128 @@ def summarize_tool_result(
     yaml_lines.append(f"  raw_output_chars: {char_count}")
 
     return '\n'.join(yaml_lines)
+
+
+# ── Compact one-line summary for dashboard / handoff ───────────────────
+# Used by both phase_analyze._extract_recent_tool_results and
+# state_space._append_recent_analysis_results to avoid duplicate regex logic.
+
+_ANALYSIS_TOOL_NAMES: frozenset[str] = frozenset({
+    "vivado_report_timing_summary", "vivado_extract_critical_path_cells",
+    "vivado_get_cached_high_fanout_nets", "vivado_check_design_status",
+    "rapidwright_analyze_critical_path_spread", "rapidwright_analyze_congestion",
+    "rapidwright_analyze_net_detour", "rapidwright_get_design_info",
+    "rapidwright_get_device_topology", "rapidwright_report_timing",
+    "rapidwright_search_cells", "rapidwright_analyze_pblock_region",
+    "rapidwright_flatten_lut_cascade",
+})
+
+
+def compact_tool_summary(tool_name: str, raw_result: str) -> str:
+    """Return a compact one-line summary of an analysis tool's raw output.
+
+    Prefers JSON parsing for structured tools, falls back to regex for text
+    tools. Returns "" if no meaningful summary could be extracted.
+
+    This is the single source of truth for dashboard/handoff tool-result
+    summaries — both phase_analyze.py and state_space.py call this function
+    instead of maintaining separate regex implementations.
+    """
+    if not raw_result or not raw_result.strip():
+        return ""
+
+    name = tool_name
+    raw = raw_result
+
+    if name == "vivado_report_timing_summary":
+        wns = _regex_first(raw, r'"?wns"?[\s:=]+([-\d.]+)', r'wns[\s:=]+([-\d.]+)')
+        tns = _regex_first(raw, r'"?tns"?[\s:=]+([-\d.]+)', r'tns[\s:=]+([-\d.]+)')
+        fe = _regex_first(raw, r'"?failing_endpoints"?[\s:=]+([-\d.]+)',
+                          r'failing_endpoints[\s:=]+([-\d.]+)')
+        return f"WNS={wns}, TNS={tns}, FE={fe}"
+
+    if name == "rapidwright_analyze_critical_path_spread":
+        data = _try_json(raw)
+        if isinstance(data, dict):
+            avg = data.get("avg_distance", data.get("avg_max_distance", "?"))
+            mx = data.get("max_distance", "?")
+            cnt = data.get("paths_analyzed", "?")
+            return f"avg={avg}, max={mx}, paths={cnt}"
+        return raw.strip().split("\n")[0][:80]
+
+    if name == "rapidwright_analyze_congestion":
+        data = _try_json(raw)
+        if isinstance(data, dict):
+            score = data.get("global_score", data.get("congested_ratio", "?"))
+            sev = data.get("severity", "?")
+            return f"global_score={score}, severity={sev}"
+        return raw.strip().split("\n")[0][:80]
+
+    if name == "vivado_get_cached_high_fanout_nets":
+        matches = re.findall(r"fanout[=:]\s*(\d+)", raw)
+        if matches:
+            max_fo = max(int(m) for m in matches)
+            return f"{len(matches)} nets, max_fanout={max_fo}"
+        return raw.strip().split("\n")[0][:80]
+
+    if name == "rapidwright_analyze_net_detour":
+        data = _try_json(raw)
+        if isinstance(data, list):
+            return f"{len(data)} cells with detour > threshold"
+        if isinstance(data, dict) and data.get("cells"):
+            return f"{len(data['cells'])} cells"
+        return raw.strip().split("\n")[0][:80]
+
+    if name == "vivado_check_design_status":
+        m = re.search(r'"status["\s:]+"([^"]+)"', raw)
+        st = m.group(1) if m else "?"
+        return f"status={st}"
+
+    if name == "rapidwright_search_cells":
+        data = _try_json(raw)
+        if isinstance(data, dict):
+            cnt = data.get("cell_count", "?")
+            return f"{cnt} cells"
+        m = re.search(r'"cell_count["\s:]+(\d+)', raw)
+        cnt = m.group(1) if m else "?"
+        return f"{cnt} cells"
+
+    if name == "vivado_extract_critical_path_cells":
+        data = _try_json(raw)
+        if isinstance(data, list):
+            return f"{len(data)} critical paths extracted"
+        return "critical paths extracted"
+
+    if name == "rapidwright_get_design_info":
+        data = _try_json(raw)
+        if isinstance(data, dict):
+            cells = data.get("total_cells", data.get("cell_count", "?"))
+            return f"cells={cells}"
+        return raw.strip().split("\n")[0][:80]
+
+    if name == "rapidwright_report_timing":
+        wns = _regex_first(raw, r'"wns"[\s:]+([-\d.]+)', r'wns[\s:=]+([-\d.]+)')
+        return f"WNS={wns}" if wns != "?" else raw.strip().split("\n")[0][:80]
+
+    # Generic fallback: first non-empty line
+    first = raw.strip().split("\n")[0][:80] if raw.strip() else ""
+    return first if first else "completed"
+
+
+def _try_json(raw: str):
+    """Try to parse raw as JSON, return None on failure."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _regex_first(raw: str, pattern_json: str, pattern_text: str) -> str:
+    """Try JSON-key regex first, then plain-text regex. Return '?' on miss."""
+    m = re.search(pattern_json, raw, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(pattern_text, raw, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return "?"

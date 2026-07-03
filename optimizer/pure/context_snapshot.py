@@ -17,6 +17,31 @@ if TYPE_CHECKING:
 # Header marker for the Pinned cell-registry layer (compression-resistant).
 CELL_REGISTRY_MARKER = "[CELL REGISTRY]"
 
+# Marker for per-phase FORMAT_GUARD injection (idempotency check).
+FORMAT_GUARD_MARKER = "[FORMAT_GUARD:"
+
+
+def extract_system_message(api_messages: list[dict]) -> tuple[str, list[dict]]:
+    """Extract the first system message for the top-level API ``system`` parameter.
+
+    Keeps prompt-caching semantics intact: the static SYSTEM_PROMPT.TXT (first
+    system message) is returned as ``system_text`` for provider caching; all
+    remaining messages (including subsequent system messages such as
+    FORMAT_GUARD / handoff / budget) stay in ``api_clean`` as conversation
+    history so they survive as context without invalidating the cache.
+
+    Returns:
+        (system_text, api_clean) — system_text is "" if no system message found.
+    """
+    system_text = ""
+    api_clean: list[dict] = []
+    for msg in api_messages:
+        if msg.get("role") == "system" and not system_text:
+            system_text = msg.get("content", "")
+        else:
+            api_clean.append(msg)
+    return system_text, api_clean
+
 
 def inject_pinned_cell_registry(
     api_messages: list[dict],
@@ -51,7 +76,11 @@ def inject_pinned_cell_registry(
         return
 
     phase = getattr(state.strategy, "current_phase", "") or ""
-    snapshot = build_registry_snapshot_yaml(registry, phase=phase)
+    stale = getattr(state.timing, "critical_paths_stale", False)
+    iteration = getattr(getattr(state, "iteration", None), "current", 0)
+    snapshot = build_registry_snapshot_yaml(
+        registry, phase=phase, stale=stale, iteration=iteration,
+    )
 
     # Insert right after the last system message (Pinned layer position).
     insert_idx = 0
@@ -160,6 +189,17 @@ def inject_merged_dashboard(
     _exclude_strategies = _hard_exclude or None
     _blocked_strategies = _blocked or None
 
+    # P3: Suppress stale current_strategy / evaluation_result during non-execute
+    # phases. state.strategy.current_strategy may still hold the previous
+    # iteration's value when a new iteration enters ANALYZE/SELECT_STRATEGY,
+    # misleading the LLM into thinking a strategy is already executing.
+    _phase_val = phase.value if hasattr(phase, "value") else str(phase)
+    _current_strategy = state.strategy.current_strategy
+    _evaluation_result = state.strategy.evaluation_result
+    if _phase_val not in ("EXECUTE_STRATEGY", "EVALUATE"):
+        _current_strategy = ""
+        _evaluation_result = ""
+
     snapshot = format_state_space_for_llm(
         space=space,
         phase=phase,
@@ -169,9 +209,46 @@ def inject_merged_dashboard(
         blocked_strategies=_blocked_strategies,
         iteration_narratives=state.iteration.narratives,
         tools_used=state.iteration.tools_used,
-        current_strategy=state.strategy.current_strategy,
-        evaluation_result=state.strategy.evaluation_result,
+        current_strategy=_current_strategy,
+        evaluation_result=_evaluation_result,
         state=state,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)
+
+    # Inject per-phase FORMAT_GUARD as a system message (idempotent via marker).
+    # This ensures the guard is present in every phase with phase-specific
+    # addenda, and survives phase transitions (unlike the old once-per-iteration
+    # injection that was lost after the first transition_phase clear).
+    _inject_phase_guard(api_messages, phase)
+
+
+def _inject_phase_guard(api_messages: list[dict], phase: LoopPhase) -> None:
+    """Inject or refresh the per-phase FORMAT_GUARD as a system message.
+
+    Idempotent: removes any prior [FORMAT_GUARD:...] system message before
+    inserting the fresh one, so it never accumulates across turns and always
+    reflects the current phase.
+    """
+    from optimizer.nodes.prepare_context import build_phase_format_guard
+
+    # Remove any existing FORMAT_GUARD system message
+    for i, msg in enumerate(api_messages):
+        if (msg.get("role") == "system"
+                and isinstance(msg.get("content"), str)
+                and FORMAT_GUARD_MARKER in msg["content"]):
+            del api_messages[i]
+            break
+
+    guard_text = build_phase_format_guard(phase)
+    # Insert after the first system message (static SYSTEM_PROMPT.TXT) to keep
+    # prompt-caching semantics: the static prompt stays first for caching, the
+    # guard follows as a second system message in the conversation.
+    insert_idx = 1
+    for i, msg in enumerate(api_messages):
+        if msg.get("role") != "system":
+            insert_idx = i
+            break
+    else:
+        insert_idx = len(api_messages)
+    api_messages.insert(insert_idx, {"role": "system", "content": guard_text})

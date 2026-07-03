@@ -15,7 +15,7 @@ from optimizer.state import OptimizerState, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
-from optimizer.pure.tool_summary import summarize_tool_result
+from optimizer.pure.tool_summary import summarize_tool_result, compact_tool_summary
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
@@ -23,7 +23,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -329,17 +329,10 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
-    # Extract system message for top-level API parameter (prompt caching).
-    # The static system prompt is passed as a top-level parameter so providers
-    # can cache it independently of the dynamic conversation history.
-    system_text = ""
-    api_clean: list[dict] = []
-    for msg in api_messages:
-        if msg.get("role") == "system" and not system_text:
-            system_text = msg.get("content", "")
-        else:
-            api_clean.append(msg)
-    api_messages = api_clean
+    # Extract the first system message for the top-level API ``system``
+    # parameter (prompt caching). Remaining system messages (FORMAT_GUARD,
+    # handoff, budget) stay in the conversation as system-role messages.
+    system_text, api_messages = extract_system_message(api_messages)
 
     # Inject merged handoff + dashboard as last user message
     # Inject Pinned cell-registry layer (right after system message),
@@ -486,14 +479,9 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
 
 
 # ── Analysis tools used for recent-results extraction ────────────────
-_ANALYSIS_TOOL_NAMES: frozenset[str] = frozenset({
-    "vivado_report_timing_summary", "vivado_extract_critical_path_cells",
-    "vivado_get_cached_high_fanout_nets", "vivado_check_design_status",
-    "rapidwright_analyze_critical_path_spread", "rapidwright_analyze_congestion",
-    "rapidwright_analyze_net_detour", "rapidwright_get_design_info",
-    "rapidwright_get_device_topology", "rapidwright_report_timing",
-    "rapidwright_search_cells", "rapidwright_analyze_pblock_region",
-})
+# Canonical set lives in tool_summary.compact_tool_summary; re-export here
+# for backward compatibility with any external callers.
+from optimizer.pure.tool_summary import _ANALYSIS_TOOL_NAMES as _ANALYSIS_TOOL_NAMES  # noqa: F401
 
 
 def _extract_recent_tool_results(state: OptimizerState) -> list[str]:
@@ -503,8 +491,6 @@ def _extract_recent_tool_results(state: OptimizerState) -> list[str]:
     summaries of analysis tools. Used to populate PhaseHandoff.tool_results
     so SELECT_STRATEGY sees concrete tool findings.
     """
-    import re
-
     current_iter = state.iteration.current
     results: list[str] = []
 
@@ -514,52 +500,13 @@ def _extract_recent_tool_results(state: OptimizerState) -> list[str]:
         if name not in _ANALYSIS_TOOL_NAMES:
             continue
 
-        summary = ""
-        if name == "vivado_report_timing_summary":
-            wns = _extract_timing_value(raw, "wns")
-            tns = _extract_timing_value(raw, "tns")
-            fe = _extract_timing_value(raw, "failing_endpoints")
-            summary = f"[{name}] WNS={wns}, TNS={tns}, failing={fe}"
-        elif name == "rapidwright_analyze_critical_path_spread":
-            m = re.search(r'"avg_(?:max_)?distance["\s:]+([\d.]+)', raw)
-            mx = re.search(r'"max_distance["\s:]+([\d.]+)', raw)
-            avg = m.group(1) if m else "?"
-            maxd = mx.group(1) if mx else "?"
-            summary = f"[{name}] avg_distance={avg}, max_distance={maxd}"
-        elif name == "rapidwright_analyze_congestion":
-            m = re.search(r'"global_score["\s:]+([\d.]+)', raw)
-            sev = re.search(r'"severity["\s:]+"([^"]+)"', raw)
-            score = m.group(1) if m else "?"
-            sev_val = sev.group(1) if sev else "?"
-            summary = f"[{name}] score={score}, severity={sev_val}"
-        elif name == "vivado_get_cached_high_fanout_nets":
-            fo_matches = re.findall(r"fanout[=:]\s*(\d+)", raw)
-            if fo_matches:
-                max_fo = max(int(f) for f in fo_matches)
-                summary = f"[{name}] {len(fo_matches)} nets, max_fanout={max_fo}"
-        elif name == "rapidwright_analyze_net_detour":
-            summary = f"[{name}] completed"
-        elif name == "vivado_check_design_status":
-            m = re.search(r'"status["\s:]+"([^"]+)"', raw)
-            st = m.group(1) if m else "?"
-            summary = f"[{name}] status={st}"
-        elif name == "rapidwright_search_cells":
-            cells_m = re.search(r'"cell_count["\s:]+(\d+)', raw)
-            cnt = cells_m.group(1) if cells_m else "?"
-            summary = f"[{name}] {cnt} cells"
-
-        if summary and summary not in results:
-            results.append(summary)
+        summary = compact_tool_summary(name, raw)
+        if summary:
+            entry = f"[{name}] {summary}"
+            if entry not in results:
+                results.append(entry)
 
     return results
-
-
-def _extract_timing_value(raw: str, key: str) -> str:
-    """Quick regex-based timing value extraction."""
-    import re
-    pat = re.compile(rf'{re.escape(key)}[\s:=]+([-\d.]+)', re.IGNORECASE)
-    m = pat.search(raw)
-    return m.group(1) if m else "?"
 
 
 def _extract_analyze_key_findings(state: OptimizerState) -> dict:

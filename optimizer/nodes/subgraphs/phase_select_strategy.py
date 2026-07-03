@@ -19,7 +19,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
 from optimizer.color import green, yellow
 
@@ -280,15 +280,9 @@ async def _call_phase_llm(state, deps, phase_tools):
     except Exception:
         return None
 
-    # Extract system message for top-level API parameter (prompt caching).
-    system_text = ""
-    api_clean: list[dict] = []
-    for msg in api_messages:
-        if msg.get("role") == "system" and not system_text:
-            system_text = msg.get("content", "")
-        else:
-            api_clean.append(msg)
-    api_messages = api_clean
+    # Extract the first system message for the top-level API ``system``
+    # parameter (prompt caching). Remaining system messages stay in context.
+    system_text, api_messages = extract_system_message(api_messages)
 
     # Inject merged handoff + dashboard as last user message
     inject_pinned_cell_registry(api_messages, state)

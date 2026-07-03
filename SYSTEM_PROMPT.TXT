@@ -104,36 +104,7 @@ The following patterns have been observed to correlate with suboptimal outcomes:
 - Fast timing: rapidwright_report_timing (~2.5s) vs Vivado (~14s)
 - Cost: Worker=$0.005/call, Planner=$0.075/call (15x diff)
 
-
-
-## PBLOCK EXECUTION SEQUENCE (PROVEN EFFECTIVE)
-
-When applying PBLOCK strategy, use this exact sequence for maximum effectiveness:
-1. vivado_report_utilization_for_pblock → get resource counts
-2. rapidwright_analyze_pblock_region (resource_multiplier=1.8 for small designs)
-3. rapidwright_execute_pblock_strategy (resource_multiplier=1.8)
-4. vivado_run_tcl: place_design -unplace → clear placement
-5. vivado_create_and_apply_pblock with pblock ranges from step 2
-6. vivado_place_design → re-place within pblock constraints
-7. vivado_route_design → final routing
-8. rapidwright_report_timing → verify improvement
-
-CRITICAL: Steps 4-6 are essential. Skipping them results in UNCHANGED WNS.
-Default multiplier is now 2.0x. Use 1.5x for dense (>40% util) designs.
-
-
-
-## PBLOCK EXECUTION — MANDATORY VIVADO FLOW
-
-After calling rapidwright_execute_pblock_strategy, you MUST execute this Vivado chain:
-1. vivado_run_tcl: "place_design -unplace"
-2. vivado_create_and_apply_pblock (with pblock_ranges from step 1, is_soft=false)
-3. vivado_place_design (directive="Default")
-4. vivado_route_design
-5. rapidwright_report_timing (verify improvement)
-
-The RapidWright tool only plans the pblock — it does NOT modify the design.
-Without the Vivado chain, PBLOCK has ZERO effect (always returns UNCHANGED).
-This chain takes ~180s but is ESSENTIAL for any WNS improvement from PBLOCK.
-
-MULTIPLIER: Always use resource_multiplier=2.0 for this design.
+NOTE: PBLOCK / strategy execution sequences and parameter defaults are defined
+authoritatively in the strategy_catalog (SELECT_STRATEGY) and skill_guidance
+(EXECUTE) sections of the Dashboard. Refer to those sections for the current
+execution chain and multiplier values.

@@ -589,6 +589,8 @@ def build_registry_snapshot_yaml(
     phase: str = "",
     max_cells: int = 40,
     max_modules: int = 8,
+    stale: bool = False,
+    iteration: int = 0,
 ) -> str:
     """Render the registry as a compact YAML block for the Pinned context layer.
 
@@ -606,7 +608,9 @@ def build_registry_snapshot_yaml(
             "# (containing '/') from this section.\n"
         )
     lines = ["[CELL REGISTRY]"]
-    lines.append(f"# snapshot_version: {registry.snapshot_version}  # phase={phase or 'N/A'}")
+    stale_tag = "STALE — re-fetch via vivado_extract_critical_path_cells before targeting cells" if stale else "fresh"
+    iter_tag = f"iter={iteration}" if iteration else "iter=N/A"
+    lines.append(f"# freshness: {stale_tag}  # {iter_tag}  # version={registry.snapshot_version}  # phase={phase or 'N/A'}")
     lines.append(f"# total_registered: {len(registry.cells)} cells across {len(registry.by_module)} modules")
     lines.append("canonical_cells:")
 

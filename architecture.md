@@ -99,7 +99,7 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 - **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
 - **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
   - **解析失败保留策略（2026-07，P1 修复）**: `parse_design_state()` 在 `Design State` 字段缺失时返回 `None` 而非默认 `UNPLACED`，调用方保留上次已知状态。`vivado_route_design`/`vivado_physopt_and_route` 执行后显式置 `ROUTED`（它们必然产生已布线结果），`vivado_phys_opt_design` 保留原状态。修复了 `physopt_and_route` 后误翻转为 UNPLACED、对真实布线后 WNS 误报"线负载估计"的灾难性 bug（见 run-20260703_142810）。Dashboard 警告加守卫：`design_state=UNPLACED` 但存在真实 `wns_setup` 时降级为温和提示，不再误报线负载。
-- **比赛时钟处理（clk_fpl26contest）**: `init_analysis` 显式通过 `get_clocks -quiet clk_fpl26contest` + `get_property PERIOD` 提取比赛标准时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。符合 FPL26 比赛每个 benchmark 包含 `clk_fpl26contest` 创建时钟的约束。
+- **比赛时钟处理**: `init_analysis` 通过 `get_clocks` + `get_property PERIOD` 提取时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。Dashboard Module 5 的时钟名从 `state.timing.critical_paths[0].clock.source_clock` 动态提取（2026-07 修复，此前硬编码 `clk_fpl26contest`），无 critical_paths 时回退到该默认名。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
 - **`strategy_catalog` 排除机制**: `strategy_ineffective`（TTL 阻断）和冷却策略不在 catalog 中移除，而是标为 `[BLOCKED]` 占位符（含剩余轮数/原因）。`strategy_not_applicable`、`tool_error`、`no_improvement` 完全移出 catalog（可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共23个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
@@ -383,7 +383,7 @@ class StepState:
 
 ### 4.5 report_step_state 格式提醒（双重提醒）
 
-**提醒 1 — User Message（一次性，精简版）**: FORMAT_GUARD（约 4000 字符，含 EXECUTE 工具映射 + DESIGN CONSISTENCY 要求 + CELL NAME CONTRACT），由 `format_guard_injected` 标志控制，仅注入一次。
+**提醒 1 — System Message（每 phase 注入，phase-specific）**: FORMAT_GUARD 由 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，在 `inject_merged_dashboard()` 中注入为 system message（幂等 marker 去重）。包含输出格式、EXECUTE 工具映射（仅 EXECUTE phase）、DESIGN CONSISTENCY 要求、CELL NAME CONTRACT。
 
 **提醒 2 — 工具 schema 自描述**: `report_step_state` 工具的 parameters 定义包含完整描述，`filter_tools_for_phase()` 按阶段动态 patch flow_control enum。
 
@@ -525,7 +525,7 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 ### 6.5 策略别名映射
 
-`STRATEGY_MAP` 新增 `"LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy")`。FORMAT_GUARD 策略列表同步添加。`_STRATEGY_MAPPING_LINES` 自动生成。
+`STRATEGY_MAP` 新增 `"LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy")`。FORMAT_GUARD EXECUTE addendum 策略列表同步添加。`_STRATEGY_MAPPING_LINES` 自动生成。
 
 ### 6.6 Dashboard 数据新鲜度与工具 rate limit
 
@@ -727,16 +727,25 @@ WNS_TARGET_THRESHOLD = 0.0
 
 `filter_tools_for_phase()` 对 `report_step_state` 工具定义做深拷贝 + 按阶段 patch `flow_control` enum，LLM 只看到当前阶段的合法信号。
 
-### 上下文注入层次（分层上下文管理，2026-06 增强）
+### 上下文注入层次（分层上下文管理，2026-07 增强）
 
-显式四层注入架构，每层有明确的生命周期与注意力权重策略：
+显式五层注入架构，每层有明确的生命周期与注意力权重策略：
 
 | 层 | 生命周期 | 内容 | 注入位置 |
 |------|---------|------|---------|
-| L1 STATIC | 不变（system message） | SYSTEM_PROMPT.TXT + FORMAT_GUARD | 消息列表最前 |
-| L2 PINNED | 每轮重建，绕过压缩 | **CellNameRegistry 快照**（canonical cell 名 + 模块索引） | system 之后，独立 user 消息 |
-| L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace | 最后一条 user 消息 |
+| L0 STATIC | 不变（top-level `system` 参数） | SYSTEM_PROMPT.TXT（角色/规则/启发式，~110行） | `extra_body[system]`，provider 可缓存 |
+| L1 FORMAT_GUARD | 每 phase 重建（system message） | BASE 格式要求 + Cell Name Contract + 设计一致性 + per-phase addendum（tool 可用性/PBLOCK 行为等） | 首个 system message 之后，幂等 marker 去重 |
+| L2 PINNED | 每轮重建，绕过压缩 | **CellNameRegistry 快照**（canonical cell 名 + 模块索引 + stale/fresh 标记 + iter 版本号） | system 之后，独立 user 消息 |
+| L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace（非 EXECUTE/EVALUATE 阶段抑制 current_strategy；时钟名从 critical_paths 提取） | 最后一条 user 消息 |
 | L4 EPHEMERAL | 受压缩管理（preserve_role_turns=6） | 最近对话轮次 + 压缩后 YAML 历史 | 消息列表主体 |
+
+**关键修复（2026-07）**：
+- **P0**：`transition_phase` 现恢复全部 system messages（此前仅恢复首个，导致 FORMAT_GUARD/handoff/budget 在首次 phase 切换后丢失）。
+- **P1/P7**：FORMAT_GUARD 从一次性注入改为每 phase 按 `build_phase_guard(phase)` 动态生成，ANALYZE 阶段不再看到 EXECUTE-only 的 PBLOCK 行为指令。注入点集中在 `inject_merged_dashboard()`，非散布 4 个 phase 文件。
+- **P3**：`format_state_space_for_llm` 在非 EXECUTE/EVALUATE 阶段抑制 `current_strategy`，防止上一迭代残留误导。
+- **P5**：Module 5 时钟名从 `critical_paths[0].clock.source_clock` 提取，不再硬编码 `clk_fpl26contest`。
+- **P6**：Cell Registry 附带 `stale`/`fresh` 标记和 `iter=N` 版本号。
+- **P4**：`compact_tool_summary()` 作为共享函数统一 dashboard/handoff 的 tool result 摘要，优先 JSON 解析。
 
 **Pinned 层（L2）是关键**：LLM 在 EXECUTE 阶段调用 `optimize_cell_placement` 等工具时，不再依赖"几轮前看过的、已被压缩的工具输出"来回忆 cell 名，而是直接看到 Pinned 层注册表提供的规范化名。把"记忆重建"降级为"复制粘贴"，从根上消除 cell 名幻觉。Pinned 层由 `inject_pinned_cell_registry()` 每轮移除并重新插入（幂等，不累积），不进入 MessageStore，天然抗压缩。
 
@@ -832,8 +841,8 @@ EntityRegistry
 | `optimizer/state.py` | `OptimizerState` 新增 `entity_registry` 字段 |
 | `optimizer/pure/critical_path.py` | `_is_valid_cell_name` re-export；`update_critical_paths` 同步注册表 |
 | `optimizer/pure/tool_router.py` | `call_tool` 增加 `entity_registry` 参数 + 边界校验 |
-| `optimizer/pure/context_snapshot.py` | **新增** `inject_pinned_cell_registry()` |
-| `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 增加 "CELL NAME CONTRACT" 段，指引 LLM 使用 [CELL REGISTRY]、禁止 device site / bare type 名 |
+| `optimizer/pure/context_snapshot.py` | `inject_pinned_cell_registry()` + `extract_system_message()` 共享函数 + `_inject_phase_guard()` per-phase 注入 |
+| `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 拆分为 `BASE_FORMAT_GUARD` + `_PHASE_GUIDES` + `build_phase_format_guard()`；移除一次性注入逻辑 |
 | `optimizer/nodes/subgraphs/phase_*.py` | 4 阶段 `_call_phase_llm` 调用 Pinned 注入 + 传 registry |
 | `RapidWrightMCP/server.py` | cell 名参数 schema 增强（pattern/description/examples） |
 | `dashboard/serializer.py` | 无需改动（`dataclasses.asdict` + `_make_json_safe` 自动处理 `entity_registry`，含 set→sorted list 转换） |

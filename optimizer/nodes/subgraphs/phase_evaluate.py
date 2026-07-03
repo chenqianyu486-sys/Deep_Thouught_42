@@ -28,7 +28,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, PULSE_WIDTH_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES, EQUIVALENCE_FF_CHANGE_THRESHOLD, EQUIVALENCE_LUT_CHANGE_THRESHOLD
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
-from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -638,15 +638,9 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
     except Exception:
         return None
 
-    # Extract system message for top-level API parameter (prompt caching).
-    system_text = ""
-    api_clean: list[dict] = []
-    for msg in api_messages:
-        if msg.get("role") == "system" and not system_text:
-            system_text = msg.get("content", "")
-        else:
-            api_clean.append(msg)
-    api_messages = api_clean
+    # Extract the first system message for the top-level API ``system``
+    # parameter (prompt caching). Remaining system messages stay in context.
+    system_text, api_messages = extract_system_message(api_messages)
 
     # Inject merged handoff + dashboard as last user message
     inject_pinned_cell_registry(api_messages, state)

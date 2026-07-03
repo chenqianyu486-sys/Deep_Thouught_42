@@ -15,6 +15,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.compress import compress_context
 from ..pure.constants import STRATEGY_MAP as _STRATEGY_MAP
+from ..pure.tool_filter import LoopPhase
 
 logger = logging.getLogger(__name__)
 
@@ -23,42 +24,39 @@ _STRATEGY_MAPPING_LINES = "\n".join(
     f"      {k} → {v.execute_tool}" for k, v in sorted(_STRATEGY_MAP.items())
 )
 
-# FORMAT_GUARD: enforced on first iteration so the LLM reliably calls report_step_state.
-# Matches the old optimize() flow (dcp_optimizer.py:5233-5255).
-FORMAT_GUARD = f"""OUTPUT FORMAT — call `report_step_state` in every response as a structured tool call,
+# ── FORMAT_GUARD: split into BASE + per-phase addenda ──────────────────
+# The BASE guard contains phase-agnostic rules that apply to every phase.
+# Per-phase addenda contain ONLY the guidance relevant to that phase,
+# avoiding token waste from irrelevant instructions (e.g. EXECUTE-only
+# tool-filtering rules shown during ANALYZE).
+
+BASE_FORMAT_GUARD = """OUTPUT FORMAT — call `report_step_state` in every response as a structured tool call,
 alongside any other tool calls (or alone if making none). Process control goes in the tool
 call; analysis and reasoning go in text.
-
-EXECUTE phase: tool filtering restricts available tools to the selected strategy.
-Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
-Strategy-to-tool mapping:
-{_STRATEGY_MAPPING_LINES}
-
-PHASE-GATED TOOL AVAILABILITY — CRITICAL:
-  The tool set changes per phase. The phase label in the [PHASE — Context &
-  Dashboard] header is the AUTHORITATIVE current phase (your report_step_state
-  .strategy_phase is advisory and does NOT drive routing).
-  - ANALYZE: only diagnostic/read-only tools are exposed. Execution tools
-    (rapidwright_execute_*, vivado_place/route/phys_opt_design) are NOT
-    available here. Do NOT attempt to execute a strategy during ANALYZE —
-    you will see "tool not found". Finish analysis (ANALYZE_DONE) first.
-  - SELECT_STRATEGY: pick exactly one strategy_name via report_step_state.
-  - EXECUTE_STRATEGY: only the selected strategy's primary tool(s) are exposed.
-  - EVALUATE: read-only tools to assess the WNS delta and decide next.
-
-PBLOCK AUTO-CHAIN BEHAVIOR:
-  rapidwright_execute_pblock_strategy auto-chains: unplace → place_design
-  (Explore) → route_design (Explore). It therefore tears down and rebuilds
-  the existing place/route. On an already-routed design this can land on an
-  equal-or-worse result with zero WNS delta — that is a fair "no improvement"
-  outcome, NOT a tool error. If PBLOCK yields delta ≈ 0 once, do NOT re-select
-  it the same iteration; switch strategies.
 
 RESPONSIVENESS — REASON BEFORE ACTING:
   Always include a brief reasoning line in the text body before/alongside tool
   calls. An empty text body with only tool calls wastes a turn and is treated
   as a no-op (2 consecutive empty responses force-exit the phase). State what
   you observed and what you are about to do.
+
+CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
+  Cell-targeting tools (rapidwright_optimize_cell_placement, rapidwright_*_strategy,
+  rapidwright_optimize_lut_input_cone, etc.) require HIERARCHICAL cell instance names
+  that contain the '/' separator (e.g. 'u_core/u_alu/lut1').
+  - The [CELL REGISTRY] section in your context (injected every turn, right after
+    the system message) is the canonical, compression-resistant source of valid
+    cell names. ALWAYS copy names from there when calling cell-targeting tools.
+  - DO NOT reconstruct cell names from memory or from compressed tool outputs —
+    these are frequently truncated or hallucinated.
+  - Device sites (SLICE_X*, DSP*_X*, RAMB*_X*) and bare type names (LUT6, FDRE)
+    are NOT valid cell names — they will be rejected at the tool boundary.
+  - If you submit invalid names, the tool returns a structured rejection with
+    suggested canonical names from the registry. Use those suggestions to correct
+    and re-issue the call.
+  - After any design modification (place/route/opt_design), the registry is
+    marked stale; re-fetch via vivado_extract_critical_path_cells or
+    rapidwright_search_cells before targeting cells again.
 
 DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
   The competition requires STRICT design logic equivalence. Any optimization must preserve
@@ -84,29 +82,65 @@ DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
     - Only directional comparison (better/worse) is reliable
     - Always verify with Vivado for final decisions
 
-CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
-  Cell-targeting tools (rapidwright_optimize_cell_placement, rapidwright_*_strategy,
-  rapidwright_optimize_lut_input_cone, etc.) require HIERARCHICAL cell instance names
-  that contain the '/' separator (e.g. 'u_core/u_alu/lut1').
-  - The [CELL REGISTRY] section in your context (injected every turn, right after
-    the system message) is the canonical, compression-resistant source of valid
-    cell names. ALWAYS copy names from there when calling cell-targeting tools.
-  - DO NOT reconstruct cell names from memory or from compressed tool outputs —
-    these are frequently truncated or hallucinated.
-  - Device sites (SLICE_X*, DSP*_X*, RAMB*_X*) and bare type names (LUT6, FDRE)
-    are NOT valid cell names — they will be rejected at the tool boundary.
-  - If you submit invalid names, the tool returns a structured rejection with
-    suggested canonical names from the registry. Use those suggestions to correct
-    and re-issue the call.
-  - After any design modification (place/route/opt_design), the registry is
-    marked stale; re-fetch via vivado_extract_critical_path_cells or
-    rapidwright_search_cells before targeting cells again.
-
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text
   - Omitting the report_step_state tool call entirely
   - Skipping validation after design modifications
 """
+
+_PHASE_GUIDES: dict[str, str] = {
+    LoopPhase.ANALYZE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
+  The tool set changes per phase. The phase label in the [PHASE — Context &
+  Dashboard] header is the AUTHORITATIVE current phase (your report_step_state
+  .strategy_phase is advisory and does NOT drive routing).
+  - ANALYZE: only diagnostic/read-only tools are exposed. Execution tools
+    (rapidwright_execute_*, vivado_place/route/phys_opt_design) are NOT
+    available here. Do NOT attempt to execute a strategy during ANALYZE —
+    you will see "tool not found". Finish analysis (ANALYZE_DONE) first.""",
+
+    LoopPhase.SELECT_STRATEGY.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
+  - SELECT_STRATEGY: pick exactly one strategy_name via report_step_state.
+    Execution tools are NOT available here. Review the strategy_catalog in
+    the Dashboard and the handoff findings, then signal your choice.""",
+
+    LoopPhase.EXECUTE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
+  - EXECUTE_STRATEGY: only the selected strategy's primary tool(s) are exposed.
+
+EXECUTE phase: tool filtering restricts available tools to the selected strategy.
+Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
+Strategy-to-tool mapping:
+{_STRATEGY_MAPPING_LINES}
+
+PBLOCK AUTO-CHAIN BEHAVIOR:
+  rapidwright_execute_pblock_strategy auto-chains: unplace → place_design
+  (Explore) → route_design (Explore). It therefore tears down and rebuilds
+  the existing place/route. On an already-routed design this can land on an
+  equal-or-worse result with zero WNS delta — that is a fair "no improvement"
+  outcome, NOT a tool error. If PBLOCK yields delta ≈ 0 once, do NOT re-select
+  it the same iteration; switch strategies.
+
+PBLOCK MANDATORY VIVADO FLOW:
+  The RapidWright PBLOCK tool only plans the pblock — it does NOT modify the
+  design. Without the auto-chained Vivado place+route, PBLOCK has ZERO effect
+  (always returns UNCHANGED). The auto-chain handles this for you; do NOT
+  skip it. Refer to skill_guidance in the Dashboard for the current chain
+  and multiplier values.""",
+
+    LoopPhase.EVALUATE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
+  - EVALUATE: read-only tools to assess the WNS delta and decide next.""",
+}
+
+
+def build_phase_format_guard(phase: LoopPhase) -> str:
+    """Build the phase-specific FORMAT_GUARD text.
+
+    Combines BASE_FORMAT_GUARD with the per-phase addendum. The result is
+    prefixed with a marker so callers can detect prior injection (idempotency).
+    """
+    phase_key = phase.value if hasattr(phase, "value") else str(phase)
+    addendum = _PHASE_GUIDES.get(phase_key, "")
+    marker = f"[FORMAT_GUARD:{phase_key}]"
+    return f"{marker}\n{BASE_FORMAT_GUARD}\n{addendum}"
 
 
 async def prepare_context_node(
@@ -136,14 +170,12 @@ async def prepare_context_node(
         except Exception as e:
             logger.warning(f"[prepare_context] Compression failed: {e}")
 
-    # 2. Inject FORMAT_GUARD (once, first iteration)
-    if not state.model.format_guard_injected and deps.compat is not None:
-        try:
-            deps.compat.add_message("system", FORMAT_GUARD)
-            state.model.format_guard_injected = True
-            logger.info("[prepare_context] FORMAT_GUARD injected")
-        except Exception as e:
-            logger.warning(f"[prepare_context] FORMAT_GUARD injection failed: {e}")
+    # 2. FORMAT_GUARD is now injected per-phase in inject_merged_dashboard
+    #    (see context_snapshot.py), not here. The old once-per-iteration
+    #    injection was lost after the first phase transition; per-phase
+    #    injection ensures the guard is always present with phase-specific
+    #    addenda. Reset the legacy flag so old runs don't carry stale state.
+    state.model.format_guard_injected = False
 
     # 3. Inject handoff prompt
     if not state.model.iteration_handoff_injected and state.model.iteration_handoff_prompt:

@@ -130,7 +130,8 @@ class TestInjectMergedDashboard:
             state = OptimizerState()
             state.timing.latest_wns = -0.5
             inject_merged_dashboard(messages, state, phase)
-            assert len(messages) == 3
+            # inject_merged_dashboard now also injects a FORMAT_GUARD system
+            # message, so the count is 4: sys, guard, previous, dashboard.
             last = messages[-1]
             assert last["role"] == "user"
             phase_label = phase.value.upper()

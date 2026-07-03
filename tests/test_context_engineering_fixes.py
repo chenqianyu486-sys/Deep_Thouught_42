@@ -240,3 +240,377 @@ class TestCooldownLogic:
             iteration=1, wns_at_entry=-0.978, best_wns_at_entry=-0.978,
         ))
         assert _cool_down_current_strategy_if_stalled(s, "improved") is False
+
+
+# ── Batch A: P0 system-message retention + shared extract fn ────────────
+
+class TestExtractSystemMessage:
+    """Shared extract_system_message preserves prompt-caching semantics."""
+
+    def test_first_system_to_system_text_rest_to_api_clean(self):
+        from optimizer.pure.context_snapshot import extract_system_message
+        msgs = [
+            {"role": "system", "content": "STATIC_PROMPT"},
+            {"role": "system", "content": "FORMAT_GUARD"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+        sys_text, clean = extract_system_message(msgs)
+        assert sys_text == "STATIC_PROMPT"
+        assert clean == [
+            {"role": "system", "content": "FORMAT_GUARD"},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ]
+
+    def test_no_system_message(self):
+        from optimizer.pure.context_snapshot import extract_system_message
+        msgs = [{"role": "user", "content": "hi"}]
+        sys_text, clean = extract_system_message(msgs)
+        assert sys_text == ""
+        assert clean == msgs
+
+    def test_empty_list(self):
+        from optimizer.pure.context_snapshot import extract_system_message
+        sys_text, clean = extract_system_message([])
+        assert sys_text == ""
+        assert clean == []
+
+
+class TestSystemMessageRetentionAcrossPhaseTransition:
+    """P0: transition_phase must restore ALL system messages, not just the first."""
+
+    def test_all_system_messages_restored(self):
+        """Simulate a phase transition and verify that FORMAT_GUARD and budget
+        system messages survive the clear+restore, not just SYSTEM_PROMPT.TXT."""
+        import asyncio
+        from context_manager.manager import MemoryManager
+        from context_manager.compat import DCPOptimizerCompat
+        from context_manager.events import EventBus
+        from optimizer.pure.tool_filter import LoopPhase
+        from optimizer.nodes.subgraphs.phase_handoff import (
+            PhaseHandoff, transition_phase,
+        )
+
+        mm = MemoryManager(event_bus=EventBus())
+        compat = DCPOptimizerCompat(mm)
+
+        # Simulate initial injection: SYSTEM_PROMPT + FORMAT_GUARD + budget
+        compat.add_message("system", "SYSTEM_PROMPT_TXT")
+        compat.add_message("system", "FORMAT_GUARD_CONTENT")
+        compat.add_message("system", "[BUDGET] ...")
+
+        # Add some conversation
+        compat.add_message("user", "analyze this")
+        compat.add_message("assistant", "ok")
+
+        # Build a minimal deps-like object
+        class _Deps:
+            pass
+        deps = _Deps()
+        deps.compat = compat
+        deps.memory_manager = mm
+
+        handoff = PhaseHandoff(source_phase="ANALYZE", llm_summary="done")
+        asyncio.run(transition_phase(
+            deps, LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, handoff,
+        ))
+
+        # After transition, all 3 system messages must be in working memory
+        remaining = mm.get_context()
+        system_contents = [m.content for m in remaining if m.role.value == "system"]
+        assert "SYSTEM_PROMPT_TXT" in system_contents
+        assert "FORMAT_GUARD_CONTENT" in system_contents
+        assert "[BUDGET] ..." in system_contents
+
+
+# ── Batch B: Dashboard data accuracy (P3, P5, P6) ──────────────────────
+
+class TestClockNameNotHardcoded:
+    """P5: Module 5 clock name must come from critical path data, not hardcoded."""
+
+    def test_clock_name_from_critical_path(self):
+        from optimizer.state import CriticalPathEntry, ClockDomainInfo
+        s = OptimizerState()
+        s.timing.clock_period = 5.0
+        s.timing.critical_paths = [
+            CriticalPathEntry(clock=ClockDomainInfo(source_clock="clk_custom")),
+        ]
+        from optimizer.pure.state_space import _build_constraints_env
+        ce = _build_constraints_env(s)
+        assert "clk_custom" in ce.clock_definitions
+        assert "clk_fpl26contest" not in ce.clock_definitions
+        assert ce.clock_definitions["clk_custom"] == 200.0
+
+    def test_fallback_when_no_critical_paths(self):
+        s = OptimizerState()
+        s.timing.clock_period = 5.0
+        s.timing.critical_paths = []
+        from optimizer.pure.state_space import _build_constraints_env
+        ce = _build_constraints_env(s)
+        assert "clk_fpl26contest" in ce.clock_definitions
+
+    def test_dest_clock_used_when_no_source(self):
+        from optimizer.state import CriticalPathEntry, ClockDomainInfo
+        s = OptimizerState()
+        s.timing.clock_period = 4.0
+        s.timing.critical_paths = [
+            CriticalPathEntry(clock=ClockDomainInfo(source_clock="", dest_clock="clk_capture")),
+        ]
+        from optimizer.pure.state_space import _build_constraints_env
+        ce = _build_constraints_env(s)
+        assert "clk_capture" in ce.clock_definitions
+
+
+class TestStrategyLifecycleClean:
+    """P3: current_strategy must not leak into ANALYZE/SELECT_STRATEGY dashboard."""
+
+    def test_analyze_phase_suppresses_current_strategy(self):
+        s = OptimizerState()
+        s.strategy.current_strategy = "PBLOCK"
+        s.strategy.evaluation_result = "IMPROVED"
+        s.strategy.current_phase = "ANALYZE"
+        from optimizer.pure.state_space import build_state_space, format_state_space_for_llm
+        space = build_state_space(s)
+        yaml = format_state_space_for_llm(
+            space=space, phase=LoopPhase.ANALYZE,
+            current_strategy=s.strategy.current_strategy,
+            evaluation_result=s.strategy.evaluation_result,
+            state=s,
+        )
+        assert "current_strategy: PBLOCK" not in yaml
+
+    def test_execute_phase_shows_current_strategy(self):
+        s = OptimizerState()
+        s.strategy.current_strategy = "PBLOCK"
+        s.strategy.evaluation_result = "IMPROVED"
+        s.strategy.current_phase = "EXECUTE_STRATEGY"
+        from optimizer.pure.state_space import build_state_space, format_state_space_for_llm
+        space = build_state_space(s)
+        yaml = format_state_space_for_llm(
+            space=space, phase=LoopPhase.EXECUTE,
+            current_strategy=s.strategy.current_strategy,
+            evaluation_result=s.strategy.evaluation_result,
+            state=s,
+        )
+        assert "current_strategy: PBLOCK" in yaml
+
+    def test_inject_merged_dashboard_analyze_suppresses_strategy(self):
+        """End-to-end: inject_merged_dashboard reads state and suppresses stale
+        current_strategy during ANALYZE phase."""
+        from optimizer.pure.context_snapshot import inject_merged_dashboard
+        s = OptimizerState()
+        s.strategy.current_strategy = "PBLOCK"
+        s.strategy.evaluation_result = "IMPROVED"
+        s.strategy.current_phase = "ANALYZE"
+        s.strategy.last_handoff_text = ""
+        api_messages: list[dict] = []
+        inject_merged_dashboard(api_messages, s, LoopPhase.ANALYZE)
+        dashboard = api_messages[-1]["content"]
+        assert "current_strategy: PBLOCK" not in dashboard
+
+
+class TestCellRegistryFreshness:
+    """P6: Cell Registry snapshot must show stale/fresh status and iteration."""
+
+    def test_stale_marker_shown(self):
+        from optimizer.pure.entities import EntityRegistry, CellRef
+        reg = EntityRegistry()
+        reg.cells["u_core/lut1"] = CellRef(canonical_name="u_core/lut1", cell_type="LUT6", last_seen_iter=1)
+        from optimizer.pure.entities import build_registry_snapshot_yaml
+        yaml = build_registry_snapshot_yaml(reg, stale=True, iteration=2)
+        assert "STALE" in yaml
+        assert "iter=2" in yaml
+
+    def test_fresh_marker_shown(self):
+        from optimizer.pure.entities import EntityRegistry, CellRef
+        reg = EntityRegistry()
+        reg.cells["u_core/lut1"] = CellRef(canonical_name="u_core/lut1", cell_type="LUT6", last_seen_iter=1)
+        from optimizer.pure.entities import build_registry_snapshot_yaml
+        yaml = build_registry_snapshot_yaml(reg, stale=False, iteration=1)
+        assert "fresh" in yaml
+        assert "STALE" not in yaml
+
+    def test_inject_passes_stale_from_state(self):
+        """inject_pinned_cell_registry propagates critical_paths_stale."""
+        from optimizer.pure.context_snapshot import inject_pinned_cell_registry
+        from optimizer.pure.entities import EntityRegistry, CellRef
+        s = OptimizerState()
+        s.timing.critical_paths_stale = True
+        s.iteration.current = 3
+        s.entity_registry = EntityRegistry()
+        s.entity_registry.cells["u_core/lut1"] = CellRef(canonical_name="u_core/lut1", cell_type="LUT6")
+        api: list[dict] = []
+        inject_pinned_cell_registry(api, s)
+        content = api[0]["content"]
+        assert "STALE" in content
+        assert "iter=3" in content
+
+
+# ── Batch C: FORMAT_GUARD phase-specific + SYSTEM_PROMPT cleanup ───────
+
+class TestFormatGuardPhaseSpecific:
+    """P1/P7: FORMAT_GUARD must be phase-specific and injected per-phase."""
+
+    def test_analyze_guard_has_analyze_addendum(self):
+        from optimizer.nodes.prepare_context import build_phase_format_guard
+        guard = build_phase_format_guard(LoopPhase.ANALYZE)
+        assert "[FORMAT_GUARD:analyze]" in guard
+        assert "ANALYZE: only diagnostic" in guard
+        # EXECUTE-only content should NOT appear in ANALYZE guard
+        assert "PBLOCK AUTO-CHAIN" not in guard
+
+    def test_execute_guard_has_execute_addendum(self):
+        from optimizer.nodes.prepare_context import build_phase_format_guard
+        guard = build_phase_format_guard(LoopPhase.EXECUTE)
+        assert "[FORMAT_GUARD:execute]" in guard
+        assert "PBLOCK AUTO-CHAIN" in guard
+        assert "tool filtering" in guard
+
+    def test_select_guard_has_no_execute_content(self):
+        from optimizer.nodes.prepare_context import build_phase_format_guard
+        guard = build_phase_format_guard(LoopPhase.SELECT_STRATEGY)
+        assert "[FORMAT_GUARD:select_strategy]" in guard
+        assert "pick exactly one strategy" in guard
+        assert "PBLOCK AUTO-CHAIN" not in guard
+
+    def test_all_phases_have_base_content(self):
+        from optimizer.nodes.prepare_context import build_phase_format_guard
+        for phase in LoopPhase:
+            guard = build_phase_format_guard(phase)
+            # BASE_FORMAT_GUARD content present in all phases
+            assert "report_step_state" in guard
+            assert "CELL NAME CONTRACT" in guard
+            assert "DESIGN CONSISTENCY" in guard
+            assert "STRICTLY FORBIDDEN" in guard
+
+    def test_inject_merged_dashboard_injects_guard(self):
+        """inject_merged_dashboard should inject a FORMAT_GUARD system message."""
+        from optimizer.pure.context_snapshot import inject_merged_dashboard
+        s = OptimizerState()
+        api: list[dict] = [{"role": "system", "content": "STATIC"}]
+        inject_merged_dashboard(api, s, LoopPhase.ANALYZE)
+        guard_msgs = [m for m in api if m.get("role") == "system"
+                      and "[FORMAT_GUARD:" in m.get("content", "")]
+        assert len(guard_msgs) == 1
+        assert "[FORMAT_GUARD:analyze]" in guard_msgs[0]["content"]
+
+    def test_guard_idempotent(self):
+        """Calling inject_merged_dashboard twice should not accumulate guards."""
+        from optimizer.pure.context_snapshot import inject_merged_dashboard
+        s = OptimizerState()
+        api: list[dict] = [{"role": "system", "content": "STATIC"}]
+        inject_merged_dashboard(api, s, LoopPhase.ANALYZE)
+        inject_merged_dashboard(api, s, LoopPhase.ANALYZE)
+        guard_msgs = [m for m in api if m.get("role") == "system"
+                      and "[FORMAT_GUARD:" in m.get("content", "")]
+        assert len(guard_msgs) == 1
+
+    def test_guard_updates_when_phase_changes(self):
+        """Guard content should reflect the latest phase, not accumulate."""
+        from optimizer.pure.context_snapshot import inject_merged_dashboard
+        s = OptimizerState()
+        api: list[dict] = [{"role": "system", "content": "STATIC"}]
+        inject_merged_dashboard(api, s, LoopPhase.ANALYZE)
+        inject_merged_dashboard(api, s, LoopPhase.EXECUTE)
+        guard_msgs = [m for m in api if m.get("role") == "system"
+                      and "[FORMAT_GUARD:" in m.get("content", "")]
+        assert len(guard_msgs) == 1
+        assert "[FORMAT_GUARD:execute]" in guard_msgs[0]["content"]
+        assert "[FORMAT_GUARD:analyze]" not in guard_msgs[0]["content"]
+
+
+class TestSystemPromptCleanup:
+    """P1: SYSTEM_PROMPT.TXT should not contain PBLOCK sequence or hardcode multiplier."""
+
+    def test_no_pblock_execution_sequence(self):
+        from pathlib import Path
+        prompt = Path("SYSTEM_PROMPT.TXT").read_text()
+        assert "PBLOCK EXECUTION SEQUENCE" not in prompt
+        assert "MANDATORY VIVADO FLOW" not in prompt
+
+    def test_no_hardcoded_multiplier(self):
+        from pathlib import Path
+        prompt = Path("SYSTEM_PROMPT.TXT").read_text()
+        assert "resource_multiplier=2.0" not in prompt
+        assert "MULTIPLIER: Always use" not in prompt
+
+    def test_role_and_rules_preserved(self):
+        from pathlib import Path
+        prompt = Path("SYSTEM_PROMPT.TXT").read_text()
+        assert "FPGA_Timing_Optimization_Expert" in prompt
+        assert "report_step_state" in prompt
+        assert "DESIGN CONSISTENCY" not in prompt  # moved to FORMAT_GUARD
+        # Strategy list still present (descriptions, not sequences)
+        assert "PBLOCK" in prompt
+
+
+# ── Batch D: Shared tool summary (P4) ──────────────────────────────────
+
+class TestSharedToolSummary:
+    """P4: compact_tool_summary is the single source for dashboard/handoff summaries."""
+
+    def test_timing_summary_json(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = json.dumps({"wns": -0.5, "tns": -3.2, "failing_endpoints": 10})
+        s = compact_tool_summary("vivado_report_timing_summary", raw)
+        assert "WNS=-0.5" in s
+        assert "TNS=-3.2" in s
+        assert "FE=10" in s
+
+    def test_timing_summary_text_format(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = "WNS: -0.500\nTNS: -3.200\nFailing Endpoints: 10"
+        s = compact_tool_summary("vivado_report_timing_summary", raw)
+        assert "WNS=" in s
+
+    def test_critical_path_spread_json(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = json.dumps({"avg_distance": 12.5, "max_distance": 30.0, "paths_analyzed": 5})
+        s = compact_tool_summary("rapidwright_analyze_critical_path_spread", raw)
+        assert "avg=12.5" in s
+        assert "max=30.0" in s
+        assert "paths=5" in s
+
+    def test_congestion_json(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = json.dumps({"global_score": 0.15, "severity": "HIGH"})
+        s = compact_tool_summary("rapidwright_analyze_congestion", raw)
+        assert "global_score=0.15" in s
+        assert "severity=HIGH" in s
+
+    def test_high_fanout_nets(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = "net_a fanout=500\nnet_b fanout=200\nnet_c fanout=1000"
+        s = compact_tool_summary("vivado_get_cached_high_fanout_nets", raw)
+        assert "3 nets" in s
+        assert "max_fanout=1000" in s
+
+    def test_search_cells_json(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = json.dumps({"cell_count": 42})
+        s = compact_tool_summary("rapidwright_search_cells", raw)
+        assert "42 cells" in s
+
+    def test_empty_raw(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        assert compact_tool_summary("vivado_report_timing_summary", "") == ""
+        assert compact_tool_summary("vivado_report_timing_summary", "   ") == ""
+
+    def test_unknown_tool_fallback(self):
+        from optimizer.pure.tool_summary import compact_tool_summary
+        raw = "some output\nsecond line"
+        s = compact_tool_summary("unknown_tool", raw)
+        assert "some output" in s
+
+    def test_extract_recent_tool_results_uses_shared_fn(self):
+        """phase_analyze._extract_recent_tool_results delegates to compact_tool_summary."""
+        from optimizer.nodes.subgraphs.phase_analyze import _extract_recent_tool_results
+        s = OptimizerState()
+        s.iteration.current = 1
+        s.context.raw_tool_outputs[(1, "ANALYZE", 1, "vivado_report_timing_summary")] = \
+            json.dumps({"wns": -0.5, "tns": -3.2, "failing_endpoints": 10})
+        results = _extract_recent_tool_results(s)
+        assert len(results) == 1
+        assert "vivado_report_timing_summary" in results[0]
+        assert "WNS=-0.5" in results[0]

@@ -308,8 +308,23 @@ def _build_constraints_env(state: OptimizerState) -> DashboardConstraints:
     """Build Module 5: timing constraints environment."""
     clock_defs: dict[str, float] = {}
     cp = state.timing.clock_period
+
+    # Derive the real clock name from critical path data instead of hardcoding
+    # "clk_fpl26contest". Falls back to the historical name only when no clock
+    # name is available (first-iteration pre-analysis).
+    clk_name = ""
+    for p in state.timing.critical_paths:
+        if p.clock and p.clock.source_clock:
+            clk_name = p.clock.source_clock
+            break
+        if p.clock and p.clock.dest_clock:
+            clk_name = p.clock.dest_clock
+            break
+    if not clk_name:
+        clk_name = "clk_fpl26contest"
+
     if cp and cp > 0:
-        clock_defs["clk_fpl26contest"] = round(1000.0 / cp, 1)
+        clock_defs[clk_name] = round(1000.0 / cp, 1)
 
     ci = state.timing.constraints_info or {}
     return DashboardConstraints(
@@ -513,6 +528,14 @@ def format_state_space_for_llm(
     """
     enabled = PHASE_STATESPACE_MODULES.get(phase) if phase else None
     lines: list[str] = []
+
+    # P3: Suppress stale current_strategy / evaluation_result during non-execute
+    # phases. When a new iteration enters ANALYZE/SELECT_STRATEGY, the state
+    # may still hold the previous iteration's strategy, misleading the LLM.
+    _phase_val = phase.value.upper() if phase else ""
+    if _phase_val not in ("EXECUTE_STRATEGY", "EVALUATE", "EXECUTE"):
+        current_strategy = ""
+        evaluation_result = ""
 
     # Freshness tag helper — available to all module renderers below
     _ff = state.timing.field_freshness if state else None
@@ -1124,16 +1147,7 @@ def _append_architecture_insights(lines: list[str], ao: DashboardArchitectureOve
 
 
 # ── Analysis Tools for Design Structure ────────────────────────────
-
-_ANALYSIS_TOOL_NAMES: frozenset[str] = frozenset({
-    "vivado_report_timing_summary", "vivado_extract_critical_path_cells",
-    "vivado_get_cached_high_fanout_nets", "vivado_check_design_status",
-    "rapidwright_analyze_critical_path_spread", "rapidwright_analyze_congestion",
-    "rapidwright_analyze_net_detour", "rapidwright_get_design_info",
-    "rapidwright_get_device_topology", "rapidwright_report_timing",
-    "rapidwright_search_cells", "rapidwright_analyze_pblock_region",
-    "rapidwright_flatten_lut_cascade",
-})
+# _ANALYSIS_TOOL_NAMES now lives in tool_summary.py (single source of truth).
 
 
 def _append_design_structure(lines: list[str], state: OptimizerState) -> None:
@@ -1197,6 +1211,8 @@ def _append_recent_analysis_results(lines: list[str], state: OptimizerState) -> 
     """Append recent analysis phase tool results as structured summaries.
     Reads from raw_tool_outputs — no extra MCP calls. SELECT_STRATEGY only.
     """
+    from .tool_summary import compact_tool_summary, _ANALYSIS_TOOL_NAMES
+
     current_iter = state.iteration.current
     entries: list[str] = []
 
@@ -1206,58 +1222,7 @@ def _append_recent_analysis_results(lines: list[str], state: OptimizerState) -> 
         if it != current_iter and it != current_iter - 1:
             continue
 
-        # Extract a compact one-line summary from the raw output
-        summary = ""
-        if name == "vivado_report_timing_summary":
-            wns = _extract_timing_value(raw, "wns")
-            tns = _extract_timing_value(raw, "tns")
-            fe = _extract_timing_value(raw, "failing_endpoints")
-            summary = f"WNS={wns}, TNS={tns}, FE={fe}"
-        elif name == "rapidwright_analyze_critical_path_spread":
-            import json
-            try:
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    avg = data.get("avg_distance", data.get("avg_max_distance", "?"))
-                    mx = data.get("max_distance", "?")
-                    cnt = data.get("paths_analyzed", "?")
-                    summary = f"avg={avg}, max={mx}, paths={cnt}"
-            except (json.JSONDecodeError, TypeError):
-                summary = raw.strip()[:80]
-        elif name == "rapidwright_analyze_congestion":
-            import json
-            try:
-                data = json.loads(raw)
-                if isinstance(data, dict):
-                    score = data.get("global_score", data.get("congested_ratio", "?"))
-                    sev = data.get("severity", "?")
-                    summary = f"global_score={score}, severity={sev}"
-            except (json.JSONDecodeError, TypeError):
-                summary = raw.strip()[:80]
-        elif name == "vivado_get_cached_high_fanout_nets":
-            # Count lines with fanout info
-            import re
-            matches = re.findall(r"fanout=(\d+)", raw)
-            if matches:
-                max_fo = max(int(m) for m in matches)
-                summary = f"{len(matches)} nets, max_fanout={max_fo}"
-            else:
-                summary = raw.strip()[:80]
-        elif name == "rapidwright_analyze_net_detour":
-            import json
-            try:
-                data = json.loads(raw)
-                if isinstance(data, list):
-                    summary = f"{len(data)} cells with detour > threshold"
-                elif isinstance(data, dict) and data.get("cells"):
-                    summary = f"{len(data['cells'])} cells"
-            except (json.JSONDecodeError, TypeError):
-                summary = raw.strip()[:80]
-        else:
-            # Generic: first non-empty, non-json line
-            first_line = raw.strip().split("\n")[0][:80] if raw.strip() else ""
-            summary = first_line if first_line else f"completed"
-
+        summary = compact_tool_summary(name, raw)
         if summary:
             entry = f"    - [{name}] {summary}"
             if entry not in entries:
@@ -1268,15 +1233,6 @@ def _append_recent_analysis_results(lines: list[str], state: OptimizerState) -> 
         lines.append("recent_analysis:")
         for e in entries[-6:]:
             lines.append(e)
-
-
-def _extract_timing_value(raw: str, key: str) -> str:
-    """Quick regex-based timing value extraction for dashboard summaries."""
-    import re
-    # Pattern: key: value  or  key=value
-    pat = re.compile(rf'{re.escape(key)}[\s:=]+([-\d.]+)', re.IGNORECASE)
-    m = pat.search(raw)
-    return m.group(1) if m else "?"
 
 
 def _format_violation_summary(
