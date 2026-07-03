@@ -122,6 +122,34 @@ def summarize_tool_result(
                 f"  raw_output: |\n{indent}"
             )
 
+    # Internal tool: design_data_read — return structured summary
+    if tool_name == "design_data_read":
+        try:
+            data = json.loads(raw_result)
+            if isinstance(data, dict) and "error" in data:
+                summary_parts.append(f"Error: {data['error'][:200]}")
+                status = "error"
+            elif isinstance(data, dict):
+                dt = data.get("data_type", "?")
+                sz = data.get("size", "?")
+                rec = data.get("total_records") or "?"
+                summary_parts.append(f"Read design data: {dt} ({sz} bytes, {rec} records)")
+                key_details["data_type"] = dt
+                key_details["total_records"] = rec
+        except Exception:
+            pass
+
+    # Internal tool: design_data_list_snapshots — list available iterations
+    if tool_name == "design_data_list_snapshots":
+        try:
+            data = json.loads(raw_result)
+            if isinstance(data, dict):
+                total = data.get("total_iterations", 0)
+                iterations = data.get("iterations", [])
+                summary_parts.append(f"{total} iterations with stored design data: {iterations}")
+        except Exception:
+            pass
+
     # Bypass summarization for compact outputs.
     # extract_critical_path_cells excluded from bypass: even small JSON should
     # go through the dedicated summary branch to extract D1/D2 diagnostics.

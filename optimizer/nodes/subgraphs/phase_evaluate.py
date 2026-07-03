@@ -443,6 +443,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     tool_cache=state.context.tool_cache,
                     design_size_factor=state.timing.design_size_factor,
                     entity_registry=state.entity_registry,
+                    run_dir=state.control.run_dir,
                 )
                 summary = summarize_tool_result(
                     tool_name, result,
@@ -459,6 +460,20 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
 
                 # Store raw output (mirrors ANALYZE/EXECUTE pattern)
                 state.context.raw_tool_outputs[(state.iteration.current, "EVALUATE", tool_round, tool_name)] = result
+                # Persist raw output to disk for design_data_read access
+                if state.control.run_dir is not None:
+                    try:
+                        from optimizer.pure.design_data import DesignDataManager
+                        ddm = DesignDataManager(state.control.run_dir)
+                        ddm.store_raw_output(
+                            tool_name=tool_name,
+                            iteration=state.iteration.current,
+                            phase="EVALUATE",
+                            round_index=tool_round,
+                            raw_text=result,
+                        )
+                    except Exception:
+                        pass
                 if len(state.context.raw_tool_outputs) > state.context.raw_tool_output_max:
                     oldest_key = min(state.context.raw_tool_outputs.keys(), key=lambda k: (k[0], k[2]))
                     del state.context.raw_tool_outputs[oldest_key]

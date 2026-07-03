@@ -243,6 +243,10 @@ RECENT_TURNS_TO_KEEP = 20         # Recent messages to keep during compression
 WORKER_CONTEXT_WARN_TOKENS = 180_000   # ~72% of 250K max_tokens (planner promotion when context is full)
 WORKER_CONTEXT_FORCE_TOKENS = 200_000  # ~80% of 250K max_tokens (force planner at hard limit)
 
+# Design data persistence
+DESIGN_DATA_DIR = "design_data"               # Subdirectory under run_dir
+DESIGN_DATA_MAX_FILES = 500                   # Max JSON files per iteration (safety limit)
+
 
 # ── Dashboard freshness tracking ──────────────────────────────
 

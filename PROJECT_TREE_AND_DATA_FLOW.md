@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 16 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview；时钟名从 critical_paths 提取，非硬编码）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + stale/fresh 标记 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入 + per-phase FORMAT_GUARD 注入 + 共享 extract_system_message）、tool_summary.py（tool result 摘要 + compact_tool_summary 共享函数）
+│   └── pure/                     # 17 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview；时钟名从 critical_paths 提取，非硬编码）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验 + design_data_read/design_data_list_snapshots 内部工具）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + stale/fresh 标记 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入 + per-phase FORMAT_GUARD 注入 + 共享 extract_system_message + DesignDataManager 全量数据持久化触发）、tool_summary.py（tool result 摘要 + compact_tool_summary 共享函数）、**design_data.py**（DesignDataManager 设计数据持久化 + 截断聚合统计 compute_unshown_path_stats / compute_unshown_hotspot_stats）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流、数据质量守卫、冷却逻辑等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -162,6 +162,11 @@ _prepare_api_messages():
   3. 注入迭代 handoff（迭代边界）
   4. inject_pinned_cell_registry() ← [CELL REGISTRY] 作为 system 后的独立 user 消息（Pinned 层，每轮重建，抗压缩）
   5. inject_merged_dashboard() ← 数据 Dashboard 作为最后一条 user 消息
+     └── DesignDataManager.store_snapshot() → {run_dir}/design_data/iteration_{N}/
+         ├── critical_paths.json（全量，不截断）
+         ├── high_fanout_nets.json, congestion.json, route_status.json
+         └── tool_output_{name}_{round}.json（每次工具调用后持久化）
+         （LLM 可通过 design_data_read 工具访问，不触发 Vivado/RapidWright）
                                                              ↓
                                                    LLM API Call
 ```
@@ -246,6 +251,17 @@ architecture_overview:
 **StateSpace 新增字段**: Module 1 新增 `iterations_remaining`、`budget_used`、`budget_remaining`、`wns_gap_to_zero`，帮助 LLM 评估优化进度和剩余预算。Dashboard 末尾新增 `applied_optimizations` 独立段落，列出成功应用于 `best_checkpoint` 的策略历史（策略名 + WNS 前后对比 + 迭代号）。
 
 **Phase-aware filtering**: `PHASE_STATESPACE_MODULES` 按阶段控制模块——ANALYZE 看 7 模块（M5 隐藏），SELECT_STRATEGY 看 9 模块（新增 M4b `design_structure` + M8 `recent_analysis`），EXECUTE/EVALUATE 看 M1 + M2b (紧凑摘要) + M6。
+
+**截断透明化（2026-07 新增）**: Dashboard 在被截断的模块后添加未显示数据的聚合统计：
+
+- `timing_clusters` 中：`unshown_path_stats` 显示截断路径的总数、slack 范围/均值、严重度分布、时钟域分解、常见 cell 类型
+- `physical_congestion` 中：`unshown_hotspots` 显示未显示的热点数量和严重度范围
+- `netlist_quality` 中：`unshown_high_fanout_nets` 显示未显示的高扇出网络数量
+- Dashboard 末尾：`truncation_advisory` 区段列出各模块截断量、`design_data_path`、`design_data_read` 存取命令
+
+所有新增统计字段均带 `[fresh]`/`[stale]` 新鲜度标注，与已有字段一致。聚合统计的计算函数为纯函数（`design_data.py:compute_unshown_path_stats()`），基于全量 `critical_paths` 数据，不触发额外工具调用。
+
+**数据持久化（2026-07 新增）**: `inject_merged_dashboard()` 每次调用时通过 `DesignDataManager` 将全量设计数据（不截断的关键路径、高扇出网络、拥塞数据、路由状态、设计信息）持久化为 `{run_dir}/design_data/iteration_{N}/` 下的 JSON 文件。LLM 可通过 `design_data_read(iteration=N, data_type='critical_paths')` 内部工具直接读取完整数据，无需重新运行 Vivado/RapidWright。
 
 **LLM 防歧义注解**: 所有 N/A 和空列表带机器可读原因——`"N/A(initial_state)"`、`"N/A(no_io_ports)"`、`[]  # no_high_fanout_nets_found`。纯数据无判断标签。每次通过 `build_state_space()` 重建，不进入 MessageStore，同时通过 WebSocket 推送到前端。
 

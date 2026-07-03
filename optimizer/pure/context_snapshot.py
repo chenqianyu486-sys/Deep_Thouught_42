@@ -159,8 +159,65 @@ def inject_merged_dashboard(
     so it gets maximum attention weight at the end of the conversation.
     """
     from .state_space import build_state_space, format_state_space_for_llm
+    from .design_data import DesignDataManager
 
     space = build_state_space(state)
+
+    # ── Persist full design data (truncation transparency) ────────
+    design_data_path: str | None = None
+    full_critical_paths: list | None = None
+    total_failing_endpoints: int | None = None
+    total_high_fanout_nets: int | None = None
+    total_congestion_hotspots: int | None = None
+    total_design_cell_types: int | None = None
+    total_violating_modules: int | None = None
+
+    run_dir = state.control.run_dir
+    if run_dir is not None:
+        try:
+            ddm = DesignDataManager(run_dir)
+
+            # Store full critical paths (untruncated), even when stale
+            # so LLM can see unshown_path_stats with [stale] annotation.
+            if state.timing.critical_paths:
+                full_critical_paths = list(state.timing.critical_paths)
+
+            # Compute totals for truncation transparency
+            total_failing_endpoints = state.timing.latest_failing_endpoints
+            if state.timing.high_fanout_nets is not None:
+                total_high_fanout_nets = len(state.timing.high_fanout_nets)
+            if state.timing.congestion_data is not None:
+                congestion_raw = state.timing.congestion_data
+                if isinstance(congestion_raw, dict):
+                    total_congestion_hotspots = len(congestion_raw.get("hotspots", []))
+            if state.timing.design_info is not None:
+                total_design_cell_types = len(
+                    state.timing.design_info.get("top_cell_types", [])
+                ) if isinstance(state.timing.design_info.get("top_cell_types"), (list, dict)) else None
+
+            # Store full snapshot to disk (once per iteration)
+            current_iter = state.iteration.current
+            if current_iter != state.context.design_data.last_snapshot_iteration:
+                iter_dir = ddm.store_snapshot(
+                    critical_paths=full_critical_paths,
+                    high_fanout_nets=state.timing.high_fanout_nets,
+                    congestion_data=state.timing.congestion_data,
+                    route_status=state.timing.route_status,
+                    design_info=state.timing.design_info,
+                    failing_endpoint_names=state.timing.failing_endpoint_names,
+                    field_freshness=state.timing.field_freshness,
+                    iteration=current_iter,
+                    phase=phase.value if hasattr(phase, "value") else str(phase),
+                )
+                design_data_path = iter_dir
+                state.context.design_data.last_snapshot_iteration = current_iter
+                state.context.design_data.design_data_path = iter_dir
+                if current_iter not in state.context.design_data.stored_iterations:
+                    state.context.design_data.stored_iterations.append(current_iter)
+            else:
+                design_data_path = state.context.design_data.design_data_path
+        except Exception:
+            pass
 
     # Build exclusion and blocked-strategy sets.
     # Hard-exclude: tool_error is permanent/immediate (no TTL).
@@ -215,6 +272,13 @@ def inject_merged_dashboard(
         current_strategy=_current_strategy,
         evaluation_result=_evaluation_result,
         state=state,
+        design_data_path=design_data_path,
+        full_critical_paths=full_critical_paths,
+        total_failing_endpoints=total_failing_endpoints,
+        total_high_fanout_nets=total_high_fanout_nets,
+        total_congestion_hotspots=total_congestion_hotspots,
+        total_design_cell_types=total_design_cell_types,
+        total_violating_modules=total_violating_modules,
     )
 
     inject_context_snapshot_at_end(api_messages, snapshot)

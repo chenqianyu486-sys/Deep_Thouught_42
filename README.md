@@ -94,6 +94,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 10c | 上下文工程：实体注册表 SSOT | `EntityRegistry`（`state.entity_registry`）为 canonical cell 名唯一权威来源；解析/search_cells 同步写入，设计修改后 `mark_stale()`，rollback 后 `clear()`；`tool_router` 在 LLM→MCP 边界校验（设计修改工具强制严格模式，拒绝注册表外名） |
 | 10d | 上下文工程：策略结果表（2026-07） | Dashboard 末尾新增 `strategy_outcomes:` YAML 区块，分 `successful`（从 `optimization_history` 读取，含 WNS delta）和 `failed`（从 `failed_strategies` 读取，含阻塞原因和剩余轮数）两个子节。每次 LLM 调用可见，消除策略重复选择 |
 | 10e | 上下文工程：策略-工具映射恢复（2026-07） | 在 SELECT_STRATEGY 阶段的 FORMAT_GUARD 中注入 `_STRATEGY_MAPPING_LINES`，让 LLM 在选择策略前就能验证执行工具是否存在，避免选择 CellReplication 等无对应工具的策略 |
+| 10f | 上下文工程：Dashboard 截断透明化（2026-07） | 全量设计数据持久化为 `{run_dir}/design_data/` JSON 文件（`design_data.py`）；Dashboard 在被截断的模块后添加聚合统计（`unshown_path_stats`、`unshown_hotspots`、`unshown_high_fanout_nets`），LLM 无需额外工具调用即可了解未显示数据的整体特征；末尾 `truncation_advisory` 区段列出各模块截断量并给出 `design_data_read` 存取指南；新增数据同样带 `[fresh]`/`[stale]` 新鲜度标注 |
 
 **验证与安全层面**:
 | # | 原则 | 实现方式 |
@@ -228,7 +229,7 @@ Deep_Thouught_42/
 │   ├── deps.py               # NodeDeps：外部依赖容器
 │   ├── graph.py / edges.py   # NodeGraph 执行引擎 + 条件边
 │   ├── nodes/                # 9 个节点 + llm_tool_loop 子图（4 阶段）
-│   └── pure/                 # 16 个纯函数模块（可独立单元测试，含 entities.py 实体注册表）
+│   └── pure/                 # 17 个纯函数模块（可独立单元测试，含 entities.py 实体注册表 + design_data.py 设计数据持久化）
 ├── strategy_library.py       # 16 种策略及触发条件
 ├── skills/                   # Skill 框架（渐进式三层加载，34 文件）
 ├── RapidWrightMCP/           # RapidWright MCP 服务器（39 工具）

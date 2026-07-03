@@ -95,7 +95,8 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
 **关键设计要点（架构实现层面）**：
 - **LLM 防歧义注解**: `_annotated_list()` / `_annotated_val()` 辅助函数确保 [] 和 N/A 都携带机器可读原因
 - **类型契约**: Dashboard 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零）
-- **无持久化**: 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建
+- **无持久化**: Dashboard 快照不进入 MessageStore，完全绕过压缩系统，每次 API 调用从当前状态重建；全量设计数据通过 `DesignDataManager` 持久化到 `{run_dir}/design_data/`（2026-07 新增），LLM 通过 `design_data_read` 内部工具访问
+- **截断透明化（2026-07 新增）**: Dashboard 在被截断的模块后添加未显示数据的聚合统计（`unshown_path_stats`、`unshown_hotspots`、`unshown_high_fanout_nets`），末尾添加 `truncation_advisory` 区段列出截断量与存取指南；聚合统计基于全量 `critical_paths` 纯函数计算，零 MCP 开销，均带 `[fresh]`/`[stale]` 新鲜度标注
 - **无策略引导**（2026-06）：`design_delay_profile` 不再附带 `strategy_hint`，`_append_architecture_hints()` 重命名为 `_append_architecture_insights()`，仅输出纯数据描述
 - **设计状态标注（DesignState 枚举）**: 从 `report_timing_summary` 的 `Design State` 字段解析，设置 `state.timing.design_state` 为 `DesignState.UNPLACED`（未布局） / `PLACED`（仅布局） / `ROUTED`（已布线）。Dashboard M1 根据状态显示不同粒度的警告：UNPLACED→"WNS based on wireload estimates"，PLACED→"WNS based on estimated routing delays"。非 ROUTED 状态时 Level 1 RW 预检查自动跳过。
   - **解析失败保留策略（2026-07，P1 修复）**: `parse_design_state()` 在 `Design State` 字段缺失时返回 `None` 而非默认 `UNPLACED`，调用方保留上次已知状态。`vivado_route_design`/`vivado_physopt_and_route` 执行后显式置 `ROUTED`（它们必然产生已布线结果），`vivado_phys_opt_design` 保留原状态。修复了 `physopt_and_route` 后误翻转为 UNPLACED、对真实布线后 WNS 误报"线负载估计"的灾难性 bug（见 run-20260703_142810）。Dashboard 警告加守卫：`design_state=UNPLACED` 但存在真实 `wns_setup` 时降级为温和提示，不再误报线负载。
@@ -582,6 +583,21 @@ api_messages = [
 ]
 ```
 
+### 5.4 设计数据持久化（2026-07 新增）
+
+`DesignDataManager`（`optimizer/pure/design_data.py`）在每次 dashboard 构建和工具调用时，将全量设计数据持久化为 `{run_dir}/design_data/iteration_{N}/` 下的结构化 JSON 文件：
+
+- **`store_raw_output()`**: 每次工具调用后，将原始输出持久化到 `tool_output_{name}_{round}.json`，含 `_meta` 元数据（时间戳、迭代、阶段、原始字符数）
+- **`store_snapshot()`**: 新迭代首次 dashboard 构建时，将全量 `critical_paths`、`high_fanout_nets`、`congestion_data`、`route_status`、`design_info` 分别写入独立 JSON 文件。每个文件的 `_meta` 中包含对应的 `field_freshness` 状态，供 LLM 判断数据是否过期
+- **`read_design_data()`**: 通过 `design_data_read` 内部工具读取持久化文件，返回结构化 JSON（含 `total_records`、`size`、`meta`）
+- **`list_available_data()`** / **`list_all_iterations()`**: 列出可用数据
+
+**持久化触发点**：
+1. `inject_merged_dashboard()`（`context_snapshot.py`）：新迭代首次调用时触发全量快照
+2. `phase_analyze.py` / `phase_execute.py` / `phase_evaluate.py`：每次工具调用后触发原始输出持久化
+
+**消费者**: LLM 通过 `design_data_read(iteration=N, data_type='critical_paths')` 内部工具访问（注册在全局 `_NO_CACHE_TOOLS` 中，4 个 phase 白名单均包含）。不调用 Vivado/RapidWright，零延迟。
+
 ---
 
 ## 6. DCP 验证实现细节
@@ -640,6 +656,8 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 ### 6.6 Dashboard 数据新鲜度与工具 rate limit
 
 **字段级新鲜度追踪**: `field_freshness: dict[str, str]`（2026-06-24 新增，替代 `refreshed_fields: set[str]`）。每个 Dashboard 数据字段独立标注 `[fresh]`/`[stale]`。初始化全部 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部降级为 `stale`。EXECUTE 和 EVALUATE 两阶段对称处理（2026-06-27 修复：EVALUATE 之前缺失 stale 标记逻辑，造成 false-fresh）。
+
+**截断透明化新鲜度（2026-07 新增）**: `unshown_path_stats` 区段顶部显示 `unshown_freshness: stale/fresh` 行（基于 `critical_paths_stale` + `_tag('critical_path_cells')`）；`unshown_hotspots` 和 `unshown_high_fanout_nets` 行尾带 `_tag('congestion_data')`/`_tag('high_fanout_nets')`；`truncation_advisory` 区段包含 `freshness: stale_fields=[...] | all_fields_fresh` 全局状态行。截断透明化新增的三个 section 均与已有新鲜度系统完全集成。
 
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
@@ -862,7 +880,7 @@ CONSECUTIVE_NO_PROGRESS_LIMIT = 3
 | L0 STATIC | 不变（top-level `system` 参数） | SYSTEM_PROMPT.TXT（角色/规则/启发式，~110行） | `extra_body[system]`，provider 可缓存 |
 | L1 FORMAT_GUARD | 每 phase 重建（system message） | BASE 格式要求 + Cell Name Contract + 设计一致性 + per-phase addendum（tool 可用性/PBLOCK 行为/EVALUATE 决策指引等） | 首个 system message 之后，幂等 marker 去重 |
 | L2 PINNED | 每轮重建，绕过压缩 | **CellNameRegistry 快照**（canonical cell 名 + 模块索引 + stale/fresh 标记 + iter 版本号） | system 之后，独立 user 消息 |
-| L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace（非 EXECUTE/EVALUATE 阶段抑制 current_strategy；时钟名从 critical_paths 提取） | 最后一条 user 消息 |
+| L3 DYNAMIC | 每轮重建，phase-aware | Dashboard 7-module StateSpace（非 EXECUTE/EVALUATE 阶段抑制 current_strategy；时钟名从 critical_paths 提取；模块尾部含 `unshown_path_stats`/`unshown_hotspots`/`unshown_high_fanout_nets` 截断聚合统计；末尾 `truncation_advisory` 列出截断量与 `design_data_read` 存取指南） | 最后一条 user 消息 |
 | L4 EPHEMERAL | 受压缩管理（preserve_role_turns=6） | 最近对话轮次 + 压缩后 YAML 历史 | 消息列表主体 |
 
 **关键修复（2026-07）**：
@@ -970,10 +988,16 @@ EntityRegistry
 | `optimizer/pure/entities.py` | **新增**：EntityRegistry + 校验 + 富错误 + Pinned 渲染 + auto-inject 提取 |
 | `optimizer/state.py` | `OptimizerState` 新增 `entity_registry` 字段 |
 | `optimizer/pure/critical_path.py` | `_is_valid_cell_name` re-export；`update_critical_paths` 同步注册表 |
-| `optimizer/pure/tool_router.py` | `call_tool` 增加 `entity_registry` 参数 + 边界校验 |
-| `optimizer/pure/context_snapshot.py` | `inject_pinned_cell_registry()` + `extract_system_message()` 共享函数 + `_inject_phase_guard()` per-phase 注入 |
+| `optimizer/pure/tool_router.py` | `call_tool` 增加 `entity_registry` 参数 + 边界校验 + `run_dir` 参数 + `design_data_read`/`design_data_list_snapshots` 内部工具（2026-07） |
+| `optimizer/pure/context_snapshot.py` | `inject_pinned_cell_registry()` + `extract_system_message()` 共享函数 + `_inject_phase_guard()` per-phase 注入 + DesignDataManager 全量数据持久化触发 + `format_state_space_for_llm` 传递截断参数（2026-07） |
+| `optimizer/pure/state_space.py` | 添加 `unshown_path_stats`/`unshown_hotspots`/`unshown_high_fanout_nets` 截断聚合统计 + `truncation_advisory` 区段 + 所有新增字段 `[fresh]`/`[stale]` 标注（2026-07） |
+| `optimizer/pure/design_data.py` | **新增**：DesignDataManager 设计数据持久化（store_raw_output/store_snapshot/read_design_data）+ 纯函数 compute_unshown_path_stats/compute_unshown_hotspot_stats（2026-07） |
+| `optimizer/pure/tool_summary.py` | 新增 `design_data_read`/`design_data_list_snapshots` 工具摘要分支（2026-07） |
+| `optimizer/pure/tool_filter.py` | 新增 `design_data_read`/`design_data_list_snapshots` 到所有 4 阶段白名单（2026-07） |
+| `optimizer/pure/constants.py` | 新增 `DESIGN_DATA_DIR`/`DESIGN_DATA_MAX_FILES` 常量（2026-07） |
+| `optimizer/state.py` | 新增 `DesignDataState` dataclass，挂载到 `ContextState.design_data`（2026-07） |
 | `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 拆分为 `BASE_FORMAT_GUARD` + `_PHASE_GUIDES` + `build_phase_format_guard()`；移除一次性注入逻辑 |
-| `optimizer/nodes/subgraphs/phase_*.py` | 4 阶段 `_call_phase_llm` 调用 Pinned 注入 + 传 registry |
+| `optimizer/nodes/subgraphs/phase_*.py` | 4 阶段 `_call_phase_llm` 调用 Pinned 注入 + 传 registry + `call_tool_fn` 新增 `run_dir` 参数 + 工具输出持久化钩子（2026-07） |
 | `RapidWrightMCP/server.py` | cell 名参数 schema 增强（pattern/description/examples） |
 | `dashboard/serializer.py` | 无需改动（`dataclasses.asdict` + `_make_json_safe` 自动处理 `entity_registry`，含 set→sorted list 转换） |
 

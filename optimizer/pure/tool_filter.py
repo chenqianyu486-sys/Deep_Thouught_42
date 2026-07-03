@@ -88,6 +88,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         # Internal tools
         "vivado_get_raw_tool_output",
         "vivado_get_cached_high_fanout_nets",
+        "design_data_read",
+        "design_data_list_snapshots",
         "report_step_state",
     }) | CONSISTENCY_VALIDATION_TOOLS,
 
@@ -95,6 +97,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "report_step_state",
         "vivado_get_raw_tool_output",
         "vivado_get_cached_high_fanout_nets",
+        "design_data_read",
+        "design_data_list_snapshots",
         "rapidwright_analyze_pblock_region",
     }) | CONSISTENCY_VALIDATION_TOOLS,
 
@@ -138,6 +142,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         # Cached data tools
         "vivado_get_cached_high_fanout_nets",
         # Internal tools
+        "design_data_read",
+        "design_data_list_snapshots",
         "report_step_state",
     }) | CONSISTENCY_VALIDATION_TOOLS,
 
@@ -149,6 +155,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "vivado_extract_critical_path_cells",
         "report_step_state",
         "vivado_get_raw_tool_output",
+        "design_data_read",
+        "design_data_list_snapshots",
     }) | CONSISTENCY_VALIDATION_TOOLS,
 }
 

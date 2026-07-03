@@ -33,6 +33,10 @@ from ..state import (
 from .critical_path import DISPLAY_LIMIT_SNAPSHOT, MAX_DELAY_HOTSPOTS
 from .tool_filter import LoopPhase
 from .timing import compute_violation_summary
+from .design_data import (
+    compute_unshown_path_stats,
+    compute_unshown_hotspot_stats,
+)
 
 # Maximum violating paths in StateSpace (user spec says Top 20)
 MAX_VIOLATING_PATHS = 20
@@ -520,6 +524,14 @@ def format_state_space_for_llm(
     current_strategy: str = "",
     evaluation_result: str = "",
     state: OptimizerState | None = None,
+    # Design data persistence (truncation transparency)
+    design_data_path: str | None = None,
+    full_critical_paths: list | None = None,
+    total_failing_endpoints: int | None = None,
+    total_high_fanout_nets: int | None = None,
+    total_congestion_hotspots: int | None = None,
+    total_design_cell_types: int | None = None,
+    total_violating_modules: int | None = None,
 ) -> str:
     """Format the 7-module StateSpace as YAML for LLM context injection.
 
@@ -744,6 +756,43 @@ def format_state_space_for_llm(
             )
         lines.append("")
 
+        # ── Unshown path statistics (truncation transparency) ─────
+        # Freshness annotation for unshown data (derived from critical_path_cells status)
+        _unshown_stale = (state.timing.critical_paths_stale
+                          if state and state.timing.critical_paths_stale is not None
+                          else False)
+        _unshown_tag = _tag('critical_path_cells') if _unshown_stale else ""
+        _unshown_status = "stale (place/route changed)" if _unshown_stale else "fresh"
+        if _unshown_tag or _unshown_stale:
+            lines.append(f"  unshown_freshness: {_unshown_status}{_unshown_tag}")
+        if full_critical_paths and len(full_critical_paths) > len(tc.top_violating_paths):
+            unshown_stats = compute_unshown_path_stats(
+                full_critical_paths, len(tc.top_violating_paths),
+            )
+            if unshown_stats:
+                us = unshown_stats
+                lines.append(f"  unshown_path_stats:  # {us['total_unshown']} paths beyond top {len(tc.top_violating_paths)}")
+                lines.append(f"    total_unshown: {us['total_unshown']}")
+                if 'slack_range' in us:
+                    lines.append(f"    slack_range: '{us['slack_range']}'")
+                    lines.append(f"    mean_slack: '{us['mean_slack']}'")
+                if 'severity_distribution' in us:
+                    sd = us['severity_distribution']
+                    lines.append("    severity_distribution:")
+                    lines.append(f"      critical_slack_lt_-1.0ns: {sd.get('critical', 0)}")
+                    lines.append(f"      moderate_slack_-1.0_to_-0.3ns: {sd.get('moderate', 0)}")
+                    lines.append(f"      marginal_slack_-0.3_to_0ns: {sd.get('marginal', 0)}")
+                if 'clock_domain_breakdown' in us:
+                    lines.append("    clock_domain_breakdown:")
+                    for cd, cnt in us['clock_domain_breakdown'].items():
+                        lines.append(f"      {cd}: {cnt}")
+                if 'common_cell_types' in us:
+                    lines.append(f"    common_cell_types: \"{us['common_cell_types']}\"")
+                if 'mean_logic_delay_pct' in us:
+                    lines.append(f"    mean_logic_delay_pct: {us['mean_logic_delay_pct']}")
+                lines.append("")
+        lines.append("")
+
     # ── Module 2b: Timing Violation Summary (compact, for EXECUTE/EVALUATE phases) ──
     if enabled is not None and "timing_clusters_summary" in enabled:
         tc = space.timing_clusters
@@ -817,6 +866,16 @@ def format_state_space_for_llm(
                 lines.append(f"      module: {h.dominant_module}")
         else:
             lines.append("  hotspots: []  # no_congestion_hotspots")
+        # Unshown hotspot count (truncation transparency)
+        if total_congestion_hotspots is not None and total_congestion_hotspots > len(pc.congestion_hotspots[:5]):
+            unshown = total_congestion_hotspots - len(pc.congestion_hotspots[:5])
+            unshown_stats = compute_unshown_hotspot_stats(
+                pc.congestion_hotspots, 5,
+            )
+            if unshown_stats and 'severity_range' in unshown_stats:
+                lines.append(f"  unshown_hotspots: {unshown} additional hotspots not shown (severity range: {unshown_stats['severity_range']}){_tag('congestion_data')}")
+            else:
+                lines.append(f"  unshown_hotspots: {unshown} additional hotspots not shown{_tag('congestion_data')}")
         lines.append("")
 
     # ── Module 4: Netlist Quality Profiler ─────────────────────────
@@ -836,6 +895,9 @@ def format_state_space_for_llm(
                 lines.append(f"    - {net.net_name}: fanout={net.fanout_count}{rep}")
         else:
             ann = _annotated_list(nq.high_fanout_nets, "no_high_fanout_nets_found")
+        if total_high_fanout_nets is not None and total_high_fanout_nets > len(nq.high_fanout_nets[:10]):
+            unshown = total_high_fanout_nets - len(nq.high_fanout_nets[:10])
+            lines.append(f"  unshown_high_fanout_nets: {unshown} additional high-fanout nets not shown{_tag('high_fanout_nets')}")
             lines.append(f"  high_fanout_nets: {ann}")
         if nq.failed_inferences:
             lines.append(f"  failed_inferences:  # {len(nq.failed_inferences)}")
@@ -994,6 +1056,50 @@ def format_state_space_for_llm(
     # ── Skill guidance (EXECUTE phase) ─────────────────────────────
     if phase == LoopPhase.EXECUTE and current_strategy:
         _append_skill_guidance(lines, current_strategy)
+
+    # ── Truncation advisory ───────────────────────────────────
+    if design_data_path:
+        lines.append("truncation_advisory:")
+        lines.append(f"  design_data_path: \"{design_data_path}\"")
+        lines.append("  # Use design_data_read(iteration=N, data_type=<type>) to access full data")
+        # Global freshness status
+        _stale_fields = [k for k, v in (state.timing.field_freshness.items() if state else {}).items() if v == "stale"]
+        if state and state.timing.critical_paths_stale:
+            _stale_fields.append("critical_paths")
+        if _stale_fields:
+            lines.append(f"  freshness: stale_fields={_stale_fields}  # re-run analysis tools to refresh")
+        else:
+            lines.append("  freshness: all_fields_fresh  # dashboard data is current")
+        lines.append("  sections:")
+        # Per-section truncation info
+        if full_critical_paths and len(full_critical_paths) > 20:
+            lines.append(f"    top_paths:")
+            lines.append(f"      shown: {min(len(full_critical_paths), 20)}")
+            lines.append(f"      total: {len(full_critical_paths)}")
+        if total_failing_endpoints is not None and total_failing_endpoints > 10:
+            lines.append(f"    failing_endpoints:")
+            lines.append(f"      shown: 10")
+            lines.append(f"      total: {total_failing_endpoints}")
+        if total_congestion_hotspots is not None and total_congestion_hotspots > 5:
+            lines.append(f"    congestion_hotspots:")
+            lines.append(f"      shown: 5")
+            lines.append(f"      total: {total_congestion_hotspots}")
+        if total_high_fanout_nets is not None and total_high_fanout_nets > 10:
+            lines.append(f"    high_fanout_nets:")
+            lines.append(f"      shown: 10")
+            lines.append(f"      total: {total_high_fanout_nets}")
+        lines.append("  available_data_types:")
+        lines.append("    - critical_paths  # Full list of all extracted critical paths")
+        lines.append("    - high_fanout_nets  # Full list of all high-fanout nets")
+        lines.append("    - congestion  # Full congestion analysis data")
+        lines.append("    - route_status  # Full route status report")
+        lines.append("    - failing_endpoint_names  # Full list of failing endpoint names")
+        lines.append("    - tool_output:<tool_name>  # Raw tool output by name")
+        lines.append("  commands:")
+        lines.append("    - design_data_read(iteration=N, data_type='critical_paths')")
+        lines.append("    - design_data_read(iteration=N, data_type='high_fanout_nets')")
+        lines.append("    - vivado_get_raw_tool_output(iteration=N, tool_name='<name>')")
+        lines.append("")
 
     lines.append("--- End Dashboard ---")
     return "\n".join(lines)

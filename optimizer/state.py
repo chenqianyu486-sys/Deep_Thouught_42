@@ -394,6 +394,14 @@ class OptimizationAppliedRecord:
 
 
 @dataclass
+class DesignDataState:
+    """Tracks what design data has been persisted to disk."""
+    last_snapshot_iteration: int = -1  # -1 = no snapshot taken yet
+    stored_iterations: list[int] = field(default_factory=list)
+    design_data_path: Optional[str] = None  # current iteration's design_data dir path
+
+
+@dataclass
 class ContextState:
     """Compression metrics, raw tool outputs, repetition detection."""
     compression_count: int = 0
@@ -427,6 +435,8 @@ class ContextState:
     consecutive_empty_responses: int = 0
     # PBLOCK multiplier tracking: records (iteration, multiplier) for variation
     previous_pblock_multipliers: list[tuple[int, float]] = field(default_factory=list)
+    # Design data persistence tracking (for DesignDataManager)
+    design_data: DesignDataState = field(default_factory=DesignDataState)
 
 
 @dataclass

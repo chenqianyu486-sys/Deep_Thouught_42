@@ -52,6 +52,8 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "rapidwright_execute_combinational_rebalancing_strategy",
     "rapidwright_execute_lut_muxf_repack_strategy",
     "rapidwright_execute_muxf_tree_reorder_strategy",
+    "design_data_read",
+    "design_data_list_snapshots",
 })
 
 
@@ -79,12 +81,13 @@ async def call_tool(
     tool_cache: dict | None = None,
     design_size_factor: float = 1.0,
     entity_registry: "EntityRegistry | None" = None,
+    run_dir: "Path | None" = None,
 ) -> str:
     """Execute a tool call on the appropriate MCP server.
 
     Routes to rapidwright_ or vivado_ session based on tool name prefix.
     Handles internal tools (get_raw_tool_output, get_cached_high_fanout_nets,
-    report_step_state).
+    report_step_state, design_data_read, design_data_list_snapshots).
 
     LLM->tool boundary validation: when entity_registry is provided, cell-name
     arguments are validated & sanitized via validate_and_sanitize_cell_args
@@ -184,6 +187,26 @@ async def call_tool(
     # Internal tool: report_step_state (safety net)
     if tool_name == "report_step_state":
         return json.dumps({"status": "acknowledged"})
+
+    # Internal tool: design_data_read — retrieve persisted design data
+    if tool_name == "design_data_read":
+        if run_dir is None:
+            return json.dumps({"error": "No run_dir configured, design data not available"})
+        from .design_data import DesignDataManager
+        ddm = DesignDataManager(run_dir)
+        result = ddm.read_design_data(
+            iteration=arguments.get("iteration", iteration),
+            data_type=arguments.get("data_type", ""),
+        )
+        return result
+
+    # Internal tool: design_data_list_snapshots — list available iterations
+    if tool_name == "design_data_list_snapshots":
+        if run_dir is None:
+            return json.dumps({"error": "No run_dir configured, design data not available"})
+        from .design_data import DesignDataManager
+        ddm = DesignDataManager(run_dir)
+        return ddm.list_all_iterations()
 
     # ── LLM->tool boundary: validate & sanitize cell-name arguments ──
     # Partial-pass+warn policy (confirmed decision). Returns a structured
