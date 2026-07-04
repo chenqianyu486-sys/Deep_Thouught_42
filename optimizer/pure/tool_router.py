@@ -33,6 +33,7 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "vivado_route_design",
     "vivado_phys_opt_design",
     "vivado_physopt_and_route",
+    "vivado_open_checkpoint",
     "vivado_write_checkpoint",
     "vivado_create_and_apply_pblock",
     "rapidwright_execute_pblock_strategy",

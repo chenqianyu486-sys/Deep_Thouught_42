@@ -22,6 +22,7 @@ from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
+from optimizer.pure.constants import DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,17 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     prev_best_wns=state.timing.prev_best_wns,
                     prev_best_tns=state.timing.prev_best_tns,
                 )
+
+                # Track dashboard freshness (mirrors ANALYZE/EVALUATE pattern)
+                if tool_name in DESIGN_MODIFICATION_TOOLS:
+                    state.timing.critical_paths_stale = True
+                    for field in state.timing.field_freshness:
+                        state.timing.field_freshness[field] = "stale"
+                refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
+                if refreshable:
+                    for field in refreshable:
+                        state.timing.field_freshness[field] = "fresh"
+
                 if deps.compat is not None:
                     deps.compat.add_message("tool", summary, {
                         "tool_call_id": tc.id, "name": tool_name,

@@ -210,6 +210,19 @@ async def transition_phase(
         logger.warning(f"[phase_handoff] Transition failed (non-critical): {e}")
 
 
+def reset_design_fingerprint() -> None:
+    """Reset the global design fingerprint tracker.
+
+    Called on rollback and iteration start to prevent stale cache preservation
+    across design-state boundaries. When the design is physically restored to a
+    different checkpoint (rollback) or a new iteration begins, cached tool results
+    from the previous design state may be invalid — resetting the fingerprint
+    ensures the next phase transition will clear the tool cache.
+    """
+    global _last_design_fingerprint
+    _last_design_fingerprint = None
+
+
 def _format_phase_archive(
     phase: LoopPhase,
     messages: list,

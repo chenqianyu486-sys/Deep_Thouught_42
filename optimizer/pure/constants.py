@@ -264,6 +264,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_extract_critical_path_cells": frozenset({"critical_path_cells"}),
     "vivado_report_qor_suggestions": frozenset({"qor_suggestions"}),
     "vivado_report_high_fanout_nets": frozenset({"high_fanout_nets"}),
+    "vivado_get_wns": frozenset({"timing_summary"}),
 }
 
 # ── Design modification tools ──────────────────────────────────
@@ -276,6 +277,7 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
     "vivado_place_design",
     "vivado_create_and_apply_pblock",
     "vivado_physopt_and_route",
+    "vivado_open_checkpoint",
     # RapidWright strategy tools — all modify the design
     "rapidwright_execute_pblock_strategy",
     "rapidwright_execute_fanout_strategy",

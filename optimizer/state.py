@@ -399,6 +399,7 @@ class DesignDataState:
     last_snapshot_iteration: int = -1  # -1 = no snapshot taken yet
     stored_iterations: list[int] = field(default_factory=list)
     design_data_path: Optional[str] = None  # current iteration's design_data dir path
+    last_snapshot_fingerprint: str = ""  # fingerprint of data at last snapshot; when data changes within same iteration, mismatch triggers re-storage
 
 
 @dataclass

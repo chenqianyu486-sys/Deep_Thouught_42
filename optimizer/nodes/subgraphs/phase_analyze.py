@@ -79,6 +79,29 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         except Exception as _e:
             logger.warning(f"[ANALYZE] Auto-refresh failed: {_e}")
 
+    # ── Rollback-scenario auto-refresh ──
+    # After rollback, critical_paths was cleared and critical_paths_stale=True.
+    # Refresh design_info (fast, ~30s) so the LLM has structural data even
+    # before it calls any analysis tools. critical_paths are left for the LLM
+    # to re-extract on demand (may need vivado_extract_critical_path_cells).
+    if state.timing.critical_paths_stale and not state.timing.critical_paths:
+        if state.timing.field_freshness.get("design_info") == "stale":
+            try:
+                _info_result = await call_tool_fn(
+                    tool_name="rapidwright_get_design_info", arguments={},
+                    rapidwright_session=deps.rapidwright_session,
+                    vivado_session=deps.vivado_session,
+                    raw_tool_outputs=state.context.raw_tool_outputs,
+                    tool_cache=state.context.tool_cache,
+                    design_size_factor=state.timing.design_size_factor,
+                    entity_registry=state.entity_registry,
+                )
+                if _info_result and "error" not in _info_result.lower():
+                    state.timing.field_freshness["design_info"] = "fresh"
+                    logger.info("[ANALYZE] Auto-refreshed design_info after rollback")
+            except Exception as _e2:
+                logger.warning(f"[ANALYZE] Auto-refresh design_info failed: {_e2}")
+
     while True:
         tool_round += 1
         state.iteration.tool_round = tool_round

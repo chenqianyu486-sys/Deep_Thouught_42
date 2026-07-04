@@ -16,6 +16,7 @@ from ..deps import NodeDeps
 from ..edges import NodeName
 from ..color import green
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from .subgraphs.phase_handoff import reset_design_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,15 @@ async def iteration_start_node(
     state.iteration.blocked_strategies.clear()
     state.iteration.tool_round = 0
     state.model.current_task_type = ""
+
+    # Clear cross-iteration caches: previous iteration's tool results and
+    # raw outputs are invalid for the new iteration's different design state.
+    state.context.tool_cache.clear()
+    state.context.raw_tool_outputs.clear()
+    # Reset phase-handoff design fingerprint so the next phase transition
+    # clears any remaining cached tool results from the prior iteration.
+    reset_design_fingerprint()
+    logger.info(f"[iteration_start] Tool cache and raw outputs cleared for iteration {state.iteration.current}")
 
     iter_num = state.iteration.current
     logger.info(green(

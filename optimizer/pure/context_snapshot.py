@@ -7,12 +7,16 @@ The handoff summary is merged into the same message.
 
 from __future__ import annotations
 
+import logging
+
 from typing import TYPE_CHECKING
 
 from .tool_filter import LoopPhase
 
 if TYPE_CHECKING:
     from ..state import OptimizerState
+
+logger = logging.getLogger(__name__)
 
 # Header marker for the Pinned cell-registry layer (compression-resistant).
 CELL_REGISTRY_MARKER = "[CELL REGISTRY]"
@@ -195,9 +199,26 @@ def inject_merged_dashboard(
                     state.timing.design_info.get("top_cell_types", [])
                 ) if isinstance(state.timing.design_info.get("top_cell_types"), (list, dict)) else None
 
-            # Store full snapshot to disk (once per iteration)
+            # ── Compute data fingerprint for snapshot-change detection ──
+            # The fingerprint captures the essential state that should trigger
+            # a new snapshot when it changes. It covers: WNS, critical path
+            # count, and the freshness state of all dashboard fields.
+            def _compute_data_fingerprint() -> str:
+                _wns = state.timing.latest_wns
+                _cp_count = len(state.timing.critical_paths) if state.timing.critical_paths else 0
+                _freshness_parts = sorted(
+                    f"{k}={v}" for k, v in state.timing.field_freshness.items()
+                )
+                return f"wns={_wns:.3f}|cp={_cp_count}|{'|'.join(_freshness_parts)}"
+
+            # Store full snapshot to disk when iteration changes OR when
+            # the data fingerprint differs (data changed within same iteration).
+            # This ensures rollback-then-refresh triggers a new snapshot even
+            # when the iteration number hasn't advanced.
             current_iter = state.iteration.current
-            if current_iter != state.context.design_data.last_snapshot_iteration:
+            _fp = _compute_data_fingerprint()
+            _last_fp = getattr(state.context.design_data, 'last_snapshot_fingerprint', "")
+            if current_iter != state.context.design_data.last_snapshot_iteration or _fp != _last_fp:
                 iter_dir = ddm.store_snapshot(
                     critical_paths=full_critical_paths,
                     high_fanout_nets=state.timing.high_fanout_nets,
@@ -212,12 +233,18 @@ def inject_merged_dashboard(
                 design_data_path = iter_dir
                 state.context.design_data.last_snapshot_iteration = current_iter
                 state.context.design_data.design_data_path = iter_dir
+                state.context.design_data.last_snapshot_fingerprint = _fp
                 if current_iter not in state.context.design_data.stored_iterations:
                     state.context.design_data.stored_iterations.append(current_iter)
+                logger.debug(
+                    f"[DESIGN_DATA] Snapshot stored for iteration {current_iter} "
+                    f"(iter_changed={current_iter != state.context.design_data.last_snapshot_iteration}, "
+                    f"fp_changed={_fp != _last_fp})"
+                )
             else:
                 design_data_path = state.context.design_data.design_data_path
-        except Exception:
-            pass
+        except Exception as _dd_err:
+            logger.warning(f"[DESIGN_DATA] Snapshot store failed: {_dd_err}", exc_info=True)
 
     # Build exclusion and blocked-strategy sets.
     # Hard-exclude: tool_error is permanent/immediate (no TTL).
