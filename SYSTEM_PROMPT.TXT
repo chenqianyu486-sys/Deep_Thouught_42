@@ -19,8 +19,11 @@ rules:
        in the EVALUATE phase. Signal EXEC_DONE and let the system handle rollback.
        You will receive a [SYSTEM — Rollback Occurred] notification with the restored WNS."
     - "For fanout data, use vivado_get_cached_high_fanout_nets (available in
-       ANALYZE, SELECT_STRATEGY, and EXECUTE phases). The cached data is populated
-       during initial analysis and is the canonical source."
+       ANALYZE, SELECT_STRATEGY, and EXECUTE phases). The cache reflects the
+       initial-analysis scan (min_fanout=50) and may be stale after design
+       modifications; if it returns empty or the design has changed since
+       init_analysis, re-run vivado_get_critical_high_fanout_nets to refresh
+       before concluding the design has no high-fanout nets."
 
 response_format:
   rule: "Every response MUST call report_step_state(step_id, result_status, flow_control) as structured tool call."

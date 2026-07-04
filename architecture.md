@@ -1097,19 +1097,54 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 **修复方向**：`tool_summary.py` 对 `rapidwright_analyze_*` 工具增加结构化摘要（提取 congested_columns_count/severity 等顶层键）。
 
-### 15.5 路由状态 `total_nets=0` 解析错误
+### 15.5 路由状态 `total_nets=0` 解析错误（2026-07-04 已修复）
 
-**现象**：`vivado_report_route_status` 返回 `{"total_nets": 0, "routed_nets": 37081}`——`total_nets` 解析为 0 而 `routed_nets` 正确。
+**现象**：`vivado_report_route_status` 返回 `{"total_nets": 0, "routed_nets": 37081}`——`total_nets` 解析为 0，`routed_nets` 也是错的（37081 实为 logical nets，非 fully-routed）。
 
-**根因**：`parse_route_status()`（`timing.py:284`）的解析逻辑对 `total_nets` 字段的定位依赖于特定的 Vivado `report_route_status` 输出格式，格式波动时定位偏移。
+**根因（两层）**：
+1. **JSON 包装未解包**：MCP 工具 `vivado_report_route_status`（`vivado_mcp_server.py:2448`）把真实 Vivado 输出塞进 `raw_report` 字段返回 JSON。`parse_route_status()` 收到的是这段 JSON 而非裸文本，`raw_report` 内的换行被转义为 `\n`，`split('\n')` 后整段报告变成**一整行**。
+2. **子串匹配与真实标签不符**：真实 Vivado 格式为 `# of logical nets` / `# of fully routed nets` / `# of nets with routing errors`（见 `dcp_optimizer_run-20260704_085355/vivado.log:11663`），而解析器找 `'total nets'`/`'nets total'` → 永不命中 → `total_nets=0`；`'routed' in s` 命中那一整行（含 "fully routed"），`re.search` 抓到行内第一个数字 37081（logical nets），`routed_nets` 也错。
+
+**修复**（`optimizer/pure/timing.py:284`）：解析前先解包 JSON `raw_report`；按真实标签 `# of logical nets` / `# of fully routed nets` / `# of nets with routing errors` / `# of routable nets` / `# of nets not needing routing` 匹配。
+
+**连带修复**（`optimizer/nodes/subgraphs/phase_execute.py:1900` route-reuse guard）：guard 原查 `total_nets > 0`，但 `total_nets` = logical nets（设计里总存在，与是否布线无关）。修复前靠 bug（=0）让 guard 永远回退常规布线；修好 parser 后 `total_nets` 恒 >0 会让 guard 变成永真死代码、对未布线设计也启用 `-reuse`。改查 `routed_nets > 0`（真正表示"有先验布线"），与 guard 注释 "only if design has prior routing" 语义一致。`optimizer/pure/constants.py:425` 注释同步。
+
+**验证**：`TestParseRouteStatus` 5 项单测（真实格式 / JSON 包装 / 未布线设计 / 空输入 / 千分位逗号）。全量 434 项通过。
 
 ### 15.6 定位文件总览
 
-| 文件 | 缺陷 | 优先级 |
-|------|------|--------|
-| `VivadoMCP/vivado_mcp_server.py:2918-2930` | `check_design_status` 对 routed 设计返回 `is_routed=false` | P0 |
-| `optimizer/nodes/init_analysis.py:232` | 高扇出扫描阈值 `min_fanout=100` 过高 | P0 |
-| `optimizer/pure/timing.py:175-212` | `parse_high_fanout_nets` 对异常网线名缺乏容错 | P1 |
-| `optimizer/pure/state_space.py` | Module 3 在 EVALUATE/SELECT_STRATEGY 阶段被过滤 | P2 |
-| `optimizer/pure/tool_summary.py` | `rapidwright_analyze_congestion` 摘要为空 | P2 |
-| `optimizer/pure/timing.py:284` | `parse_route_status` 对 `total_nets` 的解析定位偏移 | P2 |
+第一轮（2026-07-04 日志分析）与第二轮（DCP 客观数据准确度审计）修复状态：
+
+| 文件 | 缺陷 | 优先级 | 状态 |
+|------|------|--------|------|
+| `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对 routed 设计返回 `is_routed=false`（大小写敏感匹配） | P3 | ✅ 已修（C1：大小写不敏感 + Unknown 回退） |
+| `optimizer/nodes/init_analysis.py` | 高扇出扫描阈值 `min_fanout=100` 过高 | P0 | ✅ 已修（C2：降至 50） |
+| `optimizer/pure/timing.py` | `parse_high_fanout_nets` `net_name=parts[2]` 截断多 token 网名 | P1 | ✅ 已修（C2：`" ".join(parts[2:])`） |
+| `optimizer/pure/state_space.py` | Module 3 在 EXECUTE/EVALUATE 阶段被过滤（SELECT_STRATEGY 实际显示） | P2 | ✅ 已修（M1：EXECUTE/EVALUATE 保留 physical_congestion） |
+| `optimizer/pure/tool_summary.py` | `design_data_read`/`list_snapshots` 分支 NameError 被静默吞掉 | P1 | ✅ 已修（M4：累加器初始化前移） |
+| `optimizer/pure/timing.py:284` | `parse_route_status` 对 `total_nets` 的解析定位偏移 | P2 | ✅ 已修（§15.5） |
+| `optimizer/pure/timing.py` | `parse_pvt_corner` 未测得时返回硬编码 `slow_0p95v_85c`（伪造测量值） | P0 | ✅ 已修（C4：返回 None + Dashboard N/A） |
+| `optimizer/pure/critical_path.py` | `validate_critical_path_data` FF 计数恒零（`k.startswith("FD")` 与 `"FF"` 返回值不匹配） | P1 | ✅ 已修（C5：`k in ("FF","FF_REPLICA")`） |
+| `optimizer/pure/entities.py` | `is_valid_cell_name` `"pblock" in name` 误拒 `u_core/pblock_controller/inst` | P3 | ✅ 已修（C6：仅检查 leaf 段） |
+| `optimizer/pure/constants.py` | `vivado_run_tcl` 不在 `DESIGN_MODIFICATION_TOOLS` → TCL 改设计后 field_freshness 不降级 | P0 | ✅ 已修（F1：`is_modifying_tcl` 内容检测） |
+| `optimizer/pure/constants.py` | `rapidwright_analyze_congestion` 不在 `DASHBOARD_REFRESH_MAP` | P2 | ✅ 已修（F3） |
+| `optimizer/pure/constants.py` | `vivado_unplace_cells` 不在 `DESIGN_MODIFICATION_TOOLS` | P3 | ✅ 已修（F6） |
+| `optimizer/nodes/subgraphs/phase_analyze.py`、`phase_select_strategy.py` | 自动刷新只置 `timing_summary=fresh`，遗漏 `cdc_paths` | P2 | ✅ 已修（F2：按 `DASHBOARD_REFRESH_MAP` 批量置 fresh） |
+| `optimizer/nodes/subgraphs/phase_execute.py` | `_auto_refresh_critical_paths` 置 `critical_paths_stale=False` 不同步 `field_freshness` → `stale=false [stale]` 矛盾 | P1 | ✅ 已修（F4/F5：同步两套系统） |
+| `optimizer/pure/state_space.py` | `delta_wns` 跨阶段/迭代残留，无抑制无标签 | P1 | ✅ 已修（F8：非 EXECUTE/EVALUATE 置 None） |
+| `optimizer/pure/state_space.py` | `bram/dsp_utilization`、`ths_hold` 缺 `[fresh]`/`[stale]` 标签 | P1 | ✅ 已修（M2） |
+| `optimizer/pure/state_space.py`、`state.py` | `total_control_sets`/`false_paths_count`/`multicycle_paths_count` 零值歧义 | P2 | ✅ 已修（M3：`None` + `_annotated_val`） |
+| `SYSTEM_PROMPT.TXT` | 指示 LLM 信任 `vivado_get_cached_high_fanout_nets` 为 "canonical source"（缓存实为空） | P0 | ✅ 已修（M5：改为可空 + 刷新指引） |
+| `optimizer/pure/design_data.py` | 持久化文件名 `tool_output_{name}_{round}.json` 缺 phase → 跨阶段覆盖 | P2 | ✅ 已修（M6：加 phase） |
+| `optimizer/pure/design_data.py` | `_enforce_file_limit` 清理范围含快照数据文件 | P3 | ✅ 已修（M7：仅 `tool_output_*`） |
+| `optimizer/pure/design_data.py` | `read_design_data` 回传的 `_meta` fresh 标签是持久化时刻的，无过期警示 | P2 | ✅ 已修（M9：`freshness_caveat` 字段） |
+| `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 称 "Trust `[fresh]` data" 过度承诺 | P3 | ✅ 已修（F7：改为"无修改记录"语义） |
+| `VivadoMCP/vivado_mcp_server.py` | `report_route_status` envelope 硬编码 `route_errors:0`/`unrouted_nets:0` | P3 | ✅ 已修（C7：置 None，纯函数为唯一来源） |
+
+> **文档订正**：§15.2 原"parser 要求 `line.split()` 恰好 3 部分"有误，实为 `>= 3`，真正脆弱点是 `net_name=parts[2]` 只取首 token。§15.3 原"EVALUATE/SELECT_STRATEGY 阶段被过滤"有误——SELECT_STRATEGY 实际显示 Module 3，仅 EXECUTE/EVALUATE 隐藏。§15.4 原"`rapidwright_analyze_congestion` 摘要为 `{`"在当前代码不成立（`compact_tool_summary` 已有专用 handler 产出 `global_score=..., severity=...`），真实受影响的是 `design_data_read` 分支 NameError（M4）。
+
+### 15.7 三条系统性根因
+
+1. **双陈旧度系统漂移**（F4/F5）：`critical_paths_stale` 布尔与 `field_freshness["critical_path_cells"]` 字典独立更新必然漂移。修复：`_auto_refresh_critical_paths` 同步两套；未来可合并为字典 SSOT。
+2. **静默零/空解析范式**（C2/C4/C8/M3）：多个 parser 在失败时返回与真实零无法区分的值，甚至伪造默认值（C4 PVT）。修复：失败返回 `None` + Dashboard `_annotated_val` 标注原因（`parse_resource_utilization` 为范例）。
+3. **内存修复未同步磁盘**（M6）：`raw_tool_outputs` 内存键已修为 `(iteration, phase, round)` 三元，但 `DesignDataManager.store_raw_output` 文件名仍二元。修复：文件名加 phase。

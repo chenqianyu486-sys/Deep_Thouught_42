@@ -19,6 +19,7 @@ from optimizer.pure.timing import (
     is_valid_wns,
     parse_hold_timing,
     parse_resource_utilization,
+    parse_route_status,
 )
 from skills.pblock_strategy import compute_adaptive_resource_multiplier
 from optimizer.pure.model_select import (
@@ -257,6 +258,89 @@ class TestParseResourceUtilization:
     """
         result = parse_resource_utilization(report)
         assert result is None
+
+
+class TestParseRouteStatus:
+    """parse_route_status — covers A.5 (total_nets=0) regression.
+
+    Real Vivado report_route_status -return_string format captured from
+    dcp_optimizer_run-20260704_085355/vivado.log:11663.
+    """
+
+    # Real output captured from a fully-routed design (37081 logical nets,
+    # 27961 routable, all fully routed).
+    REAL_FULLY_ROUTED = (
+        "Design Route Status\n"
+        "                                               :      # nets :\n"
+        "   ------------------------------------------- : ----------- :\n"
+        "   # of logical nets.......................... :       37081 :\n"
+        "       # of nets not needing routing.......... :        9120 :\n"
+        "           # of internally routed nets........ :        9019 :\n"
+        "           # of implicitly routed ports....... :         101 :\n"
+        "       # of routable nets..................... :       27961 :\n"
+        "           # of fully routed nets............. :       27961 :\n"
+        "       # of nets with routing errors.......... :           0 :\n"
+        "   ------------------------------------------- : ----------- :\n"
+    )
+
+    def test_raw_fully_routed(self):
+        result = parse_route_status(self.REAL_FULLY_ROUTED)
+        assert result["total_nets"] == 37081
+        assert result["routed_nets"] == 27961
+        assert result["unresolved_nets"] == 0
+        assert result["routable_nets"] == 27961
+        assert result["not_needing_routing_nets"] == 9120
+
+    def test_mcp_json_envelope(self):
+        """MCP wraps the real report under 'raw_report' as escaped JSON;
+        the envelope's is_placed/is_routed are unreliable and must not be
+        used. Parser must unwrap and parse the real report."""
+        import json as _json
+        envelope = _json.dumps({
+            "is_placed": False,   # unreliable (§15.1)
+            "is_routed": False,   # unreliable (§15.1)
+            "route_errors": 0,
+            "unrouted_nets": 0,
+            "raw_report": self.REAL_FULLY_ROUTED,
+        })
+        result = parse_route_status(envelope)
+        assert result["total_nets"] == 37081
+        assert result["routed_nets"] == 27961
+        assert result["unresolved_nets"] == 0
+
+    def test_unrouted_design(self):
+        """After place_design, before route_design: fully routed = 0 and
+        routing errors = all routable nets. routed_nets must be 0 so the
+        route-reuse guard falls back to normal routing."""
+        unrouted = (
+            "Design Route Status\n"
+            "   # of logical nets.......................... :       37081 :\n"
+            "       # of nets not needing routing.......... :        9120 :\n"
+            "       # of routable nets..................... :       27961 :\n"
+            "           # of fully routed nets............. :           0 :\n"
+            "       # of nets with routing errors.......... :       27961 :\n"
+        )
+        result = parse_route_status(unrouted)
+        assert result["total_nets"] == 37081
+        assert result["routed_nets"] == 0
+        assert result["unresolved_nets"] == 27961
+
+    def test_empty_and_non_json(self):
+        assert parse_route_status("")["total_nets"] == 0
+        assert parse_route_status("   ")["routed_nets"] == 0
+        # Non-JSON text without recognizable labels → all zeros (no crash).
+        result = parse_route_status("some arbitrary vivado output\nno labels here")
+        assert result["total_nets"] == 0
+        assert result["routed_nets"] == 0
+
+    def test_comma_thousands(self):
+        report = (
+            "   # of logical nets.......................... :     123,456 :\n"
+            "   # of fully routed nets............. :     123,456 :\n"
+        )
+        result = parse_route_status(report)
+        assert result["total_nets"] == 123456
+        assert result["routed_nets"] == 123456
 
 
 # ── Model selection tests ────────────────────────────────────────

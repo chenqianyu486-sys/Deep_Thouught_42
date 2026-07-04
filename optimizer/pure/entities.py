@@ -84,11 +84,15 @@ def is_valid_cell_name(name: str) -> bool:
     if not name or not isinstance(name, str):
         return False
 
-    name_lower = name.lower()
-    if name_lower.startswith("pblock") or "pblock" in name_lower:
+    leaf = name.split("/")[-1] if "/" in name else name
+    # Reject PBLOCK constraint labels (e.g. "pblock_tight", "u_core/pblock_io").
+    # Pblock labels appear as standalone names or as the leaf segment; a
+    # "pblock_*" segment in the MIDDLE of a path (e.g.
+    # "u_core/pblock_controller/inst") is a real module, not a pblock label,
+    # so only the leaf is checked (C6: avoid over-rejecting real cells).
+    if leaf.lower().startswith("pblock"):
         return False
 
-    leaf = name.split("/")[-1] if "/" in name else name
     if _DEVICE_SITE_PATTERNS.match(leaf):
         return False
 
@@ -114,10 +118,10 @@ def is_valid_pin_name(name: str) -> bool:
     """
     if not name or not isinstance(name, str):
         return False
-    name_lower = name.lower()
-    if "pblock" in name_lower:
-        return False
     leaf = name.split("/")[-1] if "/" in name else name
+    # Reject PBLOCK labels (leaf-segment check; see is_valid_cell_name for C6).
+    if leaf.lower().startswith("pblock"):
+        return False
     if _DEVICE_SITE_PATTERNS.match(leaf):
         return False
     if "/" not in name:

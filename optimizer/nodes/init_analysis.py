@@ -229,7 +229,7 @@ async def init_analysis_node(
             # Step B4: High fanout nets
             nets_report = await call_tool_fn(
                 "vivado_get_critical_high_fanout_nets",
-                {"num_paths": 50, "min_fanout": 100},
+                {"num_paths": 50, "min_fanout": 50},
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )

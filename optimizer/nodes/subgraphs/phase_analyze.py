@@ -74,7 +74,12 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 state.timing.latest_wns = _parsed["wns"]
                 state.timing.latest_tns = _parsed.get("tns")
                 state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
-                state.timing.field_freshness["timing_summary"] = "fresh"
+                # Mark all fields refreshed by vivado_report_timing_summary
+                # fresh (timing_summary AND cdc_paths) — matches the main-loop
+                # DASHBOARD_REFRESH_MAP handling so cdc_paths does not stay
+                # stale after the auto-refresh (F2).
+                for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
+                    state.timing.field_freshness[_f] = "fresh"
                 logger.info(f"[ANALYZE] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
         except Exception as _e:
             logger.warning(f"[ANALYZE] Auto-refresh failed: {_e}")

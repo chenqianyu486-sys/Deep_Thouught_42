@@ -108,10 +108,12 @@ PHASE_STATESPACE_MODULES: dict[LoopPhase, frozenset[str]] = {
         "architecture_overview", "design_structure", "recent_analysis",
     }),
     LoopPhase.EXECUTE: frozenset({
-        "global_state", "timing_clusters_summary", "dynamic_gradient",
+        "global_state", "timing_clusters_summary", "physical_congestion",
+        "dynamic_gradient",
     }),
     LoopPhase.EVALUATE: frozenset({
-        "global_state", "timing_clusters_summary", "dynamic_gradient",
+        "global_state", "timing_clusters_summary", "physical_congestion",
+        "dynamic_gradient",
     }),
 }
 
@@ -297,7 +299,7 @@ def _build_netlist_quality(state: OptimizerState) -> DashboardNetlistQuality:
         )
 
     return DashboardNetlistQuality(
-        total_control_sets=cs.get("total_control_sets", 0),
+        total_control_sets=cs.get("total_control_sets"),
         avg_control_sets_per_slice=cs.get("avg_per_slice"),
         high_fanout_nets=nets,
         failed_inferences=[],  # synthesis log not available post-synth
@@ -333,11 +335,11 @@ def _build_constraints_env(state: OptimizerState) -> DashboardConstraints:
     ci = state.timing.constraints_info or {}
     return DashboardConstraints(
         clock_definitions=clock_defs,
-        false_paths_count=ci.get("false_paths_count", 0),
-        multicycle_paths_count=ci.get("multicycle_paths_count", 0),
+        false_paths_count=ci.get("false_paths_count"),
+        multicycle_paths_count=ci.get("multicycle_paths_count"),
         io_delay_defined_pct=ci.get("io_delay_defined_pct"),
         total_io_ports=ci.get("total_io_ports"),
-        pvt_corner=state.timing.pvt_corner or "slow_0p95v_85c",
+        pvt_corner=state.timing.pvt_corner,
     )
 
 
@@ -370,12 +372,19 @@ def _build_dynamic_gradient(state: OptimizerState) -> DashboardDynamicGradient:
             action_status = "Success"  # No regression = success
         else:
             action_status = ""  # PENDING or not yet evaluated
+        # delta_wns is only meaningful alongside the action that produced it.
+        delta_wns_show = delta_wns
     else:
         last_action = ""
         action_status = ""
+        # Suppress the stale evaluation delta outside EXECUTE/EVALUATE so it
+        # does not contradict the empty last_action (F8: evaluation_wns_delta
+        # persists across phases/iterations and otherwise reads as a real
+        # improvement with no corresponding action).
+        delta_wns_show = None
 
     return DashboardDynamicGradient(
-        delta_wns=delta_wns if delta_wns != 0.0 else None,
+        delta_wns=delta_wns_show if delta_wns_show != 0.0 else None,
         delta_tns=delta_tns,
         delta_congestion=delta_congestion,
         last_action_taken=last_action,
@@ -616,15 +625,15 @@ def format_state_space_for_llm(
         if gs.whs_hold is not None:
             lines.append(f"  whs_hold: {gs.whs_hold:.3f}{_tag('timing_summary')}")
         if gs.ths_hold is not None:
-            lines.append(f"  ths_hold: {gs.ths_hold:.3f}")
+            lines.append(f"  ths_hold: {gs.ths_hold:.3f}{_tag('timing_summary')}")
         if gs.lut_utilization is not None:
             lines.append(f"  lut_utilization: {gs.lut_utilization:.2%}{_tag('resource_utilization')}")
         if gs.ff_utilization is not None:
             lines.append(f"  ff_utilization: {gs.ff_utilization:.2%}{_tag('resource_utilization')}")
         if gs.bram_utilization is not None:
-            lines.append(f"  bram_utilization: {gs.bram_utilization:.2%}")
+            lines.append(f"  bram_utilization: {gs.bram_utilization:.2%}{_tag('resource_utilization')}")
         if gs.dsp_utilization is not None:
-            lines.append(f"  dsp_utilization: {gs.dsp_utilization:.2%}")
+            lines.append(f"  dsp_utilization: {gs.dsp_utilization:.2%}{_tag('resource_utilization')}")
         if gs.cell_count > 0:
             lines.append(f"  cell_count: {gs.cell_count}")
             lines.append(f"  net_count: {gs.net_count}")
@@ -883,7 +892,7 @@ def format_state_space_for_llm(
         nq = space.netlist_quality
         lines.append("# Module 4: Netlist Quality Profiler")
         lines.append("netlist_quality:")
-        lines.append(f"  total_control_sets: {nq.total_control_sets}")
+        lines.append(f"  total_control_sets: {_annotated_val(nq.total_control_sets, reason='not_extracted')}")
         lines.append(f"  avg_control_sets_per_slice: {_annotated_val(nq.avg_control_sets_per_slice, '{:.2f}', 'data_not_available')}")
         lines.append(f"  cross_domain_paths_count: {nq.cross_domain_paths_count}{_tag('cdc_paths')}")
         if nq.cell_type_summary:
@@ -924,8 +933,8 @@ def format_state_space_for_llm(
                 lines.append(f"    {clk_name}: {freq:.1f} MHz")
         else:
             lines.append("  clock_definitions: {}")
-        lines.append(f"  false_paths_count: {ce.false_paths_count}")
-        lines.append(f"  multicycle_paths_count: {ce.multicycle_paths_count}")
+        lines.append(f"  false_paths_count: {_annotated_val(ce.false_paths_count, reason='not_extracted')}")
+        lines.append(f"  multicycle_paths_count: {_annotated_val(ce.multicycle_paths_count, reason='not_extracted')}")
         if ce.io_delay_defined_pct is None:
             if ce.total_io_ports == 0:
                 iodp = '"N/A(no_io_ports)"'
@@ -934,7 +943,7 @@ def format_state_space_for_llm(
         else:
             iodp = f"{ce.io_delay_defined_pct:.2%}"
         lines.append(f"  io_delay_defined_pct: {iodp}")
-        lines.append(f"  pvt_corner: {ce.pvt_corner}")
+        lines.append(f"  pvt_corner: {_annotated_val(ce.pvt_corner, reason='not_extracted')}")
         lines.append("")
 
     # ── Module 6: Dynamic Gradient Data ────────────────────────────

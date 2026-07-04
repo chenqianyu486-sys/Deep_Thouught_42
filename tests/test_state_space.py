@@ -290,7 +290,10 @@ class TestPhaseAwareFiltering:
         assert "timing_violation_summary:" in text
         # But NOT the full Module 2 with detailed paths
         assert "Module 2: Timing Path Clusters" not in text
-        assert "Module 3:" not in text
+        # Module 3 (physical_congestion) IS shown in EXECUTE so congestion-aware
+        # strategies keep their motivation during execution (M1: shown [stale]
+        # after design changes rather than disappearing).
+        assert "Module 3:" in text
         assert "Module 4:" not in text
         assert "Module 5:" not in text
 
@@ -362,6 +365,10 @@ class TestYamlFormatting:
     def test_delta_wns_four_decimal_places(self):
         state = make_state()
         state.strategy.evaluation_wns_delta = 0.077
+        # delta_wns is only rendered during EVALUATE/EXECUTE_STRATEGY (F8:
+        # suppressed elsewhere to avoid stale residue contradicting an empty
+        # last_action).
+        state.strategy.current_phase = "EVALUATE"
         space = build_state_space(state)
         text = format_state_space_for_llm(space=space)
         # delta_wns 使用 +.4f 格式

@@ -89,8 +89,10 @@ STALE DATA HANDLING — CRITICAL:
      before evaluating improvement or making strategy decisions.
   2. Critical paths marked `[stale]` MUST be re-extracted via
      vivado_extract_critical_path_cells before any cell-targeting operation.
-  3. `[fresh]` means the data was collected or refreshed in the current context.
-     Trust `[fresh]` data for your decisions.
+  3. `[fresh]` means no design modification has been recorded since this field
+     was last refreshed. It is generally reliable, but if you are uncertain
+     whether a modification occurred (e.g. a TCL-driven change), refresh
+     before high-stakes decisions.
   4. Ignoring stale data leads to wrong strategy decisions. When uncertain,
      refresh before deciding.
 

@@ -198,7 +198,9 @@ def parse_high_fanout_nets(report: str) -> list[tuple[str, int, int]]:
                 try:
                     path_count = int(parts[0])
                     fanout = int(parts[1])
-                    net_name = parts[2]
+                    # Join all remaining tokens: net names with spaces (escaped
+                    # identifiers) would be truncated if only parts[2] is taken.
+                    net_name = " ".join(parts[2:])
 
                     if (net_name and
                             '/' in net_name and
@@ -284,42 +286,89 @@ def compute_timing_hash(raw_text: str) -> str:
 def parse_route_status(report: str) -> dict:
     """Parse Vivado report_route_status output.
 
-    Extracts: total_nets, routed_nets, unresolved_nets, long_route_nets_count,
-    and estimates avg_wirelength from route metrics when available.
-    Also extracts detailed metrics: congestion_level, total_wirelength,
-    max_wirelength, timing_violated_nets for Dashboard M3.
+    Handles both raw Vivado text and the JSON envelope returned by the
+    vivado_report_route_status MCP tool (which embeds the real report under
+    "raw_report"); the envelope's own is_placed/is_routed fields are
+    unreliable (see architecture.md §15.1) so we parse the raw text only.
+
+    Vivado's ``report_route_status -return_string`` format::
+
+        Design Route Status
+           # of logical nets.......................... : 37081 :
+           # of nets not needing routing.......... : 9120 :
+           # of routable nets..................... : 27961 :
+           # of fully routed nets............. : 27961 :
+           # of nets with routing errors.......... : 0 :
+
+    Field semantics (net counts):
+      - total_nets: # of logical nets (all nets; exists regardless of routing)
+      - routed_nets: # of fully routed nets (0 when design is unrouted)
+      - unresolved_nets: # of nets with routing errors
+      - routable_nets / not_needing_routing_nets: informational sub-totals
+
+    Extended metrics (avg_wirelength, congestion_level, total_wirelength,
+    max_wirelength, timing_violated_nets, long_route_nets_count) are extracted
+    when present in extended report variants; the basic report omits them.
 
     Returns:
-        dict with keys: total_nets, routed_nets, unresolved_nets,
-        long_route_nets_count, avg_wirelength (None if not available),
-        congestion_level, total_wirelength, max_wirelength,
-        timing_violated_nets.
+        dict with the keys above; counts default to 0, floats to None.
     """
     result: dict = {
         "total_nets": 0, "routed_nets": 0, "unresolved_nets": 0,
+        "routable_nets": 0, "not_needing_routing_nets": 0,
         "long_route_nets_count": 0, "avg_wirelength": None,
         "congestion_level": None, "total_wirelength": None,
         "max_wirelength": None, "timing_violated_nets": None,
     }
-    lines = report.split('\n')
-    for line in lines:
+    if not report or not report.strip():
+        return result
+
+    # Unwrap the MCP JSON envelope if present, so we parse the real report
+    # instead of a single escaped JSON string line.
+    text = report
+    stripped = report.strip()
+    if stripped.startswith("{"):
+        try:
+            envelope = json.loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            envelope = None
+        if isinstance(envelope, dict) and envelope.get("raw_report"):
+            text = envelope["raw_report"]
+
+    def _first_int(line: str):
+        m = re.search(r"(\d[\d,]*)", line)
+        return int(m.group(1).replace(",", "")) if m else None
+
+    for line in text.split('\n'):
         s = line.strip().lower()
-        if 'total nets' in s or 'nets total' in s:
-            m = re.search(r'(\d[\d,]*)', line)
-            if m:
-                result["total_nets"] = int(m.group(1).replace(",", ""))
-        elif 'routed' in s and 'unrouted' not in s and 'partially' not in s:
-            m = re.search(r'(\d[\d,]*)', line)
-            if m and "total" not in s:
-                result["routed_nets"] = int(m.group(1).replace(",", ""))
-        elif 'unresolved' in s or 'unrouted' in s:
-            m = re.search(r'(\d[\d,]*)', line)
-            if m:
-                result["unresolved_nets"] = int(m.group(1).replace(",", ""))
+        if not s:
+            continue
+        # Net counts — match the full Vivado label so "fully routed" is not
+        # caught by a generic "routed" substring (the prior bug).
+        if "# of logical nets" in s:
+            v = _first_int(line)
+            if v is not None:
+                result["total_nets"] = v
+        elif "# of fully routed nets" in s:
+            v = _first_int(line)
+            if v is not None:
+                result["routed_nets"] = v
+        elif "# of nets with routing errors" in s:
+            v = _first_int(line)
+            if v is not None:
+                result["unresolved_nets"] = v
+        elif "# of routable nets" in s:
+            v = _first_int(line)
+            if v is not None:
+                result["routable_nets"] = v
+        elif "# of nets not needing routing" in s:
+            v = _first_int(line)
+            if v is not None:
+                result["not_needing_routing_nets"] = v
         elif 'long route' in s or 'longest route' in s:
-            m = re.search(r'(\d[\d,]*)', line)
-            if m:
-                result["long_route_nets_count"] = int(m.group(1).replace(",", ""))
+            v = _first_int(line)
+            if v is not None:
+                result["long_route_nets_count"] = v
         elif 'average wirelength' in s or 'avg wirelength' in s:
             m = re.search(r'([\d.]+)', line)
             if m:
@@ -340,9 +389,9 @@ def parse_route_status(report: str) -> dict:
             if m:
                 result["max_wirelength"] = float(m.group(1))
         elif 'timing violated' in s or 'violated nets' in s:
-            m = re.search(r'(\d[\d,]*)', line)
-            if m:
-                result["timing_violated_nets"] = int(m.group(1).replace(",", ""))
+            v = _first_int(line)
+            if v is not None:
+                result["timing_violated_nets"] = v
     return result
 
 
@@ -418,15 +467,19 @@ def parse_design_info(result_text: str) -> dict | None:
     }
 
 
-def parse_pvt_corner(timing_report: str) -> str:
+def parse_pvt_corner(timing_report: str) -> str | None:
     """Extract PVT corner from report_timing_summary header.
 
     Vivado timing reports include a header line like:
       'Speed Grade: -2  PVT: slow_0p95v_85c'
-    or similar. Returns the PVT string, or default 'slow_0p95v_85c'.
+    or similar. Returns the PVT string, or None if not found.
+
+    Returning None (rather than a fabricated default) prevents an unmeasured
+    PVT corner from being presented to the LLM as a real value — the Dashboard
+    renders None as ``N/A(not_extracted)``.
     """
     if not timing_report:
-        return "slow_0p95v_85c"
+        return None
     for line in timing_report.split('\n'):
         if 'PVT' in line or 'pvt' in line:
             m = re.search(r'PVT[:\s]+(\S+)', line, re.IGNORECASE)
@@ -438,7 +491,7 @@ def parse_pvt_corner(timing_report: str) -> str:
                 if any(c in token_lower for c in ('slow', 'fast', 'typ', '0p', '_')):
                     if len(token) > 4:
                         return token.rstrip(',.;')
-    return "slow_0p95v_85c"
+    return None
 
 
 def compute_violation_summary(

@@ -25,7 +25,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -796,8 +796,16 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     except Exception as e:
                         logger.debug(f"[EXECUTE] search_cells registry sync failed: {e}")
 
-                # Mark critical paths stale after layout changes
-                if tool_name in DESIGN_MODIFICATION_TOOLS:
+                # Mark critical paths stale after layout changes.
+                # vivado_run_tcl is not in DESIGN_MODIFICATION_TOOLS (also used
+                # for read-only queries), so inspect its TCL command for
+                # modifying verbs to avoid false-freshness (F1).
+                _design_changed = tool_name in DESIGN_MODIFICATION_TOOLS
+                if tool_name == "vivado_run_tcl":
+                    _tcl_cmd = tool_args.get("command") or tool_args.get("tcl") or ""
+                    if is_modifying_tcl(_tcl_cmd):
+                        _design_changed = True
+                if _design_changed:
                     state.timing.critical_paths_stale = True
                     # Mark all dashboard fields stale — design has changed
                     for field in state.timing.field_freshness:
@@ -1897,9 +1905,11 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 )
                 del args["directive"]
 
-        # Handle route reuse: keep -reuse only if design has been routed
+        # Handle route reuse: keep -reuse only if design has prior routing.
+        # routed_nets (# of fully routed nets) is the real signal — total_nets
+        # counts logical nets which exist even before routing (see A.5).
         if args.pop("reuse", False):
-            if state.timing.route_status and state.timing.route_status.get("total_nets", 0) > 0:
+            if state.timing.route_status and state.timing.route_status.get("routed_nets", 0) > 0:
                 args["reuse"] = True
                 logger.info("[chain] Route reuse enabled (design has prior routing)")
             else:
@@ -2066,6 +2076,11 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
     if cell_paths:
         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
         state.timing.critical_paths_stale = False
+        # Keep the field_freshness dict in sync with the boolean flag —
+        # otherwise the Dashboard renders the contradictory "stale=false [stale]"
+        # (F4: two staleness systems must not drift).
+        if "critical_path_cells" in state.timing.field_freshness:
+            state.timing.field_freshness["critical_path_cells"] = "fresh"
         logger.info(f"[EXECUTE] Auto-refreshed {len(cell_paths)} critical paths")
     # cell_paths 为空时不修改 stale 标志 — 下次触发时重试
 

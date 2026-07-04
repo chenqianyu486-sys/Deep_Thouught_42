@@ -268,6 +268,7 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
     "vivado_report_qor_suggestions": frozenset({"qor_suggestions"}),
     "vivado_report_high_fanout_nets": frozenset({"high_fanout_nets"}),
     "vivado_get_wns": frozenset({"timing_summary"}),
+    "rapidwright_analyze_congestion": frozenset({"congestion_data"}),
 }
 
 # ── Design modification tools ──────────────────────────────────
@@ -279,6 +280,7 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
     "vivado_route_design",
     "vivado_place_design",
     "vivado_create_and_apply_pblock",
+    "vivado_unplace_cells",
     "vivado_physopt_and_route",
     "vivado_open_checkpoint",
     # RapidWright strategy tools — all modify the design
@@ -303,6 +305,44 @@ DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
     # Vivado tools
     "vivado_opt_design",
 })
+
+
+# ── TCL modification detection (for vivado_run_tcl) ───────────────
+# vivado_run_tcl is NOT in DESIGN_MODIFICATION_TOOLS because the LLM also
+# uses it for read-only queries (get_property, report_*). Instead, the
+# stale-marking sites inspect the TCL command via is_modifying_tcl() so
+# only design-modifying commands invalidate field_freshness — closing the
+# false-freshness gap without over-aggressively stale-marking read-only TCL.
+MODIFYING_TCL_VERBS: frozenset[str] = frozenset({
+    "place_design", "route_design", "phys_opt_design", "opt_design",
+    "unplace", "unplace_cells", "set_property", "create_pblock",
+    "resize_pblock", "add_cells_to_pblock", "remove_cells_from_pblock",
+    "delete_pblock", "place_cell", "unroute_net", "route_net",
+    "lock_design", "unlock_design", "replace_cell", "move_cell",
+    "retarget", "remap", "synth_design", "link_design",
+})
+
+
+def is_modifying_tcl(command: str) -> bool:
+    """Return True if a vivado_run_tcl command string contains design-modifying verbs.
+
+    Matches the first word of each non-comment line (Vivado TCL is line-oriented),
+    so read-only commands like ``report_timing_summary`` or ``get_property`` do
+    not trigger stale-marking, while ``place_design`` / ``set_property ...`` do.
+    """
+    if not command or not isinstance(command, str):
+        return False
+    for line in command.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        tokens = stripped.split()
+        if not tokens:
+            continue
+        first_word = tokens[0].lower().split("::")[-1]
+        if first_word in MODIFYING_TCL_VERBS:
+            return True
+    return False
 
 
 # ── Per-phase tool rate limits ────────────────────────────────────
@@ -422,7 +462,8 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
 # reuse — phys_opt preserves routing, so route_design -reuse re-routes only the
 # moved nets. PBLOCK keeps reuse because its unplace is local (critical cells
 # only), leaving the rest of the design routed. See phase_execute.py route-reuse
-# guard for the runtime total_nets check.
+# guard for the runtime routed_nets check (A.5: total_nets counts logical
+# nets and is always > 0, so it cannot gate reuse).
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
         # Local unplace: only critical-path cells (vs the old global

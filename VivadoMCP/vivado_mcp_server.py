@@ -2442,14 +2442,17 @@ async def call_tool(name: str, arguments: dict):
             # Run a quick command first to flush any leftover output from previous commands
             run_tcl_command("puts {route_status_start}", timeout=5)
             output = run_tcl_command("report_route_status -return_string", timeout=timeout)
-            # Parse basic status fields into structured JSON
-            is_placed = "Placed" in output if output else False
-            is_routed = "Routed" in output if output else False
+            # The pure parser (parse_route_status) extracts net counts from
+            # raw_report. Do NOT hardcode route_errors/unrouted_nets=0 here —
+            # those constants misled direct consumers into thinking there are
+            # zero routing errors regardless of reality (C7). is_placed/
+            # is_routed are also not reliably derivable from this report text;
+            # leave them None so the pure parser is the single source of truth.
             result = {
-                "is_placed": is_placed,
-                "is_routed": is_routed,
-                "route_errors": 0,
-                "unrouted_nets": 0,
+                "is_placed": None,
+                "is_routed": None,
+                "route_errors": None,
+                "unrouted_nets": None,
                 "raw_report": output[:2000] if output else "",
             }
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -2988,15 +2991,25 @@ async def call_tool(name: str, arguments: dict):
 
         elif name == "check_design_status":
             timeout = arguments.get("timeout", 30)
-            # Check if design is placed/routed
+            # Check if design is placed/routed.
+            # Vivado's STATUS property reports completion messages like
+            # "route_design Complete!" / "place_design Complete!" (lowercase
+            # verb), so match case-insensitively. When STATUS is empty (some
+            # Vivado versions after open_checkpoint), report Unknown rather
+            # than fabricating a placed/routed state — the Dashboard's
+            # design_state (parsed from report_timing_summary) is the
+            # authoritative source (C1).
             status_result = run_tcl_command("get_property STATUS [current_design]", timeout=timeout)
             design_open = _design_open
+            status_lower = status_result.lower() if status_result else ""
+            is_placed = ("place_design" in status_lower) or ("route_design" in status_lower)
+            is_routed = "route_design" in status_lower
 
             response = {
                 "design_open": design_open,
                 "status": status_result.strip() if status_result else "Unknown",
-                "is_placed": "Placed" in status_result if status_result else False,
-                "is_routed": "Routed" in status_result if status_result else False,
+                "is_placed": is_placed,
+                "is_routed": is_routed,
             }
             return [TextContent(type="text", text=json.dumps(response, indent=2))]
 

@@ -394,6 +394,8 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 以 `dcp_optimizer_run-20260704_085355` 日志交叉分析为基础，以下数据流问题会导致 LLM 被误导：
 
+> **修复状态（2026-07-04 第二轮审计）**：A.1–A.4 全部已修；另发现并修复 20 项新缺陷（PVT 伪造默认值、`vivado_run_tcl` 虚假新鲜、双陈旧度系统漂移、`delta_wns` 残留、新鲜度标签缺失、零值歧义、持久化文件名跨阶段覆盖等）。完整修复清单与文件定位见 [architecture.md §15.6](architecture.md)。
+
 ### A.1 `check_design_status` 返回错误状态
 
 `VivadoMCP/vivado_mcp_server.py` 的 `check_design_status` 工具使用 `get_property STATUS [current_design]` 检测设计状态。在 `open_checkpoint` 后 Vivado 返回**空字符串**，导致 `is_routed=false`、`is_placed=false`。修复方向：改用 `IS_PLACED`/`IS_ROUTED` 属性探测。
@@ -410,9 +412,13 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 `tool_summary.py` 的 `compact_tool_summary` 因该工具 JSON 缺乏顶层 `message` 键而生成为 `{`。10 个拥塞列的数据被 LLM 忽略。
 
-### A.5 `route_status.total_nets` 解析为 0
+### A.5 `route_status.total_nets` 解析为 0（2026-07-04 已修复）
 
 `parse_route_status()` 对 Vivado `report_route_status` 输出格式波动的容错不足，`total_nets` 定位偏移导致解析为 0。
+
+**根因（两层）**：① MCP 工具把真实输出塞进 JSON `raw_report` 字段返回，解析器未解包，`split('\n')` 后整段报告变成一整行；② 真实标签为 `# of logical nets` / `# of fully routed nets` / `# of nets with routing errors`，而解析器找 `'total nets'`/`'routed'` 子串，定位偏移 → `total_nets=0`，`routed_nets` 也错成 37081（logical nets）。
+
+**修复**：`timing.py:284` 解析前解包 JSON `raw_report`，按真实标签匹配；`phase_execute.py:1900` route-reuse guard 改查 `routed_nets > 0`（`total_nets`=logical nets 恒 >0，无法 gate reuse）。详见 [architecture.md §15.5](architecture.md)。`TestParseRouteStatus` 5 项单测覆盖。
 
 **数据流误导链总结**：
 ```
@@ -423,8 +429,6 @@ init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
         → 第二次策略选择的基期数据: 过期 + 错误 | 导致选错策略
 ```
 
-详见 [architecture.md §15](architecture.md)。
-
 ### A.6 PBLOCK 策略三个矛盾（2026-07-04 日志深度分析，已修复）
 
 同一份日志的 PBLOCK 策略执行链暴露三个工程实现矛盾，均已在 2026-07-04 修复：
@@ -433,7 +437,7 @@ init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
 - **矛盾二（全局 unplace 核弹级重做）**：PBLOCK 链 step1 全局 `place_design -unplace`（37000 cell）+ `apply_to=current_design`（pblock 约束全部 cell），破坏其他路径。修复：改为 `vivado_unplace_cells(cells=critical_path_cells)` 局部 unplace + `create_and_apply_pblock(cells=...)` 局部 pblock + 增量 place/route。PBLOCK 移出 `PLACE_ONLY_CHECK_SKILLS`（局部 unplace 后 route 前关键 net 暂未布线，place-only WNS 为伪退化）。
 - **矛盾三（epsilon 阈值不一致）**：best_保存用 `>0`、EXECUTE verdict 用 `>0.001`、冷却/无进展用 `>0.050`。PBLOCK +0.049ns 被存为 best 却被冷却（"见好就收"）。修复：冷却改 `delta>0` 跳过；无进展计数改 `delta≤0` 递增、`delta>0.050` 重置、`(0,0.050]` 既不重置也不递增。
 
-修复实现见 [docs/plans/pblock-three-contradictions-fix.md](docs/plans/pblock-three-contradictions-fix.md)。A.5（`total_nets=0`）仍未修复，独立 issue。
+修复实现见 [docs/plans/pblock-three-contradictions-fix.md](docs/plans/pblock-three-contradictions-fix.md)。A.5（`total_nets=0`）已于 2026-07-04 修复（见上文）。
 
 ---
 

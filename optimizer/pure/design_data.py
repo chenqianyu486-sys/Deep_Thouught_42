@@ -301,7 +301,12 @@ class DesignDataManager:
         """
         iter_dir = self._ensure_iter_dir(iteration)
         safe_name = tool_name.replace("vivado_", "").replace("rapidwright_", "").replace(" ", "_").lower()
-        file_path = iter_dir / f"tool_output_{safe_name}_{round_index}.json"
+        # Include phase in the filename so cross-phase calls of the same tool
+        # at the same round do not overwrite each other (M6: the in-memory
+        # raw_tool_outputs buffer uses (iteration, phase, round) keys; the
+        # on-disk filename now matches that scoping).
+        safe_phase = (phase or "unknown").replace(" ", "_").lower()
+        file_path = iter_dir / f"tool_output_{safe_name}_{safe_phase}_{round_index}.json"
 
         data = {
             "_meta": {
@@ -476,6 +481,14 @@ class DesignDataManager:
                 "total_records": total_records,
                 "data": inner,
                 "meta": payload.get("_meta", {}),
+                # M9: field_freshness in meta reflects persist-time state only.
+                # If the design was modified after this snapshot was written,
+                # the data may be stale regardless of the recorded freshness.
+                "freshness_caveat": (
+                    "meta.field_freshness reflects state at persist time. "
+                    "If the design was modified after this snapshot, re-run "
+                    "the analysis tool for current values."
+                ),
             }, cls=_DesignDataEncoder, indent=2, ensure_ascii=False)
         except Exception as e:
             return json.dumps({
@@ -508,8 +521,9 @@ class DesignDataManager:
                 "available_tool_outputs": available if available else None,
             })
 
-        # Return the most recent (last in sorted order)
-        file_path = candidates[-1]
+        # Return the most recent by mtime (phase is now part of the filename,
+        # so multiple phases of the same tool no longer collide — M6).
+        file_path = sorted(candidates, key=lambda f: f.stat().st_mtime)[-1]
         try:
             payload = json.loads(file_path.read_text(encoding="utf-8"))
             inner = payload.get("data", "")
@@ -601,11 +615,19 @@ class DesignDataManager:
         return sorted(result)
 
     def _enforce_file_limit(self, iteration: int) -> None:
-        """Remove oldest files if the iteration directory exceeds the limit."""
+        """Remove oldest tool-output files if the iteration directory exceeds the limit.
+
+        Only ``tool_output_*`` files are eligible for removal — snapshot data
+        files (critical_paths.json, congestion.json, ...) must be preserved so
+        ``design_data_read`` keeps working (M7).
+        """
         iter_dir = self._iter_dir(iteration)
         if not iter_dir.is_dir():
             return
-        files = sorted(iter_dir.glob("*.json"), key=lambda f: f.stat().st_mtime)
+        files = sorted(
+            (f for f in iter_dir.glob("*.json") if f.name.startswith("tool_output_")),
+            key=lambda f: f.stat().st_mtime,
+        )
         if len(files) > DESIGN_DATA_MAX_FILES:
             for f in files[:len(files) - DESIGN_DATA_MAX_FILES]:
                 try:

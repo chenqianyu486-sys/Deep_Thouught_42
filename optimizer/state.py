@@ -244,7 +244,7 @@ class TimingState:
     # Constraints environment info (populated during init_analysis)
     constraints_info: Optional[dict] = None
     # PVT corner extracted from timing report header (populated during init_analysis)
-    pvt_corner: str = "slow_0p95v_85c"
+    pvt_corner: Optional[str] = None
     # Phase checkpoint: which init_analysis steps have completed (for skip-on-restart)
     # Steps: timing_done, clocks_done, hold_done, util_done, route_done,
     #        constraints_done (false/multicycle/IO), cdc_done
@@ -754,7 +754,7 @@ class DashboardHighFanoutNet:
 @dataclass
 class DashboardNetlistQuality:
     """Module 4: Netlist architecture quality metrics."""
-    total_control_sets: int = 0
+    total_control_sets: Optional[int] = None  # None=not_extracted, 0=parsed zero
     avg_control_sets_per_slice: Optional[float] = None
     high_fanout_nets: list[DashboardHighFanoutNet] = field(default_factory=list)
     failed_inferences: list[str] = field(default_factory=list)
@@ -766,11 +766,11 @@ class DashboardNetlistQuality:
 class DashboardConstraints:
     """Module 5: Timing constraints environment."""
     clock_definitions: dict[str, float] = field(default_factory=dict)  # name -> freq_mhz
-    false_paths_count: int = 0
-    multicycle_paths_count: int = 0
+    false_paths_count: Optional[int] = None     # None=not_extracted, 0=parsed zero
+    multicycle_paths_count: Optional[int] = None  # None=not_extracted, 0=parsed zero
     io_delay_defined_pct: Optional[float] = None   # 0.0~1.0
     total_io_ports: Optional[int] = None             # None=parse failed, 0=no ports
-    pvt_corner: str = "slow_0p95v_85c"
+    pvt_corner: Optional[str] = None
 
 
 @dataclass

@@ -122,6 +122,13 @@ def summarize_tool_result(
                 f"  raw_output: |\n{indent}"
             )
 
+    # Initialize accumulators early: the design_data_read / list_snapshots
+    # branches below populate them, so they must exist before those branches
+    # (previously defined after, causing a NameError swallowed by except: pass).
+    summary_parts: list[str] = []
+    key_details: dict = {}
+    status = "completed"
+
     # Internal tool: design_data_read — return structured summary
     if tool_name == "design_data_read":
         try:
@@ -165,10 +172,6 @@ def summarize_tool_result(
             f"  raw_output_chars: {char_count}\n"
             f"  raw_output: |\n{indent}"
         )
-
-    summary_parts = []
-    key_details = {}
-    status = "completed"
 
     # Common: extract error/fail indicators
     has_error = any("error" in l.lower() for l in lines[:20])

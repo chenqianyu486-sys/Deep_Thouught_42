@@ -130,8 +130,10 @@ def validate_critical_path_data(
                 f"from incorrect TCL extraction"
             )
 
-        # Check for expected sequential elements
-        ff_count = sum(v for k, v in cell_types.items() if k.startswith("FD") or k in ("FDPE", "FDCE"))
+        # Check for expected sequential elements.
+        # _heuristic_cell_type returns "FF" / "FF_REPLICA" for register cells
+        # (not "FD..."), so count those rather than keys starting with "FD".
+        ff_count = sum(v for k, v in cell_types.items() if k in ("FF", "FF_REPLICA"))
         if ff_count == 0 and total_types > 10:
             issues.append(
                 "No flip-flop cells found in any path — paths may not be "
