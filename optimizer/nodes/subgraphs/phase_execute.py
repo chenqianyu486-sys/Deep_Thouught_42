@@ -1800,6 +1800,14 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 f"The Vivado P&R chain was skipped because the strategy had no netlist effect. "
                 f"Consider selecting a strategy that does not require critical path data, "
                 f"or use vivado_extract_critical_path_cells to populate path data first.")
+        # Record strategy failure so SELECT_STRATEGY won't re-select it this iteration
+        record_strategy_failure(
+            state, state.strategy.current_strategy,
+            "strategy_not_applicable", tool=tool_name,
+            detail=f"chain_skipped: {skip_reason}"
+        )
+        if state.strategy.current_strategy not in state.iteration.blocked_strategies:
+            state.iteration.blocked_strategies.append(state.strategy.current_strategy)
         return
 
     # Capture pre-chain WNS baseline (before Vivado opens the skill's DCP).

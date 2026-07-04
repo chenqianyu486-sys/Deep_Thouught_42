@@ -1027,3 +1027,64 @@ EntityRegistry
 | B2 | 工具 | report_high_fanout_nets 专用工具 | 封装 Vivado `report_high_fanout_nets` 为独立 MCP 工具，供 LLM 诊断高扇出网络（Dashboard 字段: high_fanout_nets） |
 | C2 | 编译 | set_incremental_checkpoint 增量编译支持 | 新增 `set_incremental_checkpoint` 工具，支持增量编译流程以加速多轮迭代 |
 | C3 | 编译 | RWRoute 环境变量开关 | 提供环境变量控制 RapidWright 路由引擎（RWRoute）的启用/禁用，灵活适配不同设计场景 |
+
+---
+
+## 15. 已知数据质量缺陷（2026-07-04 运行日志分析发现）
+
+本节记录运行时日志交叉分析（`dcp_optimizer_run-20260704_085355`）发现的数据质量问题，这些缺陷会导致 LLM 在策略决策时被错误数据误导。
+
+### 15.1 `check_design_status` 对 routed 设计返回 `is_routed=false`
+
+**现象**：`vivado_check_design_status` 返回 `is_placed=false, is_routed=false`，即使设计已完成布局布线。
+
+**根因**：该工具通过 `get_property STATUS [current_design]` 获取状态（`VivadoMCP/vivado_mcp_server.py:2918-2930`）。在 `open_checkpoint` 加载 DCP 后，Vivado 的 STATUS 属性返回**空字符串**。MCP 代码 `if status_result else False` 将空字符串短路为 `False`。
+
+**影响**：LLM 看到的 `is_routed=false` 与真实状态完全矛盾。`state_space.py:594` 虽有 `design_state=unplaced` 警告注释，但未处理 `Unknown` 值。
+
+**修复方向**：改用 `get_property IS_PLACED` / `get_property IS_ROUTED` 属性探测，或解析 `report_timing_summary` 中的 Design State 字段。
+
+### 15.2 高扇出网线扫描阈值过高（init_analysis 使用 min_fanout=100）
+
+**现象**：`init_analysis.py:230-237` 以 `min_fanout=100` 调用 `vivado_get_critical_high_fanout_nets`，`parse_high_fanout_nets()`（`timing.py:175-212`）解析格式化表格时返回 0 条记录，而实际设计存在 fanout >= 100 的网线（如 `M0w[19]` 扇出 259，`M1w[47]` 扇出 164）。
+
+LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
+
+**根因**：`get_critical_high_fanout_nets` 内部基于 `report_timing -return_string` 文本正则解析。第一次调用时函数内部确有数据（Vivado MCP 日志显示执行了 26 次父网线名解析），但 `parse_high_fanout_nets` 的表格行格式匹配严格（要求 `line.split()` 恰好 3 部分），父网线名中的特殊字符可能导致解析跳过。
+
+**修复方向**：阈值降至 `min_fanout=50`；`parse_high_fanout_nets` 增加对异常网线名的容错。
+
+### 15.3 Module 3（物理与拥塞指标）在策略切换后从 Dashboard 消失
+
+**现象**：ANALYZE 阶段的 Dashboard（`state_space.py` 构建的 Module 3）包含完整的拥塞/高扇出/路由状态。但 EVALUATE 和 SELECT_STRATEGY #2 阶段的 Dashboard **完全没有 Module 3**。
+
+**影响**：LLM 在第二次策略选择时"忘记"了自己在 ANALYZE 阶段发现的 34 条高扇出网线，认为 "Fanout: Need to check fanout first"（自相矛盾）。
+
+分析表明这与 `format_state_space_for_llm()` 的 phase-aware 过滤逻辑有关——部分阶段会剔除被认为"不相关"的模块，但 PHYSICAL_CONGESTION 模块对策略决策始终相关。
+
+**修复方向**：Module 3 在所有阶段保留结构，stale 字段标注 `[stale]` 而非移除。
+
+### 15.4 拥塞工具摘要缺失
+
+**现象**：`tool_summary.py` 对 `rapidwright_analyze_congestion` 的 `compact_tool_summary` 生成为 `{`（空 JSON 前缀），因为该 JSON 输出缺少 `message` 顶层键。而实际原始数据包含 10 个拥塞列和 `has_congestion_issues: true`。
+
+**影响**：LLM 误认为拥塞不严重，排除了 CongestionSpreading 和 CongestionRouteExplore 策略。
+
+**修复方向**：`tool_summary.py` 对 `rapidwright_analyze_*` 工具增加结构化摘要（提取 congested_columns_count/severity 等顶层键）。
+
+### 15.5 路由状态 `total_nets=0` 解析错误
+
+**现象**：`vivado_report_route_status` 返回 `{"total_nets": 0, "routed_nets": 37081}`——`total_nets` 解析为 0 而 `routed_nets` 正确。
+
+**根因**：`parse_route_status()`（`timing.py:284`）的解析逻辑对 `total_nets` 字段的定位依赖于特定的 Vivado `report_route_status` 输出格式，格式波动时定位偏移。
+
+### 15.6 定位文件总览
+
+| 文件 | 缺陷 | 优先级 |
+|------|------|--------|
+| `VivadoMCP/vivado_mcp_server.py:2918-2930` | `check_design_status` 对 routed 设计返回 `is_routed=false` | P0 |
+| `optimizer/nodes/init_analysis.py:232` | 高扇出扫描阈值 `min_fanout=100` 过高 | P0 |
+| `optimizer/pure/timing.py:175-212` | `parse_high_fanout_nets` 对异常网线名缺乏容错 | P1 |
+| `optimizer/pure/state_space.py` | Module 3 在 EVALUATE/SELECT_STRATEGY 阶段被过滤 | P2 |
+| `optimizer/pure/tool_summary.py` | `rapidwright_analyze_congestion` 摘要为空 | P2 |
+| `optimizer/pure/timing.py:284` | `parse_route_status` 对 `total_nets` 的解析定位偏移 | P2 |

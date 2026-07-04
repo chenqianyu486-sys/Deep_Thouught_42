@@ -80,7 +80,7 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
         "rapidwright_analyze_congestion",
         "rapidwright_analyze_pblock_region",
         # REMOVED: rapidwright_get_device_topology — data already in Dashboard from init_analysis
-        "rapidwright_report_timing",
+        # REMOVED: rapidwright_report_timing — 25.6s call; Vivado report_timing_summary (0.5-4.2s) is faster & authoritative
         "rapidwright_get_design_info",
         "rapidwright_search_cells",
         # Execution tools (LOW risk, useful as probes during analysis)

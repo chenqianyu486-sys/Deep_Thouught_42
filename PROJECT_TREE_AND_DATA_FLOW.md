@@ -390,7 +390,44 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 ---
 
-## 附录 A. 迭代控制概览
+## 附录 A. 已知数据流陷阱（2026-07-04 运行日志分析发现）
+
+以 `dcp_optimizer_run-20260704_085355` 日志交叉分析为基础，以下数据流问题会导致 LLM 被误导：
+
+### A.1 `check_design_status` 返回错误状态
+
+`VivadoMCP/vivado_mcp_server.py` 的 `check_design_status` 工具使用 `get_property STATUS [current_design]` 检测设计状态。在 `open_checkpoint` 后 Vivado 返回**空字符串**，导致 `is_routed=false`、`is_placed=false`。修复方向：改用 `IS_PLACED`/`IS_ROUTED` 属性探测。
+
+### A.2 高扇出网线初始扫描结果为 0
+
+`init_analysis` 以 `min_fanout=100` 调用 `vivado_get_critical_high_fanout_nets`，`parse_high_fanout_nets()` 解析出 0 条。但 LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查得 34 条。阈值过高 + 父网线名解析边界情况导致 Dashboard 初始承载空数据。
+
+### A.3 Module 3 在策略切换后消失
+
+`state_space.py` 构建的 Module 3（物理与拥塞指标）在 EVALUATE/SELECT_STRATEGY 阶段被过滤移出 Dashboard。第二次策略选择时 LLM 无法获取拥塞/高扇出/路由状态数据，基于过期信息做出决策。
+
+### A.4 `rapidwright_analyze_congestion` 摘要为空
+
+`tool_summary.py` 的 `compact_tool_summary` 因该工具 JSON 缺乏顶层 `message` 键而生成为 `{`。10 个拥塞列的数据被 LLM 忽略。
+
+### A.5 `route_status.total_nets` 解析为 0
+
+`parse_route_status()` 对 Vivado `report_route_status` 输出格式波动的容错不足，`total_nets` 定位偏移导致解析为 0。
+
+**数据流误导链总结**：
+```
+init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
+  → Dashboard Module 3 承载空数据
+    → LLM 自行发现 34 条高扇出网线(但系统未保留)
+      → PBLOCK 后 Module 3 被过滤消失
+        → 第二次策略选择的基期数据: 过期 + 错误 | 导致选错策略
+```
+
+详见 [architecture.md §15](architecture.md)。
+
+---
+
+## 附录 B. 迭代控制概览
 
 - **常量**: `MAX_TOOL_ROUNDS=80`, `GLOBAL_NO_IMPROVEMENT_LIMIT=3`, `WNS_TARGET=0.0`
 - **退出原因**: `cost_limit` / `wns_target_met` / `max_iterations_reached` / `tool_round_limit` / `user_requested` / `rollback`

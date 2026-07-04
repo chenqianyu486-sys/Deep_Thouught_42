@@ -1063,7 +1063,7 @@ def format_state_space_for_llm(
         lines.append(f"  design_data_path: \"{design_data_path}\"")
         lines.append("  # Use design_data_read(iteration=N, data_type=<type>) to access full data")
         # Global freshness status
-        _stale_fields = [k for k, v in (state.timing.field_freshness.items() if state else {}).items() if v == "stale"]
+        _stale_fields = [k for k, v in (state.timing.field_freshness if state else {}).items() if v == "stale"]
         if state and state.timing.critical_paths_stale:
             _stale_fields.append("critical_paths")
         if _stale_fields:
