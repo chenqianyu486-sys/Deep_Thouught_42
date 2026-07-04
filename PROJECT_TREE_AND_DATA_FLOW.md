@@ -434,6 +434,6 @@ init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
 - **429 降级**: fallback 轮询→耗尽→切层级→清空
 - **DCP 验证**: Phase 1 结构对比(RapidWright) + Phase 2 功能仿真(Vivado xsim, 200向量)。每5次迭代中间验证。详见 [architecture.md §6](architecture.md)
 - **工具输出摘要化**: 大输出提取WNS/TNS摘要 + `raw_output_truncated: true`；小型(<3KB)直通嵌入。侧缓冲 FIFO 50条。详见 [architecture.md §5](architecture.md)
-- **迭代开始 checkpoint**: `iteration_start` 节点自动保存 `iteration_{iter}_start.dcp` 作为 rollback 基线；`_reload_baseline_on_switch` 优先从 `best_checkpoint_path` 恢复，回退到 iteration start DCP
+- **迭代开始 checkpoint**: `iteration_start` 节点自动保存 `iteration_{iter}_start.dcp` 作为 rollback 基线；优先从 `best_checkpoint.dcp` 拷贝（`shutil.copy2`）而非 Vivado 序列化（节省 ~5s/次）；`_reload_baseline_on_switch` 优先从 `best_checkpoint_path` 恢复，回退到 iteration start DCP
 - **设计指纹缓存**: `transition_phase` 接收 `design_fingerprint`（`best_checkpoint_path` 字符串）判断设计是否变更；指纹不变时 tool cache 跨阶段保留，避免 EVALUATE→CONTINUE→ANALYZE 循环中不必要的缓存失效
 - **优化历史追踪**: `optimization_history`（`OptimizationAppliedRecord` 列表，含 strategy/params/wns_before/wns_after/iteration/checkpoint_path）在每次保存 `best_checkpoint` 时追加记录，注入 handoff 和 Dashboard

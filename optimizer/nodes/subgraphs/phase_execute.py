@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import time
 
 from pathlib import Path
@@ -136,13 +137,25 @@ async def _ensure_iteration_start_checkpoint(
         if saved_iteration != iteration
     ]
     iter_ckpt = state.control.run_dir / f"iteration_{iteration}_start.dcp"
-    await call_tool_fn(
-        "vivado_write_checkpoint",
-        {"dcp_path": str(iter_ckpt.resolve()), "force": True},
-        deps.rapidwright_session,
-        deps.vivado_session,
-        design_size_factor=state.timing.design_size_factor,
-    )
+    # When best_checkpoint.dcp already exists, copy it directly — no point
+    # asking Vivado to serialize unchanged memory (saves ~2-3s per write).
+    best = state.control.best_checkpoint_path
+    if best is not None and best.exists():
+        shutil.copy2(str(best), str(iter_ckpt))
+        logger.info(
+            f"[CHECKPOINT] Copied iteration {iteration} start DCP "
+            f"from best_checkpoint (saved ~2-3s)")
+    else:
+        await call_tool_fn(
+            "vivado_write_checkpoint",
+            {"dcp_path": str(iter_ckpt.resolve()), "force": True},
+            deps.rapidwright_session,
+            deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        logger.info(
+            f"[CHECKPOINT] Saved iteration {iteration} start DCP via Vivado "
+            f"(no best_checkpoint to copy)")
     state.control.iteration_checkpoints.append((iteration, iter_ckpt))
     while len(state.control.iteration_checkpoints) > 3:
         _, old_path = state.control.iteration_checkpoints.pop(0)
@@ -150,7 +163,7 @@ async def _ensure_iteration_start_checkpoint(
             old_path.unlink(missing_ok=True)
         except Exception:
             pass
-    logger.info(f"[CHECKPOINT] Saved iteration {iteration} start DCP")
+    logger.info(f"[CHECKPOINT] Done: iteration {iteration} start DCP ready")
     return True
 
 
@@ -638,7 +651,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     directive = tool_args.get("directive", "").lower()
                     if directive == "unplace":
                         try:
-                            pre_unplace_ckpt = Path(f"/tmp/pre_unplace_{state.iteration.current}_{tool_round}.dcp")
+                            pre_unplace_ckpt = state.control.run_dir / f"pre_unplace_{state.iteration.current}_{tool_round}.dcp"
                             await call_tool_fn(
                                 "vivado_write_checkpoint", {"dcp_path": str(pre_unplace_ckpt), "force": True},
                                 deps.rapidwright_session, deps.vivado_session,
@@ -1424,6 +1437,9 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
             design_size_factor=state.timing.design_size_factor,
         )
         state.control.best_checkpoint_path = ckpt_path
+        # Vivado memory now holds best_checkpoint.dcp content — sync the
+        # design pointer so strategy re-entry can skip redundant reopen (~15s).
+        state.control.current_dcp_path = ckpt_path.resolve()
         state.context.optimization_history.append(OptimizationAppliedRecord(
             strategy=state.strategy.current_strategy,
             params="",
@@ -1817,12 +1833,13 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
     # Save pre-chain state for rollback on failure
     pre_chain_path = None
     try:
+        pre_chain_ckpt = state.control.run_dir / "pre_chain_pblock.dcp"
         pre_ckpt_result = await call_tool_fn(
-            "vivado_write_checkpoint", {"dcp_path": "/tmp/pre_chain_pblock.dcp", "force": True},
+            "vivado_write_checkpoint", {"dcp_path": str(pre_chain_ckpt.resolve()), "force": True},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
-        pre_chain_path = "/tmp/pre_chain_pblock.dcp"
+        pre_chain_path = str(pre_chain_ckpt.resolve())
     except Exception as e:
         logger.warning(f"[chain] Could not save pre-chain checkpoint: {e}")
 

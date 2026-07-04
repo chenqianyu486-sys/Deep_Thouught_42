@@ -108,6 +108,9 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 17 | retiming 安全守卫 | 阻止 `AlternateFlowWithRetiming`、`AddRetime` 等指令（双层防护） |
 | 17b | 指令黑名单 + 自动回退（2026-07） | `KNOWN_BROKEN_DIRECTIVES` 列出因许可问题已知失败的指令（如 `Performance_ExtraTimingOpt`）；auto-chain 中检测到黑名单指令时自动回退到策略默认指令，避免 ~17 秒的失败 P&R 循环 |
 | 17c | 检查点重载优化（2026-07） | `_reload_baseline_on_switch()` 在调用 `vivado_open_checkpoint` 前检查 `current_dcp_path` 是否已匹配目标检查点；若已加载则跳过重新打开，节省 ~27 秒/次 |
+| 17d | 检查点同步修复（2026-07） | `_save_best_checkpoint()` 写入后同步更新 `state.control.current_dcp_path`，避免策略切换时因指针不一致触发无意义重载（~15s 浪费） |
+| 17e | 迭代开始 checkpoint 拷贝优化（2026-07） | `iteration_start` 节点和 `_ensure_iteration_start_checkpoint` 优先从 `best_checkpoint.dcp` 拷贝而非通过 Vivado 序列化写入（节省 ~5s/次） |
+| 17f | 临时路径修复（2026-07） | `pre_chain_pblock.dcp` 和 `pre_unplace_*` 检查点从硬编码 `/tmp/` 迁移到 `run_dir/`，消除并发任务覆盖风险 |
 
 **策略与迭代层面**:
 | # | 原则 | 实现方式 |
@@ -121,7 +124,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 24 | 收益递减自动检测 | 同一策略最近 2+ 次使用且每次 |delta| < 0.020ns 时标记为 `no_improvement`（TTL=3 轮） |
 | 25 | 连续无进展检测 | EVALUATE 阶段连续 3 次无进展评估后强制 `SWITCH_STRATEGY` |
 | 26 | 优化历史追踪 | 每次 `best_checkpoint` 更新时记录策略名/WNS 前后对比/迭代号，注入 handoff 和 Dashboard |
-| 27 | 迭代开始 checkpoint | 每迭代开始时自动保存 DCP 快照，作为 `_reload_baseline_on_switch` 的次要回退基线 |
+| 27 | 迭代开始 checkpoint | 每迭代开始时自动保存 DCP 快照，作为 `_reload_baseline_on_switch` 的次要回退基线；当 `best_checkpoint.dcp` 存在时使用 `shutil.copy2` 拷贝（节省 ~5s/次 Vivado 序列化） |
 | 28 | 设计指纹缓存 | `transition_phase` 通过 `design_fingerprint` 比较决定是否保留 tool cache；设计未变更时跨阶段缓存保留 |
 
 > 完整实现级技术细节见 [architecture.md](architecture.md)。

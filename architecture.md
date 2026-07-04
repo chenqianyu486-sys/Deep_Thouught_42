@@ -510,11 +510,17 @@ else:
 
 ### 4.14 迭代开始 Checkpoint（2026-07）
 
-`iteration_start_node` 在每个迭代开始时自动保存当前设计状态到 `iteration_{iter}_start.dcp`，作为 `_reload_baseline_on_switch` 的回退基线：
+`iteration_start_node` 在每个迭代开始时自动保存当前设计状态到 `iteration_{iter}_start.dcp`，作为 `_reload_baseline_on_switch` 的回退基线。
+
+**拷贝优化（2026-07-04）**：当 `best_checkpoint.dcp` 已存在于磁盘时（表明 Vivado 内存未发生变化），直接通过 `shutil.copy2` 拷贝文件，而非调用 Vivado `write_checkpoint` 序列化。因 `best_checkpoint.dcp` 始终精确反映 Vivado 当前内存状态，且两次 checkpoint 写入间无任何工具调用修改设计，拷贝结果与 Vivado 序列化等价，但耗时从 ~2.5s 降至 ~0.01s。`_ensure_iteration_start_checkpoint` 中采用相同逻辑。
 
 ```python
 iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
-await call_tool_fn("vivado_write_checkpoint", {"dcp_path": str(iter_ckpt.resolve()), ...})
+best = state.control.best_checkpoint_path
+if best is not None and best.exists():
+    shutil.copy2(str(best), str(iter_ckpt))  # 节省 ~2.5s Vivado 序列化
+else:
+    await call_tool_fn("vivado_write_checkpoint", ...)
 state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
 ```
 
@@ -529,6 +535,8 @@ state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
 `_reload_baseline_on_switch()` 中每次策略切换都会调用 `vivado_open_checkpoint`（约 27 秒）。对于连续执行多个策略的迭代，同一最佳检查点被反复重载。
 
 优化：在调用 `vivado_open_checkpoint` 前检查 `state.control.current_dcp_path` 是否已匹配目标检查点路径。若已匹配（`str(state.control.current_dcp_path) == str(iter_ckpt.resolve())`），跳过重新加载，仅刷新时序报告。`current_dcp_path` 在 `vivado_open_checkpoint` 成功执行后更新，auto-chain 中同样更新（`phase_execute.py` L1869-1871）。每次跳过节省约 27 秒。
+
+**Bug 修复（2026-07-04）**：`_save_best_checkpoint()` 通过 Vivado 成功写入 `best_checkpoint.dcp` 后，仅更新了 `best_checkpoint_path` 但未同步更新 `current_dcp_path`。导致后续策略切换时 `_reload_baseline_on_switch` 路径比较失效——Vivado 内存实际已持有 best checkpoint 内容，但系统误认为设计指针仍指向 iteration start DCP，触发无意义重载（~15s 浪费）。修复：在 `_save_best_checkpoint` 中增加 `state.control.current_dcp_path = ckpt_path.resolve()`。
 
 ---
 
@@ -683,14 +691,14 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 ### Layer 3: unplace 自动回滚
 1. 追踪 `vivado_place_design(directive="unplace")` 调用
-2. 保存 pre-unplace checkpoint 到 `/tmp/pre_unplace_{iter}_{round}.dcp`
+2. 保存 pre-unplace checkpoint 到 `run_dir/pre_unplace_{iter}_{round}.dcp`（原 `/tmp/`，2026-07-04 迁移至 `run_dir` 消除并发覆盖风险）
 3. 后续 `vivado_place_design`（非 unplace）清除标志
 4. 阶段退出时若标志仍为 True → 从 pre-unplace checkpoint 恢复 + 刷新 WNS/TNS/FE
 
 ### Layer 4: Vivado 执行工具错误检测
 - VivadoMCP 检测 `^ERROR: [` 文本模式，返回 JSON `{"error": "..."}`
 - `phase_execute.py` 检查 JSON `error` 键 + 文本 `ERROR: [` 模式
-- 任一检测到错误: 中止链 + 从 pre-chain checkpoint 恢复
+- 任一检测到错误: 中止链 + 从 pre-chain checkpoint 恢复（`run_dir/pre_chain_pblock.dcp`，2026-07-04 从 `/tmp/` 迁移至 `run_dir`）
 
 ---
 

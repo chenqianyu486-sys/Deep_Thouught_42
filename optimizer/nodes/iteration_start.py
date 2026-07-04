@@ -9,6 +9,7 @@ Reference: dcp_optimizer.py optimize() loop start (~line 5195)
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 
 from ..state import OptimizerState
@@ -91,18 +92,29 @@ async def iteration_start_node(
 
     # Save iteration start checkpoint for rollback baseline.
     # _ensure_iteration_start_checkpoint (in EXECUTE) reuses this.
+    # When best_checkpoint.dcp already exists, copy it directly (saves ~5s
+    # per iteration by avoiding a full Vivado serialization of unchanged memory).
     try:
         iter_ckpt = state.control.run_dir / f"iteration_{state.iteration.current}_start.dcp"
         if not iter_ckpt.exists():
-            await call_tool_fn(
-                "vivado_write_checkpoint",
-                {"dcp_path": str(iter_ckpt.resolve()), "force": True},
-                deps.rapidwright_session,
-                deps.vivado_session,
-                design_size_factor=state.timing.design_size_factor,
-            )
+            best = state.control.best_checkpoint_path
+            if best is not None and best.exists():
+                shutil.copy2(str(best), str(iter_ckpt))
+                logger.info(
+                    f"[iteration_start] Copied iteration {state.iteration.current} start DCP "
+                    f"from best_checkpoint (saved ~5s)")
+            else:
+                await call_tool_fn(
+                    "vivado_write_checkpoint",
+                    {"dcp_path": str(iter_ckpt.resolve()), "force": True},
+                    deps.rapidwright_session,
+                    deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
+                )
+                logger.info(
+                    f"[iteration_start] Saved iteration {state.iteration.current} start DCP "
+                    f"via Vivado (no best_checkpoint to copy)")
             state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
-            logger.info(f"[iteration_start] Saved iteration {state.iteration.current} start DCP")
     except Exception as e:
         logger.warning(f"[iteration_start] Failed to save iteration checkpoint: {e}")
 
