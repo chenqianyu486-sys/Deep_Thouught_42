@@ -228,7 +228,10 @@ PLACE_ONLY_CHECK_SKILLS: frozenset[str] = frozenset({
     "rapidwright_execute_opt_design_strategy",
     "rapidwright_execute_combinational_rebalancing_strategy",
     "rapidwright_execute_lut_muxf_repack_strategy",
-    "rapidwright_execute_pblock_strategy",
+    # PBLOCK excluded: its chain uses local unplace_cells (critical cells only),
+    # so after place_design the moved cells' nets are temporarily unrouted and
+    # place-only WNS is an artifactual regression — the check would wrongly skip
+    # route_design. PBLOCK relies on post-chain re-eval + EVALUATE rollback instead.
 })
 
 # Context thresholds (derived from model config, but we use safe defaults)
@@ -411,14 +414,29 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
 # place_design/route_design steps accept an optional directive override via
 # args_from_skill (keys: place_directive / route_directive in the skill result).
 # When absent, the hardcoded "Explore" in args is used as fallback.
+#
+# route_design `reuse: True` policy: only set when prior routing exists at the
+# route step. Chains starting with unplace / open_checkpoint+place / opt+place
+# have NO prior routing at route time → reuse is dead config (omitted). Chains
+# whose route step follows phys_opt_design (muxf_tree_reorder, physopt) keep
+# reuse — phys_opt preserves routing, so route_design -reuse re-routes only the
+# moved nets. PBLOCK keeps reuse because its unplace is local (critical cells
+# only), leaving the rest of the design routed. See phase_execute.py route-reuse
+# guard for the runtime total_nets check.
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
-        {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
+        # Local unplace: only critical-path cells (vs the old global
+        # place_design -unplace which tore down the whole design). Keeps the
+        # rest of the design placed/routed so the next place+route is
+        # incremental — route_design -reuse below reuses prior routing.
+        {"tool": "vivado_unplace_cells",
+         "args_from_skill": {"cells": "critical_path_cells"}},
         {"tool": "vivado_create_and_apply_pblock",
          "args_from_skill": {
              "pblock_name": "pblock_name",
              "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
+             "cells": "critical_path_cells",
          }},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
@@ -440,7 +458,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"dcp_path": "checkpoint_path"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
@@ -452,7 +470,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
@@ -465,7 +483,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
@@ -476,7 +494,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
@@ -513,7 +531,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"dcp_path": "post_checkpoint_path"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},

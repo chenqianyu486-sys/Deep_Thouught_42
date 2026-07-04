@@ -98,13 +98,18 @@ def _cool_down_current_strategy_if_stalled(
     """Block a switched strategy only when its measured WNS did not improve.
 
     Two failure regimes:
-    - Measured no-improvement (delta is a number <= EPSILON): the strategy DID
+    - Measured no-improvement (delta is a number <= 0): the strategy DID
       execute and produce a measurable WNS, it just didn't help. Apply cooldown
       unconditionally — even if a strategy tool's summary contained the word
       "error" (e.g. vivado_place_design reporting "already placed" is a soft
       no-op, not a crash). Re-selecting it the same iteration causes the
       PlaceRouteDirectiveExplore → PhysOptAggressive → PlaceRouteDirectiveExplore
       loops observed in practice.
+      Note: a marginal positive delta (0 < delta <= EPSILON) is NOT cooled here.
+      best_wns was updated (best_checkpoint saved), so the strategy produced a
+      real — if small — gain; cooling it would contradict the best-save logic
+      (which uses strict > 0). The EPSILON noise floor is reserved for the
+      no-progress counter reset (only delta > EPSILON resets the counter).
     - Unmeasured failure (delta is None): the strategy tool never produced a
       measurable result (genuine crash/exception). Only then skip cooldown so
       the strategy gets a fair retry chance — and only when the strategy tool
@@ -132,11 +137,14 @@ def _cool_down_current_strategy_if_stalled(
                 return False
         return False
 
-    # Improved beyond epsilon — no cooldown.
-    if delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
+    # Any positive delta — no cooldown. best_wns was updated (best_checkpoint
+    # saved), so the strategy produced a real gain, even if marginal
+    # (0 < delta <= EPSILON). The EPSILON noise floor is reserved for the
+    # no-progress counter reset, not for cooldown.
+    if delta > 0:
         return False
 
-    # Measured no-improvement (delta <= EPSILON): strategy executed fairly.
+    # Measured no-improvement (delta <= 0): strategy executed fairly.
     # Log auxiliary-tool errors for observability but still apply cooldown.
     if state.iteration.tool_errors:
         aux_errors = [
@@ -285,10 +293,16 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             llm_summary = assistant_content
 
             # ── Consecutive no-progress tracking ──
+            # delta > EPSILON (significant gain) → reset counter.
+            # delta <= 0 (true no-improvement) → increment; >=3 forces SWITCH.
+            # 0 < delta <= EPSILON (marginal gain) → neither reset nor increment:
+            #   best_wns was updated so it's a real gain, but not significant
+            #   enough to reset a prior stall streak. Bounded by max_rounds +
+            #   multi-strategy cap (MAX_STRATEGY_CYCLES=5), so it can't loop.
             delta = _strategy_wns_delta_since_entry(state)
             if delta is not None and delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
                 state.context.consecutive_no_progress = 0
-            elif delta is not None:
+            elif delta is not None and delta <= 0:
                 state.context.consecutive_no_progress += 1
                 if state.context.consecutive_no_progress >= 3:
                     logger.warning(

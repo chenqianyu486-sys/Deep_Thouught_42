@@ -1523,14 +1523,15 @@ def create_and_apply_pblock(
     exclude_clocks: bool = True,
     timeout: float = 300.0,
     validate_resources: bool = True,
-    max_expansion_attempts: int = 3
+    max_expansion_attempts: int = 3,
+    cells: list = None
 ) -> str:
     """
     Create a pblock and apply it to the design with resource validation.
-    
+
     Args:
         pblock_name: Name for the pblock (e.g., "pblock_tight")
-        ranges: Pblock range specification (e.g., "SLICE_X0Y0:SLICE_X100Y100" or 
+        ranges: Pblock range specification (e.g., "SLICE_X0Y0:SLICE_X100Y100" or
                 "CLOCKREGION_X0Y0:CLOCKREGION_X2Y3")
         apply_to: What to apply pblock to - "current_design" applies to all cells in the design,
                  or provide a cell pattern (e.g., "design_1_wrapper_i/*")
@@ -1538,7 +1539,11 @@ def create_and_apply_pblock(
         exclude_clocks: If True, exclude CLOCK and IO primitives from pblock (default: True)
         validate_resources: If True, validate resources and auto-expand if needed
         max_expansion_attempts: Maximum times to try expanding the pblock
-    
+        cells: If provided (non-empty list of canonical cell names), constrain ONLY those
+               cells (local pblock) via `add_cells_to_pblock ... [get_cells [list ...]]`.
+               Takes precedence over apply_to. Used by the PBLOCK auto-chain for local
+               (critical-cells-only) pblock so the rest of the design keeps its placement.
+
     Returns:
         Status message
     """
@@ -1580,7 +1585,13 @@ def create_and_apply_pblock(
             result_lines.append(f"Set IS_SOFT = {soft_value}")
             
             # Apply pblock to cells
-            if apply_to == "current_design":
+            if cells:
+                # Local pblock: constrain only the specified critical-path cells
+                # (vs apply_to=current_design which constrains the whole design).
+                # tcl_quote brace-wraps each name (injection-safe; rejects '}').
+                quoted = " ".join(tcl_quote(c) for c in cells)
+                add_cmd = f"add_cells_to_pblock {pblock_name} [get_cells [list {quoted}]]"
+            elif apply_to == "current_design":
                 # Exclude CLOCK and IO primitives — only constrain relocatable logic cells.
                 # NOTE: This filter syntax must be validated in Vivado Console before deployment.
                 # Vivado PRIMITIVE_GROUP values: PAD, IO, CLOCK, BRAM, DSP, etc.
@@ -1806,6 +1817,29 @@ async def list_tools():
                         "description": "Timeout in seconds (default: 3600 for placement)"
                     }
                 }
+            }
+        ),
+        Tool(
+            name="unplace_cells",
+            description="Unplace specific cells (local unplace) without disturbing the rest of the design. "
+                        "Used by the PBLOCK auto-chain to unplace only critical-path cells before re-placing "
+                        "them under a pblock, keeping other cells' placement/routing intact (incremental P&R). "
+                        "Equivalent to Vivado `unplace_cells [get_cells [list <cells>]]`. "
+                        "Cell names must be canonical hierarchical names (from the cell registry).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cells": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of canonical hierarchical cell names to unplace."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default: 300)"
+                    }
+                },
+                "required": ["cells"]
             }
         ),
         Tool(
@@ -2047,6 +2081,13 @@ async def list_tools():
                     "apply_to": {
                         "type": "string",
                         "description": "What to constrain: 'current_design' (all cells) or a cell pattern (default: 'current_design')"
+                    },
+                    "cells": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of canonical cell names to constrain (local pblock). "
+                                        "Takes precedence over apply_to: only these cells are added to the pblock, "
+                                        "leaving the rest of the design's placement intact for incremental P&R."
                     },
                     "is_soft": {
                         "type": "boolean",
@@ -2487,6 +2528,35 @@ async def call_tool(name: str, arguments: dict):
                 return [TextContent(type="text", text=json.dumps({"error": f"place_design failed: {output[:500]}"}))]
             return [TextContent(type="text", text=f"Placement complete.\n\n{output}")]
         
+        elif name == "unplace_cells":
+            # Local unplace of specific cells (vs global place_design -unplace).
+            # Used by the PBLOCK auto-chain to unplace only critical-path cells,
+            # leaving the rest of the design placed/routed for incremental P&R.
+            cells = arguments.get("cells", [])
+            if isinstance(cells, str):
+                cells = [cells]
+            timeout = arguments.get("timeout", 300)
+            if not isinstance(cells, list) or not cells:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": "unplace_cells requires a non-empty 'cells' list"}))]
+            # Build: unplace_cells [get_cells [list {c1} {c2} ...]]
+            # tcl_quote brace-wraps each name; names containing '}' raise to
+            # preserve brace balance (injection-safe).
+            try:
+                quoted = " ".join(tcl_quote(str(c)) for c in cells)
+            except ValueError as e:
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"unplace_cells: unsafe cell name: {e}"}
+                ))]
+            cmd = f"unplace_cells [get_cells [list {quoted}]]"
+            output = run_tcl_command(cmd, timeout=timeout)
+            if re.search(r'^ERROR: \[', output, re.MULTILINE):
+                logger.error(f"unplace_cells failed: {output[:300]}")
+                return [TextContent(type="text", text=json.dumps(
+                    {"error": f"unplace_cells failed: {output[:500]}"}
+                ))]
+            return [TextContent(type="text", text=f"Unplaced {len(cells)} cell(s).\n\n{output}")]
+
         elif name == "route_design":
             directive = arguments.get("directive")
             reuse = arguments.get("reuse", False)
@@ -2652,8 +2722,9 @@ async def call_tool(name: str, arguments: dict):
             apply_to = arguments.get("apply_to", "current_design")
             is_soft = arguments.get("is_soft", False)
             timeout = arguments.get("timeout", 300)
-            
-            output = create_and_apply_pblock(pblock_name, ranges, apply_to, is_soft, timeout)
+            cells = arguments.get("cells")
+
+            output = create_and_apply_pblock(pblock_name, ranges, apply_to, is_soft, timeout, cells=cells)
             return [TextContent(type="text", text=output)]
         
         elif name == "write_verilog_simulation":

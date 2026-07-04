@@ -189,7 +189,7 @@ class CriticalPathEntry:
 | 冷却逻辑分层 | `phase_evaluate.py` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
 | 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective`（TTL=1）+ `no_improvement`（TTL=3）+ `strategy_not_applicable`（TTL=2）标为 `[BLOCKED]` 占位符；`tool_error` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
 | 空结果模式匹配 | `iteration_end.py` | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久排除） |
-| Improvement 阈值 | `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | 低于 50ps 视为无改善 |
+| Improvement 阈值（三档语义）| `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | `delta>0` 不冷却（best_checkpoint 已保存）；`delta>0.050` 重置无进展计数；`delta≤0` 计无进展。边际正收益 (0,0.050] 不惩罚 |
 
 ---
 
@@ -212,18 +212,26 @@ class CriticalPathEntry:
 ```python
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
-        {"tool": "vivado_place_design", "args": {"directive": "unplace"}},
+        # 局部 unplace：仅关键路径 cell（2026-07-04 改造，原为全局 place_design -unplace）
+        {"tool": "vivado_unplace_cells",
+         "args_from_skill": {"cells": "critical_path_cells"}},
         {"tool": "vivado_create_and_apply_pblock",
          "args_from_skill": {
              "pblock_name": "pblock_name",
-             "pblock_ranges": "pblock_ranges",
+             "ranges": "pblock_ranges",
              "is_soft": "is_soft_recommended",
+             "cells": "critical_path_cells",   # 局部 pblock：只约束关键 cell
          }},
-        {"tool": "vivado_place_design", "args": {}},
-        {"tool": "vivado_route_design", "args": {}},
+        {"tool": "vivado_place_design", "args": {"directive": "Explore"},
+         "args_from_skill": {"directive": "place_directive"}},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+         "args_from_skill": {"directive": "route_directive"}},
+        {"tool": "vivado_report_timing_summary", "args": {}},
     ],
 }
 ```
+
+**route_design `reuse` 策略**（2026-07-04）：仅在 route 步前存在先验布线时设置 `reuse: True`。以 unplace / open_checkpoint+place / opt+place 开头的链 route 时无先验布线 → reuse 为死配置（已移除 fanout/opt_design/combinational_rebalancing/lut_muxf_repack/flatten_lut_cascade 5 条链）。phys_opt 链（muxf_tree_reorder、physopt）route 前 phys_opt_design 保留布线 → reuse 有效（保留）。PBLOCK 因局部 unplace 保留其余设计布线 → reuse 有效（保留）。运行时 guard 见 `phase_execute.py` route-reuse 检查（`state.timing.route_status.total_nets > 0`）。
 
 **执行流程**：
 ```
@@ -447,7 +455,11 @@ DeepSeek V4 Flash 在长上下文场景下可能产生"沉默退化"——65% �
 
 ### 4.11 连续无进展自动检测（2026-07）
 
-EVALUATE 阶段新增 `consecutive_no_progress` 计数器。每次评估后计算当前策略的 WNS delta（与进入 EVALUATE 时相比）：delta < `STRATEGY_IMPROVEMENT_EPSILON_NS`（0.050ns）则 `consecutive_no_progress += 1`，否则重置为 0。当计数 >= 3 时：
+EVALUATE 阶段 `consecutive_no_progress` 计数器。每次评估计算当前策略 WNS delta（与进入 EXECUTE 时相比），三档语义：
+
+- `delta > STRATEGY_IMPROVEMENT_EPSILON_NS`（0.050ns，显著收益）→ 重置为 0
+- `delta ≤ 0`（真无改善）→ `+= 1`，计数 >= 3 强制切换
+- `0 < delta ≤ 0.050`（边际正收益，best_checkpoint 已保存）→ **既不重置也不递增**
 
 ```python
 if state.context.consecutive_no_progress >= 3:
@@ -455,6 +467,8 @@ if state.context.consecutive_no_progress >= 3:
 ```
 
 触发后记录日志警告 `"[EVALUATE] 3 consecutive no-progress evaluations — forcing SWITCH_STRATEGY"`。
+
+**冷却判定同步**（`_cool_down_current_strategy_if_stalled`）：以 `delta > 0` 跳过冷却，与计数器三档对齐。2026-07-04 修复：此前冷却用 `delta > 0.050` 而 best_保存用 `>0`，导致 PBLOCK +0.049ns 改进被存为 best 却被冷却（"见好就收"矛盾）。现在任何正收益都不冷却，EPSILON 仅用于"显著收益"判定（重置计数）。
 
 ### 4.12 优化历史追踪（2026-07）
 
@@ -695,6 +709,8 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 3. 后续 `vivado_place_design`（非 unplace）清除标志
 4. 阶段退出时若标志仍为 True → 从 pre-unplace checkpoint 恢复 + 刷新 WNS/TNS/FE
 
+> **PBLOCK 链改用局部 unplace**（2026-07-04）：PBLOCK auto-chain step1 由全局 `place_design -unplace` 改为 `vivado_unplace_cells(cells=critical_path_cells)`，仅 unplace 关键路径 cell，其余设计布局/布线保持不变（增量 P&R）。此 Layer 3 全局 unplace 回滚仍对 LLM 直接调用 `place_design -unplace` 生效；PBLOCK 链的失败由 `_execute_chain_actions` 的 pre-chain checkpoint（`pre_chain_pblock.dcp`）回滚覆盖。
+
 ### Layer 4: Vivado 执行工具错误检测
 - VivadoMCP 检测 `^ERROR: [` 文本模式，返回 JSON `{"error": "..."}`
 - `phase_execute.py` 检查 JSON `error` 键 + 文本 `ERROR: [` 模式
@@ -783,6 +799,7 @@ DESIGN_SIZE_BINS = [(0, 50000, 1.0), (50000, 150000, 1.5), (150000, 2**31, 3.0)]
 MAX_TIMEOUT = 900.0
 
 # 冷却逻辑 Improvement 阈值 (0.001 → 0.050, 2026-06-23)
+# 2026-07-04: 三档语义——delta>0 不冷却；delta>0.050 重置无进展计数；delta≤0 计无进展
 STRATEGY_IMPROVEMENT_EPSILON_NS: float = 0.050
 
 # 策略工具名称集合（用于冷却逻辑分层：策略工具本身失败→跳过冷却，仅辅助工具失败→应用冷却）

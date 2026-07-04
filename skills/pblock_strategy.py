@@ -441,6 +441,12 @@ def generate_pblock_plan(
         "multi_region_suggestions": multi_region,
         "next_steps": next_steps,
         "is_soft_recommended": is_soft_recommended,
+        # Echo back the critical-path cells so the PBLOCK auto-chain can pass
+        # them to vivado_unplace_cells (local unplace) and to
+        # vivado_create_and_apply_pblock(cells=...) (local pblock). Empty when
+        # no critical paths were available — the chain's unplace step will
+        # surface that as an error (data quality guard upstream should prevent).
+        "critical_path_cells": critical_path_cells or [],
     }
 
 

@@ -385,6 +385,19 @@ class TestStrategyCooldown:
         assert state.iteration.blocked_strategies == []
         assert state.context.failed_strategies == []
 
+    def test_switch_keeps_marginal_improvement_available(self):
+        """A marginal positive delta (0 < delta <= EPSILON=0.050) must NOT be
+        cooled down — best_wns was updated (best_checkpoint saved), so the
+        strategy produced a real gain. Reproduces the PBLOCK +0.049ns case
+        where the old >EPSILON cooldown gate wrongly blocked a working strategy
+        that had just improved WNS."""
+        state = self._state_with_strategy_delta(0.049)
+
+        _handle_switch_strategy(state, NodeDeps(), "try another strategy")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
     def test_iteration_start_clears_short_cooldowns(self):
         state = self._state_with_strategy_delta(0.0)
         state.iteration.blocked_strategies = ["PBLOCK"]

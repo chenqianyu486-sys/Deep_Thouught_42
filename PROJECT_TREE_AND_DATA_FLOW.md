@@ -331,7 +331,7 @@ VivadoMCP 服务端 + dcp_optimizer.py 入口双层守卫，阻止以下指令�
 
 ### 3.9 Auto-chain Directive Tuning
 
-自动链（`SKILL_CHAIN_ACTIONS`）扩展支持LLM可调布局布线指令：8个技能包装器（pblock、physopt、opt_design、combinational_rebalancing、lut_muxf_repack、muxf_tree_reorder、fanout、flatten_lut_cascade）现接受可选的 `place_directive`/`route_directive` 参数，通过 `_attach_chain_directives()` 注入链式动作；LLM可在 `PLACE_SAFE_DIRECTIVES`/`ROUTE_SAFE_DIRECTIVES` 白名单内自由选择，省略时回退为"Explore"。修复了 `_strategy_plan_to_dict`（`RapidWrightMCP/rapidwright_tools.py`）中opt/physopt指令因嵌套于 `analysis_summary` 内而被忽略、始终回退为"Explore"的bug。白名单在VivadoMCP服务端强制执行，register_retiming因破坏周期精确等价性而排除。现在这一机制升级为三层回退：LLM 显式传入 > 策略默认值 > 硬编码 "Explore"。策略默认值通过 `STRATEGY_DEFAULT_DIRECTIVES` 字典（`optimizer/pure/constants.py`）激活 `PR_DIRECTIVE_COMBINATIONS` 场景目录，为各策略链匹配典型瓶颈指令对。例如：`opt_design`/`combinational_rebalancing`/`flatten_lut_cascade` → `("ExtraTimingOpt", "NoTimingRelaxation")`；`physopt`/`muxf_tree` → `("Explore", "Explore")`；`pblock`/`fanout` → `(None, "NoTimingRelaxation")`（路由专用）。三层回退逻辑位于 `_execute_chain_actions`（`optimizer/nodes/subgraphs/phase_execute.py`），通过 `"args_from_skill" in step` 守卫保护不含 `args_from_skill` 的特殊步骤（如 pblock "unplace"）。
+自动链（`SKILL_CHAIN_ACTIONS`）扩展支持LLM可调布局布线指令：8个技能包装器（pblock、physopt、opt_design、combinational_rebalancing、lut_muxf_repack、muxf_tree_reorder、fanout、flatten_lut_cascade）现接受可选的 `place_directive`/`route_directive` 参数，通过 `_attach_chain_directives()` 注入链式动作；LLM可在 `PLACE_SAFE_DIRECTIVES`/`ROUTE_SAFE_DIRECTIVES` 白名单内自由选择，省略时回退为"Explore"。修复了 `_strategy_plan_to_dict`（`RapidWrightMCP/rapidwright_tools.py`）中opt/physopt指令因嵌套于 `analysis_summary` 内而被忽略、始终回退为"Explore"的bug。白名单在VivadoMCP服务端强制执行，register_retiming因破坏周期精确等价性而排除。现在这一机制升级为三层回退：LLM 显式传入 > 策略默认值 > 硬编码 "Explore"。策略默认值通过 `STRATEGY_DEFAULT_DIRECTIVES` 字典（`optimizer/pure/constants.py`）激活 `PR_DIRECTIVE_COMBINATIONS` 场景目录，为各策略链匹配典型瓶颈指令对。例如：`opt_design`/`combinational_rebalancing`/`flatten_lut_cascade` → `("ExtraTimingOpt", "NoTimingRelaxation")`；`physopt`/`muxf_tree` → `("Explore", "Explore")`；`pblock`/`fanout` → `(None, "NoTimingRelaxation")`（路由专用）。三层回退逻辑位于 `_execute_chain_actions`（`optimizer/nodes/subgraphs/phase_execute.py`），通过 `"args_from_skill" in step` 守卫确保指令回退仅作用于含 `args_from_skill` 的 place/route 步。**PBLOCK 链改造**（2026-07-04）：step1 由全局 `place_design -unplace` 改为 `vivado_unplace_cells(cells=critical_path_cells)`（局部 unplace 仅关键 cell），`create_and_apply_pblock` 传 `cells=critical_path_cells`（局部 pblock），route 保留 `reuse:True`（局部 unplace 后其余设计仍布线）。同时 PBLOCK 移出 `PLACE_ONLY_CHECK_SKILLS`（局部 unplace 后 route 前关键 net 暂未布线，place-only WNS 为伪退化）。
 
 ## 4. MCP 服务器架构
 
@@ -424,6 +424,16 @@ init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
 ```
 
 详见 [architecture.md §15](architecture.md)。
+
+### A.6 PBLOCK 策略三个矛盾（2026-07-04 日志深度分析，已修复）
+
+同一份日志的 PBLOCK 策略执行链暴露三个工程实现矛盾，均已在 2026-07-04 修复：
+
+- **矛盾一（route reuse 死配置）**：8 条 auto-chain 全带 `reuse:True`，但 5 条 route 前无先验布线（unplace / open_checkpoint+place / opt+place 后），reuse 永远无效；A.5 的 `total_nets=0` 解析 bug 恰好掩盖。修复：移除 5 条死配置链的 `reuse:True`，保留 phys_opt 链与 PBLOCK（局部 unplace 后保留布线）。
+- **矛盾二（全局 unplace 核弹级重做）**：PBLOCK 链 step1 全局 `place_design -unplace`（37000 cell）+ `apply_to=current_design`（pblock 约束全部 cell），破坏其他路径。修复：改为 `vivado_unplace_cells(cells=critical_path_cells)` 局部 unplace + `create_and_apply_pblock(cells=...)` 局部 pblock + 增量 place/route。PBLOCK 移出 `PLACE_ONLY_CHECK_SKILLS`（局部 unplace 后 route 前关键 net 暂未布线，place-only WNS 为伪退化）。
+- **矛盾三（epsilon 阈值不一致）**：best_保存用 `>0`、EXECUTE verdict 用 `>0.001`、冷却/无进展用 `>0.050`。PBLOCK +0.049ns 被存为 best 却被冷却（"见好就收"）。修复：冷却改 `delta>0` 跳过；无进展计数改 `delta≤0` 递增、`delta>0.050` 重置、`(0,0.050]` 既不重置也不递增。
+
+修复实现见 [docs/plans/pblock-three-contradictions-fix.md](docs/plans/pblock-three-contradictions-fix.md)。A.5（`total_nets=0`）仍未修复，独立 issue。
 
 ---
 
