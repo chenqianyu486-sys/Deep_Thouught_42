@@ -132,20 +132,29 @@ Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
 Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
 
-PBLOCK AUTO-CHAIN BEHAVIOR:
-  rapidwright_execute_pblock_strategy auto-chains: unplace → place_design
-  (Explore) → route_design (Explore). It therefore tears down and rebuilds
-  the existing place/route. On an already-routed design this can land on an
-  equal-or-worse result with zero WNS delta — that is a fair "no improvement"
-  outcome, NOT a tool error. If PBLOCK yields delta ≈ 0 once, do NOT re-select
-  it the same iteration; switch strategies.
+PBLOCK AUTO-CHAIN BEHAVIOR (LOCAL pblock on critical path cells only):
+  rapidwright_execute_pblock_strategy auto-chains: unplace_cells(cells=critical_path_cells) →
+  create_and_apply_pblock(cells=critical_path_cells, is_soft=is_soft_recommended) →
+  place_design → route_design → report_timing_summary.
+  KEY: Only the critical_path_cells (~50 cells from Dashboard) are unplaced and
+  bound to the pblock. The remaining 99%+ of the design stays placed/routed — this
+  is INCREMENTAL P&R, not a full tear-down. Vivado auto-reuses prior routing for
+  unchanged nets.
+
+  The pblock region is SIZED for the bound cells (bound cell resources ×
+  resource_multiplier), NOT the whole design. is_soft follows the BOUND cells'
+  true density — when only a few cells are bound, density is low and IS_SOFT=0
+  (hard pblock), providing a genuine placement constraint.
+
+  Very small WNS improvements (e.g., <0.05ns) may be P&R random noise rather than
+  pblock effect. If PBLOCK yields delta ≈ 0 or negligible, do NOT re-select it
+  the same iteration; switch strategies.
 
 PBLOCK MANDATORY VIVADO FLOW:
-  The RapidWright PBLOCK tool only plans the pblock — it does NOT modify the
-  design. Without the auto-chained Vivado place+route, PBLOCK has ZERO effect
-  (always returns UNCHANGED). The auto-chain handles this for you; do NOT
-  skip it. Refer to skill_guidance in the Dashboard for the current chain
-  and multiplier values.
+  The RapidWright PBLOCK tool only plans the pblock region — it does NOT modify
+  the design. The auto-chain handles all Vivado steps for you; do NOT call Vivado
+  tools manually during PBLOCK execution. See the result's sizing_basis /
+  bound_resources / bound_cell_count fields to understand region sizing.
 
 PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
   Skill tools (rapidwright_execute_*_strategy, rapidwright_flatten_lut_cascade)
