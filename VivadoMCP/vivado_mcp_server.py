@@ -2994,8 +2994,20 @@ async def call_tool(name: str, arguments: dict):
             status_result = run_tcl_command("get_property STATUS [current_design]", timeout=timeout)
             design_open = _design_open
             status_lower = status_result.lower() if status_result else ""
-            is_placed = ("place_design" in status_lower) or ("route_design" in status_lower)
-            is_routed = "route_design" in status_lower
+            # IS_PLACED / IS_ROUTED are reliable even after open_checkpoint
+            # (STATUS may be empty for routed designs that were checkpointed
+            # and re-opened — Appendix A.1). Fall back to STATUS string match
+            # when IS_PLACED/IS_ROUTED returns something unexpected.
+            is_placed_raw = run_tcl_command("get_property IS_PLACED [current_design]", timeout=5)
+            is_routed_raw = run_tcl_command("get_property IS_ROUTED [current_design]", timeout=5)
+            is_placed = is_placed_raw.strip() == "1"
+            is_routed = is_routed_raw.strip() == "1"
+            # Fallback: if IS_PLACED/IS_ROUTED returned non-boolean (old Vivado),
+            # use the STATUS string heuristic.
+            if is_placed_raw.strip() not in ("1", "0"):
+                is_placed = ("place_design" in status_lower) or ("route_design" in status_lower)
+            if is_routed_raw.strip() not in ("1", "0"):
+                is_routed = "route_design" in status_lower
 
             response = {
                 "design_open": design_open,

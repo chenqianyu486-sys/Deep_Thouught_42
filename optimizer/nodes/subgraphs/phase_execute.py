@@ -25,7 +25,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl, STRATEGY_MAP, StrategyEntry
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -320,6 +320,28 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     # rather than inheriting the previous strategy's in-memory modifications.
     if not checkpoint_created and _is_strategy_reentry(state):
         await _reload_baseline_on_switch(state, deps)
+
+    # Auto-refresh stale critical_paths for netlist-modifying strategies that
+    # need them (MUXFTreeReorder, LUTCascade, CombinationalRebalance, LUTMUXFRepack).
+    # These strategies' chains auto-inject critical_paths from verified state data,
+    # so the LLM should NOT waste rounds on extraction. A fresh Dashboard avoids
+    # triggering LLM data-gathering behavior before tool invocation.
+    _netlist_strategy_refresh_tools = frozenset({
+        "rapidwright_execute_muxf_tree_reorder_strategy",
+        "rapidwright_flatten_lut_cascade",
+        "rapidwright_execute_combinational_rebalancing_strategy",
+        "rapidwright_execute_lut_muxf_repack_strategy",
+    })
+    _current_tool = STRATEGY_MAP.get(state.strategy.current_strategy, StrategyEntry("", "")).execute_tool
+    if _current_tool in _netlist_strategy_refresh_tools and state.timing.critical_paths_stale:
+        try:
+            await _auto_refresh_critical_paths(state, deps)
+            logger.info(
+                "[EXECUTE] Auto-refreshed stale critical_paths for %s at phase entry",
+                state.strategy.current_strategy,
+            )
+        except Exception as e:
+            logger.warning("[EXECUTE] Critical path auto-refresh at entry failed: %s", e)
 
     while True:
         tool_round += 1

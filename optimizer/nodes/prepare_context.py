@@ -132,6 +132,16 @@ Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
 Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
 
+AUTO-INJECTED STRATEGY DATA (DO NOT extract before calling execution tools):
+  For netlist-modifying strategies (MUXFTreeReorder, CombinationalRebalance,
+  LUTMUXFRepack, LUTCascade), critical_paths are automatically injected from
+  verified state data when you call the execution tool. Simply call the tool
+  directly — the system fills in critical_paths. Manual extraction via
+  vivado_extract_critical_path_cells or design_data_read BEFORE tool invocation
+  wastes rounds and hits the no-progress limit. If the Dashboard shows
+  critical_paths as [stale], refresh ONCE with vivado_extract_critical_path_cells(num_paths=10),
+  then immediately call the execution tool.
+
 PBLOCK AUTO-CHAIN BEHAVIOR (LOCAL pblock on critical path cells only):
   rapidwright_execute_pblock_strategy auto-chains: unplace_cells(cells=critical_path_cells) →
   create_and_apply_pblock(cells=critical_path_cells, is_soft=is_soft_recommended) →
