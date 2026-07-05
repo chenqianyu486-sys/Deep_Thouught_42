@@ -311,7 +311,7 @@ class TestParseRouteStatus:
     def test_unrouted_design(self):
         """After place_design, before route_design: fully routed = 0 and
         routing errors = all routable nets. routed_nets must be 0 so the
-        route-reuse guard falls back to normal routing."""
+        dashboard route_status field correctly reflects an unrouted design."""
         unrouted = (
             "Design Route Status\n"
             "   # of logical nets.......................... :       37081 :\n"
@@ -1015,13 +1015,6 @@ class TestSkillChainActions:
         pblock_step = next(s for s in chain if s["tool"] == "vivado_create_and_apply_pblock")
         assert pblock_step["args_from_skill"]["cells"] == "critical_path_cells"
 
-    def test_pblock_route_keeps_reuse(self):
-        """矛盾二: after local unplace the rest of the design stays routed, so
-        route_design -reuse is valid for PBLOCK (reuses unchanged nets)."""
-        route = self._route_step("rapidwright_execute_pblock_strategy")
-        assert route is not None
-        assert route["args"].get("reuse") is True
-
     def test_pblock_not_in_place_only_check(self):
         """矛盾二: PBLOCK must NOT be in PLACE_ONLY_CHECK_SKILLS — after local
         unplace+place the moved cells' nets are temporarily unrouted, so
@@ -1029,28 +1022,22 @@ class TestSkillChainActions:
         assert "rapidwright_execute_pblock_strategy" not in PLACE_ONLY_CHECK_SKILLS
 
     @pytest.mark.parametrize("skill", [
+        "rapidwright_execute_pblock_strategy",
         "rapidwright_execute_fanout_strategy",
         "rapidwright_execute_opt_design_strategy",
         "rapidwright_execute_combinational_rebalancing_strategy",
         "rapidwright_execute_lut_muxf_repack_strategy",
         "rapidwright_flatten_lut_cascade",
-    ])
-    def test_dead_config_chains_have_no_reuse(self, skill):
-        """矛盾一: chains whose route step follows open_checkpoint+place or
-        opt+place have NO prior routing — reuse:True would be dead config."""
-        route = self._route_step(skill)
-        assert route is not None, f"{skill} has no route_design step"
-        assert "reuse" not in route["args"], (
-            f"{skill} route_design must not set reuse (no prior routing at route time)"
-        )
-
-    @pytest.mark.parametrize("skill", [
         "rapidwright_execute_muxf_tree_reorder_strategy",
         "rapidwright_execute_physopt_strategy",
     ])
-    def test_physopt_chains_keep_reuse(self, skill):
-        """矛盾一: phys_opt_design preserves routing, so route_design -reuse is
-        valid (re-routes only the moved nets) — keep it."""
+    def test_no_chain_sets_reuse_flag(self, skill):
+        """Vivado route_design has no -reuse option (it rejects it with
+        'Unknown option'). Vivado automatically preserves routing for unchanged
+        nets, so no chain may set `reuse` in its route_design args."""
         route = self._route_step(skill)
-        assert route is not None, f"{skill} has no route_design step"
-        assert route["args"].get("reuse") is True
+        if route is None:
+            return  # skill has no route_design step
+        assert "reuse" not in route["args"], (
+            f"{skill} route_design must not set reuse (invalid Vivado flag)"
+        )

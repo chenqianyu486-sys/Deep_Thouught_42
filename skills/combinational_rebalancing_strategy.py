@@ -176,7 +176,7 @@ def generate_combinational_rebalance_plan(
         StrategyStep(
             step_name="route_design",
             platform="Vivado",
-            params={"directive": "Explore", "reuse": True},
+            params={"directive": "Explore"},
             description="Re-route design",
             executed=False,
             expected_duration_seconds=300,

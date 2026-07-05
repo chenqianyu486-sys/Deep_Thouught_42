@@ -224,14 +224,14 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          }},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
 }
 ```
 
-**route_design `reuse` 策略**（2026-07-04）：仅在 route 步前存在先验布线时设置 `reuse: True`。以 unplace / open_checkpoint+place / opt+place 开头的链 route 时无先验布线 → reuse 为死配置（已移除 fanout/opt_design/combinational_rebalancing/lut_muxf_repack/flatten_lut_cascade 5 条链）。phys_opt 链（muxf_tree_reorder、physopt）route 前 phys_opt_design 保留布线 → reuse 有效（保留）。PBLOCK 因局部 unplace 保留其余设计布线 → reuse 有效（保留）。运行时 guard 见 `phase_execute.py` route-reuse 检查（`state.timing.route_status.total_nets > 0`）。
+**route_design 路由复用**（2026-07-05 修订）：Vivado `route_design` 无 `-reuse` 选项，对未变更网线自动保留布线，无需任何 flag。早期版本在 chain config 设 `reuse: True` 并由 `phase_execute.py` 的 route-reuse guard 发射 `-reuse`，被 Vivado 以 `Unknown option '-reuse'` 拒绝，导致 PBLOCK/physopt 链在 route 步必然失败回滚。现已移除全部 `reuse` 配置、guard 与 MCP `reuse` 参数（`test_no_chain_sets_reuse_flag` 覆盖）。
 
 **执行流程**：
 ```
@@ -1107,7 +1107,9 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 **修复**（`optimizer/pure/timing.py:284`）：解析前先解包 JSON `raw_report`；按真实标签 `# of logical nets` / `# of fully routed nets` / `# of nets with routing errors` / `# of routable nets` / `# of nets not needing routing` 匹配。
 
-**连带修复**（`optimizer/nodes/subgraphs/phase_execute.py:1900` route-reuse guard）：guard 原查 `total_nets > 0`，但 `total_nets` = logical nets（设计里总存在，与是否布线无关）。修复前靠 bug（=0）让 guard 永远回退常规布线；修好 parser 后 `total_nets` 恒 >0 会让 guard 变成永真死代码、对未布线设计也启用 `-reuse`。改查 `routed_nets > 0`（真正表示"有先验布线"），与 guard 注释 "only if design has prior routing" 语义一致。`optimizer/pure/constants.py:425` 注释同步。
+**连带修复**（`optimizer/nodes/subgraphs/phase_execute.py` route-reuse guard）：guard 原查 `total_nets > 0`，但 `total_nets` = logical nets（设计里总存在，与是否布线无关）。修复前靠 bug（=0）让 guard 永远回退常规布线；修好 parser 后 `total_nets` 恒 >0 会让 guard 变成永真死代码、对未布线设计也启用 `-reuse`。改查 `routed_nets > 0`（真正表示"有先验布线"），与 guard 注释 "only if design has prior routing" 语义一致。`optimizer/pure/constants.py:425` 注释同步。
+
+> **2026-07-05 更新**：上述 route-reuse guard 与全部 `reuse: True` 配置已彻底移除——Vivado `route_design` 根本不接受 `-reuse` 选项（实测 `Unknown option '-reuse'`），路由复用由 Vivado 默认行为自动完成。详见上节"route_design 路由复用"。
 
 **验证**：`TestParseRouteStatus` 5 项单测（真实格式 / JSON 包装 / 未布线设计 / 空输入 / 千分位逗号）。全量 434 项通过。
 
@@ -1140,6 +1142,28 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 | `optimizer/pure/design_data.py` | `read_design_data` 回传的 `_meta` fresh 标签是持久化时刻的，无过期警示 | P2 | ✅ 已修（M9：`freshness_caveat` 字段） |
 | `optimizer/nodes/prepare_context.py` | FORMAT_GUARD 称 "Trust `[fresh]` data" 过度承诺 | P3 | ✅ 已修（F7：改为"无修改记录"语义） |
 | `VivadoMCP/vivado_mcp_server.py` | `report_route_status` envelope 硬编码 `route_errors:0`/`unrouted_nets:0` | P3 | ✅ 已修（C7：置 None，纯函数为唯一来源） |
+
+第三轮（2026-07-05 上下文管理数据准确度/新鲜度审计，基于 `dcp_optimizer_run-20260705_092133`）：
+
+| 文件 | 缺陷 | 优先级 | 状态 |
+|------|------|--------|------|
+| `VivadoMCP/vivado_mcp_server.py`、`optimizer/pure/constants.py`、`phase_execute.py`、3 个 skill | `route_design -reuse` 是 Vivado 非法选项（`Unknown option '-reuse'`），PBLOCK/physopt 链在 route 步必然失败回滚 | P0 | ✅ 已修（移除 `reuse` 参数/配置/guard/测试，Vivado 默认自动复用布线） |
+| `optimizer/nodes/subgraphs/phase_execute.py`、`phase_handoff.py` | auto-chain 失败回滚后 Previous Phase Summary 仍报 "completed"，failed_strategies reason 误为 `strategy_ineffective` | P0 | ✅ 已修（chain 失败写入 `tool_errors` → `_determine_failure_reason` 返回 `tool_error`；handoff 显式 `Outcome: failed_restored`） |
+| `optimizer/nodes/subgraphs/phase_execute.py` | post-eval 从 JSON/report 拿到当前 WNS 后未同步 `field_freshness[timing_summary]`，dashboard 显示 `wns_setup: -0.939 [stale]`（值新标签旧） | P1 | ✅ 已修（`_mark_timing_fresh` 在 physopt JSON/post_eval/auto-rollback/chain-restore 4 处同步） |
+| `optimizer/pure/design_data.py`、`context_snapshot.py` | snapshot 在 EXECUTE 入口继承 pre-modification stale 标记，但 critical_paths 数据是刚 re-extract 的当前值（"数据新标签旧"） | P1 | ✅ 已修（snapshot.json + critical_paths.json meta 增 `data_currency`/`extraction_iteration`/`data_is_current`） |
+| `optimizer/pure/entities.py` | Cell Registry 跨提取累积不剪枝，旧路径 cell（如 `[41]`）与新路径 cell（如 `[40]`）混排，LLM 难辨当前优先 | P2 | ✅ 已修（YAML 增 `current_extraction` 汇总行 + 历史 cell `iter=M` 注记） |
+| `optimizer/state.py`、`state_space.py`、5 个 phase 节点、`rollback.py` | `critical_paths_stale=true (place/route changed)` 标签对 `open_checkpoint` 重载/`strategy switch`/`rollback` 均误标为 "place/route changed" | P2 | ✅ 已修（`critical_paths_stale_reason` 字段区分 4 种原因并渲染） |
+| `optimizer/nodes/subgraphs/phase_analyze.py` | `resource_utilization` 全程 stale 未 auto-refresh，LLM 决策无当前 LUT/FF/DSP 数据 | P3 | ✅ 已修（ANALYZE 入口 `vivado_report_utilization_for_pblock` auto-refresh） |
+| `RapidWrightMCP/server.py` | `execute_pblock_strategy` 硬编码 `resource_multiplier=2.0`（"FORCED"），LLM 传入的 multiplier 被无视、调参失效（日志中 1.2→2.0 的根源） | P0 | ✅ 已修（改为 `arguments.get("resource_multiplier", 2.0)`，默认保留 2.0 但尊重 LLM 覆盖；schema default 同步 2.0） |
+| `optimizer/nodes/subgraphs/phase_evaluate.py` | chain 失败回滚后 `delta=0.0`（非 None），`_cool_down_current_strategy_if_stalled` 误判"策略无效"冷却；PBLOCK 因 `route_design` 失败被错误阻塞（与上行 handoff 层修复互补，handoff 归因对但 EVALUATE 仍冷却） | P0 | ✅ 已修（C1：`delta<=0` 分支检测 `tool_errors` 中 `chain=True` 记录，跳过冷却保持 retriable） |
+
+**第三轮补充：LLM 可调参与上下文质量改进**（基于同一日志，bug 修复之外追加的接口增强，让 LLM 能有效调参并拿到充足、准确、客观的上下文与反馈）：
+
+| 文件 | 改动 | 类别 |
+|------|------|------|
+| `skills/pblock_strategy.py` | 返回 dict 增 `utilization_density`/`density_warning`/`capacity_basis`/`input_multiplier`/`final_multiplier`/`multiplier_transform`/`region_selection_reason`；`_build_advice_sufficient` 按 density 分级（>90% 拥塞警告，不再无脑 "safely proceed"）；message 标注 multiplier 变换与 density | 上下文 |
+| `skills/pblock_strategy.py`、`RapidWrightMCP/rapidwright_tools.py`、`server.py` | 新增 `max_utilization_density` 参数（默认 0.90），LLM 可控区域余量；density 超限返回 `density_warning=true`，advice 警告 | 可调参 |
+| `optimizer/nodes/subgraphs/phase_execute.py` | critical_path_cells 覆盖时 `add_message` 增强：列出 cells 预览 + 覆盖原因（data quality guard），告知 LLM 其输入被覆盖 | 反馈 |
 
 > **文档订正**：§15.2 原"parser 要求 `line.split()` 恰好 3 部分"有误，实为 `>= 3`，真正脆弱点是 `net_name=parts[2]` 只取首 token。§15.3 原"EVALUATE/SELECT_STRATEGY 阶段被过滤"有误——SELECT_STRATEGY 实际显示 Module 3，仅 EXECUTE/EVALUATE 隐藏。§15.4 原"`rapidwright_analyze_congestion` 摘要为 `{`"在当前代码不成立（`compact_tool_summary` 已有专用 handler 产出 `global_score=..., severity=...`），真实受影响的是 `design_data_read` 分支 NameError（M4）。
 

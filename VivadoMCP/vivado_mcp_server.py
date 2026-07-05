@@ -1844,7 +1844,7 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design. Supports -reuse flag to reuse existing routing for unchanged nets. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, Congestion_Explore/_NetDelay_high/_medium/_low, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives).",
+            description="Run routing on the current design. Vivado automatically preserves routing for unchanged nets, so no explicit reuse flag is needed. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, Congestion_Explore/_NetDelay_high/_medium/_low, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1853,10 +1853,6 @@ async def list_tools():
                         "enum": list(ROUTE_SAFE_DIRECTIVES),
                         "default": "Default",
                         "description": "Routing directive. See enum for all valid values."
-                    },
-                    "reuse": {
-                        "type": "boolean",
-                        "description": "Reuse existing routing for unchanged nets (-reuse). Reduces routing runtime by reusing prior routing results where possible."
                     },
                     "timeout": {
                         "type": "number",
@@ -2562,11 +2558,10 @@ async def call_tool(name: str, arguments: dict):
 
         elif name == "route_design":
             directive = arguments.get("directive")
-            reuse = arguments.get("reuse", False)
             timeout = arguments.get("timeout", 3600)  # 1 hour default for routing
 
             # Log unexpected parameters to help debug LLM misuse
-            expected_keys = {"directive", "timeout", "reuse"}
+            expected_keys = {"directive", "timeout"}
             unexpected = set(arguments.keys()) - expected_keys
             if unexpected:
                 logger.warning(f"route_design: ignoring unexpected parameters: {unexpected}. "
@@ -2586,9 +2581,6 @@ async def call_tool(name: str, arguments: dict):
                         )
                     )]
                 cmd += f" -directive {tcl_quote(directive)}"
-            if reuse:
-                cmd += " -reuse"
-                logger.info("route_design: reuse mode enabled")
 
             output = run_tcl_command(cmd, timeout=timeout)
             # Detect Vivado errors — return JSON error so chain execution can detect failure

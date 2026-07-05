@@ -66,7 +66,7 @@ python VivadoMCP/vivado_mcp_server.py \
 | Tool | Description |
 |------|-------------|
 | `place_design` | Run placement (safe directives whitelisted in schema) |
-| `route_design` | Run routing (safe directives whitelisted; supports `-reuse`) |
+| `route_design` | Run routing (safe directives whitelisted; Vivado auto-preserves routing for unchanged nets) |
 | `phys_opt_design` | Physical optimization (retiming blocked) |
 | `physopt_and_route` | Combined phys_opt + route (single atomic call) |
 | `opt_design` | Logic-level optimization (AddRetime blocked) |

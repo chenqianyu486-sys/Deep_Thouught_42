@@ -242,6 +242,7 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
 
     # 3. Mark all state as stale — nothing from the previous strategy is valid
     state.timing.critical_paths_stale = True
+    state.timing.critical_paths_stale_reason = "strategy switch"
     for field in state.timing.field_freshness:
         state.timing.field_freshness[field] = "stale"
     # Ensure critical_path_cells freshness entry exists even if not yet extracted
@@ -290,6 +291,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     reached_callback = False  # track if the strategy reached callback indicating completion
     no_progress_count = 0  # consecutive rounds without side-effect tool calls
     _exit_after_tools = False  # defer exit until pending tools execute
+    chain_failed = False  # set True when an auto-chain step errors and restores the design
 
     # Record phase entry
     phase_entry = PhaseEntry(
@@ -473,11 +475,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                     f"with verified state data ({len(cells)} cells) for {tool_name}"
                                 )
                                 if deps.compat is not None:
+                                    preview = ", ".join(cells[:8]) + ("..." if len(cells) > 8 else "")
                                     deps.compat.add_message("user",
-                                        f"[DATA INTEGRITY] Overriding LLM-provided critical_path_cells "
-                                        f"with {len(cells)} verified cells from state for {tool_name}. "
-                                        f"State data is extracted via the verified "
-                                        f"vivado_extract_critical_path_cells tool.")
+                                        f"[DATA INTEGRITY] Overriding your critical_path_cells "
+                                        f"with {len(cells)} verified cells from state for {tool_name} "
+                                        f"(reason: state data comes from the verified "
+                                        f"vivado_extract_critical_path_cells tool, avoiding data "
+                                        f"quality issues from raw TCL extraction). "
+                                        f"Cells used (preview): [{preview}].")
                             tool_args["critical_path_cells"] = cells
 
                 # Data quality guard: if all critical path cells were filtered
@@ -807,6 +812,15 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         _design_changed = True
                 if _design_changed:
                     state.timing.critical_paths_stale = True
+                    # open_checkpoint reloads a (possibly different) DCP but
+                    # does not run place/route — label it distinctly so the
+                    # LLM knows the stale mark is a conservative reload, not a
+                    # layout change.
+                    state.timing.critical_paths_stale_reason = (
+                        "checkpoint reloaded"
+                        if tool_name == "vivado_open_checkpoint"
+                        else "place/route changed"
+                    )
                     # Mark all dashboard fields stale — design has changed
                     for field in state.timing.field_freshness:
                         state.timing.field_freshness[field] = "stale"
@@ -861,6 +875,10 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 if deps.compat is not None:
                                     deps.compat.add_message("user", eval_notice)
                                 logger.info(f"[EXECUTE] Post-eval (from result): {tool_name} -> WNS={new_wns:.3f}ns (delta={delta:+.3f}, {verdict})")
+                                # WNS came from the tool's post-route JSON — it is
+                                # current. Sync timing_summary freshness so the
+                                # dashboard does not show a fresh WNS tagged [stale].
+                                _mark_timing_fresh(state)
                             else:
                                 # Fallback to full timing report if JSON doesn't have WNS
                                 post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
@@ -1220,11 +1238,20 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 state.timing.latest_wns = restore_timing["wns"]
                 state.timing.latest_tns = restore_timing.get("tns")
                 state.timing.latest_failing_endpoints = restore_timing.get("failing_endpoints")
+                _mark_timing_fresh(state)
         except Exception as e:
             logger.warning(f"[EXECUTE] Auto-rollback failed: {e}")
 
     # Phase exit: build handoff
-    llm_summary = llm_summary or f"Execution of {state.strategy.current_strategy} completed."
+    if chain_failed:
+        outcome = "failed_restored"
+        llm_summary = llm_summary or (
+            f"Execution of {state.strategy.current_strategy} FAILED (auto-chain error), "
+            f"design restored to baseline. Strategy recorded as tool_error (retriable)."
+        )
+    else:
+        outcome = "completed"
+        llm_summary = llm_summary or f"Execution of {state.strategy.current_strategy} completed."
     wns_after = state.timing.latest_wns
 
     handoff = build_phase_handoff(
@@ -1238,6 +1265,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             "strategy_name": state.strategy.current_strategy,
             "wns_before": wns_before,
             "wns_after": wns_after,
+            "outcome": outcome,
         },
         message_count=tool_round,
         design_stage=getattr(state.timing, 'current_stage', ''),
@@ -1654,6 +1682,22 @@ def _get_fallback_model(state: OptimizerState, current_model: str) -> str | None
     return None
 
 
+def _mark_timing_fresh(state: OptimizerState) -> None:
+    """Mark timing_summary (and cdc_paths) fresh after a successful timing parse.
+
+    Modification tools (phys_opt/route) mark all dashboard fields stale, but
+    the post-eval path immediately parses a fresh WNS from the tool result or
+    a vivado_report_timing_summary call. Without this sync, the dashboard shows
+    the current WNS tagged ``[stale]`` — a correct value with a misleading tag
+    that prompts the LLM to wastefully re-run report_timing_summary.
+
+    Mirrors DASHBOARD_REFRESH_MAP["vivado_report_timing_summary"] = {timing_summary,
+    cdc_paths} so the freshness stays consistent with the main-loop tool path.
+    """
+    for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
+        state.timing.field_freshness[_f] = "fresh"
+
+
 async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str) -> str | None:
     """Force WNS evaluation after critical tools.
 
@@ -1690,6 +1734,9 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         state.timing.latest_tns = tns
     if fe is not None:
         state.timing.latest_failing_endpoints = fe
+    # This hook just ran vivado_report_timing_summary and parsed a fresh WNS —
+    # sync timing_summary freshness so the dashboard does not tag it [stale].
+    _mark_timing_fresh(state)
     if wns > state.timing.best_wns:
         state.timing.best_wns = wns
         state.timing.best_wns_iteration = state.iteration.current
@@ -1734,6 +1781,7 @@ async def _lightweight_chain_validation(state, deps, tool_name, tools_called):
         state.iteration.tools_used.append("vivado_place_design")
         tools_called.append("vivado_place_design")
         state.timing.critical_paths_stale = True
+        state.timing.critical_paths_stale_reason = "place/route changed"
 
         # Re-evaluate WNS
         verdict = await _post_eval_hook(state, deps, "vivado_place_design")
@@ -1905,16 +1953,6 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 )
                 del args["directive"]
 
-        # Handle route reuse: keep -reuse only if design has prior routing.
-        # routed_nets (# of fully routed nets) is the real signal — total_nets
-        # counts logical nets which exist even before routing (see A.5).
-        if args.pop("reuse", False):
-            if state.timing.route_status and state.timing.route_status.get("routed_nets", 0) > 0:
-                args["reuse"] = True
-                logger.info("[chain] Route reuse enabled (design has prior routing)")
-            else:
-                logger.info("[chain] Route reuse requested but no prior routing — falling back to normal route")
-
         try:
             logger.info(f"[chain] Auto-executing {target_tool} after {tool_name}")
             raw_result = await call_tool_fn(
@@ -1947,6 +1985,17 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 deps.compat.add_message("user",
                     f"[AUTO-CHAIN] After {tool_name}: {target_tool} {status_label} — {summary[:400]}")
             if step_failed:
+                chain_failed = True
+                # Record the chain failure in tool_errors so iteration_end's
+                # _determine_failure_reason classifies it as tool_error (retriable,
+                # TTL=0) rather than strategy_ineffective — the strategy never
+                # got a fair run; the chain crashed and was restored to baseline.
+                state.iteration.tool_errors.append({
+                    "tool": target_tool,
+                    "result": f"[CHAIN ERROR] {summary[:1800]}",
+                    "chain": True,
+                    "strategy": state.strategy.current_strategy,
+                })
                 raise RuntimeError(f"{target_tool} reported error in result: {summary[:200]}")
             _track_wns_from_result(state, target_tool, raw_result)
 
@@ -1957,6 +2006,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             # Mark critical paths stale after placement-affecting chain tools
             if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):
                 state.timing.critical_paths_stale = True
+                state.timing.critical_paths_stale_reason = "place/route changed"
 
             # ── Level 2: Vivado Place-Only timing check ──────────────
             # After a real place_design (not unplace), evaluate place-only
@@ -2048,6 +2098,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                             state.timing.latest_wns = restore_timing.get("wns")
                             if state.timing.latest_wns is not None:
                                 logger.info(f"[chain] Post-restore WNS: {state.timing.latest_wns:.3f}")
+                                _mark_timing_fresh(state)
                             else:
                                 logger.warning("[chain] Could not parse WNS from timing after restore")
                         else:
@@ -2076,6 +2127,7 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
     if cell_paths:
         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
         state.timing.critical_paths_stale = False
+        state.timing.critical_paths_stale_reason = ""
         # Keep the field_freshness dict in sync with the boolean flag —
         # otherwise the Dashboard renders the contradictory "stale=false [stale]"
         # (F4: two staleness systems must not drift).

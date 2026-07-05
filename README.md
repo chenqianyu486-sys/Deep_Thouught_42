@@ -85,7 +85,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 **数据与上下文层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
-| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 23 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells`；**FORMAT_GUARD 增加 `STALE DATA HANDLING` 章节明确指示 LLM 过期数据必须先刷新再做决策（2026-07）；ANALYZE/SELECT_STRATEGY 阶段入口自动调用 `vivado_report_timing_summary` 刷新过期 WNS（2026-07）** |
+| 6 | 数据可信度 | `field_freshness` 追踪每字段状态 (`fresh`/`stale`)；Dashboard 每个值后显示 `[fresh]`/`[stale]` 标记；设计修改工具（`DESIGN_MODIFICATION_TOOLS`，2026-06-27 补充至 23 个）自动将所有字段降级为 `stale`（EXECUTE+EVALUATE 对称处理）；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；EXECUTE 阶段自动用 state 可信数据覆盖 LLM 提供的 `critical_paths`/`critical_path_cells`；**FORMAT_GUARD 增加 `STALE DATA HANDLING` 章节明确指示 LLM 过期数据必须先刷新再做决策（2026-07）；ANALYZE/SELECT_STRATEGY 阶段入口自动调用 `vivado_report_timing_summary` 刷新过期 WNS（2026-07）；post-eval 从 physopt JSON/report 拿到当前 WNS 后同步 `timing_summary=fresh`（`_mark_timing_fresh`，2026-07-05）；`critical_paths_stale_reason` 区分 `place/route changed`/`checkpoint reloaded`/`strategy switch`/`rollback`（2026-07-05）；snapshot 持久化 `data_currency`/`extraction_iteration` 让 LLM 区分"数据新标签旧"（2026-07-05）** |
 | 7 | 信息保留 | 压缩标记保留关键指标（WNS/TNS/FE/delta/status）；`preserve_role_turns=6` 保留原始 role |
 | 8 | LLM 提示缓存 | 每 API 调用通过 `extra_body` 发送 `{"cache": {"prompt": true}}`，共享函数 `build_llm_extra_body()` |
 | 9 | Dashboard 数据可信度注解 | 严格区分 `None`（未分析）与 `[]`/`0`（已分析但为零），带机器可读原因: `"N/A(congestion_analysis_not_supported)"` |

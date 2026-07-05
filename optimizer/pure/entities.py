@@ -616,6 +616,20 @@ def build_registry_snapshot_yaml(
     iter_tag = f"iter={iteration}" if iteration else "iter=N/A"
     lines.append(f"# freshness: {stale_tag}  # {iter_tag}  # version={registry.snapshot_version}  # phase={phase or 'N/A'}")
     lines.append(f"# total_registered: {len(registry.cells)} cells across {len(registry.by_module)} modules")
+    # Distinguish cells from the current extraction vs historical ones. The
+    # registry accumulates across extractions and does not prune, so a cell
+    # from an earlier iteration may no longer be on the current critical path.
+    # Tagging historical cells lets the LLM prefer current-extraction cells.
+    if iteration:
+        current_count = sum(
+            1 for ref in registry.cells.values()
+            if ref.last_seen_iter == iteration
+        )
+        historical_count = len(registry.cells) - current_count
+        lines.append(
+            f"# current_extraction: {current_count} cells (iter={iteration}), "
+            f"historical: {historical_count} cells (prefer current for targeting)"
+        )
     lines.append("canonical_cells:")
 
     top = registry.top_n_cells(max_cells)
@@ -626,6 +640,10 @@ def build_registry_snapshot_yaml(
             meta.append(f"type={ref.cell_type}")
         if ref.location:
             meta.append(f"loc={ref.location}")
+        # Mark cells not seen in the current extraction so the LLM can tell
+        # they may be stale relative to the latest critical path.
+        if iteration and ref.last_seen_iter != iteration:
+            meta.append(f"iter={ref.last_seen_iter}")
         meta_str = f"  # {' '.join(meta)}" if meta else ""
         lines.append(f"  - {name}{meta_str}")
     if len(registry.cells) > max_cells:

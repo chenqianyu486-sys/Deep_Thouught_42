@@ -51,6 +51,11 @@
         "type": "number",
         "description": "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
         "default": 0.3
+      },
+      "max_utilization_density": {
+        "type": "number",
+        "description": "Max allowed region utilization density (0.0-1.0). When the selected region's density exceeds this, density_warning=true is returned in the result. Lower this (e.g. 0.80) for high-utilization designs to avoid congested pblocks. Default 0.90.",
+        "default": 0.9
       }
     },
     "required": [

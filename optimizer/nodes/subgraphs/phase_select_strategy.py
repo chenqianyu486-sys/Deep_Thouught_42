@@ -241,6 +241,11 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 # Track dashboard freshness (mirrors ANALYZE/EVALUATE pattern)
                 if tool_name in DESIGN_MODIFICATION_TOOLS:
                     state.timing.critical_paths_stale = True
+                    state.timing.critical_paths_stale_reason = (
+                        "checkpoint reloaded"
+                        if tool_name == "vivado_open_checkpoint"
+                        else "place/route changed"
+                    )
                     for field in state.timing.field_freshness:
                         state.timing.field_freshness[field] = "stale"
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)

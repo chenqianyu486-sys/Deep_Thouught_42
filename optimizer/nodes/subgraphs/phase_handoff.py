@@ -60,6 +60,11 @@ class PhaseHandoff:
             return ""
         parts = ["## Previous Phase Summary"]
         parts.append(f"Source: {self.source_phase}")
+        # Surface the execution outcome prominently so a failed/restored chain
+        # is not mistaken for a successful-but-ineffective run.
+        outcome = self.key_findings.get("outcome") if self.key_findings else None
+        if outcome:
+            parts.append(f"Outcome: {outcome}")
         if self.wns is not None:
             parts.append(f"WNS: {self.wns:.3f}ns")
         if self.tns is not None:
@@ -83,8 +88,10 @@ class PhaseHandoff:
             tools_str = ", ".join(self.tools_called[-6:])
             parts.append(f"Tools: {tools_str}")
         if self.key_findings:
+            # 'outcome' is rendered as a dedicated Outcome line above; skip here.
             items = [f"{k}={v}" for k, v in self.key_findings.items()
-                     if not isinstance(v, (list, dict)) or len(str(v)) < 100]
+                     if k != "outcome"
+                     and (not isinstance(v, (list, dict)) or len(str(v)) < 100)]
             if items:
                 parts.append(f"Findings: {', '.join(items[:5])}")
         if self.tool_results:

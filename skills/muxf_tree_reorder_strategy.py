@@ -207,7 +207,7 @@ def generate_muxf_tree_reorder_plan(
         StrategyStep(
             step_name="route_design",
             platform="Vivado",
-            params={"directive": "Explore", "reuse": True},
+            params={"directive": "Explore"},
             description="Re-route design after phys_opt changes",
             executed=False,
             expected_duration_seconds=300,

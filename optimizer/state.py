@@ -219,6 +219,12 @@ class TimingState:
     critical_paths: list[CriticalPathEntry] = field(default_factory=list)
     critical_paths_iteration: int = 0
     critical_paths_stale: bool = False
+    # Human-readable reason for why critical_paths_stale was set (e.g.
+    # "place/route changed", "checkpoint reloaded", "strategy switch",
+    # "rollback"). Rendered in the dashboard so the LLM can distinguish a
+    # real layout change from a benign checkpoint reload. Reset to "" when
+    # critical_paths_stale is cleared.
+    critical_paths_stale_reason: str = ""
     resource_utilization: Optional[dict] = None
     baseline_resource_utilization: Optional[dict] = None
     field_freshness: dict[str, str] = field(default_factory=dict)

@@ -347,6 +347,7 @@ class DesignDataManager:
         field_freshness: Optional[dict] = None,
         iteration: int = 0,
         phase: str = "",
+        critical_paths_extraction_iter: Optional[int] = None,
     ) -> str:
         """Store a full snapshot of design analysis data to disk.
 
@@ -396,6 +397,14 @@ class DesignDataManager:
                 },
                 "data": data,
             }
+            # For critical_paths, record the actual extraction iteration so
+            # readers can tell the data is current even when field_freshness
+            # was conservatively marked "stale" at persist time.
+            if data_type == "critical_paths" and critical_paths_extraction_iter is not None:
+                payload["_meta"]["extraction_iteration"] = critical_paths_extraction_iter
+                payload["_meta"]["data_is_current"] = (
+                    critical_paths_extraction_iter == iteration
+                )
             file_path.write_text(_encode_design_data(payload), encoding="utf-8")
             stored.append(data_type)
 
@@ -411,6 +420,20 @@ class DesignDataManager:
                 "field_freshness": _ff,
             },
         }
+        # Record when each data type was actually extracted, independent of the
+        # stale/fresh label. field_freshness can be conservatively "stale" at
+        # EXECUTE entry (pre-modification) even when the data was just
+        # re-extracted this iteration and is still current. data_currency lets
+        # the LLM distinguish "data from this iteration (current)" from
+        # "data from a prior iteration (may be outdated)".
+        data_currency: dict[str, Any] = {}
+        if critical_paths is not None and critical_paths_extraction_iter is not None:
+            data_currency["critical_paths"] = {
+                "extraction_iteration": critical_paths_extraction_iter,
+                "is_current": critical_paths_extraction_iter == iteration,
+            }
+        if data_currency:
+            index_data["_meta"]["data_currency"] = data_currency
         # Check if critical_paths_stale is available via the critical_paths data
         if field_freshness:
             for fname, fstatus in field_freshness.items():
@@ -484,10 +507,15 @@ class DesignDataManager:
                 # M9: field_freshness in meta reflects persist-time state only.
                 # If the design was modified after this snapshot was written,
                 # the data may be stale regardless of the recorded freshness.
+                # For critical_paths, meta.data_is_current / extraction_iteration
+                # record when the data was actually extracted — if extracted this
+                # iteration, the data is current even when field_freshness="stale".
                 "freshness_caveat": (
                     "meta.field_freshness reflects state at persist time. "
                     "If the design was modified after this snapshot, re-run "
-                    "the analysis tool for current values."
+                    "the analysis tool for current values. For critical_paths, "
+                    "prefer meta.data_is_current / extraction_iteration over "
+                    "field_freshness to judge currency."
                 ),
             }, cls=_DesignDataEncoder, indent=2, ensure_ascii=False)
         except Exception as e:

@@ -678,7 +678,10 @@ def format_state_space_for_llm(
         lines.append("timing_clusters:")
         # ── Freshness indicator ──
         if state and state.timing.critical_paths_stale is not None:
-            stale_label = "true (place/route changed)" if state.timing.critical_paths_stale else "false"
+            stale_label = (
+                f"true ({state.timing.critical_paths_stale_reason or 'place/route changed'})"
+                if state.timing.critical_paths_stale else "false"
+            )
             cp_fresh = _tag("critical_path_cells") if state else ""
             ext_iter = state.timing.critical_paths_iteration
             total_fe = state.timing.latest_failing_endpoints
@@ -812,7 +815,10 @@ def format_state_space_for_llm(
             lines.append(f"  failing_endpoints: {_annotated_val(vs.total_failing_endpoints, reason='not_analyzed')}")
             # Freshness indicator (compact)
             if state and state.timing.critical_paths_stale is not None:
-                stale_label = "true (place/route changed)" if state.timing.critical_paths_stale else "false"
+                stale_label = (
+                f"true ({state.timing.critical_paths_stale_reason or 'place/route changed'})"
+                if state.timing.critical_paths_stale else "false"
+            )
                 ext_iter = state.timing.critical_paths_iteration
                 fresh_line = f"  freshness: extracted_iteration={ext_iter}, stale={stale_label}"
                 total_fe = state.timing.latest_failing_endpoints

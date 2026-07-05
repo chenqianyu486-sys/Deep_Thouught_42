@@ -56,6 +56,32 @@ def compute_adaptive_resource_multiplier(
         return min(base_multiplier, 1.2)
 
 
+def _describe_multiplier_transform(
+    target_lut_count: int,
+    target_ff_count: int,
+    base_multiplier: float,
+    adaptive_multiplier: float,
+    device_lut_capacity: int = 394000,
+) -> str:
+    """Explain why the multiplier changed from base to adaptive.
+
+    Mirrors the branching in compute_adaptive_resource_multiplier so the
+    LLM can understand why its input_multiplier was adjusted.
+    """
+    ratio = target_lut_count / device_lut_capacity if device_lut_capacity > 0 else 0
+    if adaptive_multiplier > base_multiplier:
+        return (
+            f"adaptive: {base_multiplier}→{adaptive_multiplier} "
+            f"(small design, {ratio:.0%} of device, raised for placement freedom)"
+        )
+    if adaptive_multiplier < base_multiplier:
+        return (
+            f"adaptive: {base_multiplier}→{adaptive_multiplier} "
+            f"(large design, {ratio:.0%} of device, lowered to avoid resource conflicts)"
+        )
+    return f"adaptive: {base_multiplier} (unchanged, {ratio:.0%} of device)"
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -136,11 +162,27 @@ def _build_advice_insufficient(deficit: dict, full_device: dict,
     return advice
 
 
-def _build_advice_sufficient() -> list[str]:
-    """Build advice array for sufficient capacity scenario."""
+def _build_advice_sufficient(utilization_density: float) -> list[str]:
+    """Build advice array for sufficient capacity scenario, graded by density.
+
+    capacity_ok only means the region fits the resources — it does NOT mean
+    placement will succeed. At high density place_design congests and worsens
+    timing, so the advice must warn the LLM rather than green-light blindly.
+    """
+    if utilization_density > 0.90:
+        return [
+            f"Region nearly full (utilization density {utilization_density:.1%}); "
+            f"place_design will likely congest and worsen timing. Consider a higher "
+            f"resource_multiplier (larger region) or fewer target cells before proceeding."
+        ]
+    if utilization_density > 0.80:
+        return [
+            f"Density high (utilization density {utilization_density:.1%}); "
+            f"IS_SOFT=1 recommended. Monitor post-place WNS closely — timing may regress."
+        ]
     return [
-        "Region capacity is sufficient for the target resources. "
-        "You can safely proceed with pblock creation and placement."
+        f"Region capacity is sufficient (utilization density {utilization_density:.1%}). "
+        f"You can safely proceed with pblock creation and placement."
     ]
 
 
@@ -153,6 +195,7 @@ def generate_pblock_plan(
     resource_multiplier: float = 1.5,
     critical_path_cells: list[str] | None = None,
     distance_weight_factor: float = 0.3,
+    max_utilization_density: float = 0.90,
 ) -> dict:
     """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating.
 
@@ -196,12 +239,17 @@ def generate_pblock_plan(
         }
 
     # Apply adaptive resource multiplier based on design size
+    input_multiplier = resource_multiplier
     adaptive_multiplier = compute_adaptive_resource_multiplier(
         target_lut_count, target_ff_count, base_multiplier=resource_multiplier
     )
+    multiplier_transform = _describe_multiplier_transform(
+        target_lut_count, target_ff_count, input_multiplier, adaptive_multiplier
+    )
     logger.info(
-        "Adaptive resource multiplier: base=%.1f, adaptive=%.1f (LUT=%d, FF=%d)",
-        resource_multiplier, adaptive_multiplier, target_lut_count, target_ff_count
+        "Adaptive resource multiplier: base=%.1f, adaptive=%.1f (LUT=%d, FF=%d) — %s",
+        resource_multiplier, adaptive_multiplier, target_lut_count, target_ff_count,
+        multiplier_transform,
     )
     required_lut = int(target_lut_count * adaptive_multiplier)
     required_ff = int(target_ff_count * adaptive_multiplier)
@@ -272,6 +320,8 @@ def generate_pblock_plan(
     }
 
     capacity_ok = region_result.capacity_ok
+    capacity_basis = "initial_region"
+    region_selection_reason = "smart_region_search (sliding window around critical-path center of mass)"
     multi_region = region_result.multi_region_suggestions
 
     # Step 3: If insufficient, try fallback expansion
@@ -294,6 +344,8 @@ def generate_pblock_plan(
             if expanded_result.get("capacity_met"):
                 capacity_ok = True
                 expanded = True
+                capacity_basis = "fallback_expansion"
+                region_selection_reason = "fallback_expanded_to_capacity (initial region insufficient)"
                 region = {
                     "col_min": expanded_result["col_min"],
                     "col_max": expanded_result["col_max"],
@@ -362,17 +414,29 @@ def generate_pblock_plan(
     except Exception:
         pass
 
-    # Step 5: Build advice (use smart_region_search's advice as base, augment with our own)
+    # Compute utilization density (objective, independent of capacity_ok).
+    # capacity_ok only means "fits"; density tells the LLM HOW full the region is,
+    # so it can judge congestion risk before committing to place_design.
+    est_luts = max(estimated.get("luts", 1), 1)
+    utilization_density = required_lut / est_luts
+    density_warning = utilization_density > max_utilization_density
+
+    # Step 5: Build advice (density-graded when sufficient, deficit-driven when not)
     is_soft_recommended = False
     if capacity_ok:
-        est_luts = estimated.get("luts", 1)
-        utilization_density = required_lut / max(est_luts, 1)
         is_soft_recommended = utilization_density > 0.8
-        advice = _build_advice_sufficient()
+        advice = _build_advice_sufficient(utilization_density)
         advice.append(
             f"IS_SOFT={'1' if is_soft_recommended else '0'} recommended "
             f"(utilization density: {utilization_density:.1%})."
         )
+        if density_warning:
+            advice.append(
+                f"WARNING: utilization density {utilization_density:.1%} exceeds "
+                f"max_utilization_density {max_utilization_density:.0%} — place_design "
+                f"is likely to congest. Consider raising resource_multiplier or "
+                f"skipping PBLOCK for this design."
+            )
     else:
         advice = _build_advice_insufficient(
             deficit or {}, full_device, required_lut, required_ff,
@@ -395,13 +459,16 @@ def generate_pblock_plan(
     # Build message
     if capacity_ok:
         qualifier = " (expanded via fallback)" if expanded else ""
+        density_tag = f" [WARNING: density {utilization_density:.1%} > {max_utilization_density:.0%}]" if density_warning else ""
         msg = (
             f"PBLOCK region found{qualifier}: cols {region['col_min']}-{region['col_max']}, "
             f"rows {region['row_min']}-{region['row_max']}. "
             f"Estimated: {estimated['luts']:,} LUTs, {estimated['ffs']:,} FFs, "
             f"{estimated['dsps']} DSPs, {estimated['brams']} BRAMs. "
-            f"Capacity OK (target: {required_lut:,} LUTs x{resource_multiplier}, "
-            f"{required_ff:,} FFs x{resource_multiplier})."
+            f"Capacity OK (target: {required_lut:,} LUTs x{adaptive_multiplier}, "
+            f"{required_ff:,} FFs x{adaptive_multiplier}). "
+            f"Utilization density {utilization_density:.1%}{density_tag}. "
+            f"Multiplier: {input_multiplier}→{adaptive_multiplier} ({multiplier_transform})."
         )
     else:
         d_lut = deficit.get("luts", 0) if deficit else 0
@@ -434,8 +501,21 @@ def generate_pblock_plan(
         "pblock_name": pblock_name,
         "estimated_resources": estimated,
         "target_resources": required,
+        # Multiplier transparency: input (LLM-provided) vs final (after adaptive
+        # adjustment) plus the transform reason, so the LLM can predict how its
+        # resource_multiplier parameter maps to the actual region size.
         "resource_multiplier": adaptive_multiplier,
+        "input_multiplier": input_multiplier,
+        "final_multiplier": adaptive_multiplier,
+        "multiplier_transform": multiplier_transform,
         "capacity_ok": capacity_ok,
+        "capacity_basis": capacity_basis,
+        "region_selection_reason": region_selection_reason,
+        # Objective density metrics: capacity_ok only means "fits"; density tells
+        # the LLM how full the region is so it can judge congestion risk.
+        "utilization_density": utilization_density,
+        "density_warning": density_warning,
+        "max_utilization_density": max_utilization_density,
         "deficit": deficit,
         "advice": advice,
         "multi_region_suggestions": multi_region,
@@ -503,6 +583,11 @@ def _validate_pblock_inputs(**kwargs) -> tuple[bool, str]:
         ParameterSpec("distance_weight_factor", float,
                       "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
                       default=0.3),
+        ParameterSpec("max_utilization_density", float,
+                      "Max allowed region utilization density (0.0-1.0). When the selected region's "
+                      "density exceeds this, density_warning=true is returned in the result. Lower this "
+                      "(e.g. 0.80) for high-utilization designs to avoid congested pblocks. Default 0.90.",
+                      default=0.90),
     ],
     required_context=["design"],
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
@@ -524,7 +609,8 @@ class PblockStrategySkill(Skill):
                 target_dsp_count: int = 0, target_bram_count: int = 0,
                 resource_multiplier: float = 1.5,
                 critical_path_cells: list[str] | None = None,
-                distance_weight_factor: float = 0.3) -> SkillResult:
+                distance_weight_factor: float = 0.3,
+                max_utilization_density: float = 0.90) -> SkillResult:
         try:
             result = generate_pblock_plan(
                 context.design,
@@ -533,6 +619,7 @@ class PblockStrategySkill(Skill):
                 resource_multiplier,
                 critical_path_cells=critical_path_cells,
                 distance_weight_factor=distance_weight_factor,
+                max_utilization_density=max_utilization_density,
             )
             is_error = result.get("status") == "error"
             error_msg = result.get("message") if is_error else None
@@ -581,6 +668,11 @@ class PblockStrategySkill(Skill):
         ParameterSpec("distance_weight_factor", float,
                       "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
                       default=0.3),
+        ParameterSpec("max_utilization_density", float,
+                      "Max allowed region utilization density (0.0-1.0). When the selected region's "
+                      "density exceeds this, density_warning=true is returned in the result. Lower this "
+                      "(e.g. 0.80) for high-utilization designs to avoid congested pblocks. Default 0.90.",
+                      default=0.90),
     ],
     required_context=["design"],
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND", "TEMPORARILY_UNAVAILABLE", "SKILL_TIMEOUT"],
@@ -604,7 +696,8 @@ class ExecutePblockStrategySkill(Skill):
                 target_dsp_count: int = 0, target_bram_count: int = 0,
                 resource_multiplier: float = 1.2,
                 critical_path_cells: list[str] | None = None,
-                distance_weight_factor: float = 0.3) -> SkillResult:
+                distance_weight_factor: float = 0.3,
+                max_utilization_density: float = 0.90) -> SkillResult:
         try:
             result = generate_pblock_plan(
                 context.design,
@@ -613,6 +706,7 @@ class ExecutePblockStrategySkill(Skill):
                 resource_multiplier,
                 critical_path_cells=critical_path_cells,
                 distance_weight_factor=distance_weight_factor,
+                max_utilization_density=max_utilization_density,
             )
             if result.get("status") == "error":
                 return SkillResult(success=False, data=result,

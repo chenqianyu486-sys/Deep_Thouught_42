@@ -455,21 +455,17 @@ STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
 # args_from_skill (keys: place_directive / route_directive in the skill result).
 # When absent, the hardcoded "Explore" in args is used as fallback.
 #
-# route_design `reuse: True` policy: only set when prior routing exists at the
-# route step. Chains starting with unplace / open_checkpoint+place / opt+place
-# have NO prior routing at route time → reuse is dead config (omitted). Chains
-# whose route step follows phys_opt_design (muxf_tree_reorder, physopt) keep
-# reuse — phys_opt preserves routing, so route_design -reuse re-routes only the
-# moved nets. PBLOCK keeps reuse because its unplace is local (critical cells
-# only), leaving the rest of the design routed. See phase_execute.py route-reuse
-# guard for the runtime routed_nets check (A.5: total_nets counts logical
-# nets and is always > 0, so it cannot gate reuse).
+# route_design routing reuse: Vivado automatically preserves routing for
+# unchanged nets when route_design is called on a partially-routed design, so
+# no explicit flag is needed. (A previous `reuse: True` arg emitted an invalid
+# `-reuse` flag that Vivado rejected with "Unknown option '-reuse'", causing
+# every PBLOCK/physopt chain to fail at the route step.)
 SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_pblock_strategy": [
         # Local unplace: only critical-path cells (vs the old global
         # place_design -unplace which tore down the whole design). Keeps the
         # rest of the design placed/routed so the next place+route is
-        # incremental — route_design -reuse below reuses prior routing.
+        # incremental — Vivado automatically reuses prior routing for unchanged nets.
         {"tool": "vivado_unplace_cells",
          "args_from_skill": {"cells": "critical_path_cells"}},
         {"tool": "vivado_create_and_apply_pblock",
@@ -481,7 +477,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          }},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "place_directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],
@@ -545,7 +541,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
     "rapidwright_execute_muxf_tree_reorder_strategy": [
         {"tool": "vivado_phys_opt_design",
          "args_from_skill": {"directive": "directive"}},
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
@@ -558,7 +554,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
          "args_from_skill": {"directive": "directive"}},
         # Post-eval fires here (vivado_phys_opt_design is in POST_EVAL_TOOLS).
         # If UNCHANGED, chain gate (P0) skips remaining steps.
-        {"tool": "vivado_route_design", "args": {"directive": "Explore", "reuse": True},
+        {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
     ],

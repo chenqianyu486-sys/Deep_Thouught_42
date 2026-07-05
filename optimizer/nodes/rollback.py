@@ -124,6 +124,7 @@ async def rollback_node(
         for field in state.timing.field_freshness:
             state.timing.field_freshness[field] = "stale"
         state.timing.critical_paths_stale = True
+        state.timing.critical_paths_stale_reason = "rollback"
         logger.info("[ROLLBACK] All field_freshness marked stale")
 
         # 3. Clear in-memory analysis data from the failed iteration.

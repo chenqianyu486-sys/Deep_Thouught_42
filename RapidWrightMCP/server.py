@@ -610,6 +610,14 @@ async def list_tools() -> list[Tool]:
                         "description": "Distance weight in region scoring (0.3 default). "
                                        "Higher = prefer regions closer to critical path cells.",
                         "default": 0.3
+                    },
+                    "max_utilization_density": {
+                        "type": "number",
+                        "description": "Max allowed region utilization density (0.0-1.0). When the "
+                                       "selected region's density exceeds this, density_warning=true is "
+                                       "returned. Lower this (e.g. 0.80) for high-utilization designs to "
+                                       "avoid congested pblocks. Default 0.90.",
+                        "default": 0.90
                     }
                 },
                 "required": ["target_lut_count", "target_ff_count"]
@@ -633,9 +641,19 @@ async def list_tools() -> list[Tool]:
             pre-pblock state for rollback. On chain failure, design auto-restores to pre-chain state.
 
             OUTPUT includes:
-            - capacity_ok: only proceed if true
-            - deficit: per-type resource shortfall (LUT/FF/DSP/BRAM)
-            - is_soft_recommended: auto-set based on utilization density (>80% = soft constraint)
+            - capacity_ok (bool): only proceed if true. NOTE: capacity_ok only means the region
+              FITS the resources — it does NOT guarantee placement succeeds.
+            - utilization_density (float): objective region fill ratio (required/estimated).
+              Check this BEFORE proceeding: density above ~0.90 means place_design will likely
+              congest and worsen timing.
+            - density_warning (bool): true when utilization_density > max_utilization_density.
+            - input_multiplier / final_multiplier / multiplier_transform: shows how your
+              resource_multiplier was adjusted (adaptive scaling by design size) so you can
+              predict how the parameter maps to region size.
+            - capacity_basis: "initial_region" or "fallback_expansion" (whether the region was
+              found directly or had to be expanded to fit).
+            - deficit: per-type resource shortfall (LUT/FF/DSP/BRAM) when capacity_ok=false.
+            - is_soft_recommended: auto-set based on utilization density (>80% = soft constraint).
             - pblock_ranges, pblock_name, region: the returned pblock_ranges value should be passed as the
               `ranges` parameter to VivadoMCP `create_and_apply_pblock`
 
@@ -643,7 +661,9 @@ async def list_tools() -> list[Tool]:
             fanout_strategy. Running fanout before PBLOCK disrupts placement and
             typically worsens WNS by > 0.5ns.
 
-            NOTE: resource_multiplier defaults to 1.2 (tighter regions; matches schema default).
+            NOTE: resource_multiplier defaults to 2.0 (contest headroom). Lower to 1.2-1.5 for
+            tighter regions on high-utilization designs. Your value is respected (no longer forced
+            to 2.0); the result's multiplier_transform field shows any adaptive adjustment.
             analyze_pblock_region uses 1.5 for looser analysis-time buffer.""",
             inputSchema={
                 "type": "object",
@@ -668,8 +688,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "resource_multiplier": {
                         "type": "number",
-                        "description": "Buffer multiplier for resource targets (default: 1.2 for tighter regions)",
-                        "default": 1.2
+                        "description": "Buffer multiplier for resource targets (default: 2.0 contest headroom). "
+                                       "Lower to 1.2-1.5 for tighter regions on high-utilization designs. "
+                                       "Your value is respected; multiplier_transform in the result shows "
+                                       "any adaptive adjustment.",
+                        "default": 2.0
                     },
                     "critical_path_cells": {
                         "type": "array",
@@ -683,6 +706,14 @@ async def list_tools() -> list[Tool]:
                         "description": "Distance weight in region scoring (0.3 default). "
                                        "Higher = prefer regions closer to critical path cells.",
                         "default": 0.3
+                    },
+                    "max_utilization_density": {
+                        "type": "number",
+                        "description": "Max allowed region utilization density (0.0-1.0). When the "
+                                       "selected region's density exceeds this, density_warning=true is "
+                                       "returned. Lower this (e.g. 0.80) for high-utilization designs to "
+                                       "avoid congested pblocks. Default 0.90.",
+                        "default": 0.90
                     },
                     "place_directive": {
                         "type": "string",
@@ -1720,18 +1751,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     resource_multiplier=arguments.get("resource_multiplier", 1.5),
                     critical_path_cells=arguments.get("critical_path_cells"),
                     distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
+                    max_utilization_density=arguments.get("max_utilization_density", 0.90),
                 )
 
         elif name == "execute_pblock_strategy":
-            # Optional parameters default to 0 (auto-detect in rapidwright_tools)
+            # Optional parameters default to 0 (auto-detect in rapidwright_tools).
+            # resource_multiplier: default 2.0 for contest optimization, but the
+            # LLM may override it (e.g. 1.2 for tighter regions on high-utilization
+            # designs). Forcing 2.0 silently ignored the LLM's parameter — restored.
             result = rw.execute_pblock_strategy(
                 target_lut_count=arguments.get("target_lut_count", 0),
                 target_ff_count=arguments.get("target_ff_count", 0),
                 target_dsp_count=arguments.get("target_dsp_count", 0),
                 target_bram_count=arguments.get("target_bram_count", 0),
-                resource_multiplier=2.0,  # FORCED: multiplier 2.0 for contest optimization
+                resource_multiplier=arguments.get("resource_multiplier", 2.0),
                 critical_path_cells=arguments.get("critical_path_cells"),
                 distance_weight_factor=arguments.get("distance_weight_factor", 0.3),
+                max_utilization_density=arguments.get("max_utilization_density", 0.90),
                 place_directive=arguments.get("place_directive"),
                 route_directive=arguments.get("route_directive"),
             )

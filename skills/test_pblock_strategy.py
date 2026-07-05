@@ -21,6 +21,7 @@ from skills.pblock_strategy import (
     _build_deficit,
     _build_advice_insufficient,
     _build_advice_sufficient,
+    _describe_multiplier_transform,
     _validate_pblock_inputs,
     generate_pblock_plan,
 )
@@ -138,12 +139,64 @@ def test_advice_multi_region():
 # Section C: _build_advice_sufficient
 # ══════════════════════════════════════════════════════════════════════
 
-def test_advice_sufficient():
-    """Static sufficient-capacity advice."""
-    result = _build_advice_sufficient()
+def test_advice_sufficient_low_density():
+    """Low density (<0.80): safe to proceed."""
+    result = _build_advice_sufficient(0.50)
     assert len(result) == 1
-    assert "Region capacity is sufficient" in result[0]
-    print(f"  PASSED")
+    assert "safely proceed" in result[0]
+    assert "50.0%" in result[0]
+    print(f"  PASSED: low-density safe")
+
+
+def test_advice_sufficient_medium_density():
+    """Medium density (0.80-0.90): high-density warning, IS_SOFT noted."""
+    result = _build_advice_sufficient(0.85)
+    assert len(result) == 1
+    assert "Density high" in result[0]
+    assert "85.0%" in result[0]
+    assert "safely proceed" not in result[0]
+    print(f"  PASSED: medium-density warning")
+
+
+def test_advice_sufficient_high_density():
+    """High density (>0.90): congestion warning, NOT safe to proceed."""
+    result = _build_advice_sufficient(0.95)
+    assert len(result) == 1
+    assert "nearly full" in result[0]
+    assert "worsen timing" in result[0]
+    assert "safely proceed" not in result[0]
+    print(f"  PASSED: high-density congestion warning")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Section C2: _describe_multiplier_transform (multiplier transparency)
+# ══════════════════════════════════════════════════════════════════════
+
+def test_multiplier_transform_small_design():
+    """Small design (<10% device): adaptive raised above base."""
+    # 5000 LUTs / 394000 = 1.3% → small design
+    reason = _describe_multiplier_transform(5000, 1000, 1.2, 1.8)
+    assert "1.2→1.8" in reason
+    assert "small design" in reason
+    print(f"  PASSED: {reason}")
+
+
+def test_multiplier_transform_large_design():
+    """Large design (>30% device): adaptive lowered below base."""
+    # 150000 LUTs / 394000 = 38% → large design
+    reason = _describe_multiplier_transform(150000, 1000, 1.5, 1.2)
+    assert "1.5→1.2" in reason
+    assert "large design" in reason
+    print(f"  PASSED: {reason}")
+
+
+def test_multiplier_transform_unchanged():
+    """Medium design: adaptive equals base, unchanged."""
+    # 80000 LUTs / 394000 = 20% → medium design
+    reason = _describe_multiplier_transform(80000, 1000, 1.5, 1.5)
+    assert "unchanged" in reason
+    assert "1.5" in reason
+    print(f"  PASSED: {reason}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -314,7 +367,13 @@ def main():
         test_advice_dsp_bram_deficit,
         test_advice_multi_region,
         # Section C
-        test_advice_sufficient,
+        test_advice_sufficient_low_density,
+        test_advice_sufficient_medium_density,
+        test_advice_sufficient_high_density,
+        # Section C2
+        test_multiplier_transform_small_design,
+        test_multiplier_transform_large_design,
+        test_multiplier_transform_unchanged,
         # Section D
         test_validate_valid,
         test_validate_missing_lut,

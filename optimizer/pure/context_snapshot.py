@@ -229,6 +229,11 @@ def inject_merged_dashboard(
                     field_freshness=state.timing.field_freshness,
                     iteration=current_iter,
                     phase=phase.value if hasattr(phase, "value") else str(phase),
+                    # Record when critical_paths data was actually extracted, so
+                    # the LLM can tell that data from the current iteration is
+                    # current even when field_freshness was conservatively set
+                    # to "stale" at EXECUTE entry (pre-modification).
+                    critical_paths_extraction_iter=state.timing.critical_paths_iteration,
                 )
                 design_data_path = iter_dir
                 state.context.design_data.last_snapshot_iteration = current_iter

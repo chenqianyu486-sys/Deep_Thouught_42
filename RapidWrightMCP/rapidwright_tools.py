@@ -2173,6 +2173,7 @@ def analyze_pblock_region(
     resource_multiplier: float = 1.5,
     critical_path_cells: list[str] | None = None,
     distance_weight_factor: float = 0.3,
+    max_utilization_density: float = 0.90,
 ) -> dict:
     """Analyze FPGA fabric to find optimal PBLOCK region with capacity gating. READ-ONLY.
 
@@ -2216,6 +2217,7 @@ def analyze_pblock_region(
             resource_multiplier=resource_multiplier,
             critical_path_cells=critical_path_cells,
             distance_weight_factor=distance_weight_factor,
+            max_utilization_density=max_utilization_density,
         )
 
         if not result.success:
@@ -2238,6 +2240,7 @@ def execute_pblock_strategy(
     resource_multiplier: float = 1.2,
     critical_path_cells: list[str] | None = None,
     distance_weight_factor: float = 0.3,
+    max_utilization_density: float = 0.90,
     place_directive: str | None = None,
     route_directive: str | None = None,
 ) -> dict:
@@ -2322,6 +2325,7 @@ def execute_pblock_strategy(
             resource_multiplier=resource_multiplier,
             critical_path_cells=critical_path_cells,
             distance_weight_factor=distance_weight_factor,
+            max_utilization_density=max_utilization_density,
         )
 
         if not result.success:

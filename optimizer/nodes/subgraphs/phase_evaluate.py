@@ -144,6 +144,23 @@ def _cool_down_current_strategy_if_stalled(
     if delta > 0:
         return False
 
+    # Chain-tool failure caused a rollback → delta=0 is a rollback artifact, not a
+    # strategy verdict. The strategy never got a fair run (the auto-chain crashed
+    # at place/route and restored the design to baseline). Skip cooldown so it stays
+    # retriable, matching the chain-failure intent recorded by phase_execute.py.
+    # Without this, delta=0 falls through and the strategy is wrongly blocked as
+    # "ineffective" — exactly the PBLOCK -reuse failure pattern.
+    chain_errors = [e for e in state.iteration.tool_errors if e.get("chain")]
+    if chain_errors:
+        tools_str = ", ".join(e.get("tool", "?") for e in chain_errors)
+        logger.info(
+            f"[EVALUATE] Skipping cooldown for '{strategy}' — chain tool(s) "
+            f"{tools_str} failed and design was restored to baseline "
+            f"(delta={delta:+.3f}ns is rollback artifact, not strategy verdict). "
+            f"Strategy remains retriable."
+        )
+        return False
+
     # Measured no-improvement (delta <= 0): strategy executed fairly.
     # Log auxiliary-tool errors for observability but still apply cooldown.
     if state.iteration.tool_errors:
@@ -561,6 +578,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 # the guard must exist for consistency and future tool additions).
                 if tool_name in DESIGN_MODIFICATION_TOOLS:  # pragma: defensive-guard
                     state.timing.critical_paths_stale = True
+                    state.timing.critical_paths_stale_reason = (
+                        "checkpoint reloaded"
+                        if tool_name == "vivado_open_checkpoint"
+                        else "place/route changed"
+                    )
                     for field in state.timing.field_freshness:
                         state.timing.field_freshness[field] = "stale"
                     state.entity_registry.mark_stale()

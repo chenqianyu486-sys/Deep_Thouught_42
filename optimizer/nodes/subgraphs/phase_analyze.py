@@ -19,7 +19,7 @@ from optimizer.pure.tool_summary import summarize_tool_result, compact_tool_summ
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
-from optimizer.pure.timing import parse_timing_summary, is_valid_wns
+from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
@@ -106,6 +106,30 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     logger.info("[ANALYZE] Auto-refreshed design_info after rollback")
             except Exception as _e2:
                 logger.warning(f"[ANALYZE] Auto-refresh design_info failed: {_e2}")
+
+    # ── Auto-refresh stale resource_utilization ──
+    # Utilization informs strategy selection (area-pressure vs timing-bound).
+    # Without this, utilization stays stale from init_analysis throughout the
+    # iteration after any design modification. Refresh once on ANALYZE entry
+    # so the LLM has current LUT/FF/DSP/BRAM figures when choosing a strategy.
+    if state.timing.field_freshness.get("resource_utilization") == "stale":
+        try:
+            _util_report = await call_tool_fn(
+                tool_name="vivado_report_utilization_for_pblock", arguments={},
+                rapidwright_session=deps.rapidwright_session,
+                vivado_session=deps.vivado_session,
+                raw_tool_outputs=state.context.raw_tool_outputs,
+                tool_cache=state.context.tool_cache,
+                design_size_factor=state.timing.design_size_factor,
+                entity_registry=state.entity_registry,
+            )
+            _util = parse_resource_utilization(_util_report)
+            if _util is not None:
+                state.timing.resource_utilization = _util
+                state.timing.field_freshness["resource_utilization"] = "fresh"
+                logger.info(f"[ANALYZE] Auto-refreshed resource_utilization: {_util}")
+        except Exception as _e3:
+            logger.warning(f"[ANALYZE] Auto-refresh resource_utilization failed: {_e3}")
 
     while True:
         tool_round += 1

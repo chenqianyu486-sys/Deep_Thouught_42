@@ -451,6 +451,7 @@ def update_critical_paths(
     ]
     state.timing.critical_paths_iteration = iteration
     state.timing.critical_paths_stale = False
+    state.timing.critical_paths_stale_reason = ""
 
     # Recompute violation summary from updated critical paths
     from .timing import compute_violation_summary

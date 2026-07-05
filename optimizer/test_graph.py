@@ -377,6 +377,25 @@ class TestStrategyCooldown:
 
         assert state.iteration.blocked_strategies == ["PBLOCK"]
 
+    def test_switch_skips_cooldown_on_chain_failure_rollback(self):
+        """A chain-tool failure (e.g. route_design -reuse error) causes the design
+        to be restored to baseline, so delta=0.0 is a rollback artifact — NOT a
+        strategy verdict. The strategy never got a fair run; cooldown must be
+        skipped so it stays retriable. Reproduces the PBLOCK -reuse failure where
+        route_design crashed and PBLOCK was wrongly cooled down as 'ineffective'."""
+        state = self._state_with_strategy_delta(0.0)
+        state.iteration.tool_errors.append({
+            "tool": "vivado_route_design",
+            "result": "[CHAIN ERROR] route_design failed: Unknown option '-reuse'",
+            "chain": True,
+            "strategy": "PBLOCK",
+        })
+
+        _handle_switch_strategy(state, NodeDeps(), "chain failure")
+
+        assert state.iteration.blocked_strategies == []
+        assert state.context.failed_strategies == []
+
     def test_switch_keeps_improving_strategy_available(self):
         state = self._state_with_strategy_delta(0.060)
 
