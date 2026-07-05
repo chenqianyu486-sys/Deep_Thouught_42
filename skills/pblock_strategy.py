@@ -186,6 +186,66 @@ def _build_advice_sufficient(utilization_density: float) -> list[str]:
     ]
 
 
+def _estimate_bound_cell_resources(design, cell_names: list[str]) -> dict | None:
+    """Estimate LUT/FF/DSP/BRAM resources consumed by a set of bound cells.
+
+    Sizes the pblock region around the cells that will actually be bound to
+    it (local pblock), rather than the whole design. Classifies each cell by
+    type via the RapidWright API (same scheme as rapidwright_tools auto-detect,
+    plus MUXF):
+      LUT*        -> luts
+      FD*         -> ffs   (FDPE/FDRE/FDSE/FDCE)
+      MUXF*       -> luts  (MUXF7/MUXF8 occupy the SLICE F7/F8MUX site;
+                            count as LUT-equivalent for SLICE site demand)
+      DSP*        -> dsps
+      RAMB*/BRAM* -> brams
+
+    Returns {luts, ffs, dsps, brams, matched, total}, or None when no cell
+    resolves (caller falls back to whole-design sizing).
+    """
+    if not cell_names:
+        return None
+    luts = ffs = dsps = brams = 0
+    matched = 0
+    for name in cell_names:
+        try:
+            cell = design.getCell(name)
+            if cell is None:
+                continue
+            ctype = str(cell.getType())
+        except Exception:
+            continue
+        matched += 1
+        if ctype.startswith("LUT"):
+            luts += 1
+        elif ctype.startswith("FD") or ctype in ("FDPE", "FDRE", "FDSE", "FDCE"):
+            ffs += 1
+        elif ctype.startswith("MUXF"):
+            luts += 1
+        elif ctype.startswith("DSP"):
+            dsps += 1
+        elif ctype.startswith("RAMB") or ctype.startswith("BRAM"):
+            brams += 1
+    if matched == 0:
+        logger.warning(
+            "[PBLOCK] _estimate_bound_cell_resources: 0/%d cells resolved in "
+            "design; falling back to whole-design sizing.", len(cell_names),
+        )
+        return None
+    if matched < len(cell_names) * 0.5:
+        logger.warning(
+            "[PBLOCK] _estimate_bound_cell_resources: low match rate %d/%d; "
+            "bound-resource estimate may undercount.",
+            matched, len(cell_names),
+        )
+    logger.info(
+        "[PBLOCK] Bound cell resources: matched %d/%d -> LUT=%d FF=%d DSP=%d BRAM=%d",
+        matched, len(cell_names), luts, ffs, dsps, brams,
+    )
+    return {"luts": luts, "ffs": ffs, "dsps": dsps, "brams": brams,
+            "matched": matched, "total": len(cell_names)}
+
+
 def generate_pblock_plan(
     design,
     target_lut_count: int,
@@ -251,15 +311,39 @@ def generate_pblock_plan(
         resource_multiplier, adaptive_multiplier, target_lut_count, target_ff_count,
         multiplier_transform,
     )
-    required_lut = int(target_lut_count * adaptive_multiplier)
-    required_ff = int(target_ff_count * adaptive_multiplier)
-    required_dsp = int(target_dsp_count * resource_multiplier)
-    required_bram = int(target_bram_count * resource_multiplier)
+    # Size the region for the BOUND cells (local pblock) when critical path
+    # cells are provided and resolve in the design; otherwise fall back to
+    # whole-design sizing. The 2026-07-04 chain refactor binds only
+    # critical_path_cells to the pblock, so sizing the region for the whole
+    # design produced a huge no-op region (see dcp_optimizer_run-20260705_130916).
+    # adaptive_multiplier still uses target_lut_count (whole design) for the
+    # small/medium/large classification — that is a whole-design property.
+    bound_resources = (
+        _estimate_bound_cell_resources(design, critical_path_cells)
+        if critical_path_cells else None
+    )
+    if bound_resources and bound_resources["matched"] >= max(1, len(critical_path_cells) // 2):
+        sizing_basis = "bound_cells"
+        base_lut = bound_resources["luts"]
+        base_ff = bound_resources["ffs"]
+        base_dsp = bound_resources["dsps"]
+        base_bram = bound_resources["brams"]
+    else:
+        sizing_basis = "whole_design"
+        base_lut = target_lut_count
+        base_ff = target_ff_count
+        base_dsp = target_dsp_count
+        base_bram = target_bram_count
+
+    required_lut = int(base_lut * adaptive_multiplier)
+    required_ff = int(base_ff * adaptive_multiplier)
+    required_dsp = int(base_dsp * resource_multiplier)
+    required_bram = int(base_bram * resource_multiplier)
 
     logger.info(
-        "analyze_pblock_region: target LUT=%d FF=%d DSP=%d BRAM=%d | "
+        "analyze_pblock_region: sizing_basis=%s | base LUT=%d FF=%d DSP=%d BRAM=%d | "
         "multiplier=%.1fx | required LUT=%d FF=%d DSP=%d BRAM=%d",
-        target_lut_count, target_ff_count, target_dsp_count, target_bram_count,
+        sizing_basis, base_lut, base_ff, base_dsp, base_bram,
         resource_multiplier, required_lut, required_ff, required_dsp, required_bram,
     )
 
@@ -417,8 +501,14 @@ def generate_pblock_plan(
     # Compute utilization density (objective, independent of capacity_ok).
     # capacity_ok only means "fits"; density tells the LLM HOW full the region is,
     # so it can judge congestion risk before committing to place_design.
+    # For local pblocks (bound_cells), density is the BOUND cells' occupancy of
+    # the region — not the whole design's — so is_soft reflects true constraint
+    # pressure (a few bound cells in a sized region → low density → hard pblock).
     est_luts = max(estimated.get("luts", 1), 1)
-    utilization_density = required_lut / est_luts
+    if sizing_basis == "bound_cells":
+        utilization_density = bound_resources["luts"] / est_luts
+    else:
+        utilization_density = required_lut / est_luts
     density_warning = utilization_density > max_utilization_density
 
     # Step 5: Build advice (density-graded when sufficient, deficit-driven when not)
@@ -448,10 +538,10 @@ def generate_pblock_plan(
     if capacity_ok:
         soft_str = "true" if is_soft_recommended else "false"
         next_steps = [
-            "vivado: place_design -unplace",
+            "vivado: unplace_cells(cells=critical_path_cells)  # local unplace of bound cells only",
             f"vivado: create_and_apply_pblock with pblock_ranges above, "
-            f"pblock_name=pblock_tight, is_soft={soft_str}",
-            "vivado: place_design (re-place cells within pblock constraint)",
+            f"pblock_name=pblock_tight, is_soft={soft_str}, cells=critical_path_cells",
+            "vivado: place_design (re-place unplaced cells within pblock constraint)",
             "vivado: route_design",
             "vivado: report_timing_summary (verify WNS improvement after PBLOCK re-placement)",
         ]
@@ -460,13 +550,19 @@ def generate_pblock_plan(
     if capacity_ok:
         qualifier = " (expanded via fallback)" if expanded else ""
         density_tag = f" [WARNING: density {utilization_density:.1%} > {max_utilization_density:.0%}]" if density_warning else ""
+        sizing_note = ""
+        if sizing_basis == "bound_cells":
+            sizing_note = (
+                f" (sized on {bound_resources['matched']} bound cells: "
+                f"LUT={bound_resources['luts']}, FF={bound_resources['ffs']})"
+            )
         msg = (
             f"PBLOCK region found{qualifier}: cols {region['col_min']}-{region['col_max']}, "
             f"rows {region['row_min']}-{region['row_max']}. "
             f"Estimated: {estimated['luts']:,} LUTs, {estimated['ffs']:,} FFs, "
             f"{estimated['dsps']} DSPs, {estimated['brams']} BRAMs. "
             f"Capacity OK (target: {required_lut:,} LUTs x{adaptive_multiplier}, "
-            f"{required_ff:,} FFs x{adaptive_multiplier}). "
+            f"{required_ff:,} FFs x{adaptive_multiplier}){sizing_note}. "
             f"Utilization density {utilization_density:.1%}{density_tag}. "
             f"Multiplier: {input_multiplier}→{adaptive_multiplier} ({multiplier_transform})."
         )
@@ -527,6 +623,13 @@ def generate_pblock_plan(
         # no critical paths were available — the chain's unplace step will
         # surface that as an error (data quality guard upstream should prevent).
         "critical_path_cells": critical_path_cells or [],
+        # Local-pblock sizing transparency (2026-07-05): when critical_path_cells
+        # resolve, the region is sized for those bound cells (not the whole
+        # design), density reflects bound-cell occupancy, and is_soft follows
+        # true density. Lets the LLM see what drove the region size.
+        "sizing_basis": sizing_basis,
+        "bound_resources": bound_resources,
+        "bound_cell_count": bound_resources["matched"] if bound_resources else 0,
     }
 
 
@@ -578,7 +681,10 @@ def _validate_pblock_inputs(**kwargs) -> tuple[bool, str]:
         ParameterSpec("resource_multiplier", float,
                       "Buffer multiplier for resource targets", default=1.5),
         ParameterSpec("critical_path_cells", list,
-                      "Critical path cell names for region centering (from Dashboard critical_paths)",
+                      "Cells to BIND to the pblock (constraint targets, from Dashboard "
+                      "critical_paths). When provided and resolved in the design, the "
+                      "region is sized around these cells (local pblock), not the whole "
+                      "design; is_soft follows the bound cells' true density.",
                       default=None),
         ParameterSpec("distance_weight_factor", float,
                       "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
@@ -642,8 +748,11 @@ class PblockStrategySkill(Skill):
                 "Side effects: cell placement changes, routing changes (via chain). "
                 "Trigger: avg_distance > 70 tiles (distributed design), or recommendation == 'PBLOCK'. "
                 "ORDERING: For distributed designs (avg_distance > 70), run this BEFORE fanout optimization. "
-                "The system will automatically chain place_design -unplace, create_and_apply_pblock, "
+                "The system will automatically chain unplace_cells(critical_path_cells), "
+                "create_and_apply_pblock(cells=critical_path_cells, is_soft=...), "
                 "place_design, route_design, and report_timing_summary after this skill returns. "
+                "When critical_path_cells resolve, the region is sized for those bound cells "
+                "(local pblock), not the whole design. "
                 "Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts. "
                 "NOTE: resource_multiplier defaults to 1.2x for tighter regions. "
                 "CONSTRAINTS: Only proceed if capacity_ok is true in the result.",
@@ -663,7 +772,10 @@ class PblockStrategySkill(Skill):
         ParameterSpec("resource_multiplier", float,
                       "Buffer multiplier for resource targets. Default 1.2x for tighter regions.", default=1.2),
         ParameterSpec("critical_path_cells", list,
-                      "Critical path cell names for region centering (from Dashboard critical_paths)",
+                      "Cells to BIND to the pblock (constraint targets, from Dashboard "
+                      "critical_paths). When provided and resolved in the design, the "
+                      "region is sized around these cells (local pblock), not the whole "
+                      "design; is_soft follows the bound cells' true density.",
                       default=None),
         ParameterSpec("distance_weight_factor", float,
                       "Distance weight in region scoring (0.3 default, higher = more centering on critical paths)",
@@ -682,13 +794,15 @@ class ExecutePblockStrategySkill(Skill):
 
     Same analysis as PblockStrategySkill, but designed for automatic Vivado
     tool chaining. The optimizer's SKILL_CHAIN_ACTIONS will auto-execute:
-        vivado_place_design(-unplace) →
-        vivado_create_and_apply_pblock(is_soft from recommendation) →
+        vivado_unplace_cells(cells=critical_path_cells) →
+        vivado_create_and_apply_pblock(cells=critical_path_cells, is_soft=...) →
         vivado_place_design →
         vivado_route_design
 
-    If any chain step fails, the design is restored from a pre-chain checkpoint.
-    Critical paths are auto-refreshed after placement-affecting chain tools.
+    When critical_path_cells resolve, the region is sized for those bound
+    cells (local pblock), not the whole design. If any chain step fails, the
+    design is restored from a pre-chain checkpoint. Critical paths are
+    auto-refreshed after placement-affecting chain tools.
     """
 
     def execute(self, context: SkillContext,

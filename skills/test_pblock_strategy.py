@@ -24,6 +24,7 @@ from skills.pblock_strategy import (
     _describe_multiplier_transform,
     _validate_pblock_inputs,
     generate_pblock_plan,
+    _estimate_bound_cell_resources,
 )
 from skills.smart_region_search import _suggest_multi_region_split
 
@@ -345,6 +346,90 @@ def test_multi_region_density_aware():
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Section G: _estimate_bound_cell_resources (local-pblock sizing)
+# ══════════════════════════════════════════════════════════════════════
+
+class _MockCell:
+    """Minimal stand-in for a RapidWright Cell exposing getType()."""
+    def __init__(self, ctype: str):
+        self._ctype = ctype
+
+    def getType(self):
+        return self._ctype
+
+
+class _MockDesign:
+    """Resolves a subset of cell names to _MockCell objects via getCell()."""
+    def __init__(self, cells: dict[str, str]):
+        # cells: {name: type_str}
+        self._cells = cells
+
+    def getCell(self, name):
+        ctype = self._cells.get(name)
+        return _MockCell(ctype) if ctype is not None else None
+
+
+def test_bound_resources_lut_ff_muxf():
+    """LUT6 + FDRE + MUXF7 → luts=2 (LUT6 + MUXF7), ffs=1."""
+    design = _MockDesign({
+        "u/lut6_a": "LUT6",
+        "u/fdre_b": "FDRE",
+        "u/muxf7_c": "MUXF7",
+    })
+    result = _estimate_bound_cell_resources(design, list(design._cells.keys()))
+    assert result is not None
+    assert result["luts"] == 2, f"Expected luts=2 (LUT6+MUXF7), got {result['luts']}"
+    assert result["ffs"] == 1, f"Expected ffs=1, got {result['ffs']}"
+    assert result["dsps"] == 0 and result["brams"] == 0
+    assert result["matched"] == 3
+    print(f"  PASSED: luts={result['luts']}, ffs={result['ffs']} (MUXF counted as LUT)")
+
+
+def test_bound_resources_dsp_bram():
+    """DSP48E2 + RAMB36 → dsps=1, brams=1."""
+    design = _MockDesign({
+        "u/dsp_a": "DSP48E2",
+        "u/ramb_b": "RAMB36",
+    })
+    result = _estimate_bound_cell_resources(design, list(design._cells.keys()))
+    assert result["dsps"] == 1 and result["brams"] == 1
+    assert result["luts"] == 0 and result["ffs"] == 0
+    print(f"  PASSED: dsps={result['dsps']}, brams={result['brams']}")
+
+
+def test_bound_resources_no_match():
+    """No cell resolves → None (caller falls back to whole-design sizing)."""
+    design = _MockDesign({"u/real": "LUT6"})
+    result = _estimate_bound_cell_resources(design, ["u/ghost1", "u/ghost2"])
+    assert result is None, f"Expected None when 0 cells match, got {result}"
+    print(f"  PASSED: None (0 match → fallback)")
+
+
+def test_bound_resources_empty():
+    """Empty cell list → None."""
+    design = _MockDesign({})
+    result = _estimate_bound_cell_resources(design, [])
+    assert result is None
+    print(f"  PASSED: None (empty input)")
+
+
+def test_bound_resources_partial_match():
+    """Half matched still returns a dict (matched < total, low-rate warning)."""
+    design = _MockDesign({
+        "u/lut_a": "LUT6",
+        "u/lut_b": "LUT5",
+    })
+    # 4 names, only 2 resolve → matched=2, total=4 (exactly 50% → passes threshold)
+    result = _estimate_bound_cell_resources(
+        design, ["u/lut_a", "u/lut_b", "u/ghost1", "u/ghost2"]
+    )
+    assert result is not None
+    assert result["matched"] == 2 and result["total"] == 4
+    assert result["luts"] == 2
+    print(f"  PASSED: matched={result['matched']}/{result['total']} (partial)")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # Main orchestrator
 # ══════════════════════════════════════════════════════════════════════
 
@@ -390,6 +475,12 @@ def main():
         test_multi_region_not_enough,
         test_multi_region_few_columns,
         test_multi_region_density_aware,
+        # Section G
+        test_bound_resources_lut_ff_muxf,
+        test_bound_resources_dsp_bram,
+        test_bound_resources_no_match,
+        test_bound_resources_empty,
+        test_bound_resources_partial_match,
     ]
 
     passed = 0

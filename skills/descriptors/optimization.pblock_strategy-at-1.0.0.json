@@ -42,7 +42,7 @@
       },
       "critical_path_cells": {
         "type": "array",
-        "description": "Critical path cell names for region centering (from Dashboard critical_paths)"
+        "description": "Cells to BIND to the pblock (constraint targets, from Dashboard critical_paths). When provided and resolved in the design, the region is sized around these cells (local pblock), not the whole design; is_soft follows the bound cells' true density."
       },
       "distance_weight_factor": {
         "type": "number",
