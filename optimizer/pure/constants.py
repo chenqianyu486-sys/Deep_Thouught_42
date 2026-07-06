@@ -109,6 +109,66 @@ STRATEGY_MAP: dict[str, StrategyEntry] = {
 # Auto-derived from STRATEGY_MAP so it never drifts.
 SKILL_TOOL_MAP: dict[str, str] = {v.execute_tool: v.skill_id for v in STRATEGY_MAP.values()}
 
+# ── Contract layer centralized derivations ──────────────────────────
+# Single source of truth: all tool sets derive from STRATEGY_MAP.
+
+PRIMARY_STRATEGY_TOOL_NAMES: frozenset[str] = frozenset(
+    v.execute_tool for v in STRATEGY_MAP.values()
+)
+
+
+def get_strategy_primary_tool(strategy: str) -> str | None:
+    entry = STRATEGY_MAP.get(strategy)
+    return entry.execute_tool if entry else None
+
+
+# ── Auto-derived strategy tool names (must precede DESIGN_MODIFICATION_TOOLS) ─
+
+# Names of tools that perform the actual optimization work (strategy tools).
+# Used by EVALUATE cooling logic to distinguish strategy-tool errors (which
+# mean the strategy didn't execute fairly) from auxiliary-tool errors (which
+# mean the strategy ran but auxiliary analysis tools failed). When only
+# auxiliary tools have errors, the strategy still got a fair execution chance
+# and should be cooled down if it showed no improvement.
+# Auto-derived from STRATEGY_MAP with supplementary execution tools appended.
+STRATEGY_TOOL_NAMES: frozenset[str] = frozenset(
+    PRIMARY_STRATEGY_TOOL_NAMES
+    | {
+        "vivado_physopt_and_route",
+        "vivado_phys_opt_design",
+        "vivado_opt_design",
+        "vivado_place_design",
+        "vivado_route_design",
+        "rapidwright_optimize_cell_placement",
+        "rapidwright_optimize_lut_input_cone",
+    }
+)
+
+# Core tools always available during EXECUTE phase.
+EXECUTE_CORE_TOOLS: frozenset[str] = frozenset(
+    PRIMARY_STRATEGY_TOOL_NAMES
+    | {
+        "vivado_physopt_and_route",
+        "vivado_phys_opt_design",
+        "vivado_opt_design",
+        "vivado_place_design",
+        "vivado_route_design",
+        "vivado_write_checkpoint",
+        "vivado_open_checkpoint",
+        "vivado_report_timing_summary",
+        "report_step_state",
+    }
+)
+
+# Tools whose execution triggers a post-eval timing comparison.
+POST_EVAL_TOOLS: frozenset[str] = frozenset({
+    "vivado_route_design",
+    "vivado_phys_opt_design",
+    "vivado_physopt_and_route",
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
+})
+
 
 # ── Threshold constants ──────────────────────────────────────────
 
@@ -275,36 +335,23 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
 # Tools that modify the design (place, route, phys_opt, RW strategies).
 # When called, all dashboard field_freshness entries are marked "stale"
 # so the LLM knows which data may no longer be current.
-DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset({
-    "vivado_phys_opt_design",
-    "vivado_route_design",
-    "vivado_place_design",
-    "vivado_create_and_apply_pblock",
-    "vivado_unplace_cells",
-    "vivado_physopt_and_route",
-    "vivado_open_checkpoint",
-    # RapidWright strategy tools — all modify the design
-    "rapidwright_execute_pblock_strategy",
-    "rapidwright_execute_fanout_strategy",
-    "rapidwright_optimize_pin_swapping",
-    "rapidwright_flatten_lut_cascade",
-    "rapidwright_replicate_critical_cells",
-    "rapidwright_execute_congestion_spreading",
-    "rapidwright_execute_register_retiming",
-    "rapidwright_execute_net_swapping",
-    "rapidwright_execute_opt_design_strategy",
-    "rapidwright_execute_combinational_rebalancing_strategy",
-    "rapidwright_execute_lut_muxf_repack_strategy",
-    "rapidwright_execute_muxf_tree_reorder_strategy",
-    "rapidwright_smart_retiming",
-    # Independent RapidWright tools — also modify design
-    "rapidwright_optimize_cell_placement",
-    "rapidwright_optimize_lut_input_cone",
-    "rapidwright_optimize_fanout_batch",
-    "rapidwright_execute_physopt_strategy",
-    # Vivado tools
-    "vivado_opt_design",
-})
+# Auto-derived from STRATEGY_TOOL_NAMES with extra modification tools appended.
+DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset(
+    STRATEGY_TOOL_NAMES
+    | {
+        "vivado_create_and_apply_pblock",
+        "vivado_unplace_cells",
+        "vivado_open_checkpoint",
+        "rapidwright_optimize_fanout_batch",
+        "rapidwright_execute_physopt_strategy",
+        "rapidwright_smart_retiming",
+        "vivado_opt_design",
+    }
+)
+
+# Tools with side effects on the design — reuses DESIGN_MODIFICATION_TOOLS
+# to prevent drift between the two definitions.
+SIDE_EFFECT_TOOLS: frozenset[str] = DESIGN_MODIFICATION_TOOLS
 
 
 # ── TCL modification detection (for vivado_run_tcl) ───────────────
@@ -422,34 +469,6 @@ def build_llm_extra_body(
 # so strategies get real P&R validation rather than being skipped on a
 # post-eval UNCHANGED verdict.
 HEAVY_CHAIN_SKILLS: frozenset[str] = frozenset()
-
-# Names of tools that perform the actual optimization work (strategy tools).
-# Used by EVALUATE cooling logic to distinguish strategy-tool errors (which
-# mean the strategy didn't execute fairly) from auxiliary-tool errors (which
-# mean the strategy ran but auxiliary analysis tools failed). When only
-# auxiliary tools have errors, the strategy still got a fair execution chance
-# and should be cooled down if it showed no improvement.
-STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({
-    "rapidwright_execute_pblock_strategy",
-    "rapidwright_execute_muxf_tree_reorder_strategy",
-    "rapidwright_execute_fanout_strategy",
-    "rapidwright_execute_congestion_spreading",
-    "rapidwright_optimize_pin_swapping",
-    "rapidwright_flatten_lut_cascade",
-    "rapidwright_replicate_critical_cells",
-    "rapidwright_execute_register_retiming",
-    "rapidwright_execute_lut_muxf_repack_strategy",
-    "rapidwright_execute_combinational_rebalancing_strategy",
-    "rapidwright_execute_net_swapping",
-    "rapidwright_optimize_cell_placement",
-    "rapidwright_optimize_lut_input_cone",
-    "vivado_physopt_and_route",
-    "vivado_phys_opt_design",
-    "vivado_opt_design",
-    "vivado_place_design",
-    "vivado_route_design",
-})
-
 
 # place_design/route_design steps accept an optional directive override via
 # args_from_skill (keys: place_directive / route_directive in the skill result).
@@ -574,6 +593,14 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
     ],
 }
+
+
+def get_skill_chain_actions(tool_name: str) -> list[dict] | None:
+    return SKILL_CHAIN_ACTIONS.get(tool_name)
+
+
+def has_skill_chain(tool_name: str) -> bool:
+    return tool_name in SKILL_CHAIN_ACTIONS
 
 
 # ── Optional chain actions (LLM can choose to use or skip) ──────────

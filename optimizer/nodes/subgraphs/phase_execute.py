@@ -25,7 +25,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl, STRATEGY_MAP, StrategyEntry
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl, STRATEGY_MAP, StrategyEntry, POST_EVAL_TOOLS, SIDE_EFFECT_TOOLS
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -33,39 +33,6 @@ from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
 
-# Tools that trigger mandatory WNS evaluation
-POST_EVAL_TOOLS = frozenset({
-    "vivado_route_design",
-    "rapidwright_execute_pblock_strategy",
-    "vivado_physopt_and_route",  # triggers WNS eval after PhysOpt+route
-    "vivado_phys_opt_design",  # standalone phys_opt_design for split physopt chain
-})
-
-# Tools that modify the design (side-effect tools).
-# Used for no-progress detection: if LLM only calls read-only tools for
-# NO_PROGRESS_LIMIT consecutive rounds, exit the phase early.
-SIDE_EFFECT_TOOLS = frozenset({
-    "vivado_place_design",
-    "vivado_route_design",
-    "vivado_phys_opt_design",
-    "vivado_physopt_and_route",
-    "vivado_opt_design",
-    "vivado_create_and_apply_pblock",
-    "rapidwright_execute_pblock_strategy",
-    "rapidwright_execute_fanout_strategy",
-    "rapidwright_execute_congestion_spreading",
-    "rapidwright_optimize_pin_swapping",
-    "rapidwright_flatten_lut_cascade",
-    "rapidwright_replicate_critical_cells",
-    "rapidwright_execute_register_retiming",
-    "rapidwright_smart_retiming",
-    "rapidwright_execute_net_swapping",
-    "rapidwright_optimize_cell_placement",
-    "rapidwright_optimize_lut_input_cone",
-    "rapidwright_execute_combinational_rebalancing_strategy",
-    "rapidwright_execute_lut_muxf_repack_strategy",
-    "rapidwright_execute_muxf_tree_reorder_strategy",
-})
 # No-progress detection threshold. After this many consecutive rounds
 # without any side-effect tool call, exit the EXECUTE phase early.
 #
