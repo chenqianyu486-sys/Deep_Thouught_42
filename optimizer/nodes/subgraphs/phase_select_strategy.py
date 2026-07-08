@@ -15,14 +15,22 @@ from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_fl
 from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
+from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
-from optimizer.pure.constants import DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS
+from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS
+from optimizer.pure.pblock_plan import (
+    PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
+    extract_selected_plan_from_payload,
+    plan_requires_execution_rebuild,
+)
+from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -96,7 +104,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         tool_round += 1
         state.iteration.tool_round = tool_round
         _pending_signal: str | None = None  # defer exit until pending tools execute
-        if _check_phase_exit(state, tool_round, max_rounds):
+        if _check_phase_exit(state, tool_round, max_rounds).should_exit:
             break
 
         # Call LLM with minimal tools
@@ -190,6 +198,11 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 if len(state.strategy.phase_history) > 100:
                     state.strategy.phase_history = state.strategy.phase_history[-100:]
                 state.strategy.current_phase = "SELECT_STRATEGY"
+                if step_state.strategy_name == "PBLOCK":
+                    try:
+                        await _ensure_pending_pblock_plan(state, deps)
+                    except Exception as e:
+                        logger.warning(f"[SELECT_STRATEGY] PBLOCK pre-freeze failed: {e}")
                 if message.tool_calls:
                     _pending_signal = "STRATEGY_SELECTED"
                 else:
@@ -266,7 +279,11 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         # No tool calls, no strategy selected: prompt again
         if not assistant_content.strip() and not message.tool_calls:
             state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 2:
+            empty_exit = build_phase_exit_contract(
+                consecutive_empty_responses=state.context.consecutive_empty_responses,
+                empty_response_limit=2,
+            )
+            if empty_exit.should_exit:
                 logger.warning(
                     f"[SELECT] {state.context.consecutive_empty_responses} consecutive "
                     f"empty responses, forcing exit"
@@ -307,15 +324,25 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     return LoopPhase.EXECUTE
 
 
-def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
-    if tool_round > max_rounds:
+def _check_phase_exit(
+    state: OptimizerState,
+    tool_round: int,
+    max_rounds: int,
+) -> PhaseExitContract:
+    contract = build_phase_exit_contract(
+        round_count=tool_round,
+        max_rounds=max_rounds,
+        user_exit_requested=state.control.user_exit_requested,
+    )
+    if not contract.should_exit:
+        return contract
+    if contract.event == "max_rounds":
         logger.warning(f"[SELECT_STRATEGY] Max rounds reached ({tool_round} > {max_rounds})")
-        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="SELECT_STRATEGY")
-        return True
-    if state.control.user_exit_requested:
-        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="SELECT_STRATEGY")
-        return True
-    return False
+    elif contract.event == "user_requested":
+        logger.info("[SELECT_STRATEGY] User exit requested")
+    if contract.record_reason:
+        record_flow_signal(state, "SYSTEM_EXIT", contract.record_reason, phase="SELECT_STRATEGY")
+    return contract
 
 
 async def _call_phase_llm(state, deps, phase_tools):
@@ -400,3 +427,50 @@ def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
                 blocked.add(entry.strategy)
             # else: TTL expired, strategy is unblocked and can be retried
     return blocked
+
+
+async def _ensure_pending_pblock_plan(state: OptimizerState, deps: NodeDeps) -> None:
+    """Freeze a PBLOCK plan before EXECUTE when SELECT chooses PBLOCK."""
+    if (
+        state.context.pending_pblock_plan
+        and not plan_requires_execution_rebuild(state.context.pending_pblock_plan)
+    ):
+        return
+    baseline_util = (
+        state.timing.baseline_resource_utilization
+        or state.timing.resource_utilization
+        or {}
+    )
+    if not baseline_util:
+        return
+    cells: list[str] = []
+    if state.timing.critical_paths:
+        from optimizer.pure.entities import extract_registry_cells_for_inject
+        cells = extract_registry_cells_for_inject(
+            state.entity_registry,
+            state.timing.critical_paths,
+        )
+    result = await call_tool_structured_fn(
+        "rapidwright_analyze_pblock_region",
+        {
+            "target_lut_count": baseline_util.get("LUT", 0),
+            "target_ff_count": baseline_util.get("FF", 0),
+            "target_dsp_count": baseline_util.get("DSP", 0),
+            "target_bram_count": baseline_util.get("BRAM", 0),
+            "critical_path_cells": cells,
+            "resource_multiplier": PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
+        },
+        deps.rapidwright_session,
+        deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
+    )
+    payload = result.payload if isinstance(result.payload, dict) else None
+    if not payload:
+        return
+    selected_plan = extract_selected_plan_from_payload(payload)
+    if selected_plan is not None:
+        state.context.pending_pblock_plan = selected_plan.to_dict()
+    candidate_plans = payload.get("candidate_plans")
+    if isinstance(candidate_plans, list):
+        state.context.pending_pblock_candidates = [dict(item) for item in candidate_plans if isinstance(item, dict)]
+        state.context.attempted_pblock_candidate_ids.clear()

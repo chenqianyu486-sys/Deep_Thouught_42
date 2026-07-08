@@ -16,7 +16,7 @@ from __future__ import annotations
 import copy
 from enum import Enum
 
-from .constants import get_strategy_primary_tool
+from .tool_catalog import EXECUTE_CORE_TOOLS, get_strategy_primary_tool
 
 
 class LoopPhase(str, Enum):
@@ -103,23 +103,8 @@ PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
     }) | CONSISTENCY_VALIDATION_TOOLS,
 
     LoopPhase.EXECUTE: frozenset({
-        # Strategy execution tools
-        "rapidwright_execute_pblock_strategy",
-        "rapidwright_execute_fanout_strategy",
-        "rapidwright_execute_congestion_spreading",
-        "rapidwright_optimize_pin_swapping",
-        "rapidwright_flatten_lut_cascade",
-        "rapidwright_replicate_critical_cells",
-        "rapidwright_execute_net_swapping",
-        "rapidwright_optimize_cell_placement",
-        "rapidwright_smart_region_search",
+        *EXECUTE_CORE_TOOLS,
         "rapidwright_analyze_pblock_region",
-        "rapidwright_optimize_lut_input_cone",
-        "rapidwright_execute_opt_design_strategy",
-        "rapidwright_execute_combinational_rebalancing_strategy",
-        "rapidwright_execute_lut_muxf_repack_strategy",
-        "rapidwright_execute_muxf_tree_reorder_strategy",
-        "rapidwright_execute_physopt_strategy",
         # Independent RapidWright tools (for fine-grained control)
         "rapidwright_optimize_fanout_batch",
         "rapidwright_analyze_critical_path_spread",

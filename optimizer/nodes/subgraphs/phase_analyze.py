@@ -18,10 +18,13 @@ from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools
 from optimizer.pure.tool_summary import summarize_tool_result, compact_tool_summary
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
+from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization
 from optimizer.pure.critical_path import refresh_violation_summary
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body
+from optimizer.pure.pblock_plan import extract_selected_plan_from_payload
+from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
@@ -137,7 +140,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         _pending_signal: str | None = None  # defer exit until pending tools execute
 
         # Check exit conditions
-        if _check_phase_exit(state, tool_round, max_rounds):
+        if _check_phase_exit(state, tool_round, max_rounds).should_exit:
             break
 
         # Call LLM with phase-filtered tools
@@ -305,6 +308,8 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Track WNS
                 _track_wns_from_result(state, tool_name, result)
+                if tool_name in ("rapidwright_analyze_pblock_region", "rapidwright_execute_pblock_strategy"):
+                    _update_pending_pblock_state_from_result(state, result)
 
                 # Sync canonical cell names into the entity registry from
                 # search_cells results (compression-resistant SSOT).
@@ -345,7 +350,11 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         # Track consecutive empty responses (no content AND no tool calls)
         if not assistant_content.strip() and not message.tool_calls:
             state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 2:
+            empty_exit = build_phase_exit_contract(
+                consecutive_empty_responses=state.context.consecutive_empty_responses,
+                empty_response_limit=2,
+            )
+            if empty_exit.should_exit:
                 logger.warning(
                     f"[ANALYZE] {state.context.consecutive_empty_responses} consecutive "
                     f"empty responses, forcing ANALYZE_DONE"
@@ -379,35 +388,57 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     return LoopPhase.SELECT_STRATEGY
 
 
-def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
+def _check_phase_exit(
+    state: OptimizerState,
+    tool_round: int,
+    max_rounds: int,
+) -> PhaseExitContract:
     """Check common exit conditions for the phase loop."""
-    if tool_round > max_rounds:
+    contract = build_phase_exit_contract(
+        round_count=tool_round,
+        max_rounds=max_rounds,
+        start_time=state.control.start_time,
+        wall_clock_timeout=state.control.wall_clock_timeout,
+        now=time.time(),
+        user_exit_requested=state.control.user_exit_requested,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
+    )
+    if not contract.should_exit:
+        return contract
+    if contract.event == "max_rounds":
         logger.warning(f"[ANALYZE] Max rounds reached ({tool_round} > {max_rounds})")
-        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="ANALYZE")
-        return True
-
-    if state.control.start_time:
-        elapsed = time.time() - state.control.start_time
-        if elapsed > state.control.wall_clock_timeout:
-            logger.warning(f"[ANALYZE] Wall-clock timeout: {elapsed:.0f}s")
-            state.control.is_done = True
-            state.control.done_reason = "wall_clock_timeout"
-            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase="ANALYZE")
-            return True
-
-    if state.control.user_exit_requested:
+    elif contract.event == "wall_clock_timeout":
+        elapsed = time.time() - state.control.start_time if state.control.start_time else 0.0
+        logger.warning(f"[ANALYZE] Wall-clock timeout: {elapsed:.0f}s")
+    elif contract.event == "user_requested":
         logger.info("[ANALYZE] User exit requested")
-        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="ANALYZE")
-        return True
-
-    if state.cost.total_cost >= state.cost.cost_hard_limit:
-        logger.warning(f"[ANALYZE] Cost limit reached")
+    elif contract.event == "cost_limit":
+        logger.warning("[ANALYZE] Cost limit reached")
+    if contract.set_is_done:
         state.control.is_done = True
-        state.control.done_reason = "cost_limit"
-        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase="ANALYZE")
-        return True
+    if contract.done_reason:
+        state.control.done_reason = contract.done_reason
+    if contract.record_reason:
+        record_flow_signal(state, "SYSTEM_EXIT", contract.record_reason, phase="ANALYZE")
+    return contract
 
-    return False
+
+def _update_pending_pblock_state_from_result(state: OptimizerState, raw_result: str) -> None:
+    """Freeze PBLOCK candidates produced during ANALYZE for later EXECUTE use."""
+    try:
+        payload = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    selected_plan = extract_selected_plan_from_payload(payload)
+    candidate_plans = payload.get("candidate_plans")
+    if selected_plan is not None:
+        state.context.pending_pblock_plan = selected_plan.to_dict()
+    if isinstance(candidate_plans, list):
+        state.context.pending_pblock_candidates = [dict(item) for item in candidate_plans if isinstance(item, dict)]
+        state.context.attempted_pblock_candidate_ids.clear()
 
 
 async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2.0):

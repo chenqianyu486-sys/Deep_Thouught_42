@@ -12,17 +12,17 @@ import time
 from typing import Any, Optional
 
 from context_manager.logging_config import sanitize_payload
-from .constants import (
-    ROUTING_FAILURE_PHRASES,
-    _TOOL_TIMEOUT_DEFAULTS,
-    _DEFAULT_TOOL_TIMEOUT,
-    _TOOL_TIMEOUT_MAX,
-    _MCP_ERROR_PATTERNS,
-    DESIGN_MODIFICATION_TOOLS,
-)
+from .constants import ROUTING_FAILURE_PHRASES
 from .entities import (
     EntityRegistry,
     validate_and_sanitize_cell_args,
+)
+from .tool_contracts import ToolCallResult, build_tool_call_result, is_mcp_error_response
+from .tool_catalog import DESIGN_MODIFICATION_TOOLS
+from .tool_runtime_policy import (
+    _TOOL_TIMEOUT_DEFAULTS,
+    _DEFAULT_TOOL_TIMEOUT,
+    _TOOL_TIMEOUT_MAX,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,18 +56,6 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "design_data_read",
     "design_data_list_snapshots",
 })
-
-
-def _is_mcp_error_response(text: str) -> bool:
-    """Check if an MCP tool response string indicates a recoverable error.
-    
-    MCP servers may return error strings containing [ERROR] patterns instead
-    of raising exceptions. These must be treated as failures by the agent
-    framework: no caching, cache invalidation, and proper error tracking.
-    """
-    if not text:
-        return False
-    return any(pat in text for pat in _MCP_ERROR_PATTERNS)
 
 
 async def call_tool(
@@ -312,6 +300,22 @@ async def call_tool(
                         text_parts.append(block.text)
                 result_text = "\n".join(text_parts) if text_parts else "(no output)"
                 result_size = sum(len(p) for p in text_parts) if text_parts else 0
+                # MCP protocol-level failures (e.g. inputSchema validation
+                # rejections) arrive as isError=True with plain text that does
+                # not match _MCP_ERROR_PATTERNS. Wrap them in the standard
+                # {"error": ...} envelope so downstream consumers
+                # (ToolCallResult, auto-chain fast-fail, post-eval) see a
+                # failure instead of silently continuing. A silently dropped
+                # place_design unplace step is how run-20260708_012142 lost
+                # its PBLOCK re-place trajectory.
+                if getattr(result, "isError", False) and not is_mcp_error_response(result_text):
+                    logger.error(
+                        f"[MCP_PROTOCOL_ERROR] tool={tool_name}: {result_text[:300]}"
+                    )
+                    result_text = json.dumps({
+                        "error": f"MCP tool error: {result_text[:1500]}",
+                        "tool": tool_name,
+                    })
                 logger.info(
                     f"[MCP_RESPONSE] tool={tool_name}, elapsed={elapsed:.1f}s, "
                     f"result_size={result_size} chars, heartbeats={heartbeat_count}"
@@ -320,7 +324,7 @@ async def call_tool(
                     dcp_path = arguments.get("dcp_path", "?")
                     logger.warning(f"--- [DESIGN_LOAD] Vivado design switched to: {dcp_path} ---")
                 # Detect MCP error responses — must not be cached and must invalidate cache
-                is_error_response = _is_mcp_error_response(result_text)
+                is_error_response = is_mcp_error_response(result_text)
                 # Cache logic: error responses and side-effect tools both invalidate cache
                 if tool_cache is not None:
                     if is_error_response or tool_name in _NO_CACHE_TOOLS:
@@ -383,3 +387,35 @@ def is_routing_failure(error_msg: str) -> bool:
     """Check if error message indicates a routing failure (non-timeout)."""
     error_lower = error_msg.lower()
     return any(phrase in error_lower for phrase in ROUTING_FAILURE_PHRASES)
+
+
+async def call_tool_structured(
+    tool_name: str,
+    arguments: dict,
+    rapidwright_session: Any,
+    vivado_session: Any,
+    raw_tool_outputs: dict | None = None,
+    iteration: int = 0,
+    tool_round: int = 0,
+    high_fanout_nets: list | None = None,
+    tool_cache: dict | None = None,
+    design_size_factor: float = 1.0,
+    entity_registry: "EntityRegistry | None" = None,
+    run_dir: "Path | None" = None,
+) -> ToolCallResult:
+    """Execute a tool and return a structured result envelope."""
+    raw_text = await call_tool(
+        tool_name=tool_name,
+        arguments=arguments,
+        rapidwright_session=rapidwright_session,
+        vivado_session=vivado_session,
+        raw_tool_outputs=raw_tool_outputs,
+        iteration=iteration,
+        tool_round=tool_round,
+        high_fanout_nets=high_fanout_nets,
+        tool_cache=tool_cache,
+        design_size_factor=design_size_factor,
+        entity_registry=entity_registry,
+        run_dir=run_dir,
+    )
+    return build_tool_call_result(tool_name, raw_text)

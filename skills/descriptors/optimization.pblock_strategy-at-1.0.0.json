@@ -53,12 +53,17 @@
         "type": "number",
         "description": "Max allowed region utilization density (0.0-1.0). When the selected region's density exceeds this, density_warning=true is returned in the result. Lower this (e.g. 0.80) for high-utilization designs to avoid congested pblocks. Default 0.90.",
         "default": 0.9
+      },
+      "frozen_pblock_plan": {
+        "type": "object",
+        "description": "Optional frozen PBLOCK plan from ANALYZE/SELECT. When provided, EXECUTE must not re-plan the region and should only execute this plan."
       }
     },
     "required": [
       "target_lut_count",
       "target_ff_count",
-      "critical_path_cells"
+      "critical_path_cells",
+      "frozen_pblock_plan"
     ]
   },
   "returns": {

@@ -22,10 +22,12 @@ from skills.pblock_strategy import (
     _build_advice_insufficient,
     _build_advice_sufficient,
     _describe_multiplier_transform,
+    _should_use_whole_design_fallback,
     _validate_pblock_inputs,
     generate_pblock_plan,
     _estimate_bound_cell_resources,
 )
+from optimizer.pure.pblock_plan import PBLOCK_GLOBAL_MODE, PBLOCK_UNPLACE_GLOBAL, PblockExecutionPlan
 from skills.smart_region_search import _suggest_multi_region_split
 
 
@@ -433,6 +435,36 @@ def test_bound_resources_partial_match():
 # Main orchestrator
 # ══════════════════════════════════════════════════════════════════════
 
+def test_local_pblock_fallback_triggers_for_single_column_tiny_bound_region():
+    """Large designs should not keep an ultra-tiny single-column local pblock."""
+    should_fallback, reason = _should_use_whole_design_fallback(
+        sizing_basis="bound_cells",
+        columns_used=1,
+        utilization_density=0.03,
+        target_lut_count=31370,
+        target_ff_count=1660,
+        bound_resources={"luts": 35, "ffs": 15},
+    )
+    assert should_fallback is True
+    assert "single-column" in reason
+    print(f"  PASSED: {reason}")
+
+
+def test_local_pblock_fallback_does_not_trigger_for_multi_column_region():
+    """A wider local pblock should keep bound-cell binding."""
+    should_fallback, reason = _should_use_whole_design_fallback(
+        sizing_basis="bound_cells",
+        columns_used=3,
+        utilization_density=0.03,
+        target_lut_count=31370,
+        target_ff_count=1660,
+        bound_resources={"luts": 35, "ffs": 15},
+    )
+    assert should_fallback is False
+    assert reason is None
+    print("  PASSED: multi-column local pblock preserved")
+
+
 def main():
     print("=" * 60)
     print("Unit Tests for pblock_strategy / smart_region_search")
@@ -459,6 +491,8 @@ def main():
         test_multiplier_transform_small_design,
         test_multiplier_transform_large_design,
         test_multiplier_transform_unchanged,
+        test_local_pblock_fallback_triggers_for_single_column_tiny_bound_region,
+        test_local_pblock_fallback_does_not_trigger_for_multi_column_region,
         # Section D
         test_validate_valid,
         test_validate_missing_lut,
@@ -502,6 +536,57 @@ def main():
     print(f"Results: {passed} passed, {failed} failed")
     print("=" * 60)
     return 0 if failed == 0 else 1
+
+
+def test_generate_plan_accepts_frozen_plan_without_replanning():
+    """Frozen plan should round-trip through generate_pblock_plan unchanged."""
+    frozen = PblockExecutionPlan(
+        plan_mode=PBLOCK_GLOBAL_MODE,
+        candidate_id="global_cp_center",
+        pblock_name="pblock_tight",
+        pblock_ranges="SLICE_X0Y0:SLICE_X54Y299",
+        resource_multiplier=2.0,
+        target_lut_count=12000,
+        target_ff_count=24000,
+        target_dsp_count=0,
+        target_bram_count=0,
+        bind_cells_to_pblock=False,
+        unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        is_soft=True,
+        place_directive="Explore",
+        route_directive="Explore",
+        reference_col=48,
+        reference_row=150,
+        selection_reason="global_cp_center:smart_region_search",
+        critical_path_cells_snapshot=["u0", "u1"],
+        capacity_ok=True,
+        estimated_resources={"luts": 14000, "ffs": 28000, "dsps": 0, "brams": 0},
+        region={"col_min": 0, "col_max": 54, "row_min": 0, "row_max": 299, "columns_used": 55},
+        utilization_density=0.86,
+    )
+    result = generate_pblock_plan(
+        "mock",
+        target_lut_count=12000,
+        target_ff_count=24000,
+        frozen_pblock_plan=frozen.to_dict(),
+    )
+    assert result.get("status") == "success"
+    assert result.get("recommended_candidate_id") == "global_cp_center"
+    assert result.get("selected_pblock_plan", {}).get("candidate_id") == "global_cp_center"
+    assert result.get("candidate_plans")[0]["candidate_id"] == "global_cp_center"
+    assert result.get("bind_critical_path_cells_to_pblock") is False
+
+
+def test_generate_plan_rejects_invalid_frozen_plan():
+    """Malformed frozen plan should fail fast."""
+    result = generate_pblock_plan(
+        "mock",
+        target_lut_count=12000,
+        target_ff_count=24000,
+        frozen_pblock_plan={"candidate_id": "broken"},
+    )
+    assert result.get("status") == "error"
+    assert "Invalid frozen_pblock_plan" in result.get("message", "")
 
 
 if __name__ == "__main__":

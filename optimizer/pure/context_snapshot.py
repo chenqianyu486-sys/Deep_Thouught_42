@@ -209,7 +209,8 @@ def inject_merged_dashboard(
                 _freshness_parts = sorted(
                     f"{k}={v}" for k, v in state.timing.field_freshness.items()
                 )
-                return f"wns={_wns:.3f}|cp={_cp_count}|{'|'.join(_freshness_parts)}"
+                _wns_part = "N/A" if _wns is None else f"{_wns:.3f}"
+                return f"wns={_wns_part}|cp={_cp_count}|{'|'.join(_freshness_parts)}"
 
             # Store full snapshot to disk when iteration changes OR when
             # the data fingerprint differs (data changed within same iteration).

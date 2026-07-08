@@ -1808,7 +1808,11 @@ async def list_tools():
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "enum": list(PLACE_SAFE_DIRECTIVES),
+                        # "unplace" is not a Vivado directive but a tool-level
+                        # alias for `place_design -unplace`; without it here the
+                        # MCP schema validation rejects the auto-chain's unplace
+                        # step before the handler ever runs.
+                        "enum": list(PLACE_SAFE_DIRECTIVES) + ["unplace"],
                         "default": "Default",
                         "description": "Placement directive. See enum for all valid values."
                     },

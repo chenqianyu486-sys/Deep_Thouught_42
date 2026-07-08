@@ -442,6 +442,10 @@ class ContextState:
     consecutive_empty_responses: int = 0
     # PBLOCK multiplier tracking: records (iteration, multiplier) for variation
     previous_pblock_multipliers: list[tuple[int, float]] = field(default_factory=list)
+    # Frozen PBLOCK planning state shared between analysis/selection/execute.
+    pending_pblock_plan: dict[str, Any] | None = None
+    pending_pblock_candidates: list[dict[str, Any]] = field(default_factory=list)
+    attempted_pblock_candidate_ids: list[str] = field(default_factory=list)
     # Design data persistence tracking (for DesignDataManager)
     design_data: DesignDataState = field(default_factory=DesignDataState)
 

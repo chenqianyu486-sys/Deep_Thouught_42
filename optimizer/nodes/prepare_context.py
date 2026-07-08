@@ -142,7 +142,7 @@ AUTO-INJECTED STRATEGY DATA (DO NOT extract before calling execution tools):
   critical_paths as [stale], refresh ONCE with vivado_extract_critical_path_cells(num_paths=10),
   then immediately call the execution tool.
 
-PBLOCK AUTO-CHAIN BEHAVIOR (LOCAL pblock on critical path cells only):
+PBLOCK AUTO-CHAIN BEHAVIOR (prefer LOCAL pblock, auto-fallback when too narrow):
   rapidwright_execute_pblock_strategy auto-chains: unplace_cells(cells=critical_path_cells) →
   create_and_apply_pblock(cells=critical_path_cells, is_soft=is_soft_recommended) →
   place_design → route_design → report_timing_summary.
@@ -155,6 +155,10 @@ PBLOCK AUTO-CHAIN BEHAVIOR (LOCAL pblock on critical path cells only):
   resource_multiplier), NOT the whole design. is_soft follows the BOUND cells'
   true density — when only a few cells are bound, density is low and IS_SOFT=0
   (hard pblock), providing a genuine placement constraint.
+  EXCEPTION: if that local plan collapses to an ultra-tiny single-column region for
+  a much larger distributed design, the tool may automatically fall back to a wider
+  whole-design soft pblock, omit cells=... on the create/apply step, and replace
+  local unplace_cells with a global place_design -unplace before re-placement.
 
   Very small WNS improvements (e.g., <0.05ns) may be P&R random noise rather than
   pblock effect. If PBLOCK yields delta ≈ 0 or negligible, do NOT re-select it

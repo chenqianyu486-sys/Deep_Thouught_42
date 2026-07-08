@@ -3,7 +3,7 @@
   "specVersion": "3.0",
   "id": "optimization.execute_pblock_strategy@1.0.0",
   "displayName": "Execute PBLOCK Full Strategy",
-  "description": "Complete PBLOCK workflow: analyze FPGA fabric, compute optimal region, and return pblock_ranges for automatic Vivado tool chaining. MUTATING (via chained Vivado tools). Side effects: cell placement changes, routing changes (via chain). Trigger: avg_distance > 70 tiles (distributed design), or recommendation == 'PBLOCK'. ORDERING: For distributed designs (avg_distance > 70), run this BEFORE fanout optimization. The system will automatically chain unplace_cells(critical_path_cells), create_and_apply_pblock(cells=critical_path_cells, is_soft=...), place_design, route_design, and report_timing_summary after this skill returns. When critical_path_cells resolve, the region is sized for those bound cells (local pblock), not the whole design. Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts. NOTE: resource_multiplier defaults to 1.2x for tighter regions. CONSTRAINTS: Only proceed if capacity_ok is true in the result.",
+  "description": "Complete PBLOCK workflow: analyze FPGA fabric, compute optimal region, and return pblock_ranges for automatic Vivado tool chaining. MUTATING (via chained Vivado tools). Side effects: cell placement changes, routing changes (via chain). Trigger: avg_distance > 70 tiles (distributed design), or recommendation == 'PBLOCK'. ORDERING: For distributed designs (avg_distance > 70), run this BEFORE fanout optimization. The system will automatically chain unplace_cells(critical_path_cells), create_and_apply_pblock(cells=critical_path_cells, is_soft=...), place_design, route_design, and report_timing_summary after this skill returns. When critical_path_cells resolve, the region is sized for those bound cells (local pblock), not the whole design. Prerequisite: vivado_report_utilization_for_pblock to get LUT/FF counts. NOTE: resource_multiplier defaults to 2.0x for execute mode; this is the validated logicnets baseline, while analysis mode can remain tighter/adaptive. CONSTRAINTS: Only proceed if capacity_ok is true in the result.",
   "idempotency": "non-idempotent",
   "sideEffects": [
     "cell_placement",
@@ -40,8 +40,8 @@
       },
       "resource_multiplier": {
         "type": "number",
-        "description": "Buffer multiplier for resource targets. Default 1.2x for tighter regions.",
-        "default": 1.2
+        "description": "Buffer multiplier for resource targets. Default 2.0x for execute mode (validated on logicnets).",
+        "default": 2.0
       },
       "critical_path_cells": {
         "type": "array",

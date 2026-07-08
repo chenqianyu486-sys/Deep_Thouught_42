@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# Tool-layer exports are progressively moving into dedicated modules.
+# ``constants.py`` remains a compatibility barrel while consumers migrate.
+
 
 # ── PBLOCK strategy parameters ────────────────────────────────
 PBLOCK_DISTANCE_WEIGHT_DEFAULT = 0.3
@@ -601,6 +604,48 @@ def get_skill_chain_actions(tool_name: str) -> list[dict] | None:
 
 def has_skill_chain(tool_name: str) -> bool:
     return tool_name in SKILL_CHAIN_ACTIONS
+
+
+# Chain-behavior contracts consumed by EXECUTE.
+# PBLOCK is analysis-first: the skill itself computes ranges and the Vivado
+# chain applies them, so RW directional pre-check is not meaningful there.
+RW_PRECHECK_EXEMPT_CHAIN_TOOLS: frozenset[str] = frozenset({
+    "rapidwright_execute_pblock_strategy",
+})
+
+# Some chain tools legitimately return sparse payloads but still require the
+# Vivado chain to materialize real timing impact.
+EMPTY_RESULT_CHAIN_EXEMPT_TOOLS: frozenset[str] = frozenset({
+    "rapidwright_execute_pblock_strategy",
+    "rapidwright_flatten_lut_cascade",
+})
+
+
+def tool_uses_rw_precheck(tool_name: str) -> bool:
+    """Return True when a chained tool should run the RW directional pre-check."""
+    return has_skill_chain(tool_name) and tool_name not in RW_PRECHECK_EXEMPT_CHAIN_TOOLS
+
+
+def should_skip_chain_for_empty_result(
+    tool_name: str,
+    skill_result_data: dict | None,
+) -> tuple[bool, str | None]:
+    """Return whether the auto-chain should be skipped for a sparse skill result."""
+    if not has_skill_chain(tool_name) or not isinstance(skill_result_data, dict):
+        return False, None
+
+    status = skill_result_data.get("status")
+    is_skipped = status in ("skipped", "no_action", "unchanged")
+    has_empty_payload = (
+        not skill_result_data.get("optimized_cells")
+        and not skill_result_data.get("critical_paths")
+    )
+
+    if is_skipped:
+        return True, "skipped"
+    if has_empty_payload and tool_name not in EMPTY_RESULT_CHAIN_EXEMPT_TOOLS:
+        return True, "no data produced"
+    return False, None
 
 
 # ── Optional chain actions (LLM can choose to use or skip) ──────────

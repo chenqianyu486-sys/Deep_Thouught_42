@@ -28,6 +28,22 @@ SCORE_GUARD_MIN_ITERATION = 2
 SCORE_GUARD_MIN_WNS_GAIN_NS = 0.003
 SCORE_GUARD_STALL_LIMIT = 1
 
+# Only these done_reason values may terminate the whole run. Everything else
+# ("strategies_exhausted", "switch_strategy", "rollback", "iteration_success",
+# "phase_error", ...) describes the outcome of ONE iteration's strategy loop
+# and is demoted in check_exit_node — the run ended prematurely at 24min in
+# run-20260708_024847 because EVALUATE's auto-rollback overwrote the
+# exhausted reason while SELECT's leaked is_done=True survived to the edge.
+SYSTEM_LEVEL_DONE_REASONS = frozenset({
+    "timing_already_met",
+    "wall_clock_timeout",
+    "wns_target_met",
+    "score_guard_bank_best",
+    "max_no_improvement",
+    "cost_limit",
+    "cost_limit_no_improvement",
+})
+
 
 def _competition_score_guard_reason(state: OptimizerState, elapsed: float) -> str:
     """Return early-stop reason when it is better to bank the current best."""
@@ -82,6 +98,28 @@ async def check_exit_node(
     Returns:
         Next node name (edge after_check_exit resolves final destination).
     """
+
+    # Iteration-level loop signals must not terminate the whole run: the
+    # llm_tool_loop exits with is_done=True when SELECT/EVALUATE signals
+    # EXHAUSTED, and later handlers may overwrite done_reason (observed:
+    # "switch_strategy", "rollback"). "No strategy left in THIS iteration"
+    # only means the iteration is over. Demote every non-system reason and
+    # let the system-level guards below (wall clock, score guard,
+    # no-improvement, cost) decide whether a fresh iteration — with
+    # per-iteration cooldowns reset — may start. Route through ROLLBACK so
+    # the next iteration starts from the best checkpoint (strong-baseline
+    # trajectory: run-20260706_165117 won its -0.536ns via iteration 2
+    # re-running PBLOCK from restored best).
+    if (state.control.is_done
+            and state.control.done_reason not in SYSTEM_LEVEL_DONE_REASONS):
+        demoted_reason = state.control.done_reason or "unset"
+        state.control.is_done = False
+        state.control.done_reason = "rollback"
+        logger.info(
+            green(f"[check_exit] Iteration-level signal '{demoted_reason}' "
+                  f"demoted — continuing with a fresh iteration from best checkpoint")
+        )
+        record_flow_signal(state, "EXIT_DEMOTED", demoted_reason, phase="CHECK_EXIT")
 
     # Check if initial timing already meets constraints - skip all optimization
     if (state.timing.initial_wns is not None

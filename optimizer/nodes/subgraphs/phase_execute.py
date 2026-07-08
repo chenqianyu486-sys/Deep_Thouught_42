@@ -22,10 +22,40 @@ from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, filter_tools_for_phase, get_phase_max_rounds
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
-from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, SKILL_CHAIN_ACTIONS, HEAVY_CHAIN_SKILLS, PHASE_TOOL_RATE_LIMITS, _TOOL_TIMEOUT_DEFAULTS, build_llm_extra_body, RAPIDWRIGHT_PRECHECK_ENABLED, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_REGRESS_THRESHOLD, PLACE_ONLY_CHECK_SKILLS, STRATEGY_TOOL_NAMES, STRATEGY_DEFAULT_DIRECTIVES, KNOWN_BROKEN_DIRECTIVES, is_modifying_tcl, STRATEGY_MAP, StrategyEntry, POST_EVAL_TOOLS, SIDE_EFFECT_TOOLS
+from optimizer.pure.execute_contracts import (
+    build_timing_update_exit_contract,
+    build_post_eval_guidance,
+    build_precheck_failure_contract,
+    extract_skill_precheck_diagnostics,
+    extract_post_eval_metrics,
+    get_pblock_place_only_threshold,
+    next_empty_response_streak,
+    next_no_progress_count,
+    resolve_ordered_pblock_candidates,
+    resolve_selected_pblock_plan,
+    resolve_chain_step_arguments,
+    resolve_chain_step_runtime_override,
+    should_exit_for_large_regression,
+    should_block_strategy,
+    tool_requires_post_chain_path_refresh,
+    verdict_from_wns_values,
+    should_recompute_chain_verdict,
+)
+from optimizer.pure.pblock_plan import (
+    extract_selected_plan_from_payload,
+    plan_requires_execution_rebuild,
+    should_keep_strategy_unblocked,
+    should_route_pblock_after_place,
+)
+from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
+from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body, is_modifying_tcl
+from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS, POST_EVAL_TOOLS, SIDE_EFFECT_TOOLS, STRATEGY_MAP, STRATEGY_TOOL_NAMES, StrategyEntry
+from optimizer.pure.tool_chain_policy import HEAVY_CHAIN_SKILLS, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_CHECK_SKILLS, PLACE_ONLY_REGRESS_THRESHOLD, RAPIDWRIGHT_PRECHECK_ENABLED, UNPLACE_VERIFY_MAX_PLACED_CELLS, get_skill_chain_actions, has_skill_chain, should_skip_chain_for_empty_result, tool_uses_rw_precheck
+from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -42,25 +72,6 @@ logger = logging.getLogger(__name__)
 #   - Execution tools (place_design=1800s, route_design=1800s) always reset counter
 #   - LLM round-trip latency ~5-15s → ~20-60s overhead per 4-round window
 NO_PROGRESS_LIMIT = 4
-
-
-# Once a timing-evaluated execution tool has a clear verdict, EXECUTE has
-# produced enough signal. Hand control to EVALUATE instead of asking the LLM
-# for another execution round just to decide what the verdict already implies.
-POST_EVAL_EXIT_VERDICTS = frozenset({"IMPROVED", "UNCHANGED", "REGRESSED"})
-
-
-def _execute_exit_reason_after_timing_update(
-    tool_name: str,
-    post_eval_verdict: str | None,
-    target_met: bool,
-) -> str:
-    """Return why EXECUTE should yield after an evaluated tool, or empty string."""
-    if target_met:
-        return "wns_target_met"
-    if tool_name in POST_EVAL_TOOLS and post_eval_verdict in POST_EVAL_EXIT_VERDICTS:
-        return f"post_eval_{post_eval_verdict.lower()}"
-    return ""
 
 
 async def _ensure_iteration_start_checkpoint(
@@ -314,7 +325,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         tool_round += 1
         state.iteration.tool_round = tool_round
 
-        if _check_phase_exit(state, tool_round, max_rounds):
+        if _check_phase_exit(state, tool_round, max_rounds).should_exit:
             break
 
         # Call LLM with execution tools
@@ -413,6 +424,27 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # NOTE: always overrides LLM-provided data with verified state data
                 # to prevent data quality issues from raw TCL extraction.
                 if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region"):
+                    baseline_util = (
+                        state.timing.baseline_resource_utilization
+                        or state.timing.resource_utilization
+                        or {}
+                    )
+                    injected_resource_fields = []
+                    for arg_name, util_key in (
+                        ("target_lut_count", "LUT"),
+                        ("target_ff_count", "FF"),
+                        ("target_dsp_count", "DSP"),
+                        ("target_bram_count", "BRAM"),
+                    ):
+                        if arg_name not in tool_args and util_key in baseline_util:
+                            tool_args[arg_name] = baseline_util[util_key]
+                            injected_resource_fields.append(f"{arg_name}={baseline_util[util_key]}")
+                    if injected_resource_fields:
+                        logger.info(
+                            f"[EXECUTE] Injected baseline resources for {tool_name}: "
+                            + ", ".join(injected_resource_fields)
+                        )
+
                     had_llm_data = bool(tool_args.get("critical_path_cells"))
                     if state.timing.critical_paths:
                         from optimizer.pure.entities import extract_registry_cells_for_inject
@@ -502,9 +534,51 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
 
                 # Auto-compute adaptive resource_multiplier for pblock strategy
                 if tool_name == "rapidwright_execute_pblock_strategy":
+                    multiplier_source = "llm"
                     if "resource_multiplier" not in tool_args:
                         tool_args["resource_multiplier"] = _compute_adaptive_pblock_multiplier(state)
-                        logger.info(f"[EXECUTE] Adaptive resource_multiplier: {tool_args['resource_multiplier']:.2f}")
+                        multiplier_source = "adaptive"
+                    try:
+                        current_multiplier = float(tool_args["resource_multiplier"])
+                    except Exception:
+                        current_multiplier = 0.0
+                    # logicnets_jscl contest notes validated 2.0x as the
+                    # execute-mode floor; lower values repeatedly collapsed
+                    # PBLOCK into weak/no-op behavior.
+                    if current_multiplier < 2.0:
+                        logger.warning(
+                            "[EXECUTE] Raising PBLOCK execute resource_multiplier "
+                            "from %.2f to validated floor 2.00x (source=%s)",
+                            current_multiplier,
+                            multiplier_source,
+                        )
+                        current_multiplier = 2.0
+                        tool_args["resource_multiplier"] = current_multiplier
+                    else:
+                        tool_args["resource_multiplier"] = current_multiplier
+                    logger.info(
+                        "[EXECUTE] PBLOCK execute resource_multiplier: %.2f (source=%s)",
+                        tool_args["resource_multiplier"],
+                        multiplier_source,
+                    )
+                    if (
+                        state.context.pending_pblock_plan
+                        and plan_requires_execution_rebuild(state.context.pending_pblock_plan)
+                    ):
+                        logger.warning(
+                            "[EXECUTE] Dropping understrength frozen PBLOCK plan %s; "
+                            "falling back to execute-time 2.0x planning",
+                            state.context.pending_pblock_plan.get("candidate_id", "unknown"),
+                        )
+                        state.context.pending_pblock_plan = None
+                        state.context.pending_pblock_candidates = []
+                        state.context.attempted_pblock_candidate_ids.clear()
+                    if state.context.pending_pblock_plan:
+                        tool_args["frozen_pblock_plan"] = dict(state.context.pending_pblock_plan)
+                        logger.info(
+                            "[EXECUTE] Injected frozen PBLOCK plan: %s",
+                            state.context.pending_pblock_plan.get("candidate_id", "unknown"),
+                        )
 
                 # Auto-inject critical_paths for LUT cascade tool
                 # NOTE: always overrides LLM-provided data — see pblock section above.
@@ -671,8 +745,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # unreliable due to systematic timing differences between engines.
                 rw_precheck_baseline = None
                 if (RAPIDWRIGHT_PRECHECK_ENABLED
-                        and tool_name in SKILL_CHAIN_ACTIONS
-                        and tool_name != "rapidwright_execute_pblock_strategy"
+                        and tool_uses_rw_precheck(tool_name)
                         and deps.rapidwright_session
                         and state.timing.design_state != DesignState.UNPLACED):
                     rw_precheck_baseline = await _get_rw_timing_estimate(state, deps)
@@ -688,7 +761,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         f"(wireload would be inaccurate)"
                     )
 
-                result = await call_tool_fn(
+                tool_result = await call_tool_structured_fn(
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
@@ -701,6 +774,12 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     entity_registry=state.entity_registry,
                     run_dir=state.control.run_dir,
                 )
+                result = tool_result.raw_text
+                if (
+                    tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pblock_region")
+                    and isinstance(tool_result.payload, dict)
+                ):
+                    _update_pending_pblock_state_from_payload(state, tool_result.payload)
                 tool_elapsed = time.time() - tool_start
                 logger.debug(f"[EXECUTE] {tool_name} completed in {tool_elapsed:.1f}s")
                 _pending_tool_count -= 1  # This tool call is no longer pending
@@ -831,47 +910,46 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 if tool_name in POST_EVAL_TOOLS:
                     # For physopt_and_route, WNS is already in the JSON result
                     if tool_name == "vivado_physopt_and_route":
-                        try:
-                            data = json.loads(result) if result else {}
-                            post = data.get("post_optimization", {})
-                            if isinstance(post, dict) and post.get("wns") is not None:
-                                prev_wns = pre_tool_wns
-                                new_wns = float(post["wns"])
-                                raw_tns = post.get("tns")
-                                new_tns = float(raw_tns) if isinstance(raw_tns, (int, float)) else None
-                                raw_fe = post.get("failing_endpoints")
-                                new_fe = int(raw_fe) if isinstance(raw_fe, (int, float)) else None
-                                state.timing.latest_wns = new_wns
-                                if new_tns is not None:
-                                    state.timing.latest_tns = new_tns
-                                if new_fe is not None:
-                                    state.timing.latest_failing_endpoints = new_fe
-                                if new_wns > state.timing.best_wns:
-                                    state.timing.best_wns = new_wns
-                                    state.timing.best_wns_iteration = state.iteration.current
-                                    state.timing.best_wns_tns = new_tns
-                                    state.timing.best_wns_failing_endpoints = new_fe
-                                    state.control.needs_save = True
-                                delta = new_wns - prev_wns if prev_wns is not None else 0.0
-                                verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
-                                if verdict in ("UNCHANGED", "REGRESSED"):
-                                    if state.strategy.current_strategy not in state.iteration.blocked_strategies:
-                                        state.iteration.blocked_strategies.append(state.strategy.current_strategy)
-                                post_eval_verdict = verdict
-                                eval_notice = f"[EVAL] After {tool_name}: WNS={new_wns:.3f}ns (delta={delta:+.3f}ns vs previous). {verdict}."
-                                if new_tns is not None:
-                                    eval_notice += f" TNS={new_tns:.3f}ns"
-                                if deps.compat is not None:
-                                    deps.compat.add_message("user", eval_notice)
-                                logger.info(f"[EXECUTE] Post-eval (from result): {tool_name} -> WNS={new_wns:.3f}ns (delta={delta:+.3f}, {verdict})")
-                                # WNS came from the tool's post-route JSON — it is
-                                # current. Sync timing_summary freshness so the
-                                # dashboard does not show a fresh WNS tagged [stale].
-                                _mark_timing_fresh(state)
-                            else:
-                                # Fallback to full timing report if JSON doesn't have WNS
-                                post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
-                        except (json.JSONDecodeError, TypeError, ValueError):
+                        metrics = extract_post_eval_metrics(
+                            tool_name,
+                            tool_result.payload or result,
+                        )
+                        if metrics is not None:
+                            prev_wns = pre_tool_wns
+                            new_wns = metrics["wns"]
+                            new_tns = metrics["tns"]
+                            new_fe = metrics["failing_endpoints"]
+                            state.timing.latest_wns = new_wns
+                            if new_tns is not None:
+                                state.timing.latest_tns = new_tns
+                            if new_fe is not None:
+                                state.timing.latest_failing_endpoints = new_fe
+                            if new_wns > state.timing.best_wns:
+                                state.timing.best_wns = new_wns
+                                state.timing.best_wns_iteration = state.iteration.current
+                                state.timing.best_wns_tns = new_tns
+                                state.timing.best_wns_failing_endpoints = new_fe
+                                state.control.needs_save = True
+                            verdict, delta = verdict_from_wns_values(prev_wns, new_wns)
+                            if (
+                                tool_name != "rapidwright_execute_pblock_strategy"
+                                and should_block_strategy(verdict)
+                            ):
+                                if state.strategy.current_strategy not in state.iteration.blocked_strategies:
+                                    state.iteration.blocked_strategies.append(state.strategy.current_strategy)
+                            post_eval_verdict = verdict
+                            eval_notice = f"[EVAL] After {tool_name}: WNS={new_wns:.3f}ns (delta={delta:+.3f}ns vs previous). {verdict}."
+                            if new_tns is not None:
+                                eval_notice += f" TNS={new_tns:.3f}ns"
+                            if deps.compat is not None:
+                                deps.compat.add_message("user", eval_notice)
+                            logger.info(f"[EXECUTE] Post-eval (from result): {tool_name} -> WNS={new_wns:.3f}ns (delta={delta:+.3f}, {verdict})")
+                            # WNS came from the tool's post-route JSON — it is
+                            # current. Sync timing_summary freshness so the
+                            # dashboard does not show a fresh WNS tagged [stale].
+                            _mark_timing_fresh(state)
+                        else:
+                            # Fallback to full timing report if JSON doesn't have WNS
                             post_eval_verdict = await _post_eval_hook(state, deps, tool_name)
                     else:
                         try:
@@ -881,12 +959,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 await _try_save_best_checkpoint(state, deps)
 
                 # Inject guidance when post-eval shows no improvement
-                if (post_eval_verdict == "UNCHANGED"
-                        and tool_name in POST_EVAL_TOOLS
-                        and deps.compat is not None):
-                    deps.compat.add_message("user",
-                        f"[GUIDANCE] {tool_name} produced no WNS improvement. "
-                        f"EXECUTE will yield to EVALUATE for strategy selection.")
+                guidance_message = build_post_eval_guidance(tool_name, post_eval_verdict)
+                if guidance_message and deps.compat is not None:
+                    deps.compat.add_message("user", guidance_message)
 
                 # ── Level 1: RapidWright directional pre-check ──────────────
                 # Before paying the cost of the Vivado P&R chain (~900s), use
@@ -903,40 +978,26 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # before the pre-check so we can use it for differentiated handling.
                 skill_was_skipped = False
                 skill_diagnostics = ""
-                if (tool_name in SKILL_CHAIN_ACTIONS
-                        and tool_name != "rapidwright_execute_pblock_strategy"
-                        and result):
-                    try:
-                        skill_data = json.loads(result) if isinstance(result, str) else {}
-                        if isinstance(skill_data, dict):
-                            if skill_data.get("status") == "skipped":
-                                skill_was_skipped = True
-                                analysis = skill_data.get("analysis_summary", {}) or {}
-                                if isinstance(analysis, dict):
-                                    diagnosis = analysis.get("diagnosis", "no_match")
-                                    cell_types = analysis.get("cell_type_distribution", {})
-                                    top_cells = dict(sorted(cell_types.items(), key=lambda x: -x[1])[:5])
-                                    skill_diagnostics = (
-                                        f"critical path cell types: {top_cells}, "
-                                        f"diagnosis: {diagnosis}"
-                                    )
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        pass
+                if tool_uses_rw_precheck(tool_name):
+                    skill_was_skipped, skill_diagnostics = extract_skill_precheck_diagnostics(
+                        tool_result.payload or result
+                    )
 
                 precheck_verdict = None
                 if (RAPIDWRIGHT_PRECHECK_ENABLED
-                        and tool_name in SKILL_CHAIN_ACTIONS
-                        and tool_name != "rapidwright_execute_pblock_strategy"  # analysis-only
+                        and tool_uses_rw_precheck(tool_name)
                         and deps.rapidwright_session
                         and state.timing.latest_wns is not None
                         and state.timing.design_state != DesignState.UNPLACED):
                     precheck_verdict = await _rapidwright_direction_check(state, deps, rw_precheck_baseline)
-                    if precheck_verdict in ("REGRESS", "UNCHANGED"):
-                        gate_reason = (
-                            "precheck_direction_regress"
-                            if precheck_verdict == "REGRESS"
-                            else "precheck_direction_unchanged"
-                        )
+                    precheck_contract = build_precheck_failure_contract(
+                        tool_name,
+                        precheck_verdict,
+                        skill_was_skipped=skill_was_skipped,
+                        skill_diagnostics=skill_diagnostics,
+                    )
+                    if precheck_verdict in ("REGRESS", "UNCHANGED") and precheck_contract is not None:
+                        gate_reason = precheck_contract["done_reason"]
                         logger.warning(yellow(
                             f"[EXECUTE] Pre-check {precheck_verdict} for {tool_name}: "
                             f"skipping Vivado P&R chain (~900s saved)"
@@ -947,76 +1008,39 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             phase="EXECUTE_STRATEGY",
                         )
                         if deps.compat is not None:
-                            if precheck_verdict == "REGRESS":
-                                deps.compat.add_message("user",
-                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
-                                    f"shows directional WNS regression. Skipping Vivado "
-                                    f"place+route chain. Strategy marked as ineffective."
-                                )
-                            else:
-                                deps.compat.add_message("user",
-                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
-                                    f"shows no directional WNS change (delta within dead "
-                                    f"band). Skipping Vivado place+route chain — the skill "
-                                    f"produced no measurable benefit. Strategy marked as "
-                                    f"ineffective."
-                                )
-                        # Record strategy failure so select_model won't retry it
+                            deps.compat.add_message("user", precheck_contract["user_message"])
                         record_strategy_failure(
                             state, state.strategy.current_strategy,
-                            "strategy_ineffective", tool=tool_name,
-                            detail=gate_reason
+                            precheck_contract["failure_reason"], tool=tool_name,
+                            detail=precheck_contract["failure_detail"],
                         )
                         force_exit = True
                         break
 
-                    elif precheck_verdict == "NO_WORK":
-                        # Pre-check detected no delta — the skill did not change
-                        # RW's timing model. Distinguish between "skill found no
-                        # applicable cells" (not_applicable) and "skill ran but
-                        # produced no RW-visible effect" (ineffective).
+                    elif precheck_verdict == "NO_WORK" and precheck_contract is not None:
                         logger.warning(yellow(
                             f"[EXECUTE] Pre-check NO_WORK for {tool_name}: "
                             f"no RW timing change detected, skipping P&R chain"
                         ))
-                        state.control.done_reason = "precheck_no_work"
+                        state.control.done_reason = precheck_contract["done_reason"]
                         record_flow_signal(
-                            state, "SYSTEM_EXIT", "precheck_no_work",
+                            state, "SYSTEM_EXIT", precheck_contract["done_reason"],
                             phase="EXECUTE_STRATEGY",
                         )
-                        if skill_was_skipped and skill_diagnostics:
-                            # Skill explicitly reported no applicable cells
-                            record_strategy_failure(
-                                state, state.strategy.current_strategy,
-                                "strategy_not_applicable", tool=tool_name,
-                                detail=f"no_applicable_cells: {skill_diagnostics}"
-                            )
-                            if deps.compat is not None:
-                                deps.compat.add_message("user",
-                                    f"[PRECHECK] {tool_name}: {skill_diagnostics}. "
-                                    f"Strategy is not applicable to current critical path "
-                                    f"architecture — try a different strategy type."
-                                )
-                        else:
-                            # Skill ran but produced no RW-visible effect
-                            record_strategy_failure(
-                                state, state.strategy.current_strategy,
-                                "strategy_ineffective", tool=tool_name,
-                                detail="precheck_no_work"
-                            )
-                            if deps.compat is not None:
-                                deps.compat.add_message("user",
-                                    f"[PRECHECK] {tool_name}: RapidWright timing estimate "
-                                    f"shows no WNS change. Skipping Vivado place+route chain. "
-                                    f"Strategy marked as ineffective."
-                                )
+                        record_strategy_failure(
+                            state, state.strategy.current_strategy,
+                            precheck_contract["failure_reason"], tool=tool_name,
+                            detail=precheck_contract["failure_detail"],
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user", precheck_contract["user_message"])
                         force_exit = True
                         break
-
-                # ── Chain actions for skills ────────────────────────────
+                # Chain actions for skills.
                 # Existing logic: gated by post-eval verdict.
                 # HEAVY_CHAIN_SKILLS can skip expensive chains when UNCHANGED.
-                if tool_name in SKILL_CHAIN_ACTIONS:
+                if has_skill_chain(tool_name):
+                    chain_outcome = None
                     if (post_eval_verdict == "UNCHANGED"
                             and tool_name in HEAVY_CHAIN_SKILLS
                             and deps.vivado_session):
@@ -1026,7 +1050,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         )
                         if deps.compat is not None:
                             deps.compat.add_message("user",
-                                f"[CHAIN GATE] {tool_name}: post-eval UNCHANGED — "
+                                f"[CHAIN GATE] {tool_name}: post-eval UNCHANGED - "
                                 f"skill did not modify the netlist. Skipping "
                                 f"place+create_pblock+place+route chain. "
                                 f"Running lightweight place_design to verify."
@@ -1034,15 +1058,20 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         await _lightweight_chain_validation(state, deps, tool_name, tools_called)
                     else:
                         try:
-                            skill_data = json.loads(result) if result else {}
-                            if isinstance(skill_data, dict) and "error" in skill_data:
-                                logger.warning(f"[EXECUTE] Skill {tool_name} returned error, skipping chain: {skill_data['error']}")
+                            skill_data = tool_result.payload or {}
+                            if tool_result.error:
+                                logger.warning(
+                                    f"[EXECUTE] Skill {tool_name} returned error, "
+                                    f"skipping chain: {tool_result.error}"
+                                )
                             else:
-                                await _execute_chain_actions(state, deps, tool_name, skill_data, tools_called)
+                                chain_outcome = await _execute_chain_actions(
+                                    state, deps, tool_name, skill_data, tools_called
+                                )
                                 reached_callback = True
                                 # Force refresh critical paths after PBLOCK chain completes
                                 # (layout changed, stale paths would mislead EVALUATE Dashboard)
-                                if tool_name == "rapidwright_execute_pblock_strategy":
+                                if tool_requires_post_chain_path_refresh(tool_name):
                                     try:
                                         await _auto_refresh_critical_paths(state, deps)
                                         logger.info(f"[EXECUTE] Forced critical path refresh after {tool_name}")
@@ -1050,6 +1079,23 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         logger.warning(f"[EXECUTE] Post-PBLOCK critical path refresh failed: {refresh_err}")
                         except Exception as e:
                             logger.warning(f"[EXECUTE] Chain actions failed for {tool_name}: {e}")
+                    if (
+                        tool_name == "rapidwright_execute_pblock_strategy"
+                        and isinstance(chain_outcome, dict)
+                    ):
+                        routed_delta = chain_outcome.get("best_routed_delta")
+                        if should_keep_strategy_unblocked(routed_delta):
+                            if state.strategy.current_strategy in state.iteration.blocked_strategies:
+                                state.iteration.blocked_strategies = [
+                                    s for s in state.iteration.blocked_strategies
+                                    if s != state.strategy.current_strategy
+                                ]
+                        elif chain_outcome.get("screened_out") and not chain_outcome.get("place_only_passed"):
+                            record_strategy_failure(
+                                state, state.strategy.current_strategy,
+                                "strategy_ineffective", tool=tool_name,
+                                detail="all_pblock_candidates_failed_place_only_screening",
+                            )
 
                 # ── Post-chain verdict re-evaluation ──────────────────────
                 # Analysis-only skills (e.g. pblock_strategy) don't change WNS
@@ -1058,16 +1104,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # Re-evaluate the verdict by comparing current WNS (updated by
                 # the chain's vivado_report_timing_summary step) against the
                 # pre-tool WNS.
-                if (tool_name in SKILL_CHAIN_ACTIONS
-                        and post_eval_verdict == "UNCHANGED"
-                        and pre_tool_wns is not None
-                        and state.timing.latest_wns is not None
-                        and abs(state.timing.latest_wns - pre_tool_wns) > 0.001):
-                    chain_delta = state.timing.latest_wns - pre_tool_wns
-                    if chain_delta > 0.001:
-                        post_eval_verdict = "IMPROVED"
-                    else:
-                        post_eval_verdict = "REGRESSED"
+                should_override, recomputed_verdict, chain_delta = should_recompute_chain_verdict(
+                    tool_name,
+                    post_eval_verdict,
+                    pre_tool_wns,
+                    state.timing.latest_wns,
+                )
+                if should_override and recomputed_verdict is not None and chain_delta is not None:
+                    post_eval_verdict = recomputed_verdict
                     logger.info(
                         f"[EXECUTE] Post-chain re-eval: {tool_name} -> "
                         f"WNS={state.timing.latest_wns:.3f}ns "
@@ -1085,9 +1129,10 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 # Force exit on large WNS regression (>0.5ns below best).
                 # EVALUATE will detect regression via detect_rollback_needed()
                 # and trigger automatic rollback — no need for LLM to spin here.
-                if (state.timing.latest_wns is not None
-                        and state.timing.best_wns != float('-inf')
-                        and state.timing.latest_wns < state.timing.best_wns - 0.5):
+                if should_exit_for_large_regression(
+                        state.timing.latest_wns,
+                        state.timing.best_wns,
+                ):
                     logger.warning(
                         yellow(f"[EXECUTE] Large WNS regression: {state.timing.latest_wns:.3f} "
                                f"< best {state.timing.best_wns:.3f} - 0.5, forcing exit")
@@ -1099,13 +1144,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     force_exit = True
                     break
 
-                exit_reason = _execute_exit_reason_after_timing_update(
+                exit_contract = build_timing_update_exit_contract(
                     tool_name,
                     post_eval_verdict,
-                    _check_wns_target_met(state),
+                    target_met=_check_wns_target_met(state),
                 )
-                if exit_reason:
-                    if exit_reason == "wns_target_met":
+                if exit_contract is not None:
+                    exit_reason = exit_contract["reason"]
+                    if exit_contract["flow_signal"] == "DONE":
                         logger.info(
                             green(
                                 f"[EXECUTE] WNS target met after {tool_name}; "
@@ -1129,8 +1175,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     break
 
                 # Track tool errors
-                result_lower = summary.lower() if summary else ""
-                if "error" in result_lower and "success" not in result_lower:
+                if tool_result.error:
                     state.iteration.tool_errors.append({
                         "tool": tool_name,
                         "result": summary[:2000],
@@ -1151,13 +1196,19 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             # Only count a round when ALL tools have completed (none pending).
             # This prevents penalizing rounds where slow tools (place_design/route_design)
             # are still executing and the LLM hasn't had a chance to call execution tools yet.
-            if round_had_side_effect:
-                no_progress_count = 0
-            elif _pending_tool_count <= 0:
-                no_progress_count += 1
+            no_progress_count = next_no_progress_count(
+                no_progress_count,
+                had_tool_calls=True,
+                round_had_side_effect=round_had_side_effect,
+                pending_tool_count=_pending_tool_count,
+            )
             # else: tools still pending — do NOT count this round toward no-progress
 
-            if no_progress_count >= NO_PROGRESS_LIMIT:
+            no_progress_exit = build_phase_exit_contract(
+                no_progress_count=no_progress_count,
+                no_progress_limit=NO_PROGRESS_LIMIT,
+            )
+            if no_progress_exit.should_exit:
                 logger.warning(
                     f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
                     f"without side-effect tools)"
@@ -1174,23 +1225,35 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             continue
 
         # No tool calls — count as no-progress round
-        no_progress_count += 1
+        no_progress_count = next_no_progress_count(
+            no_progress_count,
+            had_tool_calls=False,
+        )
 
         # Track consecutive empty responses (no content AND no tool calls)
-        if not assistant_content.strip() and not message.tool_calls:
-            state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 2:
-                logger.warning(
-                    f"[EXECUTE] {state.context.consecutive_empty_responses} consecutive "
-                    f"empty responses, forcing EXEC_DONE"
-                )
-                record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
-                                   phase="EXECUTE_STRATEGY")
-                break
-        else:
-            state.context.consecutive_empty_responses = 0
+        state.context.consecutive_empty_responses = next_empty_response_streak(
+            state.context.consecutive_empty_responses,
+            assistant_content=assistant_content,
+            has_tool_calls=bool(message.tool_calls),
+        )
+        empty_exit = build_phase_exit_contract(
+            consecutive_empty_responses=state.context.consecutive_empty_responses,
+            empty_response_limit=2,
+        )
+        if empty_exit.should_exit:
+            logger.warning(
+                f"[EXECUTE] {state.context.consecutive_empty_responses} consecutive "
+                f"empty responses, forcing EXEC_DONE"
+            )
+            record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
+                               phase="EXECUTE_STRATEGY")
+            break
 
-        if no_progress_count >= NO_PROGRESS_LIMIT:
+        no_progress_exit = build_phase_exit_contract(
+            no_progress_count=no_progress_count,
+            no_progress_limit=NO_PROGRESS_LIMIT,
+        )
+        if no_progress_exit.should_exit:
             logger.warning(
                 f"[EXECUTE] No-progress limit reached ({no_progress_count} rounds "
                 f"without side-effect tools)"
@@ -1217,12 +1280,12 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 design_size_factor=state.timing.design_size_factor,
             )
             # Refresh WNS after restore
-            restore_result = await call_tool_fn(
+            restore_result = await call_tool_structured_fn(
                 "vivado_report_timing_summary", {},
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )
-            restore_timing = parse_timing_summary(restore_result)
+            restore_timing = parse_timing_summary(restore_result.raw_text)
             if restore_timing.get("wns") is not None:
                 state.timing.latest_wns = restore_timing["wns"]
                 state.timing.latest_tns = restore_timing.get("tns")
@@ -1266,27 +1329,38 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     return LoopPhase.EVALUATE
 
 
-def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
-    if tool_round > max_rounds:
+def _check_phase_exit(
+    state: OptimizerState,
+    tool_round: int,
+    max_rounds: int,
+) -> PhaseExitContract:
+    contract = build_phase_exit_contract(
+        round_count=tool_round,
+        max_rounds=max_rounds,
+        start_time=state.control.start_time,
+        wall_clock_timeout=state.control.wall_clock_timeout,
+        now=time.time(),
+        user_exit_requested=state.control.user_exit_requested,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
+    )
+    if not contract.should_exit:
+        return contract
+    if contract.event == "max_rounds":
         logger.warning(f"[EXECUTE] Max rounds reached ({tool_round} > {max_rounds})")
-        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase="EXECUTE_STRATEGY")
-        return True
-    if state.control.start_time:
-        elapsed = time.time() - state.control.start_time
-        if elapsed > state.control.wall_clock_timeout:
-            state.control.is_done = True
-            state.control.done_reason = "wall_clock_timeout"
-            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase="EXECUTE_STRATEGY")
-            return True
-    if state.control.user_exit_requested:
-        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase="EXECUTE_STRATEGY")
-        return True
-    if state.cost.total_cost >= state.cost.cost_hard_limit:
+    elif contract.event == "wall_clock_timeout":
+        logger.warning("[EXECUTE] Wall-clock timeout")
+    elif contract.event == "user_requested":
+        logger.info("[EXECUTE] User exit requested")
+    elif contract.event == "cost_limit":
+        logger.warning("[EXECUTE] Cost limit reached")
+    if contract.set_is_done:
         state.control.is_done = True
-        state.control.done_reason = "cost_limit"
-        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase="EXECUTE_STRATEGY")
-        return True
-    return False
+    if contract.done_reason:
+        state.control.done_reason = contract.done_reason
+    if contract.record_reason:
+        record_flow_signal(state, "SYSTEM_EXIT", contract.record_reason, phase="EXECUTE_STRATEGY")
+    return contract
 
 
 async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2.0):
@@ -1520,18 +1594,18 @@ async def _get_rw_timing_estimate(state: OptimizerState, deps: NodeDeps) -> floa
     Returns the WNS as a float, or None if the estimate could not be obtained.
     """
     try:
-        timing_result = await call_tool_fn(
+        timing_result = await call_tool_structured_fn(
             "rapidwright_report_timing", {},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
         try:
-            data = json.loads(timing_result)
+            data = timing_result.payload or json.loads(timing_result.raw_text)
             if isinstance(data, dict) and "wns_ns" in data:
                 return float(data["wns_ns"])
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
-        timing = parse_timing_summary(timing_result)
+        timing = parse_timing_summary(timing_result.raw_text)
         return timing.get("wns")
     except Exception as e:
         logger.debug(f"[PRECHECK] Could not get RW timing estimate: {e}")
@@ -1733,9 +1807,11 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
         state.timing.best_wns_failing_endpoints = fe
         state.control.needs_save = True
 
-    delta = wns - prev_wns if prev_wns is not None else 0.0
-    verdict = "IMPROVED" if delta > 0.001 else ("UNCHANGED" if abs(delta) <= 0.001 else "REGRESSED")
-    if verdict in ("UNCHANGED", "REGRESSED"):
+    verdict, delta = verdict_from_wns_values(prev_wns, wns)
+    if (
+        tool_name != "rapidwright_execute_pblock_strategy"
+        and should_block_strategy(verdict)
+    ):
         if state.strategy.current_strategy not in state.iteration.blocked_strategies:
             state.iteration.blocked_strategies.append(state.strategy.current_strategy)
     eval_notice = (
@@ -1785,12 +1861,12 @@ async def _lightweight_chain_validation(state, deps, tool_name, tools_called):
                     f"{tool_name}. Running full chain (create_pblock + place + route)."
                 )
             # Re-run the skill to get fresh data, then execute chain
-            skill_result = await call_tool_fn(
+            skill_result = await call_tool_structured_fn(
                 tool_name, {},
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )
-            skill_data = json.loads(skill_result) if isinstance(skill_result, str) else {}
+            skill_data = skill_result.payload or {}
             await _execute_chain_actions(state, deps, tool_name,
                                          skill_data if isinstance(skill_data, dict) else {},
                                          tools_called)
@@ -1807,18 +1883,138 @@ async def _lightweight_chain_validation(state, deps, tool_name, tools_called):
     except Exception as e:
         logger.warning(f"[chain-gate] Lightweight validation failed: {e}, falling back to full chain")
         # If validation itself fails, run the full chain as fallback
-        skill_result = await call_tool_fn(
+        skill_result = await call_tool_structured_fn(
             tool_name, {},
             deps.rapidwright_session, deps.vivado_session,
             design_size_factor=state.timing.design_size_factor,
         )
-        skill_data = json.loads(skill_result) if isinstance(skill_result, str) else {}
+        skill_data = skill_result.payload or {}
         await _execute_chain_actions(state, deps, tool_name,
                                      skill_data if isinstance(skill_data, dict) else {},
                                      tools_called)
 
 
+def _update_pending_pblock_state_from_payload(state: OptimizerState, payload: dict) -> None:
+    """Freeze the selected PBLOCK plan in state so EXECUTE consumes a stable contract."""
+    selected_plan = extract_selected_plan_from_payload(payload)
+    candidate_plans = payload.get("candidate_plans")
+    if selected_plan is not None:
+        state.context.pending_pblock_plan = selected_plan.to_dict()
+    if isinstance(candidate_plans, list):
+        state.context.pending_pblock_candidates = [dict(item) for item in candidate_plans if isinstance(item, dict)]
+        state.context.attempted_pblock_candidate_ids.clear()
+
+
 async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tools_called):
+    """Execute auto-chains, with PBLOCK candidate screening handled deterministically."""
+    if tool_name != "rapidwright_execute_pblock_strategy":
+        return await _execute_single_chain_actions(
+            state, deps, tool_name, skill_result_data, tools_called
+        )
+
+    payload = dict(skill_result_data or {})
+    if state.context.pending_pblock_candidates and not payload.get("candidate_plans"):
+        payload["candidate_plans"] = list(state.context.pending_pblock_candidates)
+    if state.context.pending_pblock_plan and not payload.get("recommended_candidate_id"):
+        payload["recommended_candidate_id"] = state.context.pending_pblock_plan.get("candidate_id")
+
+    ordered_candidates = resolve_ordered_pblock_candidates(
+        payload,
+        attempted_candidate_ids=state.context.attempted_pblock_candidate_ids,
+    )
+    if not ordered_candidates:
+        return await _execute_single_chain_actions(
+            state, deps, tool_name, payload, tools_called
+        )
+
+    best_routed_delta = None
+    best_screened_out = False
+    for candidate in ordered_candidates:
+        candidate_payload = dict(payload)
+        candidate_payload["selected_pblock_plan"] = candidate.to_dict()
+        candidate_payload["frozen_pblock_plan"] = candidate.to_dict()
+        candidate_payload["recommended_candidate_id"] = candidate.candidate_id
+        state.context.pending_pblock_plan = candidate.to_dict()
+        if candidate.candidate_id not in state.context.attempted_pblock_candidate_ids:
+            state.context.attempted_pblock_candidate_ids.append(candidate.candidate_id)
+        outcome = await _execute_single_chain_actions(
+            state, deps, tool_name, candidate_payload, tools_called
+        )
+        if isinstance(outcome, dict):
+            routed_delta = outcome.get("best_routed_delta")
+            if routed_delta is not None and (
+                best_routed_delta is None or routed_delta > best_routed_delta
+            ):
+                best_routed_delta = routed_delta
+            if outcome.get("screened_out"):
+                best_screened_out = True
+                continue
+            if routed_delta is not None and should_keep_strategy_unblocked(routed_delta):
+                return outcome
+            if outcome.get("place_only_passed"):
+                return outcome
+            if outcome.get("chain_failed"):
+                continue
+        else:
+            return outcome
+
+    return {
+        "chain_failed": False,
+        "screened_out": best_screened_out,
+        "place_only_passed": False,
+        "best_routed_delta": best_routed_delta,
+    }
+
+
+async def _restore_pre_chain_checkpoint(state, deps, pre_chain_path: str) -> None:
+    """Restore EXECUTE state from the pre-chain checkpoint and refresh timing."""
+    logger.warning(f"[chain] Restoring from pre-chain checkpoint: {pre_chain_path}")
+    previous_wns = state.timing.latest_wns
+    fallback_wns = previous_wns if previous_wns is not None else state.timing.best_wns
+    await call_tool_fn(
+        "vivado_open_checkpoint", {"dcp_path": pre_chain_path},
+        deps.rapidwright_session, deps.vivado_session,
+        design_size_factor=state.timing.design_size_factor,
+    )
+    state.control.current_dcp_path = Path(pre_chain_path).resolve()
+    try:
+        restore_result = await call_tool_structured_fn(
+            "vivado_report_timing_summary", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        restore_timing = parse_timing_summary(restore_result.raw_text)
+        if isinstance(restore_timing, dict):
+            restored_wns = restore_timing.get("wns")
+            if restored_wns is not None:
+                state.timing.latest_wns = restored_wns
+                logger.info(f"[chain] Post-restore WNS: {state.timing.latest_wns:.3f}")
+                _mark_timing_fresh(state)
+            else:
+                state.timing.latest_wns = fallback_wns
+                logger.warning(
+                    "[chain] Could not parse WNS from timing after restore; "
+                    "preserving previous known WNS=%s",
+                    "N/A" if fallback_wns is None else f"{fallback_wns:.3f}",
+                )
+        else:
+            state.timing.latest_wns = fallback_wns
+            logger.warning(
+                "[chain] Could not parse timing after restore; preserving previous "
+                "known WNS=%s",
+                "N/A" if fallback_wns is None else f"{fallback_wns:.3f}",
+            )
+    except Exception as timing_err:
+        state.timing.latest_wns = fallback_wns
+        logger.warning(
+            "[chain] Timing report after restore failed: %s; preserving previous "
+            "known WNS=%s",
+            timing_err,
+            "N/A" if fallback_wns is None else f"{fallback_wns:.3f}",
+        )
+
+
+async def _execute_single_chain_actions(state, deps, tool_name, skill_result_data, tools_called):
     """Auto-execute chained MCP tools after a skill completes.
 
     Workflow:
@@ -1833,23 +2029,24 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
          - Break (do not continue with remaining steps)
          - Inject [AUTO-CHAIN ERROR] notification into LLM context
     """
-    chain = SKILL_CHAIN_ACTIONS.get(tool_name)
+    chain = get_skill_chain_actions(tool_name)
     if not chain:
         return
+    selected_plan = resolve_selected_pblock_plan(skill_result_data)
+    outcome = {
+        "chain_failed": False,
+        "screened_out": False,
+        "place_only_passed": False,
+        "place_only_delta": None,
+        "place_only_threshold": None,
+        "best_routed_delta": None,
+        "candidate_id": selected_plan.candidate_id if selected_plan is not None else None,
+    }
 
     # Guard: skip expensive Vivado P&R chain when the skill was skipped / returned empty results.
     # This prevents the wasteful pattern: strategy→"skipped"→opt_design error→rollback (~17s wasted).
-    is_skipped = (
-        isinstance(skill_result_data, dict)
-        and skill_result_data.get("status") in ("skipped", "no_action", "unchanged")
-    )
-    has_empty_cps = (
-        isinstance(skill_result_data, dict)
-        and not skill_result_data.get("optimized_cells")
-        and not skill_result_data.get("critical_paths")
-    )
-    if is_skipped or (has_empty_cps and tool_name not in ("rapidwright_execute_pblock_strategy", "rapidwright_flatten_lut_cascade",)):
-        skip_reason = "skipped" if is_skipped else "no data produced"
+    skip_chain, skip_reason = should_skip_chain_for_empty_result(tool_name, skill_result_data)
+    if skip_chain:
         logger.info(
             f"[chain] Strategy tool '{tool_name}' returned '{skip_reason}' — "
             f"skipping Vivado P&R chain (opt_design→place→route→timing). "
@@ -1869,7 +2066,8 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
         )
         if state.strategy.current_strategy not in state.iteration.blocked_strategies:
             state.iteration.blocked_strategies.append(state.strategy.current_strategy)
-        return
+        outcome["chain_failed"] = True
+        return outcome
 
     # Capture pre-chain WNS baseline (before Vivado opens the skill's DCP).
     # Used by the Level 2 place-only check to compare against post-place timing.
@@ -1890,65 +2088,30 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
 
     for step in chain:
         target_tool = step["tool"]
-        args = dict(step.get("args", {}))
-        directive_from_skill = False
-        for key, skill_key in step.get("args_from_skill", {}).items():
-            if isinstance(skill_key, str) and skill_key in skill_result_data:
-                args[key] = skill_result_data[skill_key]
-                if key == "directive":
-                    directive_from_skill = True
-            elif isinstance(skill_key, bool):
-                args[key] = skill_key
-
-        # Tier-2 fallback: per-strategy default directive profile (smarter
-        # than universal "Explore"). Only applies when (a) the LLM did not
-        # override the directive via the skill result, (b) the step is a
-        # place/route step, and (c) the step supports directive override
-        # (has args_from_skill — this guards the pblock "unplace" step and
-        # any other special directive like "unplace" from being clobbered).
-        if (not directive_from_skill
-                and target_tool in ("vivado_place_design", "vivado_route_design")
-                and "args_from_skill" in step):
-            defaults = STRATEGY_DEFAULT_DIRECTIVES.get(tool_name)
-            if defaults:
-                place_def, route_def = defaults
-                if target_tool == "vivado_place_design" and place_def:
-                    args["directive"] = place_def
-                elif target_tool == "vivado_route_design" and route_def:
-                    args["directive"] = route_def
-
-        # ── Directive blacklist check ──────────────────────────────
-        # If the resolved directive is known-broken (e.g. licensing issue),
-        # silently fall back to the strategy's default directive from
-        # STRATEGY_DEFAULT_DIRECTIVES, saving ~17s per failed attempt.
-        if "directive" in args and args["directive"] in KNOWN_BROKEN_DIRECTIVES:
-            _fallback = STRATEGY_DEFAULT_DIRECTIVES.get(tool_name)
-            _replacement = None
-            if target_tool == "vivado_place_design" and _fallback and _fallback[0]:
-                _replacement = _fallback[0]
-            elif target_tool == "vivado_route_design" and _fallback and _fallback[1]:
-                _replacement = _fallback[1]
-            if _replacement:
-                logger.warning(
-                    f"[DIRECTIVE] '{args['directive']}' is blacklisted (known licensing issue). "
-                    f"Falling back to '{_replacement}' for {tool_name}"
-                )
-                args["directive"] = _replacement
-            else:
-                # Remove directive entirely — let Vivado use its default
-                logger.warning(
-                    f"[DIRECTIVE] '{args['directive']}' is blacklisted, "
-                    f"no fallback found — removing directive"
-                )
-                del args["directive"]
+        args, directive_note = resolve_chain_step_arguments(
+            tool_name,
+            step,
+            skill_result_data,
+        )
+        if directive_note:
+            logger.warning(directive_note)
+        target_tool, args, runtime_note = resolve_chain_step_runtime_override(
+            tool_name,
+            target_tool,
+            args,
+            skill_result_data,
+        )
+        if runtime_note:
+            logger.warning(runtime_note)
 
         try:
             logger.info(f"[chain] Auto-executing {target_tool} after {tool_name}")
-            raw_result = await call_tool_fn(
+            step_result = await call_tool_structured_fn(
                 target_tool, args,
                 deps.rapidwright_session, deps.vivado_session,
                 design_size_factor=state.timing.design_size_factor,
             )
+            raw_result = step_result.raw_text
             summary = summarize_tool_result(
                 target_tool, raw_result,
                 latest_wns=state.timing.latest_wns,
@@ -1957,18 +2120,7 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                 prev_best_wns=state.timing.prev_best_wns,
                 prev_best_tns=state.timing.prev_best_tns,
             )
-            step_failed = False
-            try:
-                parsed = json.loads(raw_result) if isinstance(raw_result, str) else {}
-                if isinstance(parsed, dict) and "error" in parsed:
-                    step_failed = True
-            except (json.JSONDecodeError, TypeError):
-                pass
-            # Also detect Vivado ERROR messages in plain-text tool output
-            # (place_design/route_design return text, not JSON)
-            if not step_failed and isinstance(raw_result, str):
-                if re.search(r'^ERROR: \[', raw_result, re.MULTILINE):
-                    step_failed = True
+            step_failed = step_result.error is not None
             status_label = "failed" if step_failed else "completed"
             if deps.compat is not None:
                 deps.compat.add_message("user",
@@ -1985,7 +2137,10 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     "chain": True,
                     "strategy": state.strategy.current_strategy,
                 })
-                raise RuntimeError(f"{target_tool} reported error in result: {summary[:200]}")
+                raise RuntimeError(
+                    f"{target_tool} reported error in result: "
+                    f"{(step_result.error or summary)[:200]}"
+                )
             _track_wns_from_result(state, target_tool, raw_result)
 
             # Update current_dcp_path after opening a new checkpoint
@@ -2004,6 +2159,97 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
             # regression is unlikely to be fixed by routing.
             is_unplace = (target_tool == "vivado_place_design"
                           and args.get("directive", "").lower() == "unplace")
+            # Verify a global unplace actually emptied the placement. A
+            # rejected/no-op unplace leaves the old placement in the DCP and
+            # the following place Explore silently degenerates into a no-op
+            # (run-20260708_012142 lost the PBLOCK re-place trajectory this
+            # way). Treat an ineffective unplace as a chain failure so the
+            # pre-chain checkpoint is restored.
+            if is_unplace and deps.vivado_session:
+                probe = await call_tool_structured_fn(
+                    "vivado_run_tcl",
+                    {"command": 'llength [get_cells -hierarchical -quiet -filter {IS_PRIMITIVE == TRUE && LOC != ""}]'},
+                    deps.rapidwright_session, deps.vivado_session,
+                    design_size_factor=state.timing.design_size_factor,
+                )
+                placed_count = None
+                try:
+                    placed_count = int((probe.raw_text or "").strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    logger.warning(
+                        f"[chain] Unplace verification probe unparseable "
+                        f"(continuing): {(probe.raw_text or '')[:120]!r}"
+                    )
+                if placed_count is not None and placed_count > UNPLACE_VERIFY_MAX_PLACED_CELLS:
+                    state.iteration.tool_errors.append({
+                        "tool": target_tool,
+                        "result": f"[CHAIN ERROR] unplace ineffective: {placed_count} cells still placed",
+                        "chain": True,
+                        "strategy": state.strategy.current_strategy,
+                    })
+                    raise RuntimeError(
+                        f"place_design -unplace ineffective: {placed_count} primitives "
+                        f"still placed (> {UNPLACE_VERIFY_MAX_PLACED_CELLS}); "
+                        f"failing chain to avoid a silent no-op re-place"
+                    )
+                if placed_count is not None:
+                    logger.info(
+                        f"[chain] Unplace verified: {placed_count} primitives still placed"
+                    )
+            pblock_threshold = get_pblock_place_only_threshold(skill_result_data)
+            if (selected_plan is not None
+                    and pblock_threshold is not None
+                    and target_tool == "vivado_place_design"
+                    and not is_unplace
+                    and deps.vivado_session
+                    and chain_baseline_wns is not None):
+                try:
+                    po_result = await call_tool_structured_fn(
+                        "vivado_report_timing_summary", {},
+                        deps.rapidwright_session, deps.vivado_session,
+                        design_size_factor=state.timing.design_size_factor,
+                    )
+                    po_timing = parse_timing_summary(po_result.raw_text)
+                    po_wns = po_timing.get("wns")
+                    po_design_state = ""
+                    state_match = re.search(r'Design\s+State\s*:\s*(\w+)', po_result.raw_text or "")
+                    if state_match:
+                        po_design_state = state_match.group(1)
+                    if po_design_state and po_design_state.lower() not in ("placed", "routed", "fully"):
+                        logger.warning(
+                            f"[PBLOCK SCREEN] Skipping screening for {selected_plan.candidate_id}: "
+                            f"design state is '{po_design_state}'"
+                        )
+                    elif po_wns is not None:
+                        po_delta = po_wns - chain_baseline_wns
+                        should_route = should_route_pblock_after_place(
+                            selected_plan,
+                            po_delta,
+                            threshold=pblock_threshold,
+                        )
+                        outcome["place_only_delta"] = po_delta
+                        outcome["place_only_threshold"] = pblock_threshold
+                        route_decision = "proceeding" if should_route else "ROLLBACK + next candidate"
+                        logger.info(
+                            f"[PBLOCK SCREEN] {selected_plan.candidate_id}: "
+                            f"place-only WNS={po_wns:.3f}ns (delta={po_delta:+.3f}ns, "
+                            f"threshold={pblock_threshold:.3f}) -> {route_decision}"
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[PBLOCK SCREEN] {selected_plan.candidate_id}: "
+                                f"post-place WNS={po_wns:.3f}ns "
+                                f"(delta={po_delta:+.3f}ns vs pre-chain, threshold={pblock_threshold:.3f}). "
+                                f"Route is {route_decision}."
+                            )
+                        if not should_route:
+                            outcome["screened_out"] = True
+                            if pre_chain_path:
+                                await _restore_pre_chain_checkpoint(state, deps, pre_chain_path)
+                            return outcome
+                        outcome["place_only_passed"] = True
+                except Exception as e:
+                    logger.warning(f"[PBLOCK SCREEN] Timing check failed: {e}")
             if (PLACE_ONLY_CHECK_ENABLED
                     and target_tool == "vivado_place_design"
                     and not is_unplace
@@ -2011,18 +2257,18 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     and deps.vivado_session
                     and chain_baseline_wns is not None):
                 try:
-                    po_result = await call_tool_fn(
+                    po_result = await call_tool_structured_fn(
                         "vivado_report_timing_summary", {},
                         deps.rapidwright_session, deps.vivado_session,
                         design_size_factor=state.timing.design_size_factor,
                     )
-                    po_timing = parse_timing_summary(po_result)
+                    po_timing = parse_timing_summary(po_result.raw_text)
                     po_wns = po_timing.get("wns")
                     # Guard: skip place-only WNS check if design is not actually placed.
                     # An unplaced design (Design State: "Optimized") reports estimated
                     # delays that are falsely optimistic.
                     po_design_state = ""
-                    state_match = re.search(r'Design\s+State\s*:\s*(\w+)', po_result or "")
+                    state_match = re.search(r'Design\s+State\s*:\s*(\w+)', po_result.raw_text or "")
                     if state_match:
                         po_design_state = state_match.group(1)
                     if po_design_state and po_design_state.lower() not in ("placed", "routed", "fully"):
@@ -2062,57 +2308,36 @@ async def _execute_chain_actions(state, deps, tool_name, skill_result_data, tool
                     # Fall through: continue with route (conservative)
 
             await _try_save_best_checkpoint(state, deps)
+            if (target_tool == "vivado_route_design"
+                    and chain_baseline_wns is not None
+                    and state.timing.latest_wns is not None):
+                outcome["best_routed_delta"] = state.timing.latest_wns - chain_baseline_wns
             state.iteration.tools_used.append(target_tool)
             tools_called.append(target_tool)
         except Exception as e:
             logger.error(f"[chain] Tool {target_tool} failed: {e}")
+            outcome["chain_failed"] = True
             if pre_chain_path:
                 try:
-                    logger.warning(f"[chain] Restoring from pre-chain checkpoint: {pre_chain_path}")
-                    await call_tool_fn(
-                        "vivado_open_checkpoint", {"dcp_path": pre_chain_path},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
-                    state.control.current_dcp_path = Path(pre_chain_path).resolve()
-                    # Refresh WNS after restore so state matches Vivado
-                    try:
-                        restore_result = await call_tool_fn(
-                            "vivado_report_timing_summary", {},
-                            deps.rapidwright_session, deps.vivado_session,
-                            design_size_factor=state.timing.design_size_factor,
-                        )
-                        restore_timing = parse_timing_summary(restore_result)
-                        if isinstance(restore_timing, dict):
-                            state.timing.latest_wns = restore_timing.get("wns")
-                            if state.timing.latest_wns is not None:
-                                logger.info(f"[chain] Post-restore WNS: {state.timing.latest_wns:.3f}")
-                                _mark_timing_fresh(state)
-                            else:
-                                logger.warning("[chain] Could not parse WNS from timing after restore")
-                        else:
-                            state.timing.latest_wns = restore_timing
-                            logger.warning("[chain] Could not parse timing after restore")
-                    except Exception as timing_err:
-                        state.timing.latest_wns = None
-                        logger.warning(f"[chain] Timing report after restore failed: {timing_err}")
+                    await _restore_pre_chain_checkpoint(state, deps, pre_chain_path)
                 except Exception as restore_err:
                     logger.error(f"[chain] Pre-chain restore also failed: {restore_err}")
             if deps.compat is not None:
                 deps.compat.add_message("user",
                     f"[AUTO-CHAIN ERROR] {target_tool} failed, design restored to pre-chain state.")
             break
+    return outcome
 
 
 async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) -> None:
     """Re-extract critical paths after layout/routing changes."""
-    result = await call_tool_fn(
+    result = await call_tool_structured_fn(
         "vivado_extract_critical_path_cells",
         {"num_paths": 10},
         deps.rapidwright_session, deps.vivado_session,
         design_size_factor=state.timing.design_size_factor,
     )
-    cell_paths = parse_critical_path_cells(result)
+    cell_paths = parse_critical_path_cells(result.raw_text)
     if cell_paths:
         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
         state.timing.critical_paths_stale = False
@@ -2173,3 +2398,4 @@ def _get_local_pblock_utilization(state) -> float | None:
     Returns None to fall back to global utilization.
     """
     return None
+

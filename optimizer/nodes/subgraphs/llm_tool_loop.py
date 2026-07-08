@@ -17,6 +17,7 @@ from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, MAX_STRATEGY_CYCLES
+from optimizer.pure.phase_policy import build_phase_exit_contract
 from optimizer.pure.timing import is_valid_wns
 from optimizer.pure.compress import compress_context
 from optimizer.color import green, yellow
@@ -165,33 +166,34 @@ async def llm_tool_loop_node(
 
 def _check_exit_conditions(state: OptimizerState, total_rounds: int) -> bool:
     """Check if the outer loop should exit."""
-    if total_rounds > MAX_TOOL_ROUNDS:
+    contract = build_phase_exit_contract(
+        round_count=total_rounds,
+        max_rounds=MAX_TOOL_ROUNDS,
+        start_time=state.control.start_time,
+        wall_clock_timeout=state.control.wall_clock_timeout,
+        now=time.time(),
+        user_exit_requested=state.control.user_exit_requested,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
+    )
+    if not contract.should_exit:
+        return False
+    if contract.event == "max_rounds":
         logger.warning(yellow(f"[llm_tool_loop] Max rounds reached ({total_rounds} > {MAX_TOOL_ROUNDS})"))
-        record_flow_signal(state, "SYSTEM_EXIT", "max_rounds", phase=state.strategy.current_phase)
-        return True
-
-    if state.control.start_time:
-        elapsed = time.time() - state.control.start_time
-        if elapsed > state.control.wall_clock_timeout:
-            logger.warning(f"[llm_tool_loop] Wall-clock timeout: {elapsed:.0f}s")
-            state.control.is_done = True
-            state.control.done_reason = "wall_clock_timeout"
-            record_flow_signal(state, "SYSTEM_EXIT", "wall_clock_timeout", phase=state.strategy.current_phase)
-            return True
-
-    if state.control.user_exit_requested:
+    elif contract.event == "wall_clock_timeout":
+        elapsed = time.time() - state.control.start_time if state.control.start_time else 0.0
+        logger.warning(f"[llm_tool_loop] Wall-clock timeout: {elapsed:.0f}s")
+    elif contract.event == "user_requested":
         logger.info("[llm_tool_loop] User exit requested")
-        record_flow_signal(state, "SYSTEM_EXIT", "user_requested", phase=state.strategy.current_phase)
-        return True
-
-    if state.cost.total_cost >= state.cost.cost_hard_limit:
-        logger.warning(f"[llm_tool_loop] Cost limit reached")
+    elif contract.event == "cost_limit":
+        logger.warning("[llm_tool_loop] Cost limit reached")
+    if contract.set_is_done:
         state.control.is_done = True
-        state.control.done_reason = "cost_limit"
-        record_flow_signal(state, "SYSTEM_EXIT", "cost_limit", phase=state.strategy.current_phase)
-        return True
-
-    return False
+    if contract.done_reason:
+        state.control.done_reason = contract.done_reason
+    if contract.record_reason:
+        record_flow_signal(state, "SYSTEM_EXIT", contract.record_reason, phase=state.strategy.current_phase)
+    return True
 
 
 def _check_wns_target_met(state: OptimizerState) -> bool:

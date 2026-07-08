@@ -42,7 +42,70 @@ from optimizer.pure.iteration_logic import (
     infer_strategy_from_tools,
     build_iteration_narrative,
 )
-from optimizer.pure.constants import SKILL_CHAIN_ACTIONS, PLACE_ONLY_CHECK_SKILLS
+from optimizer.pure.constants import (
+    DASHBOARD_REFRESH_MAP,
+    EXECUTE_CORE_TOOLS,
+    PHASE_TOOL_RATE_LIMITS,
+    POST_EVAL_TOOLS,
+    SIDE_EFFECT_TOOLS,
+    SKILL_CHAIN_ACTIONS,
+    get_skill_chain_actions,
+    get_strategy_primary_tool,
+    should_skip_chain_for_empty_result,
+    tool_uses_rw_precheck,
+)
+from optimizer.pure.execute_contracts import (
+    build_timing_update_exit_contract,
+    build_post_eval_guidance,
+    build_precheck_failure_contract,
+    extract_skill_precheck_diagnostics,
+    extract_post_eval_metrics,
+    get_pblock_place_only_threshold,
+    is_chain_step_failure_result,
+    next_empty_response_streak,
+    next_no_progress_count,
+    resolve_ordered_pblock_candidates,
+    resolve_selected_pblock_plan,
+    resolve_chain_step_arguments,
+    resolve_chain_step_runtime_override,
+    should_exit_for_empty_responses,
+    should_exit_for_large_regression,
+    should_exit_for_no_progress,
+    should_block_strategy,
+    should_recompute_chain_verdict,
+    tool_requires_post_chain_path_refresh,
+    verdict_from_wns_delta,
+    verdict_from_wns_values,
+)
+from optimizer.pure.phase_policy import build_phase_exit_contract
+from optimizer.pure.pblock_plan import (
+    PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
+    PBLOCK_GLOBAL_MODE,
+    PBLOCK_LOCAL_MODE,
+    PBLOCK_UNPLACE_GLOBAL,
+    PblockExecutionPlan,
+    get_place_only_screening_threshold,
+    plan_requires_execution_rebuild,
+    recommend_pblock_plan,
+    should_route_pblock_after_place,
+)
+from optimizer.pure.tool_contracts import (
+    build_tool_call_result,
+    coerce_payload_dict,
+    is_mcp_error_response,
+)
+from optimizer.pure.tool_catalog import (
+    EXECUTE_CORE_TOOLS as EXECUTE_CORE_TOOLS_CATALOG,
+    POST_EVAL_TOOLS as POST_EVAL_TOOLS_CATALOG,
+)
+from optimizer.pure.tool_chain_policy import (
+    PLACE_ONLY_CHECK_SKILLS as PLACE_ONLY_CHECK_SKILLS_POLICY,
+    SKILL_CHAIN_ACTIONS as SKILL_CHAIN_ACTIONS_POLICY,
+)
+from optimizer.pure.tool_runtime_policy import (
+    DASHBOARD_REFRESH_MAP as DASHBOARD_REFRESH_MAP_POLICY,
+    PHASE_TOOL_RATE_LIMITS as PHASE_TOOL_RATE_LIMITS_POLICY,
+)
 
 
 # ── Timing tests ─────────────────────────────────────────────────
@@ -108,6 +171,812 @@ class TestStrategyToolFiltering:
             "rapidwright_analyze_congestion",
             "report_step_state",
         }
+
+
+class TestToolContracts:
+    def test_primary_tool_lookup_is_centralized(self):
+        assert get_strategy_primary_tool("PBLOCK") == "rapidwright_execute_pblock_strategy"
+        assert get_strategy_primary_tool("PhysOpt") == "vivado_physopt_and_route"
+        assert get_strategy_primary_tool("UnknownStrategy") is None
+
+    def test_execute_core_tools_feed_execute_allowlist(self):
+        assert "rapidwright_execute_pblock_strategy" in EXECUTE_CORE_TOOLS
+        assert "vivado_physopt_and_route" in EXECUTE_CORE_TOOLS
+        assert "report_step_state" in EXECUTE_CORE_TOOLS
+
+    def test_rw_precheck_contract_skips_analysis_only_pblock_chain(self):
+        assert tool_uses_rw_precheck("rapidwright_execute_fanout_strategy") is True
+        assert tool_uses_rw_precheck("rapidwright_execute_pblock_strategy") is False
+        assert tool_uses_rw_precheck("vivado_route_design") is False
+
+    def test_sparse_chain_skip_contract_respects_exemptions(self):
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_execute_fanout_strategy",
+            {"status": "success", "optimized_cells": [], "critical_paths": []},
+        )
+        assert skip is True
+        assert reason == "no data produced"
+
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_flatten_lut_cascade",
+            {"status": "success", "optimized_cells": [], "critical_paths": []},
+        )
+        assert skip is False
+        assert reason is None
+
+    def test_post_eval_and_chain_declarations_stay_centralized(self):
+        assert "rapidwright_execute_pblock_strategy" in POST_EVAL_TOOLS
+        chain = get_skill_chain_actions("rapidwright_execute_pblock_strategy")
+        assert chain
+        assert chain[0]["tool"] == "vivado_unplace_cells"
+
+    def test_side_effect_tools_track_design_mutators(self):
+        assert "rapidwright_execute_physopt_strategy" in SIDE_EFFECT_TOOLS
+        assert "vivado_create_and_apply_pblock" in SIDE_EFFECT_TOOLS
+
+
+class TestExecuteContracts:
+    def test_verdict_from_wns_delta(self):
+        assert verdict_from_wns_delta(0.010) == "IMPROVED"
+        assert verdict_from_wns_delta(0.0005) == "UNCHANGED"
+        assert verdict_from_wns_delta(-0.010) == "REGRESSED"
+
+    def test_verdict_from_wns_values_returns_delta(self):
+        verdict, delta = verdict_from_wns_values(-0.400, -0.350)
+        assert verdict == "IMPROVED"
+        assert round(delta, 3) == 0.050
+
+    def test_extract_post_eval_metrics_for_physopt_and_route(self):
+        raw = """
+        {
+          "post_optimization": {
+            "wns": -0.321,
+            "tns": -1.25,
+            "failing_endpoints": 7
+          }
+        }
+        """
+        metrics = extract_post_eval_metrics("vivado_physopt_and_route", raw)
+        assert metrics == {"wns": -0.321, "tns": -1.25, "failing_endpoints": 7}
+        assert extract_post_eval_metrics("vivado_route_design", raw) is None
+
+    def test_should_block_strategy_tracks_non_improving_verdicts(self):
+        assert should_block_strategy("UNCHANGED") is True
+        assert should_block_strategy("REGRESSED") is True
+        assert should_block_strategy("IMPROVED") is False
+
+    def test_build_post_eval_guidance_only_for_unchanged_post_eval_tools(self):
+        msg = build_post_eval_guidance("vivado_physopt_and_route", "UNCHANGED")
+        assert msg is not None
+        assert "no WNS improvement" in msg
+        assert build_post_eval_guidance("vivado_physopt_and_route", "IMPROVED") is None
+        assert build_post_eval_guidance("rapidwright_search_cells", "UNCHANGED") is None
+
+    def test_build_timing_update_exit_contract(self):
+        contract = build_timing_update_exit_contract(
+            "vivado_physopt_and_route",
+            "IMPROVED",
+            target_met=False,
+        )
+        assert contract == {
+            "flow_signal": "EXEC_DONE",
+            "reason": "post_eval_improved",
+        }
+
+        contract = build_timing_update_exit_contract(
+            "vivado_physopt_and_route",
+            "UNCHANGED",
+            target_met=True,
+        )
+        assert contract == {
+            "flow_signal": "DONE",
+            "reason": "wns_target_met",
+        }
+
+        assert build_timing_update_exit_contract(
+            "rapidwright_search_cells",
+            "UNCHANGED",
+            target_met=False,
+        ) is None
+
+    def test_exit_threshold_helpers(self):
+        assert should_exit_for_large_regression(-1.2, -0.5) is True
+        assert should_exit_for_large_regression(-0.8, -0.5, margin=0.5) is False
+        assert should_exit_for_no_progress(4, limit=4) is True
+        assert should_exit_for_no_progress(3, limit=4) is False
+        assert should_exit_for_empty_responses(2) is True
+        assert should_exit_for_empty_responses(1) is False
+
+    def test_progress_counters_advance_consistently(self):
+        assert next_no_progress_count(2, had_tool_calls=True, round_had_side_effect=True, pending_tool_count=0) == 0
+        assert next_no_progress_count(2, had_tool_calls=True, round_had_side_effect=False, pending_tool_count=0) == 3
+        assert next_no_progress_count(2, had_tool_calls=True, round_had_side_effect=False, pending_tool_count=1) == 2
+        assert next_no_progress_count(2, had_tool_calls=False) == 3
+
+        assert next_empty_response_streak(0, assistant_content="", has_tool_calls=False) == 1
+        assert next_empty_response_streak(1, assistant_content="thinking", has_tool_calls=False) == 0
+        assert next_empty_response_streak(1, assistant_content="", has_tool_calls=True) == 0
+
+    def test_extract_skill_precheck_diagnostics_summarizes_skipped_skill(self):
+        raw = """
+        {
+          "status": "skipped",
+          "analysis_summary": {
+            "diagnosis": "no_match",
+            "cell_type_distribution": {
+              "FDRE": 9,
+              "LUT6": 3
+            }
+          }
+        }
+        """
+        skipped, diagnostics = extract_skill_precheck_diagnostics(raw)
+        assert skipped is True
+        assert "FDRE" in diagnostics
+        assert "diagnosis: no_match" in diagnostics
+        assert extract_skill_precheck_diagnostics('{"status": "success"}') == (False, "")
+
+    def test_build_precheck_failure_contract_distinguishes_not_applicable(self):
+        contract = build_precheck_failure_contract(
+            "rapidwright_execute_fanout_strategy",
+            "NO_WORK",
+            skill_was_skipped=True,
+            skill_diagnostics="critical path cell types: {'FDRE': 4}, diagnosis: no_match",
+        )
+        assert contract is not None
+        assert contract["done_reason"] == "precheck_no_work"
+        assert contract["failure_reason"] == "strategy_not_applicable"
+        assert "not applicable" in contract["user_message"]
+
+        regress = build_precheck_failure_contract(
+            "rapidwright_execute_fanout_strategy",
+            "REGRESS",
+        )
+        assert regress is not None
+        assert regress["failure_reason"] == "strategy_ineffective"
+        assert regress["done_reason"] == "precheck_direction_regress"
+
+    def test_resolve_chain_step_arguments_prefers_skill_then_strategy_defaults(self):
+        step = {
+            "tool": "vivado_route_design",
+            "args": {},
+            "args_from_skill": {"directive": "route_directive"},
+        }
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_pblock_strategy",
+            step,
+            {},
+        )
+        assert args["directive"] == "Explore"
+        assert note is None
+
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_pblock_strategy",
+            step,
+            {"route_directive": "Explore"},
+        )
+        assert args["directive"] == "Explore"
+        assert note is None
+
+    def test_resolve_chain_step_arguments_rewrites_blacklisted_directives(self):
+        step = {
+            "tool": "vivado_place_design",
+            "args": {},
+            "args_from_skill": {"directive": "place_directive"},
+        }
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_opt_design_strategy",
+            step,
+            {"place_directive": "Performance_ExtraTimingOpt"},
+        )
+        assert args["directive"] == "ExtraTimingOpt"
+        assert note is not None
+        assert "blacklisted" in note
+
+    def test_resolve_chain_step_runtime_override_global_unplace_for_pblock_fallback(self):
+        target_tool, args, note = resolve_chain_step_runtime_override(
+            "rapidwright_execute_pblock_strategy",
+            "vivado_unplace_cells",
+            {"cells": ["u0", "u1"]},
+            {
+                "bind_critical_path_cells_to_pblock": False,
+                "pblock_fallback_reason": "whole-design fallback triggered",
+            },
+        )
+        assert target_tool == "vivado_place_design"
+        assert args == {"directive": "unplace"}
+        assert note is not None
+        assert "global place_design -unplace" in note
+
+    def test_resolve_chain_step_runtime_override_keeps_local_unplace_when_binding_cells(self):
+        target_tool, args, note = resolve_chain_step_runtime_override(
+            "rapidwright_execute_pblock_strategy",
+            "vivado_unplace_cells",
+            {"cells": ["u0", "u1"]},
+            {"bind_critical_path_cells_to_pblock": True},
+        )
+        assert target_tool == "vivado_unplace_cells"
+        assert args == {"cells": ["u0", "u1"]}
+        assert note is None
+
+    def test_resolve_chain_step_arguments_drops_pblock_cells_for_whole_design_fallback(self):
+        step = {
+            "tool": "vivado_create_and_apply_pblock",
+            "args": {},
+            "args_from_skill": {
+                "pblock_name": "pblock_name",
+                "ranges": "pblock_ranges",
+                "is_soft": "is_soft_recommended",
+                "cells": "critical_path_cells",
+            },
+        }
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_pblock_strategy",
+            step,
+            {
+                "pblock_name": "pblock_tight",
+                "pblock_ranges": "SLICE_X10Y0:SLICE_X20Y299",
+                "is_soft_recommended": False,
+                "critical_path_cells": ["u0", "u1"],
+                "bind_critical_path_cells_to_pblock": False,
+                "pblock_fallback_reason": "whole-design fallback triggered",
+            },
+        )
+        assert "cells" not in args
+        assert args["is_soft"] is True
+        assert note is not None
+        assert "whole-design fallback" in note
+
+    def test_resolve_chain_step_arguments_keeps_pblock_cells_for_local_binding(self):
+        step = {
+            "tool": "vivado_create_and_apply_pblock",
+            "args": {},
+            "args_from_skill": {
+                "pblock_name": "pblock_name",
+                "ranges": "pblock_ranges",
+                "is_soft": "is_soft_recommended",
+                "cells": "critical_path_cells",
+            },
+        }
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_pblock_strategy",
+            step,
+            {
+                "pblock_name": "pblock_tight",
+                "pblock_ranges": "SLICE_X54Y0:SLICE_X54Y299",
+                "is_soft_recommended": False,
+                "critical_path_cells": ["u0", "u1"],
+            },
+        )
+        assert args["cells"] == ["u0", "u1"]
+        assert args["is_soft"] is False
+        assert note is None
+
+    def test_chain_step_failure_result_handles_json_and_plaintext_errors(self):
+        assert is_chain_step_failure_result('{"error": "route failed"}') is True
+        assert is_chain_step_failure_result("INFO: start\nERROR: [Route 35-39] failed") is True
+        assert is_chain_step_failure_result('{"status": "success"}') is False
+
+    def test_should_recompute_chain_verdict_only_overrides_stale_unchanged(self):
+        override, verdict, delta = should_recompute_chain_verdict(
+            "rapidwright_execute_pblock_strategy",
+            "UNCHANGED",
+            -0.500,
+            -0.450,
+        )
+        assert override is True
+        assert verdict == "IMPROVED"
+        assert round(delta, 3) == 0.050
+
+        override, verdict, delta = should_recompute_chain_verdict(
+            "rapidwright_execute_pblock_strategy",
+            "IMPROVED",
+            -0.500,
+            -0.450,
+        )
+        assert override is False
+        assert verdict is None
+
+    def test_post_chain_refresh_contract(self):
+        assert tool_requires_post_chain_path_refresh("rapidwright_execute_pblock_strategy") is True
+        assert tool_requires_post_chain_path_refresh("rapidwright_execute_fanout_strategy") is False
+
+
+def _make_pblock_plan(
+    *,
+    candidate_id: str,
+    plan_mode: str,
+    columns_used: int,
+    center_col: int,
+    capacity_ok: bool = True,
+    utilization_density: float = 0.5,
+    bind_cells: bool | None = None,
+    unplace_mode: str | None = None,
+    resource_multiplier: float = 2.0,
+    bound_luts: int = 3000,
+    bound_ffs: int = 1200,
+    estimated_resources: dict | None = None,
+):
+    if bind_cells is None:
+        bind_cells = plan_mode == PBLOCK_LOCAL_MODE
+    if unplace_mode is None:
+        unplace_mode = "local_cells" if bind_cells else PBLOCK_UNPLACE_GLOBAL
+    return PblockExecutionPlan(
+        plan_mode=plan_mode,
+        candidate_id=candidate_id,
+        pblock_name="pblock_tight",
+        pblock_ranges="SLICE_X0Y0:SLICE_X10Y299",
+        resource_multiplier=resource_multiplier,
+        target_lut_count=10000,
+        target_ff_count=20000,
+        target_dsp_count=0,
+        target_bram_count=0,
+        bind_cells_to_pblock=bind_cells,
+        unplace_mode=unplace_mode,
+        is_soft=not bind_cells,
+        place_directive="Explore",
+        route_directive="Explore",
+        reference_col=center_col,
+        reference_row=150,
+        selection_reason=candidate_id,
+        critical_path_cells_snapshot=["u0", "u1"],
+        capacity_ok=capacity_ok,
+        estimated_resources=estimated_resources or {"luts": 12000, "ffs": 24000, "dsps": 0, "brams": 0},
+        region={"columns_used": columns_used, "center_col": center_col, "center_row": 150},
+        utilization_density=utilization_density,
+        bound_resources={"luts": bound_luts, "ffs": bound_ffs},
+    )
+
+
+class TestPblockPlanContracts:
+    def test_recommend_pblock_plan_prefers_non_degenerate_local_plan(self):
+        local = _make_pblock_plan(
+            candidate_id="local_bound_cells",
+            plan_mode=PBLOCK_LOCAL_MODE,
+            columns_used=3,
+            center_col=60,
+            utilization_density=0.25,
+            bound_luts=2500,
+            bound_ffs=3000,
+        )
+        global_plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=12,
+            center_col=70,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        selected, ordered = recommend_pblock_plan(
+            [local, global_plan],
+            critical_path_reference=(65, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "local_bound_cells"
+        assert ordered[0].candidate_id == "local_bound_cells"
+
+    def test_recommend_pblock_plan_falls_back_to_global_when_local_degenerate(self):
+        local = _make_pblock_plan(
+            candidate_id="local_bound_cells",
+            plan_mode=PBLOCK_LOCAL_MODE,
+            columns_used=1,
+            center_col=90,
+            utilization_density=0.05,
+            bound_luts=20,
+            bound_ffs=15,
+        )
+        global_left = _make_pblock_plan(
+            candidate_id="global_left_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=30,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        selected, ordered = recommend_pblock_plan(
+            [local, global_left],
+            critical_path_reference=(32, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "global_left_bias"
+        assert ordered[0].candidate_id == "global_left_bias"
+
+    def test_global_candidates_rank_by_capacity_then_surplus_then_distance(self):
+        tight = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=9,
+            center_col=50,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            estimated_resources={"luts": 10200, "ffs": 20400, "dsps": 0, "brams": 0},
+        )
+        far = _make_pblock_plan(
+            candidate_id="global_right_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=9,
+            center_col=90,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            estimated_resources={"luts": 10200, "ffs": 20400, "dsps": 0, "brams": 0},
+        )
+        selected, ordered = recommend_pblock_plan(
+            [far, tight],
+            critical_path_reference=(52, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "global_cp_center"
+        assert ordered[0].candidate_id == "global_cp_center"
+
+    def test_global_candidates_demote_nearly_full_regions(self):
+        roomy = _make_pblock_plan(
+            candidate_id="global_left_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=14,
+            center_col=40,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.78,
+            estimated_resources={"luts": 13000, "ffs": 26000, "dsps": 0, "brams": 0},
+        )
+        nearly_full = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=9,
+            center_col=52,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.995,
+            estimated_resources={"luts": 20000, "ffs": 40000, "dsps": 0, "brams": 0},
+        )
+        selected, ordered = recommend_pblock_plan(
+            [nearly_full, roomy],
+            critical_path_reference=(52, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "global_left_bias"
+        assert ordered[0].candidate_id == "global_left_bias"
+
+    def test_global_candidates_prefer_loose_over_near_full_regions(self):
+        # Strong-baseline evidence (run-20260706_165117): the winning global
+        # replacement pblock ran at ~0.24 target/capacity. A loose window
+        # (0.49) must outrank a near-full one (0.92) that congests the placer.
+        near_full = _make_pblock_plan(
+            candidate_id="global_right_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=80,
+            center_col=75,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.92,
+            estimated_resources={"luts": 34000, "ffs": 68000, "dsps": 0, "brams": 0},
+        )
+        loose = _make_pblock_plan(
+            candidate_id="global_cp_center_capacity_fallback",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=158,
+            center_col=55,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.49,
+            estimated_resources={"luts": 64000, "ffs": 128000, "dsps": 0, "brams": 0},
+        )
+        selected, ordered = recommend_pblock_plan(
+            [loose, near_full],
+            critical_path_reference=(60, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "global_cp_center_capacity_fallback"
+        assert ordered[0].candidate_id == "global_cp_center_capacity_fallback"
+
+    def test_global_candidates_demote_whole_device_noop_regions(self):
+        # Below ~0.10 target/capacity a "window" is effectively the whole
+        # device and constrains nothing — a loose bounded window must win.
+        loose = _make_pblock_plan(
+            candidate_id="global_left_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=100,
+            center_col=60,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.30,
+            estimated_resources={"luts": 105000, "ffs": 210000, "dsps": 0, "brams": 0},
+        )
+        whole_device = _make_pblock_plan(
+            candidate_id="global_cp_center_capacity_fallback",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=536,
+            center_col=268,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.08,
+            estimated_resources={"luts": 392000, "ffs": 784000, "dsps": 0, "brams": 0},
+        )
+        selected, ordered = recommend_pblock_plan(
+            [whole_device, loose],
+            critical_path_reference=(60, 150),
+        )
+        assert selected is not None
+        assert selected.candidate_id == "global_left_bias"
+        assert ordered[0].candidate_id == "global_left_bias"
+
+    def test_place_only_thresholds_are_mode_specific(self):
+        assert get_place_only_screening_threshold(PBLOCK_LOCAL_MODE) == 0.03
+        assert get_place_only_screening_threshold(PBLOCK_GLOBAL_MODE) == 0.10
+
+    def test_global_place_only_neutral_delta_can_route_when_roomy(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_left_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=20,
+            center_col=40,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.82,
+            capacity_ok=True,
+        )
+        assert should_route_pblock_after_place(plan, 0.0, threshold=0.10)
+
+    def test_global_place_only_neutral_delta_screens_nearly_full_region(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=90,
+            center_col=60,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            utilization_density=0.995,
+            capacity_ok=True,
+        )
+        assert not should_route_pblock_after_place(plan, 0.0, threshold=0.10)
+
+    def test_local_place_only_neutral_delta_still_requires_threshold(self):
+        plan = _make_pblock_plan(
+            candidate_id="local_bound_cells",
+            plan_mode=PBLOCK_LOCAL_MODE,
+            columns_used=3,
+            center_col=60,
+            utilization_density=0.25,
+            bound_luts=2500,
+            bound_ffs=3000,
+        )
+        assert not should_route_pblock_after_place(plan, 0.0, threshold=0.03)
+
+    def test_execution_rebuild_required_for_understrength_global_plan(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=55,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            resource_multiplier=1.5,
+        )
+        assert plan_requires_execution_rebuild(plan)
+
+    def test_execution_rebuild_not_required_for_execute_strength_global_plan(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=55,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+            resource_multiplier=PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
+        )
+        assert not plan_requires_execution_rebuild(plan)
+
+    def test_resolve_selected_pblock_plan_prefers_selected_plan_payload(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=11,
+            center_col=55,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        payload = {"selected_pblock_plan": plan.to_dict()}
+        resolved = resolve_selected_pblock_plan(payload)
+        assert resolved is not None
+        assert resolved.candidate_id == "global_cp_center"
+
+    def test_resolve_ordered_pblock_candidates_skips_attempted_ids(self):
+        recommended = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=55,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        alternate = _make_pblock_plan(
+            candidate_id="global_left_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=11,
+            center_col=25,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        ordered = resolve_ordered_pblock_candidates(
+            {
+                "candidate_plans": [recommended.to_dict(), alternate.to_dict()],
+                "recommended_candidate_id": recommended.candidate_id,
+            },
+            attempted_candidate_ids=[recommended.candidate_id],
+        )
+        assert [plan.candidate_id for plan in ordered] == ["global_left_bias"]
+
+    def test_get_pblock_place_only_threshold_reads_selected_plan(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_right_bias",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=12,
+            center_col=80,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        assert get_pblock_place_only_threshold({"selected_pblock_plan": plan.to_dict()}) == 0.10
+
+    def test_resolve_chain_step_arguments_applies_frozen_plan_contract(self):
+        step = {
+            "tool": "vivado_create_and_apply_pblock",
+            "args": {},
+            "args_from_skill": {
+                "pblock_name": "pblock_name",
+                "ranges": "pblock_ranges",
+                "is_soft": "is_soft_recommended",
+                "cells": "critical_path_cells",
+            },
+        }
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=60,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        args, note = resolve_chain_step_arguments(
+            "rapidwright_execute_pblock_strategy",
+            step,
+            {"selected_pblock_plan": plan.to_dict()},
+        )
+        assert args["pblock_name"] == "pblock_tight"
+        assert args["ranges"] == "SLICE_X0Y0:SLICE_X10Y299"
+        assert args["is_soft"] is True
+        assert "cells" not in args
+        assert note is not None
+
+    def test_resolve_chain_step_runtime_override_uses_frozen_global_plan(self):
+        plan = _make_pblock_plan(
+            candidate_id="global_cp_center",
+            plan_mode=PBLOCK_GLOBAL_MODE,
+            columns_used=10,
+            center_col=60,
+            bind_cells=False,
+            unplace_mode=PBLOCK_UNPLACE_GLOBAL,
+        )
+        target_tool, args, note = resolve_chain_step_runtime_override(
+            "rapidwright_execute_pblock_strategy",
+            "vivado_unplace_cells",
+            {"cells": ["u0", "u1"]},
+            {"selected_pblock_plan": plan.to_dict()},
+        )
+        assert target_tool == "vivado_place_design"
+        assert args == {"directive": "unplace"}
+        assert note is not None
+
+
+class TestToolCallContracts:
+    def test_coerce_payload_dict_accepts_dict_and_json_text(self):
+        assert coerce_payload_dict({"status": "success"}) == {"status": "success"}
+        assert coerce_payload_dict('{"status": "success", "value": 1}') == {
+            "status": "success",
+            "value": 1,
+        }
+        assert coerce_payload_dict("not json") is None
+
+    def test_build_tool_call_result_extracts_payload_and_error(self):
+        result = build_tool_call_result(
+            "vivado_route_design",
+            '{"status": "failed", "error": "route failed"}',
+        )
+        assert result.tool_name == "vivado_route_design"
+        assert result.payload == {"status": "failed", "error": "route failed"}
+        assert result.status == "failed"
+        assert result.error == "route failed"
+        assert result.ok is False
+
+    def test_build_tool_call_result_flags_plaintext_mcp_errors(self):
+        raw = "[ERROR] Application-level timeout after 900s"
+        result = build_tool_call_result("vivado_place_design", raw)
+        assert is_mcp_error_response(raw) is True
+        assert result.is_mcp_error is True
+        assert result.error == raw
+        assert result.payload is None
+
+    def test_build_tool_call_result_keeps_evaluate_style_payload_without_error(self):
+        result = build_tool_call_result(
+            "vivado_report_timing_summary",
+            '{"status": "success", "wns": -0.123, "summary": "timing refreshed"}',
+        )
+        assert result.payload == {
+            "status": "success",
+            "wns": -0.123,
+            "summary": "timing refreshed",
+        }
+        assert result.status == "success"
+        assert result.error is None
+        assert result.raw_text.startswith('{"status": "success"')
+
+    def test_build_tool_call_result_handles_no_output_text(self):
+        result = build_tool_call_result("vivado_extract_critical_path_cells", "")
+        assert result.raw_text == ""
+        assert result.payload is None
+        assert result.error is None
+        assert result.status is None
+
+
+class TestPhasePolicy:
+    def test_max_rounds_contract(self):
+        contract = build_phase_exit_contract(round_count=6, max_rounds=5)
+        assert contract.should_exit is True
+        assert contract.event == "max_rounds"
+        assert contract.record_reason == "max_rounds"
+        assert contract.set_is_done is False
+
+    def test_wall_clock_timeout_contract(self):
+        contract = build_phase_exit_contract(
+            start_time=10.0,
+            wall_clock_timeout=5.0,
+            now=16.0,
+        )
+        assert contract.should_exit is True
+        assert contract.event == "wall_clock_timeout"
+        assert contract.done_reason == "wall_clock_timeout"
+        assert contract.set_is_done is True
+
+    def test_user_requested_contract(self):
+        contract = build_phase_exit_contract(user_exit_requested=True)
+        assert contract.should_exit is True
+        assert contract.event == "user_requested"
+        assert contract.done_reason is None
+
+    def test_cost_limit_contract(self):
+        contract = build_phase_exit_contract(total_cost=9.5, cost_hard_limit=9.5)
+        assert contract.should_exit is True
+        assert contract.event == "cost_limit"
+        assert contract.done_reason == "cost_limit"
+        assert contract.set_is_done is True
+
+    def test_no_progress_contract(self):
+        contract = build_phase_exit_contract(no_progress_count=4, no_progress_limit=4)
+        assert contract.should_exit is True
+        assert contract.event == "no_progress"
+        assert contract.record_reason == "no_progress"
+
+    def test_empty_response_contract(self):
+        contract = build_phase_exit_contract(
+            consecutive_empty_responses=2,
+            empty_response_limit=2,
+        )
+        assert contract.should_exit is True
+        assert contract.event == "empty_responses"
+        assert contract.record_reason == "empty_responses"
+
+
+class TestSplitPolicyModules:
+    def test_catalog_exports_match_compat_constants(self):
+        assert EXECUTE_CORE_TOOLS_CATALOG == EXECUTE_CORE_TOOLS
+        assert POST_EVAL_TOOLS_CATALOG == POST_EVAL_TOOLS
+
+    def test_chain_exports_match_compat_constants(self):
+        assert SKILL_CHAIN_ACTIONS_POLICY == SKILL_CHAIN_ACTIONS
+        assert "rapidwright_execute_pblock_strategy" not in PLACE_ONLY_CHECK_SKILLS_POLICY
+
+    def test_runtime_exports_match_compat_constants(self):
+        assert DASHBOARD_REFRESH_MAP_POLICY == DASHBOARD_REFRESH_MAP
+        assert PHASE_TOOL_RATE_LIMITS_POLICY == PHASE_TOOL_RATE_LIMITS
 
 
 class TestParseTimingSummary:
@@ -651,8 +1520,23 @@ from optimizer.pure.entities import (
     extract_registry_cells_for_inject,
     CELL_NAME_TOOLS,
 )
-from optimizer.pure.context_snapshot import inject_pinned_cell_registry
+from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry
 import json as _json
+
+
+class TestContextSnapshotContracts:
+    def test_inject_merged_dashboard_tolerates_missing_wns(self, tmp_path):
+        state = OptimizerState()
+        state.control.run_dir = tmp_path
+        state.strategy.current_phase = LoopPhase.ANALYZE.value
+        state.timing.latest_wns = None
+        state.timing.field_freshness = {"timing_summary": "stale"}
+
+        api_messages: list[dict] = []
+        inject_merged_dashboard(api_messages, state, LoopPhase.ANALYZE)
+
+        assert api_messages
+        assert state.context.design_data.last_snapshot_fingerprint.startswith("wns=N/A|")
 
 
 class TestIsValidCellName:
@@ -1019,7 +1903,7 @@ class TestSkillChainActions:
         """矛盾二: PBLOCK must NOT be in PLACE_ONLY_CHECK_SKILLS — after local
         unplace+place the moved cells' nets are temporarily unrouted, so
         place-only WNS is an artifactual regression that would wrongly skip route."""
-        assert "rapidwright_execute_pblock_strategy" not in PLACE_ONLY_CHECK_SKILLS
+        assert "rapidwright_execute_pblock_strategy" not in PLACE_ONLY_CHECK_SKILLS_POLICY
 
     @pytest.mark.parametrize("skill", [
         "rapidwright_execute_pblock_strategy",

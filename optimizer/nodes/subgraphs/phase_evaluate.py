@@ -21,11 +21,12 @@ from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_summary import summarize_tool_result
-from optimizer.pure.tool_router import call_tool as call_tool_fn
+from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
+from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, PULSE_WIDTH_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES, EQUIVALENCE_FF_CHANGE_THRESHOLD, EQUIVALENCE_LUT_CHANGE_THRESHOLD
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -268,7 +269,10 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.iteration.tool_round = tool_round
         _pending_signal = False  # defer exit until pending tools execute
 
-        if _check_phase_exit(state, tool_round, max_rounds):
+        exit_contract = _check_phase_exit(state, tool_round, max_rounds)
+        if exit_contract.should_exit:
+            if exit_contract.event in {"wall_clock_timeout", "user_requested", "cost_limit"}:
+                return LoopPhase.ANALYZE
             break
 
         # Call LLM with evaluation tools
@@ -463,7 +467,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                             })
                         continue
 
-                result = await call_tool_fn(
+                tool_result = await call_tool_structured_fn(
                     tool_name=tool_name, arguments=tool_args,
                     rapidwright_session=deps.rapidwright_session,
                     vivado_session=deps.vivado_session,
@@ -476,6 +480,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     entity_registry=state.entity_registry,
                     run_dir=state.control.run_dir,
                 )
+                result = tool_result.raw_text
                 summary = summarize_tool_result(
                     tool_name, result,
                     latest_wns=state.timing.latest_wns,
@@ -488,6 +493,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     deps.compat.add_message("tool", summary, {
                         "tool_call_id": tc.id, "name": tool_name,
                     })
+                if tool_result.error:
+                    logger.warning(
+                        f"[EVALUATE] Tool '{tool_name}' returned structured error: "
+                        f"{tool_result.error[:200]}"
+                    )
 
                 # Store raw output (mirrors ANALYZE/EXECUTE pattern)
                 state.context.raw_tool_outputs[(state.iteration.current, "EVALUATE", tool_round, tool_name)] = result
@@ -600,7 +610,11 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         # No tool calls, no decision — prompt again
         if not assistant_content.strip() and not message.tool_calls:
             state.context.consecutive_empty_responses += 1
-            if state.context.consecutive_empty_responses >= 2:
+            empty_exit = build_phase_exit_contract(
+                consecutive_empty_responses=state.context.consecutive_empty_responses,
+                empty_response_limit=2,
+            )
+            if empty_exit.should_exit:
                 logger.warning(
                     f"[EVALUATE] {state.context.consecutive_empty_responses} consecutive "
                     f"empty responses, forcing SWITCH_STRATEGY"
@@ -683,13 +697,38 @@ def _handle_exhausted(state: OptimizerState, deps) -> None:
                        result_status=state.control.step_state.result_status if state.control.step_state else "")
 
 
-def _check_phase_exit(state: OptimizerState, tool_round: int, max_rounds: int) -> bool:
-    if tool_round > max_rounds:
+def _check_phase_exit(
+    state: OptimizerState,
+    tool_round: int,
+    max_rounds: int,
+) -> PhaseExitContract:
+    contract = build_phase_exit_contract(
+        round_count=tool_round,
+        max_rounds=max_rounds,
+        start_time=state.control.start_time,
+        wall_clock_timeout=state.control.wall_clock_timeout,
+        now=time.time(),
+        user_exit_requested=state.control.user_exit_requested,
+        total_cost=state.cost.total_cost,
+        cost_hard_limit=state.cost.cost_hard_limit,
+    )
+    if not contract.should_exit:
+        return contract
+    if contract.event == "max_rounds":
         logger.warning(f"[EVALUATE] Max rounds reached ({tool_round} > {max_rounds})")
-        return True
-    if state.control.user_exit_requested:
-        return True
-    return False
+    elif contract.event == "wall_clock_timeout":
+        logger.warning("[EVALUATE] Wall-clock timeout")
+    elif contract.event == "user_requested":
+        logger.info("[EVALUATE] User exit requested")
+    elif contract.event == "cost_limit":
+        logger.warning("[EVALUATE] Cost limit reached")
+    if contract.set_is_done:
+        state.control.is_done = True
+    if contract.done_reason:
+        state.control.done_reason = contract.done_reason
+    if contract.record_reason:
+        record_flow_signal(state, "SYSTEM_EXIT", contract.record_reason, phase="EVALUATE")
+    return contract
 
 
 async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2.0):

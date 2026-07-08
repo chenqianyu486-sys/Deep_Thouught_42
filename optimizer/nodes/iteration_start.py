@@ -74,6 +74,9 @@ async def iteration_start_node(
     # raw outputs are invalid for the new iteration's different design state.
     state.context.tool_cache.clear()
     state.context.raw_tool_outputs.clear()
+    state.context.pending_pblock_plan = None
+    state.context.pending_pblock_candidates.clear()
+    state.context.attempted_pblock_candidate_ids.clear()
     # Reset phase-handoff design fingerprint so the next phase transition
     # clears any remaining cached tool results from the prior iteration.
     reset_design_fingerprint()
