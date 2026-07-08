@@ -119,6 +119,11 @@ async def call_tool(
                 "of raw TCL for reliable, validated extraction."
             )
 
+    # ``timeout`` is a router-level control, not an MCP tool argument. Keep it
+    # out of schema-validated MCP calls while preserving all real tool args.
+    arguments = dict(arguments or {})
+    user_timeout = arguments.pop("timeout", None)
+
     # Internal tool: retrieve raw tool output from side buffer
     if tool_name == "vivado_get_raw_tool_output":
         if raw_tool_outputs is None:
@@ -277,7 +282,6 @@ async def call_tool(
 
     # Application-level timeout: use per-tool defaults scaled by design size,
     # with user-specified timeout taking priority.
-    user_timeout = arguments.get("timeout")
     if user_timeout is not None:
         request_timeout = float(user_timeout)
     else:

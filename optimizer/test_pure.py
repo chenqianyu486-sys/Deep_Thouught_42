@@ -93,6 +93,7 @@ from optimizer.pure.tool_contracts import (
     build_tool_call_result,
     coerce_payload_dict,
     is_mcp_error_response,
+    strip_tool_cache_header,
 )
 from optimizer.pure.tool_catalog import (
     EXECUTE_CORE_TOOLS as EXECUTE_CORE_TOOLS_CATALOG,
@@ -915,6 +916,17 @@ class TestToolCallContracts:
         assert result.payload is None
         assert result.error is None
         assert result.status is None
+
+    def test_cached_json_payload_remains_structured(self):
+        raw = '[CACHED from round 2]\n{"status":"success","value":3}'
+        result = build_tool_call_result("rapidwright_get_design_info", raw)
+        assert result.payload == {"status": "success", "value": 3}
+        assert result.status == "success"
+        assert result.error is None
+
+    def test_strip_tool_cache_header_preserves_plain_text(self):
+        assert strip_tool_cache_header("plain output") == "plain output"
+        assert strip_tool_cache_header("[CACHED from round 4]\nplain output") == "plain output"
 
 
 class TestPhasePolicy:

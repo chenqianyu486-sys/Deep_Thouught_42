@@ -20,12 +20,22 @@ def is_mcp_error_response(text: str) -> bool:
     return any(pattern in text for pattern in _MCP_ERROR_PATTERNS)
 
 
+def strip_tool_cache_header(text: str) -> str:
+    """Remove router cache metadata while preserving the original payload."""
+    if text.startswith("[CACHED from round "):
+        _header, sep, payload = text.partition("\n")
+        if sep:
+            return payload
+    return text
+
+
 def coerce_payload_dict(raw_result: object) -> dict[str, Any] | None:
     """Best-effort convert a raw tool result into a JSON dict payload."""
     if isinstance(raw_result, dict):
         return raw_result
     if not isinstance(raw_result, str) or not raw_result:
         return None
+    raw_result = strip_tool_cache_header(raw_result)
     try:
         parsed = json.loads(raw_result)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -51,7 +61,8 @@ class ToolCallResult:
 
 def build_tool_call_result(tool_name: str, raw_text: str) -> ToolCallResult:
     """Parse raw tool text into a structured envelope."""
-    payload = coerce_payload_dict(raw_text)
+    normalized_text = strip_tool_cache_header(raw_text)
+    payload = coerce_payload_dict(normalized_text)
     error = None
     status = None
 
@@ -63,9 +74,9 @@ def build_tool_call_result(tool_name: str, raw_text: str) -> ToolCallResult:
         if isinstance(raw_status, str) and raw_status.strip():
             status = raw_status
 
-    mcp_error = is_mcp_error_response(raw_text)
+    mcp_error = is_mcp_error_response(normalized_text)
     if error is None and mcp_error:
-        error = raw_text
+        error = normalized_text
 
     return ToolCallResult(
         tool_name=tool_name,
