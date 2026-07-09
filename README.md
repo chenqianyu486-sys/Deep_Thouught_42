@@ -340,7 +340,7 @@ make run_optimizer_dashboard DCP=input.dcp DASHBOARD_PORT=9090
 
 已知数据流缺陷可能导致 LLM 在策略选择时被错误或过期的分析数据误导，详见 [PROJECT_TREE_AND_DATA_FLOW.md 附录A](PROJECT_TREE_AND_DATA_FLOW.md) 和 [architecture.md §15](architecture.md)：
 
-- **`check_design_status` 对已布线设计返回 `is_routed=false`** — `get_property STATUS` 在 `open_checkpoint` 后返回空字符串
+- **`check_design_status` 对已布线设计返回 `is_routed=false`** — `STATUS`/`IS_PLACED`/`IS_ROUTED` 在 `open_checkpoint` 后均返回空字符串；已修（`report_route_status` 文本解析兜底，详见 [architecture.md §15.1/§15.8](architecture.md)）
 - **高扇出网线初始扫描结果为 0** — `min_fanout=100` 阈值过高 + 父网线名解析边界情况
 - **Module 3（物理与拥塞指标）在策略切换后消失** — EVALUATE/SELECT_STRATEGY 阶段 Dashboard 不包含拥塞/高扇出/路由数据
 - **拥塞工具摘要为空** — `rapidwright_analyze_congestion` 的 `compact_tool_summary` 生成为 `{`（JSON 前缀）

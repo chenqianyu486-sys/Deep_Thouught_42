@@ -149,6 +149,24 @@ def should_exit_for_empty_responses(streak: int, *, limit: int = 2) -> bool:
     return streak >= limit
 
 
+def detect_format_guard_violation(
+    *,
+    assistant_content: str,
+    has_tool_calls: bool,
+    has_step_state: bool,
+) -> bool:
+    """Detect a FORMAT_GUARD violation: the LLM returned text but called no
+    tool, so it did not call report_step_state.
+
+    Such a response is not a valid decision (no report_step_state means no
+    strategy selection / flow control was recorded). The caller should retry
+    without persisting the violating message, so the next round does not see
+    its own unanswered "decision" text. has_tool_calls=False implies no
+    report_step_state, but has_step_state is checked explicitly for clarity.
+    """
+    return bool(assistant_content.strip()) and not has_tool_calls and not has_step_state
+
+
 def resolve_selected_pblock_plan(skill_result_data: dict | None):
     """Resolve the typed PBLOCK plan from the skill payload."""
     return extract_selected_plan_from_payload(skill_result_data)

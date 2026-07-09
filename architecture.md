@@ -1086,11 +1086,11 @@ EntityRegistry
 
 **现象**：`vivado_check_design_status` 返回 `is_placed=false, is_routed=false`，即使设计已完成布局布线。
 
-**根因**：该工具通过 `get_property STATUS [current_design]` 获取状态（`VivadoMCP/vivado_mcp_server.py:2918-2930`）。在 `open_checkpoint` 加载 DCP 后，Vivado 的 STATUS 属性返回**空字符串**。MCP 代码 `if status_result else False` 将空字符串短路为 `False`。
+**根因**：该工具通过 `get_property STATUS [current_design]` 获取状态（`VivadoMCP/vivado_mcp_server.py:2988-3022`）。在 `open_checkpoint` 加载 DCP 后，Vivado 2025.1 的 `STATUS` 属性返回**空字符串**。C1 修复曾假设 `IS_PLACED`/`IS_ROUTED` 属性可靠并作为回退，但日志证伪：`open_checkpoint` 后 `IS_PLACED`/`IS_ROUTED` 同样返回空字符串，回退到 STATUS 字符串匹配也为空，最终 `is_placed=false, is_routed=false, status="Unknown"`。
 
-**影响**：LLM 看到的 `is_routed=false` 与真实状态完全矛盾。`state_space.py:594` 虽有 `design_state=unplaced` 警告注释，但未处理 `Unknown` 值。
+**影响**：LLM 看到的 `is_routed=false` 与真实状态完全矛盾，导致对已 routed 设计重新 unplace+place+route（浪费 ~11 分钟且时序退化）。
 
-**修复方向**：改用 `get_property IS_PLACED` / `get_property IS_ROUTED` 属性探测，或解析 `report_timing_summary` 中的 Design State 字段。
+**修复**：当 `IS_PLACED`/`IS_ROUTED` 均返回空时，调用 `report_route_status -return_string` 解析实际网线布线状态兜底（`# of fully routed nets > 0` 且 `# of nets with routing errors == 0` => `is_routed=true, is_placed=true`；`# of routable nets > 0` => `is_placed=true`）。`report_route_status` 直接遍历网线路由状态，不依赖元数据属性，在 Vivado 2025.1 上可靠。
 
 ### 15.2 高扇出网线扫描阈值过高（init_analysis 使用 min_fanout=100）
 
@@ -1142,7 +1142,7 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 | 文件 | 缺陷 | 优先级 | 状态 |
 |------|------|--------|------|
-| `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对 routed 设计返回 `is_routed=false`（大小写敏感匹配） | P3 | ✅ 已修（C1：大小写不敏感 + Unknown 回退） |
+| `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对 routed 设计返回 `is_routed=false`（`STATUS`/`IS_PLACED`/`IS_ROUTED` 在 `open_checkpoint` 后均返回空） | P3 | ✅ 已修（`report_route_status -return_string` 文本解析兜底；C1 的 `IS_PLACED`/`IS_ROUTED` 回退已被日志证伪） |
 | `optimizer/nodes/init_analysis.py` | 高扇出扫描阈值 `min_fanout=100` 过高 | P0 | ✅ 已修（C2：降至 50） |
 | `optimizer/pure/timing.py` | `parse_high_fanout_nets` `net_name=parts[2]` 截断多 token 网名 | P1 | ✅ 已修（C2：`" ".join(parts[2:])`） |
 | `optimizer/pure/state_space.py` | Module 3 在 EXECUTE/EVALUATE 阶段被过滤（SELECT_STRATEGY 实际显示） | P2 | ✅ 已修（M1：EXECUTE/EVALUATE 保留 physical_congestion） |
@@ -1195,3 +1195,14 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 1. **双陈旧度系统漂移**（F4/F5）：`critical_paths_stale` 布尔与 `field_freshness["critical_path_cells"]` 字典独立更新必然漂移。修复：`_auto_refresh_critical_paths` 同步两套；未来可合并为字典 SSOT。
 2. **静默零/空解析范式**（C2/C4/C8/M3）：多个 parser 在失败时返回与真实零无法区分的值，甚至伪造默认值（C4 PVT）。修复：失败返回 `None` + Dashboard `_annotated_val` 标注原因（`parse_resource_utilization` 为范例）。
 3. **内存修复未同步磁盘**（M6）：`raw_tool_outputs` 内存键已修为 `(iteration, phase, round)` 三元，但 `DesignDataManager.store_raw_output` 文件名仍二元。修复：文件名加 phase。
+
+### 15.8 第四轮：迭代间 handoff 归因与解析/状态/格式守卫修复（2026-07-09）
+
+基于迭代间 handoff 与运行日志交叉审查发现的 4 个缺陷，仅做核心修复（不含四阶段统一、`_validate_phase_result` 控制流改动等增强项）：
+
+| 文件 | 缺陷 | 修复 |
+|------|------|------|
+| `optimizer/pure/handoff.py` | TRAJECTORY 行将迭代净增益错误归因给最后选中但无效的策略（`narratives` 每迭代一条，策略名取迭代结束时的 `current_strategy`，delta 取迭代级净增量） | `_format_trajectory_brief` 改为同时接收 `optimization_history`，按 iteration 对齐：有生效记录则渲染 per-strategy delta（各策略真实贡献），无则回退 narrative 标签保留"试过 X 无效"可见性 |
+| `VivadoMCP/vivado_mcp_server.py` | `place_design -unplace` 后关键路径 cell 行正则硬编码 Location 列，unplace 后 Location 为空导致三条 cell 正则全失配，返回 10 条路径但 cells 全空污染下游 | `RE_CELL_LINE`/`RE_CELL_LINE_BARE` 的 Location 改为可选 `(?:...)?`；追加条件收紧为 `len(cell_names)>=2`（不再 `or len(nodes)>=2`） |
+| `optimizer/pure/execute_contracts.py`、`optimizer/nodes/subgraphs/phase_select_strategy.py`、`optimizer/state.py` | FORMAT_GUARD 违规（LLM 返回纯文本但未调 `report_step_state`）未被校验重试，违规消息写入历史导致下一轮策略偏移；`consecutive_empty_responses` "双重为空"条件使有文本无工具的违规重置计数 | 新增 `detect_format_guard_violation` 纯函数；`extract_step_state` 提前到 `add_message` 之前，违规时跳过写入、注入强提示、重试（限 2 次，不消耗 `tool_round`）；新增 `consecutive_no_tool_call` 计数器，"无工具调用"即计数并退出 |
+| `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对已 routed DCP 返回 `Unknown/false/false`（`STATUS`/`IS_PLACED`/`IS_ROUTED` 在 `open_checkpoint` 后均返回空），误导 LLM 重新 place+route | 见 §15.1：`report_route_status -return_string` 文本解析兜底 |

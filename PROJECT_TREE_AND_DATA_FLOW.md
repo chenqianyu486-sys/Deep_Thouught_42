@@ -398,7 +398,7 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 ### A.1 `check_design_status` 返回错误状态
 
-`VivadoMCP/vivado_mcp_server.py` 的 `check_design_status` 工具使用 `get_property STATUS [current_design]` 检测设计状态。在 `open_checkpoint` 后 Vivado 返回**空字符串**，导致 `is_routed=false`、`is_placed=false`。修复方向：改用 `IS_PLACED`/`IS_ROUTED` 属性探测。
+`VivadoMCP/vivado_mcp_server.py` 的 `check_design_status` 工具使用 `get_property STATUS [current_design]` 检测设计状态。在 `open_checkpoint` 后 Vivado 2025.1 的 `STATUS`/`IS_PLACED`/`IS_ROUTED` 均返回**空字符串**，导致 `is_routed=false`、`is_placed=false`。已修：当三者均空时，调用 `report_route_status -return_string` 解析实际网线布线状态兜底（`report_route_status` 直接遍历网线路由，不依赖元数据属性，可靠）。
 
 ### A.2 高扇出网线初始扫描结果为 0
 

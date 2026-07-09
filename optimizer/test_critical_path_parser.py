@@ -260,3 +260,60 @@ class TestUnexpectedDictFormat:
         assert any("Unexpected dict" in msg or "unexpected" in msg.lower() for msg in warnings), (
             f"Should warn about unexpected dict format. Got: {warnings}"
         )
+
+
+# ── Tests: unplaced-report cell line regex (problem 2 regression) ──
+# These patterns MUST stay in sync with the RE_CELL_LINE / RE_CELL_LINE_BARE
+# definitions inside extract_critical_path_cells() in
+# VivadoMCP/vivado_mcp_server.py. They guard against the unplaced-report bug
+# where the Location column is empty (after place_design -unplace) and the
+# cell line regexes must still match with Location optional.
+
+import re as _re
+
+_RE_CELL_LINE = _re.compile(r'^\s+(?:(\S+)\s+)?(\S+)\s+\(Prop_[^)]+\).*$')
+_RE_CELL_LINE_BARE = _re.compile(r'^\s+(?:(\S+)\s+)?(\S+)\s+([rf])\s+(?:\S+\s+)?(\S+)')
+
+
+class TestUnplacedReportCellRegex:
+    """Verify cell line regexes match both placed and unplaced (empty Location) formats."""
+
+    def test_placed_cell_line_with_location(self):
+        """Placed cell line: Location + CellType + (Prop_)."""
+        line = "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)"
+        m = _RE_CELL_LINE.match(line)
+        assert m is not None, "Placed cell line must match"
+        assert m.group(1) == "SLICE_X91Y106"
+        assert m.group(2) == "FDRE"
+
+    def test_unplaced_cell_line_empty_location(self):
+        """Unplaced cell line: empty Location column, only CellType + (Prop_).
+
+        This is the problem-2 bug scenario - the old regex (requiring two
+        \\S+ tokens before (Prop_) failed to match, yielding 0 cell nodes.
+        """
+        line = "                   FDRE (Prop_EFF_SLICEL_C_Q)"
+        m = _RE_CELL_LINE.match(line)
+        assert m is not None, "Unplaced cell line must match after the fix"
+        assert m.group(1) is None, "Location group should be None when unplaced"
+        assert m.group(2) == "FDRE"
+
+    def test_placed_bare_endpoint_cell(self):
+        """Placed endpoint cell: Location + CellType + r/f + pin."""
+        line = "    SLICE_X64Y289        FDRE                                         r  layer1_reg/data_out_reg[76]_rep__0/D"
+        m = _RE_CELL_LINE_BARE.match(line)
+        assert m is not None, "Placed bare cell line must match"
+        assert m.group(1) == "SLICE_X64Y289"
+        assert m.group(2) == "FDRE"
+        assert m.group(3) == "r"
+        assert m.group(4) == "layer1_reg/data_out_reg[76]_rep__0/D"
+
+    def test_unplaced_bare_endpoint_cell(self):
+        """Unplaced endpoint cell: empty Location, only CellType + r/f + pin."""
+        line = "                   FDRE                                         r  layer1_reg/data_out_reg[76]_rep__0/D"
+        m = _RE_CELL_LINE_BARE.match(line)
+        assert m is not None, "Unplaced bare cell line must match after the fix"
+        assert m.group(1) is None, "Location group should be None when unplaced"
+        assert m.group(2) == "FDRE"
+        assert m.group(3) == "r"
+        assert m.group(4) == "layer1_reg/data_out_reg[76]_rep__0/D"

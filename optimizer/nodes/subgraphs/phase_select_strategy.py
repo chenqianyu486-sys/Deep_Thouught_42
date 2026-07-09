@@ -20,6 +20,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
+from optimizer.pure.execute_contracts import detect_format_guard_violation
 from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
@@ -34,6 +35,10 @@ from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
+
+# Max FORMAT_GUARD retries in SELECT_STRATEGY before persisting the violating
+# response. Retries do not consume the tool_round budget.
+MAX_FORMAT_GUARD_RETRIES = 2
 
 
 async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
@@ -66,6 +71,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     state.strategy.current_phase = "SELECT_STRATEGY"
     max_rounds = PHASE_MAX_ROUNDS.get(LoopPhase.SELECT_STRATEGY, 6)
     tool_round = 0
+    format_guard_retries = 0
     state.context.consecutive_empty_responses = 0
     tools_called: list[str] = []
     llm_summary = ""
@@ -127,13 +133,40 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         if len(state.context.llm_call_history) > state.context.llm_call_history_max:
             state.context.llm_call_history = state.context.llm_call_history[-state.context.llm_call_history_max:]
 
+        # Extract step state first (mutates message.tool_calls: removes the
+        # report_step_state call). Done before add_message so the assistant
+        # history does not record report_step_state as a tool call (it has no
+        # tool response), and so FORMAT_GUARD can be checked before persisting.
+        step_state = extract_step_state(message)
+        state.control.step_state = step_state
+
+        # FORMAT_GUARD: LLM returned text but called no tool (hence no
+        # report_step_state). Retry without persisting the violating message,
+        # so the next round does not see its own unanswered "decision" text
+        # and mistake it for a selection (problem 3 root cause).
+        if (format_guard_retries < MAX_FORMAT_GUARD_RETRIES
+                and detect_format_guard_violation(
+                    assistant_content=assistant_content,
+                    has_tool_calls=bool(message.tool_calls),
+                    has_step_state=step_state is not None,
+                )):
+            format_guard_retries += 1
+            tool_round -= 1  # retry does not consume a round budget
+            if deps.compat is not None:
+                deps.compat.add_message("user",
+                    "[FORMAT_GUARD VIOLATION] You returned text without calling "
+                    "report_step_state. Your text was NOT recorded as a decision. "
+                    "Call report_step_state with strategy_name to select a strategy, "
+                    "or set flow_control=EXHAUSTED. Retry.")
+            logger.warning(
+                f"[SELECT_STRATEGY] FORMAT_GUARD violation, retrying "
+                f"({format_guard_retries}/{MAX_FORMAT_GUARD_RETRIES})"
+            )
+            continue
+
         if deps.compat is not None:
             metadata = {"tool_calls": message.tool_calls} if message.tool_calls else None
             deps.compat.add_message("assistant", assistant_content, metadata)
-
-        # Extract step state
-        step_state = extract_step_state(message)
-        state.control.step_state = step_state
 
         if step_state:
             state.context.step_state_misses = 0
@@ -276,22 +309,31 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 return LoopPhase.EVALUATE
             continue
 
-        # No tool calls, no strategy selected: prompt again
-        if not assistant_content.strip() and not message.tool_calls:
-            state.context.consecutive_empty_responses += 1
-            empty_exit = build_phase_exit_contract(
-                consecutive_empty_responses=state.context.consecutive_empty_responses,
+        # No tool calls this round: track the no-tool-call streak. The old
+        # logic only counted fully-empty responses (no text AND no tool), so a
+        # text-only response (FORMAT_GUARD violation that exhausted retries)
+        # reset the streak to 0 and the exit never fired. consecutive_no_tool_call
+        # uses the broader "no tool call" condition so text-only rounds count too.
+        if not message.tool_calls:
+            state.context.consecutive_no_tool_call += 1
+            if not assistant_content.strip():
+                state.context.consecutive_empty_responses += 1
+            else:
+                state.context.consecutive_empty_responses = 0
+            no_tool_exit = build_phase_exit_contract(
+                consecutive_empty_responses=state.context.consecutive_no_tool_call,
                 empty_response_limit=2,
             )
-            if empty_exit.should_exit:
+            if no_tool_exit.should_exit:
                 logger.warning(
-                    f"[SELECT] {state.context.consecutive_empty_responses} consecutive "
-                    f"empty responses, forcing exit"
+                    f"[SELECT] {state.context.consecutive_no_tool_call} consecutive "
+                    f"rounds with no tool call, forcing exit"
                 )
-                record_flow_signal(state, "SYSTEM_EXIT", "empty_responses",
+                record_flow_signal(state, "SYSTEM_EXIT", "no_tool_call",
                                    phase="SELECT_STRATEGY")
                 break
         else:
+            state.context.consecutive_no_tool_call = 0
             state.context.consecutive_empty_responses = 0
 
         if deps.compat is not None:

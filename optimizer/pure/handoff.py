@@ -83,24 +83,58 @@ def _format_failed_strategies(failed_strategies: list[dict]) -> str:
     return "\nFAILED STRATEGIES:\n" + "\n".join(lines)
 
 
-def _format_trajectory_brief(narratives: list[dict], max_entries: int = 5) -> str:
-    """Format recent iteration trajectories into brief lines."""
+def _format_trajectory_brief(
+    narratives: list[dict],
+    optimization_history: list | None = None,
+    max_entries: int = 5,
+) -> str:
+    """Format recent iteration trajectories into brief lines.
+
+    Attribution prefers optimization_history (per-strategy deltas measured
+    against each strategy's own EXECUTE-entry baseline, only for strategies
+    that actually improved best WNS) so an iteration's net gain is attributed
+    to the strategies that produced it, not to the last-selected (possibly
+    ineffective) strategy. Iterations with no effective strategy fall back to
+    the narrative's coarse label to preserve "tried X, no gain" visibility.
+    """
     if not narratives:
         return "(no history)"
+
+    # Group optimization_history records by iteration (append order = strategy
+    # execution order within the iteration).
+    history_by_iter: dict[int, list] = {}
+    for rec in optimization_history or []:
+        it = rec.iteration if isinstance(rec.iteration, int) else rec.get("iteration", 0)
+        history_by_iter.setdefault(it, []).append(rec)
+
     recent = narratives[-max_entries:]
     lines = []
     for entry in recent:
         it = entry.get("iteration", "?")
-        strategy = entry.get("strategy_label", entry.get("strategy", "?"))
         wns_before = entry.get("wns_before")
         wns_after = entry.get("wns_after")
-        wns_delta = entry.get("wns_delta")
         outcome = entry.get("outcome", "unknown")
 
         before_str = f"{wns_before:.3f}" if wns_before is not None else "N/A"
         after_str = f"{wns_after:.3f}" if wns_after is not None else "N/A"
-        delta_str = f"{wns_delta:+.3f}" if wns_delta is not None else "N/A"
-        lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({delta_str}) | {outcome}")
+
+        recs = history_by_iter.get(it, []) if isinstance(it, int) else []
+        if recs:
+            # Per-strategy attribution: each record's delta is its true
+            # contribution (wns_after - wns_before, per-strategy baseline).
+            parts = []
+            for rec in recs:
+                sname = rec.strategy if isinstance(rec.strategy, str) else rec.get("strategy", "?")
+                sb = rec.wns_before if isinstance(rec.wns_before, float) else rec.get("wns_before", 0.0)
+                sa = rec.wns_after if isinstance(rec.wns_after, float) else rec.get("wns_after", 0.0)
+                parts.append(f"{sname}({sa - sb:+.3f})")
+            lines.append(f"  Iter {it}: {', '.join(parts)} | WNS {before_str}->{after_str} | {outcome}")
+        else:
+            # No effective strategy this iteration: fall back to narrative label.
+            strategy = entry.get("strategy_label", entry.get("strategy", "?"))
+            wns_delta = entry.get("wns_delta")
+            delta_str = f"{wns_delta:+.3f}" if wns_delta is not None else "N/A"
+            lines.append(f"  Iter {it}: {strategy} | WNS {before_str}->{after_str} ({delta_str}) | {outcome}")
     return "\n".join(lines)
 
 
@@ -148,7 +182,7 @@ DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter
 
 """
 
-    trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=10)
+    trajectory = _format_trajectory_brief(state.iteration.narratives, state.context.optimization_history, max_entries=10)
     status = build_status_signal(
         state.iteration.global_no_improvement,
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),
@@ -186,7 +220,7 @@ DESIGN RESTORED: Design rolled back to best checkpoint from iteration {best_iter
 
 """
 
-    trajectory = _format_trajectory_brief(state.iteration.narratives, max_entries=5)
+    trajectory = _format_trajectory_brief(state.iteration.narratives, state.context.optimization_history, max_entries=5)
     status = build_status_signal(
         state.iteration.global_no_improvement,
         _count_consecutive_same_strategy(state.iteration.strategy_sequence),

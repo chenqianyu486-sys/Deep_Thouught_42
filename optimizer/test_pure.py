@@ -63,6 +63,7 @@ from optimizer.pure.execute_contracts import (
     get_pblock_place_only_threshold,
     is_chain_step_failure_result,
     next_empty_response_streak,
+    detect_format_guard_violation,
     next_no_progress_count,
     resolve_ordered_pblock_candidates,
     resolve_selected_pblock_plan,
@@ -297,6 +298,34 @@ class TestExecuteContracts:
         assert next_empty_response_streak(0, assistant_content="", has_tool_calls=False) == 1
         assert next_empty_response_streak(1, assistant_content="thinking", has_tool_calls=False) == 0
         assert next_empty_response_streak(1, assistant_content="", has_tool_calls=True) == 0
+
+    def test_detect_format_guard_violation(self):
+        """FORMAT_GUARD violation: text present, no tool call, no step state."""
+        # Text + no tool call + no step state => violation (the problem-3 case:
+        # LLM wrote "OptDesign is now signaled" but never called report_step_state).
+        assert detect_format_guard_violation(
+            assistant_content="OptDesign is now signaled",
+            has_tool_calls=False,
+            has_step_state=False,
+        ) is True
+        # Whitespace-only text is NOT a violation (treated as empty response).
+        assert detect_format_guard_violation(
+            assistant_content="   ",
+            has_tool_calls=False,
+            has_step_state=False,
+        ) is False
+        # Has tool calls => not a violation (LLM is doing work).
+        assert detect_format_guard_violation(
+            assistant_content="selecting PBLOCK",
+            has_tool_calls=True,
+            has_step_state=False,
+        ) is False
+        # Has step state (report_step_state called) => not a violation.
+        assert detect_format_guard_violation(
+            assistant_content="some narration",
+            has_tool_calls=False,
+            has_step_state=True,
+        ) is False
 
     def test_extract_skill_precheck_diagnostics_summarizes_skipped_skill(self):
         raw = """

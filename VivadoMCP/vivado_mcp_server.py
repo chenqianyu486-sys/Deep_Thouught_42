@@ -827,10 +827,10 @@ def extract_critical_path_cells(
 
     # ── Data path node regexes (D1: per-node delay breakdown) ──
     # Cell line: "    SLICE_X91Y106   FDRE (Prop_EFF_SLICEL_C_Q)" — Location + CellType + optional (Prop_)
-    RE_CELL_LINE    = re.compile(r'^\s+(\S+)\s+(\S+)\s+\(Prop_[^)]+\).*$')
+    RE_CELL_LINE    = re.compile(r'^\s+(?:(\S+)\s+)?(\S+)\s+\(Prop_[^)]+\).*$')  # Location optional (unplaced reports have empty Location col); group(1)=Location|None
     # Cell line without Prop_ (endpoint cell, pin on same line): "    DSP48E2_X10Y46  DSP_A_B_DATA  r  cell/pin"
     # Optional PBlock column after r/f flag (Vivado inserts it when cells are assigned to a pblock)
-    RE_CELL_LINE_BARE = re.compile(r'^\s+(\S+)\s+(\S+)\s+([rf])\s+(?:\S+\s+)?(\S+)')
+    RE_CELL_LINE_BARE = re.compile(r'^\s+(?:(\S+)\s+)?(\S+)\s+([rf])\s+(?:\S+\s+)?(\S+)')  # Location optional (unplaced); group(1)=Location|None
     # Delay line: "                              0.079  0.108 r  cell/pin"
     # Optional PBlock column after r/f flag
     RE_DELAY_LINE   = re.compile(r'^\s*(\d+\.?\d*)\s+(\d+\.?\d*)\s+([rf])\s+(?:\S+\s+)?(\S+)')
@@ -947,7 +947,7 @@ def extract_critical_path_cells(
             # Try cell line with Prop_ (sets pending_cell, delay on next line)
             m = RE_CELL_LINE.match(line)
             if m:
-                pending_cell = (m.group(1), m.group(2))  # (location, cell_type)
+                pending_cell = (m.group(1) or "", m.group(2))  # (location, cell_type); location "" when unplaced
                 continue
 
             # Try delay line (consumes pending_cell)
@@ -978,7 +978,7 @@ def extract_critical_path_cells(
             # Try bare cell line (endpoint cell: pin on same line, no delay)
             m = RE_CELL_LINE_BARE.match(line)
             if m and not pending_cell:
-                loc = m.group(1)
+                loc = m.group(1) or ""
                 ctype = m.group(2)
                 pin = m.group(4)
                 cell_name = _strip_pin_suffix(pin, PIN_SUFFIXES)
@@ -1020,7 +1020,9 @@ def extract_critical_path_cells(
         is_cross = bool(header["source_clock"] and header["dest_clock"] and
                         header["source_clock"] != header["dest_clock"])
 
-        if len(cell_names) >= 2 or len(nodes) >= 2:
+        # Require >=2 real cells (not just net nodes) so unplaced reports with
+        # empty cells arrays do not pollute downstream path lists.
+        if len(cell_names) >= 2:
             all_paths.append({
                 # Legacy fields (backward compat)
                 "cells": cell_names,
@@ -2998,20 +3000,53 @@ async def call_tool(name: str, arguments: dict):
             status_result = run_tcl_command("get_property STATUS [current_design]", timeout=timeout)
             design_open = _design_open
             status_lower = status_result.lower() if status_result else ""
-            # IS_PLACED / IS_ROUTED are reliable even after open_checkpoint
-            # (STATUS may be empty for routed designs that were checkpointed
-            # and re-opened — Appendix A.1). Fall back to STATUS string match
-            # when IS_PLACED/IS_ROUTED returns something unexpected.
+            # IS_PLACED / IS_ROUTED are NOT reliable on Vivado 2025.1 after
+            # open_checkpoint - they return empty strings just like STATUS, so
+            # the STATUS-string fallback below also yields false for a routed
+            # design. When all three get_property calls return empty, fall back
+            # to parsing report_route_status -return_string, which inspects
+            # actual net routing state and is reliable (see report_route_status
+            # tool). The Dashboard's design_state remains authoritative for
+            # timing decisions, but is_placed/is_routed here must be correct so
+            # callers do not re-place/re-route an already-routed design.
             is_placed_raw = run_tcl_command("get_property IS_PLACED [current_design]", timeout=5)
             is_routed_raw = run_tcl_command("get_property IS_ROUTED [current_design]", timeout=5)
             is_placed = is_placed_raw.strip() == "1"
             is_routed = is_routed_raw.strip() == "1"
-            # Fallback: if IS_PLACED/IS_ROUTED returned non-boolean (old Vivado),
-            # use the STATUS string heuristic.
+            # Fallback 1: if IS_PLACED/IS_ROUTED returned non-boolean (old Vivado
+            # with a non-empty STATUS), use the STATUS string heuristic.
             if is_placed_raw.strip() not in ("1", "0"):
                 is_placed = ("place_design" in status_lower) or ("route_design" in status_lower)
             if is_routed_raw.strip() not in ("1", "0"):
                 is_routed = "route_design" in status_lower
+            # Fallback 2: on Vivado 2025.1 after open_checkpoint, STATUS /
+            # IS_PLACED / IS_ROUTED all return empty, so the heuristics above
+            # yield false even for a routed design. Recover the true state by
+            # parsing report_route_status -return_string (inspects actual net
+            # routing, not metadata properties).
+            if (is_placed_raw.strip() not in ("1", "0")
+                    and is_routed_raw.strip() not in ("1", "0")
+                    and not is_placed and not is_routed):
+                run_tcl_command("puts {status_check_start}", timeout=5)
+                route_report = run_tcl_command("report_route_status -return_string", timeout=30)
+                fully_routed = 0
+                routing_errors = 0
+                routable = 0
+                for line in (route_report or "").split("\n"):
+                    s = line.strip().lower()
+                    m = re.search(r"(\d[\d,]*)", line)
+                    if "# of fully routed nets" in s:
+                        fully_routed = int(m.group(1).replace(",", "")) if m else 0
+                    elif "# of nets with routing errors" in s:
+                        routing_errors = int(m.group(1).replace(",", "")) if m else 0
+                    elif "# of routable nets" in s:
+                        routable = int(m.group(1).replace(",", "")) if m else 0
+                if fully_routed > 0 and routing_errors == 0:
+                    is_routed = True
+                    is_placed = True
+                elif routable > 0:
+                    # Placed but not fully routed (routable nets exist).
+                    is_placed = True
 
             response = {
                 "design_open": design_open,
