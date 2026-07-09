@@ -321,10 +321,11 @@ def _get_reference_points(design, critical_path_cells: list[str] | None) -> dict
         cp_row = design_center[1] if design_center else default_row
     left_col = min_col + span // 4
     right_col = min_col + (3 * span) // 4
+    _dc = (min_col + max_col) // 2
     return {
-        "global_cp_center": (int(cp_col), int(cp_row)),
-        "global_left_bias": (int(left_col), int(cp_row)),
-        "global_right_bias": (int(right_col), int(cp_row)),
+        "global_cp_center": (int(_dc), int(cp_row)),
+        "global_left_bias": (int(_dc), int(cp_row)),
+        "global_right_bias": (int(_dc), int(cp_row)),
     }
 
 
@@ -574,10 +575,12 @@ def _search_global_replacement_region(
             density_bucket = 2
         region = candidate["region"]
         area = int(region["columns_used"]) * int(region["rows_used"])
+        full_height = 0 if int(region["rows_used"]) >= int(total_rows) else 1
         return (
             0 if candidate["capacity_ok"] else 1,
+            full_height,
             density_bucket,
-            abs(density - 0.25),
+            abs(density - 0.50),
             int(candidate["deficit"]),
             area + int(candidate["distance"]),
         )
