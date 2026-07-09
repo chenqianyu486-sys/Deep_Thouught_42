@@ -329,6 +329,16 @@ async def call_tool(
                     logger.warning(f"--- [DESIGN_LOAD] Vivado design switched to: {dcp_path} ---")
                 # Detect MCP error responses — must not be cached and must invalidate cache
                 is_error_response = is_mcp_error_response(result_text)
+                # Log tool errors at ERROR level with the actual message so they
+                # reach fpl26-error.log. Previously only a boolean error=True was
+                # logged at INFO, leaving the error log empty and the failure
+                # reason (e.g. "Directive '...' is not a recognized directive")
+                # invisible to operators.
+                if is_error_response:
+                    logger.error(
+                        f"[TOOL_ERROR] tool={tool_name} (round {tool_round}): "
+                        f"{result_text[:500]}"
+                    )
                 # Cache logic: error responses and side-effect tools both invalidate cache
                 if tool_cache is not None:
                     if is_error_response or tool_name in _NO_CACHE_TOOLS:

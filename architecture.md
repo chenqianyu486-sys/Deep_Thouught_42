@@ -366,6 +366,7 @@ class StepState:
 | 无 tool_calls，无 DONE 信号 | 继续循环（纯文本处理）|
 | `ANALYZE_DONE` (EVALUATE 误发) | 映射为 SWITCH_STRATEGY（冷却停滞策略 + 推进） |
 | `EXEC_DONE` (EVALUATE 误发) | 映射为 NEXT_ITERATION |
+| `flow_control: EXHAUSTED` (任意阶段) | 设 `is_done=True`/`done_reason=strategies_exhausted`，终止优化（2026-07-09 修复：EXECUTE 中 EXHAUSTED 此前仅 break 出循环，落入 EVALUATE 后被 no-progress 强制 SWITCH，忽略 LLM"策略穷尽"判定；现在三处入口 EXECUTE/SELECT_STRATEGY/EVALUATE 均设 is_done） |
 
 ### 4.4 失败策略追踪
 
@@ -404,6 +405,12 @@ class StepState:
 - Fanout → 工具名含 `fanout` 或 `optimize_fanout`
 - CongestionSpreading → 工具名含 `congestion_spread`
 - PlaceRoute → 工具名含 `place_design` 或 `route_design`
+
+**历史黑洞修复**（2026-07-09）：迭代内 SWITCH_STRATEGY 直接回 SELECT_STRATEGY，**绕过 iteration_end**，故中途切换的无改进策略从不进入 `failed_strategies`，LLM 在 `strategy_outcomes` 中看不到已试策略（iter2 实测 6 个策略仅 1 个可见）。现在 `_handle_switch_strategy` 在切换时记录当前策略：若未已记录且未成功（不在 `optimization_history`），按 `delta≤0` 记 `no_improvement`、`delta=None` 记 `tool_error`。仅**新增**记录，不覆盖 EXECUTE 已记的更具体分类。
+
+**失败分类不覆盖**（2026-07-09）：`record_strategy_failure` 去重时，若新分类的 TTL **低于**现有分类（即试图把 EXECUTE 的语义化冷却降级为 `tool_error` 立即可重试），**保留**现有更严格分类。例如 EXECUTE 记 `strategy_not_applicable`（TTL=2），iteration_end 空结果重扫试图改记 `tool_error`（TTL=0），保留 `strategy_not_applicable`。仅当新 TTL ≥ 现有 TTL（同等或更严格）时才覆写并刷新 TTL。
+
+**失败归因**（2026-07-09）：iteration_end 失败记录的 `tool` 字段取 `get_strategy_primary_tool(strategy)`（策略主执行工具），而非 `tools_used[:3]`（跨阶段、跨策略循环累积列表，曾把 CellReplication 的 `vivado_physopt_and_route` 错归到 Fanout 名下）。无策略映射时回退 `tools_used[:3]`。
 
 ### 4.4.1 策略自动阻断（Post-eval UNCHANGED/REGRESSED，2026-07）
 
@@ -472,6 +479,8 @@ if state.context.consecutive_no_progress >= 3:
 
 **冷却判定同步**（`_cool_down_current_strategy_if_stalled`）：以 `delta > 0` 跳过冷却，与计数器三档对齐。2026-07-04 修复：此前冷却用 `delta > 0.050` 而 best_保存用 `>0`，导致 PBLOCK +0.049ns 改进被存为 best 却被冷却（"见好就收"矛盾）。现在任何正收益都不冷却，EPSILON 仅用于"显著收益"判定（重置计数）。
 
+**每迭代重置**（2026-07-09 修复）：`consecutive_no_progress` 在 `iteration_start` 重置为 0（与 `tool_errors`/`tools_used`/`blocked_strategies` 一同清理）。此前该计数器跨迭代持久，导致 iter N 的停滞计数带入 iter N+1 并无限递增（实测 3→4→…→11），每次 eval≥3 都强制 SWITCH 却无升级终止路径，直到时间预算耗尽。重置后该计数器仅门控迭代内的策略切换；跨迭代平台期终止由 `global_no_improvement` + `GLOBAL_NO_IMPROVEMENT_LIMIT`（check_exit）独立处理。
+
 ### 4.12 优化历史追踪（2026-07）
 
 **数据结构**（`optimizer/state.py` 新增 `OptimizationAppliedRecord`）：
@@ -493,12 +502,14 @@ class OptimizationAppliedRecord:
 state.context.optimization_history.append(OptimizationAppliedRecord(
     strategy=state.strategy.current_strategy,
     params="",
-    wns_before=state.timing.prev_best_wns,
+    wns_before=_current_strategy_baseline_wns(state),  # 本策略进入 EXECUTE 时的 best_wns
     wns_after=state.timing.best_wns,
     iteration=state.iteration.current,
     checkpoint_path=str(state.control.best_checkpoint_path),
 ))
 ```
+
+**每策略基线**（2026-07-09 修复）：`wns_before` 取 `_current_strategy_baseline_wns(state)`——当前策略进入 EXECUTE 时记录的 `PhaseEntry.best_wns_at_entry`（与 cooldown 的 `_strategy_wns_delta_since_entry` 同源），无匹配条目时回退 `prev_best_wns`。此前用 `prev_best_wns`（迭代开始时冻结一次），导致同迭代内后续策略的 delta 全部以迭代起始 WNS 为基准（PhysOpt 记 +0.335ns 而实际仅 +0.012ns），误导 LLM 高估策略贡献。
 
 **消费方**：
 - **Handoff**（`pure/handoff.py`）：`_format_optimization_history()` 在 planner/worker handoff 末尾追加 `APPLIED OPTIMIZATIONS` 段落
@@ -591,6 +602,10 @@ tool_result:
     -0.352
 ```
 
+**小输出错误状态修复（2026-07-09）**：`summarize_tool_result()` 的小输出绕过（<3KB 非 timing）此前硬编码 `status: completed`，且位于错误检测逻辑之前返回，导致小型 JSON 错误响应（如 `{"error": "Directive '...' is not a recognized directive"}`）被误标为 completed。修复：将通用 error/fail 检测移至绕过之前，绕过分支使用已计算的 `status`（错误时为 `error`）。同时 `phase_execute` 的 `tool_errors` 追加改为存 `tool_result.error` 原始错误文本（非 summary），保留真实失败原因供失败分类与 LLM 反馈。
+
+**工具错误 ERROR 级日志（2026-07-09）**：`tool_router.call_tool` 检测到 MCP 错误响应（`is_mcp_error_response=True`）时，新增 `logger.error("[TOOL_ERROR] ...")` 含错误原文前 500 字符。此前仅 `logger.info` 记录布尔 `error=True`，而 `fpl26-error.log` handler 只收 ERROR 级，导致该日志保持空白、Vivado 应用错误（directive 不识别、place_design 失败）不可见。
+
 **2. `_raw_tool_outputs`**: FIFO 淘汰（最多 50 条），仅当 LLM 调 `vivado_get_raw_tool_output` 时返回。键格式为 `(iteration, phase, tool_round, tool_name)`（2026-06-27 修复：之前为 `(iteration, tool_round)`，ANALYZE/EXECUTE 阶段键冲突导致结果互相覆盖）。
 
 **3. 压缩阶段旧消息裁剪**: `_compress_outdated_tool_results()` — 迭代差 > 2 的工具消息替换为 `[COMPRESSED: {tool} iter={N} | {summary}]`。
@@ -682,6 +697,12 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 **字段级新鲜度追踪**: `field_freshness: dict[str, str]`（2026-06-24 新增，替代 `refreshed_fields: set[str]`）。每个 Dashboard 数据字段独立标注 `[fresh]`/`[stale]`。初始化全部 `fresh`，工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段，设计修改工具（`DESIGN_MODIFICATION_TOOLS`）执行后全部降级为 `stale`。EXECUTE 和 EVALUATE 两阶段对称处理（2026-06-27 修复：EVALUATE 之前缺失 stale 标记逻辑，造成 false-fresh）。
 
 **截断透明化新鲜度（2026-07 新增）**: `unshown_path_stats` 区段顶部显示 `unshown_freshness: stale/fresh` 行（基于 `critical_paths_stale` + `_tag('critical_path_cells')`）；`unshown_hotspots` 和 `unshown_high_fanout_nets` 行尾带 `_tag('congestion_data')`/`_tag('high_fanout_nets')`；`truncation_advisory` 区段包含 `freshness: stale_fields=[...] | all_fields_fresh` 全局状态行。截断透明化新增的三个 section 均与已有新鲜度系统完全集成。
+
+**新鲜度契约对齐**（2026-07-09 修复，run-20260709_123409 分析）：
+- **`_reload_baseline_on_switch`**（策略重入时刷新 WNS）此前刷新 WNS 后又把全部 `field_freshness` 标为 `stale`，造成"值正确但标签为 stale"的反模式，诱导 LLM 浪费轮次重复 `vivado_report_timing_summary`。现刷新成功（`baseline_wns is not None`）后调用 `_mark_timing_fresh` 将 `timing_summary`/`cdc_paths` 重新标为 fresh，其余字段（critical_paths 等）保持 stale（反映前序策略的设计状态）。
+- **STALE DATA HANDLING 指令改写**（`prepare_context.py` BASE_FORMAT_GUARD）：原指令要求 LLM "stale WNS/TNS 必须手动刷新"，但框架已在 ANALYZE/SELECT_STRATEGY 入口及策略重入时自动刷新 WNS，4 个网表策略 EXECUTE 入口自动刷新 critical_paths，pblock/combinational 工具自动注入 verified cells/paths（附 `[DATA INTEGRITY]` 通知）。新指令如实描述自动刷新范围，仅要求 LLM 在框架未自动刷新且 cell-targeting 需要时手动刷新，消除"规则要求手动刷新 / 框架已自动刷新"的双向矛盾。
+- **CELL NAME CONTRACT 补充**：声明执行工具会自动注入 verified state data 并在覆盖 LLM 输入时发 `[DATA INTEGRITY]` 通知，对齐"[CELL REGISTRY] canonical"声明与"框架强制覆盖"的实际行为。
+- **`truncation_advisory` 诚实化**：注明 `design_data_read` 返回持久化快照（不调用 Vivado/RapidWright），stale 字段的持久化值可能滞后于实时设计，需用提取工具刷新。
 
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3

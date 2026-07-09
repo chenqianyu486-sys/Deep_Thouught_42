@@ -15,6 +15,7 @@ import re
 from ..state import OptimizerState, record_flow_signal, record_strategy_failure
 from ..deps import NodeDeps
 from ..edges import NodeName
+from ..pure.tool_catalog import get_strategy_primary_tool
 from ..pure.iteration_logic import (
     update_iteration_counters,
     update_task_type_stats,
@@ -183,11 +184,21 @@ async def iteration_end_node(
             if (not wns_improved
                     and state.control.done_reason != "iteration_success"):
                 reason = _determine_failure_reason(state, strategy_label)
+                # Derive the failing tool from the strategy's primary execute
+                # tool, not tools_this_iter[:3]. The iter list accumulates
+                # analysis + prior-strategy tools across the multi-strategy loop
+                # and misattributes failures (e.g. Fanout recorded with
+                # CellReplication's vivado_physopt_and_route). Fall back to the
+                # iter list only when no strategy mapping exists.
+                _failure_tool = (
+                    get_strategy_primary_tool(strategy_label)
+                    or ", ".join(tools_this_iter[:3])
+                )
                 record_strategy_failure(
                     state,
                     strategy=strategy_label,
                     reason=reason,
-                    tool=", ".join(tools_this_iter[:3]),
+                    tool=_failure_tool,
                     detail=f"Iteration {state.iteration.current}: no WNS improvement",
                 )
                 logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")

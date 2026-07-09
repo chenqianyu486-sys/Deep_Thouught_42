@@ -95,6 +95,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 10d | 上下文工程：策略结果表（2026-07） | Dashboard 末尾新增 `strategy_outcomes:` YAML 区块，分 `successful`（从 `optimization_history` 读取，含 WNS delta）和 `failed`（从 `failed_strategies` 读取，含阻塞原因和剩余轮数）两个子节。每次 LLM 调用可见，消除策略重复选择 |
 | 10e | 上下文工程：策略-工具映射恢复（2026-07） | 在 SELECT_STRATEGY 阶段的 FORMAT_GUARD 中注入 `_STRATEGY_MAPPING_LINES`，让 LLM 在选择策略前就能验证执行工具是否存在，避免选择 CellReplication 等无对应工具的策略 |
 | 10f | 上下文工程：Dashboard 截断透明化（2026-07） | 全量设计数据持久化为 `{run_dir}/design_data/` JSON 文件（`design_data.py`）；Dashboard 在被截断的模块后添加聚合统计（`unshown_path_stats`、`unshown_hotspots`、`unshown_high_fanout_nets`），LLM 无需额外工具调用即可了解未显示数据的整体特征；末尾 `truncation_advisory` 区段列出各模块截断量并给出 `design_data_read` 存取指南；新增数据同样带 `[fresh]`/`[stale]` 新鲜度标注 |
+| 10g | 上下文工程：规则-行为一致性（2026-07-09） | 框架声明的上下文工程规则与实际执行对齐，消除"声明自主性 vs 实际干预"的系统性矛盾：STALE DATA HANDLING 如实描述阶段入口自动刷新范围（ANALYZE/SELECT/EXECUTE-reentry 自动刷新 WNS、4 网表策略自动刷新 critical_paths、pblock/combinational 自动注入 verified cells 并发 `[DATA INTEGRITY]`），LLM 勿重复刷新；EXHAUSTED 信号三入口（EXECUTE/SELECT/EVALUATE）均设 `is_done` 终止优化；策略历史黑洞修复（迭代内 SWITCH 时记录无改进策略至 `failed_strategies`）；失败分类不降级（保留 EXECUTE 的更严格冷却，不被 iteration_end 重扫覆盖为 `tool_error`）；`optimization_history` 的 `wns_before` 改用 per-strategy `best_wns_at_entry` 基线（修正 PhysOpt +0.335→+0.012 的 delta 误算）；`consecutive_no_progress` 每迭代重置；工具错误升 ERROR 级入 `fpl26-error.log`；小输出错误响应如实标 `status: error`；失败归因用策略主工具（修正 Fanout 误归 CellReplication 工具） |
 
 **验证与安全层面**:
 | # | 原则 | 实现方式 |

@@ -451,3 +451,18 @@ init_analysis: 高扇出=0(错误) + check_design_status: unrouted(错误)
 - **迭代开始 checkpoint**: `iteration_start` 节点自动保存 `iteration_{iter}_start.dcp` 作为 rollback 基线；优先从 `best_checkpoint.dcp` 拷贝（`shutil.copy2`）而非 Vivado 序列化（节省 ~5s/次）；`_reload_baseline_on_switch` 优先从 `best_checkpoint_path` 恢复，回退到 iteration start DCP
 - **设计指纹缓存**: `transition_phase` 接收 `design_fingerprint`（`best_checkpoint_path` 字符串）判断设计是否变更；指纹不变时 tool cache 跨阶段保留，避免 EVALUATE→CONTINUE→ANALYZE 循环中不必要的缓存失效
 - **优化历史追踪**: `optimization_history`（`OptimizationAppliedRecord` 列表，含 strategy/params/wns_before/wns_after/iteration/checkpoint_path）在每次保存 `best_checkpoint` 时追加记录，注入 handoff 和 Dashboard
+
+---
+
+## 附录 C. 上下文工程矛盾修复（2026-07-09，run-20260709_123409 分析）
+
+基于 iter2 完全无效（32 次 LLM 调用、$0.11、WNS 零改善、stale 占比 69.3%）的日志矛盾分析，修复框架"声明规则"与"实际执行"之间的 6 类系统性矛盾。核心原则：让框架遵守自己定义的规则（修正数据/标签错误 + 尊重 LLM 自主信号 + 改写指令文本对齐实际自动刷新行为）。完整技术细节见 [architecture.md §4.3/§4.4/§4.11/§4.12/§5.2/§6.6](architecture.md)。
+
+| 类别 | 根因（file:line） | 修复 |
+|------|-------------------|------|
+| **P0 数据诚实性** | delta 用迭代初冻结的 `prev_best_wns`（phase_execute）；`_reload_baseline_on_switch` 刷新 WNS 后误标全 stale；小输出错误硬编码 `status:completed`（tool_summary）；JSON 错误仅 INFO 级致 fpl26-error.log 空白（tool_router）；失败归因用跨策略累积的 `tools_used[:3]`（iteration_end） | delta 改用 `best_wns_at_entry`；刷新成功后 `_mark_timing_fresh`；错误检测移至绕过前；JSON 错误升 ERROR 级；失败 tool 字段用 `get_strategy_primary_tool` |
+| **P1 历史完整性** | 迭代内 SWITCH 绕过 iteration_end，无改进策略不入 `failed_strategies`（黑洞）；iteration_end 独立重扫把 `strategy_not_applicable` 覆盖为 `tool_error` | `_handle_switch_strategy` 切换时新增 `no_improvement` 记录；`record_strategy_failure` 不降级更严格分类（TTL 比较） |
+| **P2 自主性** | EXECUTE 中 EXHAUSTED 仅 break 不设 is_done（phase_execute）；`consecutive_no_progress` 跨迭代不重置，3->11 无升级终止 | EXHAUSTED 三入口均设 `is_done`；计数器在 `iteration_start` 重置（终止由 global_no_improvement + MAX_STRATEGY_CYCLES 覆盖） |
+| **P3 规则对齐** | STALE DATA HANDLING 要求 LLM 手动刷新，但框架已自动刷新；CELL NAME CONTRACT 称 canonical 却强制覆盖；truncation_advisory 未说明 design_data_read 返回持久化快照 | 改写 STALE DATA HANDLING 如实描述自动刷新范围；CELL NAME CONTRACT 补充 `[DATA INTEGRITY]` 覆盖通知；truncation_advisory 注明持久化快照需提取工具刷新 |
+
+**验证**：`tests/test_context_engineering_fixes.py` 新增 `TestContradictionFixesP0`/`P1`（6 项单测，覆盖 delta 基线、错误状态、归因、失败分类不覆盖）。全套 302 测试通过。回放验证（用本次 run 的 DCP 重跑 iter2）需用户手动执行 `make run_optimizer`，对照 stale 占比下降、strategy_outcomes 含全部已试策略、EXHAUSTED 触发终止三项硬指标。

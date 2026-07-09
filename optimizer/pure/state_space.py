@@ -1076,7 +1076,10 @@ def format_state_space_for_llm(
     if design_data_path:
         lines.append("truncation_advisory:")
         lines.append(f"  design_data_path: \"{design_data_path}\"")
-        lines.append("  # Use design_data_read(iteration=N, data_type=<type>) to access full data")
+        lines.append("  # design_data_read returns PERSISTED snapshots (the data as it was when last")
+        lines.append("  # written to disk) - it does NOT call Vivado/RapidWright. If a field is listed")
+        lines.append("  # as stale below, the persisted value may lag the live design; refresh it with")
+        lines.append("  # the extraction tools (vivado_extract_critical_path_cells, etc.) for current data.")
         # Global freshness status
         _stale_fields = [k for k, v in (state.timing.field_freshness if state else {}).items() if v == "stale"]
         if state and state.timing.critical_paths_stale:

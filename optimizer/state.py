@@ -533,11 +533,31 @@ def record_strategy_failure(
         # Refresh reason and blocked_until_iter on re-failure so TTL
         # restarts and the entry stays blocked if still ineffective.
         entry = existing[0]
+        new_ttl = _ttl_for_reason(reason, state.iteration.current)
+        # Preserve a more-restrictive (longer cooldown) classification recorded
+        # at execution time when a later recorder (notably iteration_end's
+        # independent empty-result re-scan) tries to downgrade it. EXECUTE
+        # records strategy_not_applicable/strategy_ineffective from real chain
+        # context; iteration_end may reclassify the same attempt as tool_error
+        # (TTL=0, instantly retriable) from a raw-output regex match. Allowing
+        # that downgrade would contradict the execution-time applicability
+        # verdict and make a strategy that should cool down immediately
+        # retriable. Only overwrite when the new reason is equally or more
+        # restrictive (new TTL >= existing TTL).
+        if entry.blocked_until_iter > new_ttl:
+            logger.info(
+                "[FAILED_STRATEGY] Preserved stricter reason for %s "
+                "(existing=%s blocked_until_iter=%d, ignored downgrade to %s ttl=%d)",
+                strategy, entry.reason, entry.blocked_until_iter, reason, new_ttl,
+                extra={"strategy": strategy, "reason": entry.reason,
+                       "ignored_reason": reason},
+            )
+            return
         entry.reason = reason
         entry.tool = tool
         entry.iteration = state.iteration.current
         entry.detail = (detail or "")[:200]
-        entry.blocked_until_iter = _ttl_for_reason(reason, state.iteration.current)
+        entry.blocked_until_iter = new_ttl
         logger.warning(
             "[FAILED_STRATEGY] Updated: %s (reason=%s, tool=%s, blocked_until_iter=%d)",
             strategy, reason, tool, entry.blocked_until_iter,

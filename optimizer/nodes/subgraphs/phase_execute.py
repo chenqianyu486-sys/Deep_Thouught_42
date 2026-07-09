@@ -226,6 +226,12 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
     # Ensure critical_path_cells freshness entry exists even if not yet extracted
     state.timing.field_freshness["critical_path_cells"] = "stale"
     state.entity_registry.mark_stale()
+    # Step 2 above already obtained a current WNS via vivado_report_timing_summary.
+    # Re-mark timing_summary/cdc_paths fresh when that refresh succeeded, so the
+    # dashboard does not show a correct WNS tagged [stale] - a misleading label
+    # that prompts the LLM to wastefully re-run report_timing_summary.
+    if baseline_wns is not None:
+        _mark_timing_fresh(state)
 
     # 4. Inject [SYSTEM — Baseline Restored] notification so LLM understands
     if deps.compat is not None:
@@ -384,6 +390,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 logger.info("[EXECUTE] LLM signaled EXHAUSTED")
                 record_flow_signal(state, "EXHAUSTED", "execution_exhausted",
                                    phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
+                # Honor the EXHAUSTED verdict: terminate the optimization.
+                # Previously this only broke out of EXECUTE, letting the loop
+                # fall through to EVALUATE where the consecutive-no-progress
+                # counter forced yet another SWITCH_STRATEGY - ignoring the
+                # LLM's "all applicable strategies exhausted" signal and
+                # burning extra strategy cycles on a WNS plateau.
+                state.control.is_done = True
+                state.control.done_reason = "strategies_exhausted"
                 if message.tool_calls:
                     _exit_after_tools = True
                     logger.info(f"[EXECUTE] Deferred EXHAUSTED — executing {len(message.tool_calls)} pending tool(s) first")
@@ -1174,11 +1188,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     force_exit = True
                     break
 
-                # Track tool errors
+                # Track tool errors - store the raw error message (not the
+                # summary) so the actual Vivado/MCP failure reason (e.g.
+                # "Directive '...' is not a recognized directive") is preserved
+                # for failure classification and any downstream LLM feedback.
                 if tool_result.error:
                     state.iteration.tool_errors.append({
                         "tool": tool_name,
-                        "result": summary[:2000],
+                        "result": tool_result.error[:2000],
                     })
 
             # Auto-refresh critical paths if stale
@@ -1519,6 +1536,29 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
             state.control.needs_save = True
 
 
+def _current_strategy_baseline_wns(state: OptimizerState) -> float | None:
+    """Best WNS when the current strategy entered EXECUTE (true per-strategy baseline).
+
+    Used for optimization_history wns_before so each strategy's delta is measured
+    against the state just before IT ran, not the iteration's starting WNS
+    (prev_best_wns), which is frozen once per iteration and would inflate later
+    strategies' apparent contribution. Falls back to prev_best_wns when no
+    matching EXECUTE_STRATEGY phase entry exists (e.g. legacy/older records).
+    """
+    strategy = state.strategy.current_strategy
+    if strategy:
+        for entry in reversed(state.strategy.phase_history):
+            if (entry.phase == "EXECUTE_STRATEGY"
+                    and entry.strategy == strategy
+                    and entry.iteration == state.iteration.current):
+                if entry.best_wns_at_entry is not None:
+                    return entry.best_wns_at_entry
+                if entry.wns_at_entry is not None:
+                    return entry.wns_at_entry
+                break
+    return state.timing.prev_best_wns
+
+
 async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
     """Save a DCP checkpoint when best_wns improves, for rollback support.
 
@@ -1542,7 +1582,7 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
         state.context.optimization_history.append(OptimizationAppliedRecord(
             strategy=state.strategy.current_strategy,
             params="",
-            wns_before=state.timing.prev_best_wns,
+            wns_before=_current_strategy_baseline_wns(state),
             wns_after=state.timing.best_wns,
             iteration=state.iteration.current,
             checkpoint_path=str(state.control.best_checkpoint_path),

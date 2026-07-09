@@ -54,6 +54,13 @@ CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
   - If you submit invalid names, the tool returns a structured rejection with
     suggested canonical names from the registry. Use those suggestions to correct
     and re-issue the call.
+  - For execution tools (pblock, combinational_rebalance, lut_muxf_repack,
+    muxf_tree_reorder, flatten_lut_cascade), the framework auto-injects
+    critical_path_cells/paths from verified state data (extracted via
+    vivado_extract_critical_path_cells) to avoid data-quality issues from raw
+    TCL extraction. If your provided cells/paths are replaced, you receive a
+    [DATA INTEGRITY] notice with the verified cells used - this is expected and
+    NOT an error; you do NOT need to manually extract paths for these tools.
   - After any design modification (place/route/opt_design), the registry is
     marked stale; re-fetch via vivado_extract_critical_path_cells or
     rapidwright_search_cells before targeting cells again.
@@ -84,17 +91,25 @@ DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
 
 STALE DATA HANDLING — CRITICAL:
   Dashboard fields marked `[stale]` mean the design was modified after that
-  data was collected — they are NOT current. Before any timing-related decision:
-  1. WNS/TNS marked `[stale]` MUST be refreshed via vivado_report_timing_summary
-     before evaluating improvement or making strategy decisions.
-  2. Critical paths marked `[stale]` MUST be re-extracted via
-     vivado_extract_critical_path_cells before any cell-targeting operation.
-  3. `[fresh]` means no design modification has been recorded since this field
-     was last refreshed. It is generally reliable, but if you are uncertain
-     whether a modification occurred (e.g. a TCL-driven change), refresh
-     before high-stakes decisions.
-  4. Ignoring stale data leads to wrong strategy decisions. When uncertain,
-     refresh before deciding.
+  data was collected — they are NOT current. Freshness labels are kept in sync
+  with actual refreshes, so `[fresh]` is trustworthy and `[stale]` is real.
+  What the framework already refreshes for you (do NOT waste rounds duplicating):
+  - WNS/TNS: auto-refreshed at ANALYZE/SELECT_STRATEGY entry and on strategy
+    re-entry into EXECUTE. The WNS shown for strategy decisions is current.
+  - Critical paths: auto-refreshed at EXECUTE entry for netlist strategies
+    (MUXFTreeReorder, LUTCascade, CombinationalRebalance, LUTMUXFRepack) and
+    auto-injected as verified state data for pblock/combinational execution
+    tools. When your provided cells/paths are replaced you receive a
+    [DATA INTEGRITY] notice — that is expected, not an error.
+  When you MUST refresh manually:
+  - Before a cell-targeting operation whose critical paths still show `[stale]`
+    AND were not auto-refreshed above: call vivado_extract_critical_path_cells
+    (num_paths=10) once, then proceed to the execution tool.
+  - If a TCL-driven change occurred outside the framework and you are uncertain
+    whether `[fresh]` data is still valid: refresh before high-stakes decisions.
+  Ignoring stale data leads to wrong strategy decisions, but redundant refreshes
+  waste rounds and push you toward the no-progress limit. Trust `[fresh]`, and
+  refresh `[stale]` only when the framework has not already done so.
 
 STRICTLY FORBIDDEN:
   - XML/HTML tags in text

@@ -157,6 +157,14 @@ def summarize_tool_result(
         except Exception:
             pass
 
+    # Common: extract error/fail indicators. Runs before the compact-output
+    # bypass so small error responses (e.g. {"error": "Directive not recognized"})
+    # report an honest status instead of the default "completed".
+    has_error = any("error" in l.lower() for l in lines[:20])
+    has_fail = any("fail" in l.lower() for l in lines[:20])
+    if has_error and "success" not in raw_result.lower():
+        status = "error" if has_error else "failed"
+
     # Bypass summarization for compact outputs.
     # extract_critical_path_cells excluded from bypass: even small JSON should
     # go through the dedicated summary branch to extract D1/D2 diagnostics.
@@ -167,17 +175,11 @@ def summarize_tool_result(
             f"tool_result:\n"
             f"  tool: {tool_name}\n"
             f'  summary: "{lines[0][:200] if lines else ""}"\n'
-            f"  status: completed\n"
+            f"  status: {status}\n"
             f"  raw_output_truncated: false\n"
             f"  raw_output_chars: {char_count}\n"
             f"  raw_output: |\n{indent}"
         )
-
-    # Common: extract error/fail indicators
-    has_error = any("error" in l.lower() for l in lines[:20])
-    has_fail = any("fail" in l.lower() for l in lines[:20])
-    if has_error and "success" not in raw_result.lower():
-        status = "error" if has_error else "failed"
 
     # Tool-type specific extraction
     if tool_name in ("vivado_phys_opt_design", "vivado_report_timing_summary"):

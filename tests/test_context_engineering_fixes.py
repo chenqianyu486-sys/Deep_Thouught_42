@@ -614,3 +614,104 @@ class TestSharedToolSummary:
         assert len(results) == 1
         assert "vivado_report_timing_summary" in results[0]
         assert "WNS=-0.5" in results[0]
+
+
+# ── Context-engineering contradiction fixes (run-20260709_123409 analysis) ──
+
+class TestContradictionFixesP0:
+    """P0 data-honesty fixes: per-strategy delta, error status, failure attribution."""
+
+    def test_delta_uses_strategy_entry_baseline_not_iteration_start(self):
+        """P0-2C: PhysOpt's wns_before must be its own entry baseline (-0.655),
+        not the iteration-start prev_best_wns (-0.978). Previously every strategy
+        in an iteration was credited against the iteration's starting WNS,
+        inflating later strategies' apparent delta (PhysOpt +0.335 vs real +0.012)."""
+        from optimizer.nodes.subgraphs.phase_execute import _current_strategy_baseline_wns
+        s = OptimizerState()
+        s.iteration.current = 1
+        s.timing.prev_best_wns = -0.978          # frozen at iteration start
+        s.timing.best_wns = -0.643               # after PhysOpt
+        s.strategy.phase_history.append(PhaseEntry(
+            phase="EXECUTE_STRATEGY", strategy="PBLOCK", iteration=1,
+            wns_at_entry=-0.978, best_wns_at_entry=-0.978,
+        ))
+        s.strategy.phase_history.append(PhaseEntry(
+            phase="EXECUTE_STRATEGY", strategy="PhysOpt", iteration=1,
+            wns_at_entry=-0.655, best_wns_at_entry=-0.655,
+        ))
+        s.strategy.current_strategy = "PhysOpt"
+        baseline = _current_strategy_baseline_wns(s)
+        assert baseline == -0.655            # PhysOpt's own entry baseline
+        assert baseline != s.timing.prev_best_wns  # NOT the iteration-start value
+        # The recorded delta would be -0.643 - (-0.655) = +0.012, not +0.335.
+        assert round(s.timing.best_wns - baseline, 3) == 0.012
+
+    def test_delta_baseline_falls_back_to_prev_best_without_entry(self):
+        from optimizer.nodes.subgraphs.phase_execute import _current_strategy_baseline_wns
+        s = OptimizerState()
+        s.iteration.current = 1
+        s.timing.prev_best_wns = -0.978
+        s.strategy.current_strategy = "PhysOpt"  # no matching phase_history entry
+        assert _current_strategy_baseline_wns(s) == -0.978
+
+    def test_small_error_response_reports_error_status(self):
+        """P0-3A: a compact JSON error response (e.g. directive not recognized)
+        previously hit the small-output bypass and was labeled status: completed,
+        hiding the failure. It must now report status: error."""
+        from optimizer.pure.tool_summary import summarize_tool_result
+        raw = json.dumps({"error": "Directive 'Performance_NetDelay_high' is not a recognized directive"})
+        result = summarize_tool_result("vivado_place_design", raw)
+        assert "status: error" in result
+        assert "status: completed" not in result
+        # The error text is preserved in the raw_output block.
+        assert "not a recognized directive" in result
+
+    def test_failure_attribution_uses_strategy_primary_tool(self):
+        """P0-3D: Fanout's failure record must reference Fanout's own tool, not
+        the cross-strategy accumulated tools_used[:3] (which contained
+        CellReplication's vivado_physopt_and_route)."""
+        from optimizer.pure.tool_catalog import get_strategy_primary_tool
+        assert get_strategy_primary_tool("Fanout") == "rapidwright_execute_fanout_strategy"
+        assert get_strategy_primary_tool("CellReplication") == "rapidwright_replicate_critical_cells"
+        # Fanout's primary tool must NOT be CellReplication's tool.
+        assert get_strategy_primary_tool("Fanout") != get_strategy_primary_tool("CellReplication")
+        assert get_strategy_primary_tool("UnknownStrategy") is None
+
+
+class TestContradictionFixesP1:
+    """P1 strategy-history completeness: non-overwrite of stricter failure reasons."""
+
+    def test_stricter_failure_reason_not_downgraded_to_tool_error(self):
+        """P1-2D/3C: EXECUTE records strategy_not_applicable (TTL=2). iteration_end's
+        independent empty-result re-scan must not overwrite it with tool_error (TTL=0,
+        instantly retriable) - that would contradict the execution-time verdict."""
+        from optimizer.state import record_strategy_failure
+        s = OptimizerState()
+        s.iteration.current = 2
+        # EXECUTE-time record: strategy_not_applicable -> blocked_until_iter = 4
+        record_strategy_failure(s, strategy="LUTCascade", reason="strategy_not_applicable",
+                                tool="rapidwright_flatten_lut_cascade", detail="chain_skipped")
+        entry = s.context.failed_strategies[0]
+        assert entry.reason == "strategy_not_applicable"
+        assert entry.blocked_until_iter == 4
+        # iteration_end re-scan tries to downgrade to tool_error (TTL=0) -> must be preserved.
+        record_strategy_failure(s, strategy="LUTCascade", reason="tool_error",
+                                tool="rapidwright_flatten_lut_cascade", detail="empty result")
+        assert len(s.context.failed_strategies) == 1     # no duplicate
+        assert entry.reason == "strategy_not_applicable"  # not downgraded
+        assert entry.blocked_until_iter == 4              # cooldown preserved
+
+    def test_equally_strict_reason_refreshes_ttl(self):
+        """A re-failure with an equally-or-more restrictive reason must refresh the TTL."""
+        from optimizer.state import record_strategy_failure
+        s = OptimizerState()
+        s.iteration.current = 2
+        record_strategy_failure(s, strategy="PhysOpt", reason="strategy_not_applicable",
+                                tool="vivado_physopt_and_route", detail="first")
+        assert s.context.failed_strategies[0].blocked_until_iter == 4
+        # Re-fail at iter 3 with strategy_not_applicable (TTL=2 -> blocked until 5 >= 4) -> refresh.
+        s.iteration.current = 3
+        record_strategy_failure(s, strategy="PhysOpt", reason="strategy_not_applicable",
+                                tool="vivado_physopt_and_route", detail="second")
+        assert s.context.failed_strategies[0].blocked_until_iter == 5
+

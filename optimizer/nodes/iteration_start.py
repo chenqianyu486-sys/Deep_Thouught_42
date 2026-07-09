@@ -74,6 +74,14 @@ async def iteration_start_node(
     # raw outputs are invalid for the new iteration's different design state.
     state.context.tool_cache.clear()
     state.context.raw_tool_outputs.clear()
+    # Reset the per-iteration no-progress counter. It previously persisted
+    # across iterations (never reset here), so a stall streak from iteration N
+    # carried into N+1 and grew unboundedly (3->4->...->11), forcing a
+    # SWITCH_STRATEGY on every evaluation without an escalation path. Cross-
+    # iteration plateau detection is handled separately by global_no_improvement
+    # + GLOBAL_NO_IMPROVEMENT_LIMIT in check_exit; this counter only gates
+    # within-iteration strategy switching.
+    state.context.consecutive_no_progress = 0
     state.context.pending_pblock_plan = None
     state.context.pending_pblock_candidates.clear()
     state.context.attempted_pblock_candidate_ids.clear()
