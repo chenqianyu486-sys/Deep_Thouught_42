@@ -30,6 +30,7 @@ from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, PULSE_WIDTH_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES, EQUIVALENCE_FF_CHANGE_THRESHOLD, EQUIVALENCE_LUT_CHANGE_THRESHOLD
+from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
@@ -818,6 +819,8 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
                     state, model=model, messages=api_messages, tools=phase_tools,
                     response=response, phase="EVALUATE",
                 )
+            # Track cost so EVALUATE calls count toward the budget accumulator.
+            track_llm_call_cost(state, response)
             return response
         except Exception as e:
             last_exception = e

@@ -11,6 +11,8 @@ Run: python3 -m pytest optimizer/test_pure.py -v
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from optimizer.state import OptimizerState, _ttl_for_reason, STRATEGY_NOT_APPLICABLE_TTL
@@ -53,6 +55,10 @@ from optimizer.pure.constants import (
     get_strategy_primary_tool,
     should_skip_chain_for_empty_result,
     tool_uses_rw_precheck,
+)
+from optimizer.pure.cost_tracking import track_llm_call_cost
+from optimizer.pure.tool_chain_policy import (
+    should_skip_chain_for_empty_result as should_skip_chain_for_empty_result_runtime,
 )
 from optimizer.pure.execute_contracts import (
     build_timing_update_exit_contract,
@@ -250,6 +256,66 @@ class TestToolContracts:
         assert skip is False
         assert reason is None
 
+    def test_plan_style_ready_result_is_not_treated_as_empty(self):
+        # run-20260710_190708: LUTMUXFRepack/MUXFTreeReorder returned ready
+        # plans (status="ready" + non-empty steps) but had no
+        # optimized_cells/critical_paths, so the chain was wrongly skipped as
+        # "no data produced" and the opt_design/phys_opt chain never ran.
+        for tool in (
+            "rapidwright_execute_lut_muxf_repack_strategy",
+            "rapidwright_execute_muxf_tree_reorder_strategy",
+            "rapidwright_execute_opt_design_strategy",
+            "rapidwright_execute_combinational_rebalancing_strategy",
+        ):
+            plan = {
+                "status": "ready",
+                "steps": [{"step_name": "opt_design"}],
+                "analysis_summary": {"lut_muxf_pairs": 19},
+            }
+            skip, reason = should_skip_chain_for_empty_result(tool, plan)
+            assert skip is False, f"{tool} ready plan must not skip the chain"
+            assert reason is None
+
+    def test_plan_style_skipped_status_still_skips_chain(self):
+        # status="skipped" (e.g. CombinationalRebalance found no deep segments)
+        # must still skip even though analysis_summary is attached. `steps` is
+        # the signal, not analysis_summary.
+        skipped = {
+            "status": "skipped",
+            "analysis_summary": {"segments_found": 0},
+        }
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_execute_combinational_rebalancing_strategy", skipped
+        )
+        assert skip is True
+        assert reason == "skipped"
+
+    def test_ready_plan_without_steps_is_still_empty(self):
+        # A "ready" status with no steps is a vacuous plan; skip it.
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_execute_lut_muxf_repack_strategy",
+            {"status": "ready", "analysis_summary": {}},
+        )
+        assert skip is True
+        assert reason == "no data produced"
+
+    def test_runtime_and_constants_chain_skip_agree(self):
+        # The runtime (tool_chain_policy) and constants copies must stay in
+        # sync so tests exercise the same logic the EXECUTE node runs.
+        cases = [
+            ("rapidwright_execute_lut_muxf_repack_strategy",
+             {"status": "ready", "steps": [{"step_name": "opt_design"}]}),
+            ("rapidwright_execute_combinational_rebalancing_strategy",
+             {"status": "skipped", "analysis_summary": {"segments_found": 0}}),
+            ("rapidwright_execute_fanout_strategy",
+             {"status": "success", "optimized_cells": [], "critical_paths": []}),
+        ]
+        for tool, data in cases:
+            assert (
+                should_skip_chain_for_empty_result(tool, data)
+                == should_skip_chain_for_empty_result_runtime(tool, data)
+            ), f"chain-skip divergence between constants and tool_chain_policy for {tool}"
+
     def test_post_eval_and_chain_declarations_stay_centralized(self):
         assert "rapidwright_execute_pblock_strategy" in POST_EVAL_TOOLS
         chain = get_skill_chain_actions("rapidwright_execute_pblock_strategy")
@@ -259,6 +325,75 @@ class TestToolContracts:
     def test_side_effect_tools_track_design_mutators(self):
         assert "rapidwright_execute_physopt_strategy" in SIDE_EFFECT_TOOLS
         assert "vivado_create_and_apply_pblock" in SIDE_EFFECT_TOOLS
+
+
+class TestCostTracking:
+    """track_llm_call_cost must cover every phase, not just EXECUTE.
+
+    Regression for run-20260710_190708: only EXECUTE tracked usage, so
+    ANALYZE/SELECT_STRATEGY/EVALUATE costs were dropped and total_cost was
+    understated 2.77x ($0.1262 reported vs $0.3488 real).
+    """
+
+    @staticmethod
+    def _response(**usage_fields):
+        usage = types.SimpleNamespace(
+            prompt_tokens=usage_fields.get("prompt_tokens", 0),
+            completion_tokens=usage_fields.get("completion_tokens", 0),
+            total_tokens=usage_fields.get("total_tokens", 0),
+            cost=usage_fields.get("cost", 0.0),
+            completion_tokens_details=usage_fields.get("completion_tokens_details"),
+            cache_read_input_tokens=usage_fields.get("cache_read_input_tokens"),
+            cache_creation_input_tokens=usage_fields.get("cache_creation_input_tokens"),
+        )
+        return types.SimpleNamespace(usage=usage)
+
+    def test_accumulates_tokens_and_cost(self):
+        state = OptimizerState()
+        track_llm_call_cost(
+            state,
+            self._response(prompt_tokens=100, completion_tokens=50,
+                           total_tokens=150, cost=0.0123),
+        )
+        assert state.cost.total_prompt_tokens == 100
+        assert state.cost.total_completion_tokens == 50
+        assert state.cost.total_tokens == 150
+        assert abs(state.cost.total_cost - 0.0123) < 1e-9
+
+    def test_accumulates_across_multiple_calls(self):
+        state = OptimizerState()
+        for cost in (0.01, 0.02, 0.03, 0.04):
+            track_llm_call_cost(
+                state,
+                self._response(prompt_tokens=10, completion_tokens=5,
+                               total_tokens=15, cost=cost),
+            )
+        assert state.cost.total_prompt_tokens == 40
+        assert state.cost.total_tokens == 60
+        assert abs(state.cost.total_cost - 0.10) < 1e-9
+
+    def test_tracks_cache_and_reasoning_tokens(self):
+        state = OptimizerState()
+        track_llm_call_cost(
+            state,
+            self._response(
+                prompt_tokens=200, completion_tokens=20, total_tokens=220,
+                cost=0.005,
+                completion_tokens_details=types.SimpleNamespace(reasoning_tokens=8),
+                cache_read_input_tokens=150,
+                cache_creation_input_tokens=40,
+            ),
+        )
+        assert state.cost.total_reasoning_tokens == 8
+        assert state.cost.total_cache_read_tokens == 150
+        assert state.cost.total_cache_creation_tokens == 40
+
+    def test_missing_usage_is_noop(self):
+        state = OptimizerState()
+        track_llm_call_cost(state, types.SimpleNamespace(usage=None))
+        track_llm_call_cost(state, None)
+        assert state.cost.total_cost == 0.0
+        assert state.cost.total_prompt_tokens == 0
 
 
 class TestExecuteContracts:

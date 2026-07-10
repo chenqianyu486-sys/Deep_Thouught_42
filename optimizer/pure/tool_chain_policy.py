@@ -135,8 +135,19 @@ def should_skip_chain_for_empty_result(
 
     status = skill_result_data.get("status")
     is_skipped = status in ("skipped", "no_action", "unchanged")
+    # Plan-style results (status "ready"/"planned" with non-empty steps) carry
+    # an executable Vivado chain even without optimized_cells/critical_paths.
+    # run-20260710_190708: LUTMUXFRepack/MUXFTreeReorder returned ready plans
+    # but were misjudged as "no data produced", so their opt_design/phys_opt
+    # chains never ran. `steps` (not analysis_summary) is the signal: skipped
+    # plans also attach analysis_summary but never steps.
+    has_ready_plan = (
+        status in ("ready", "planned")
+        and bool(skill_result_data.get("steps"))
+    )
     has_empty_payload = (
-        not skill_result_data.get("optimized_cells")
+        not has_ready_plan
+        and not skill_result_data.get("optimized_cells")
         and not skill_result_data.get("critical_paths")
     )
 

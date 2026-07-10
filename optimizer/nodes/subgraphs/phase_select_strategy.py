@@ -25,6 +25,7 @@ from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
+from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS
 from optimizer.pure.pblock_plan import (
     PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
@@ -454,6 +455,8 @@ async def _call_phase_llm(state, deps, phase_tools):
                 state, model=model, messages=api_messages, tools=phase_tools,
                 response=response, phase="SELECT_STRATEGY",
             )
+        # Track cost so SELECT_STRATEGY calls count toward the budget accumulator.
+        track_llm_call_cost(state, response)
         return response
     except Exception as e:
         logger.error(f"[SELECT_STRATEGY] LLM call failed: {e}")

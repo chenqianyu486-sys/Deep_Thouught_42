@@ -264,6 +264,7 @@ llm_tool_loop._execute_chain_actions()
 - Chain 步骤状态检测: 每个 chain 步骤检查 `"error"` 键，有错则中断 chain
 - 错误恢复: 链式动作开始前保存快照，单步失败时自动恢复
 - Critical path stale 标记: `vivado_place_design` 和 `vivado_create_and_apply_pblock` 执行后自动标记 `critical_paths_stale = True`
+- 空结果 chain-skip 守卫: 执行 P&R 链前 `should_skip_chain_for_empty_result` 检测 Skill 是否产出可执行数据，`status in ("skipped","no_action","unchanged")` 或既无 `optimized_cells`/`critical_paths` 也无 plan 风格 `steps` 时跳过链（避免 ~17s 无效回滚）。plan 风格输出（`status:"ready"` + 非空 `steps`）视为有数据（见 §15.10）
 
 ### 3.4 关键路径感知的 PBLOCK 区域选择
 
@@ -1228,3 +1229,15 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 | `optimizer/pure/tool_summary.py` | `place_design` 非法 directive 错误（`not a recognized directive`）被当作普通 error 行，LLM 误判为 DRC 并 unplace 重试（Bug #4） | `place_design` 摘要优先检测 directive 未识别，置 `status=error` 并给明确提示（用合法 directive，勿 unplace 重试） |
 
 **验证**：`optimizer/test_routed_guards.py` 8 项新单测（array coerce + NoneType 兜底）；全量 246 项通过。重放该设计时应断言 `best_checkpoint.dcp` 经 `check_design_status` 得 `is_routed=true` 且 WNS 落在真实 routed 区间（`-0.465` 量级），不再出现 `-0.003` 估算伪改善。
+
+### 15.10 第七轮：chain-skip 误判与成本累计器失真修复（2026-07-10）
+
+基于 `dcp_optimizer_run-20260710_190708` 三层日志（optimizer / vivado / prompt-LLM）交叉分析报告的 P0 项修复。两个缺陷均破坏决策基础：前者让有效策略的 Vivado P&R 链从未执行，后者让预算监控失真 2.77x。
+
+| 文件 | 缺陷 | 修复 |
+|------|------|------|
+| `optimizer/pure/tool_chain_policy.py`、`optimizer/pure/constants.py` | `should_skip_chain_for_empty_result` 的 `has_empty_payload` 仅检查 `optimized_cells`/`critical_paths`，plan 风格输出（`lut_muxf_repack`/`muxf_tree_reorder`/`opt_design`/`combinational_rebalancing` 返回 `status:"ready"` + 非空 `steps` + `analysis_summary`，无 `optimized_cells`/`critical_paths`）被误判为 "no data produced" 而跳过 Vivado P&R 链。运行中 LUTMUXFRepack 识别出 19 个 LUT↔MUXF 对 + 5 个 LUT5 候选并产出 ready plan，但其 `opt_design AddRemap`（整个运行唯一未试过的逻辑重构）从未执行 | 新增 `has_ready_plan`：`status in ("ready","planned") 且 steps 非空` 视为有数据、不跳过链。`steps`（非 `analysis_summary`）是信号——skipped plan 也会附 `analysis_summary` 但从不附 `steps`；`status="skipped"` 仍由既有 `is_skipped` 检查先行捕获。两份副本（运行时用 tool_chain_policy、测试用 constants）同步修复 |
+| `optimizer/pure/cost_tracking.py`（新增）、`optimizer/nodes/subgraphs/phase_{analyze,select_strategy,execute,evaluate}.py` | 成本累计仅在 EXECUTE 阶段（私有 `_track_cost`）调用，ANALYZE/SELECT_STRATEGY/EVALUATE 的 LLM 调用成本未计入 `state.cost.total_cost`。运行报告 $0.1262 恰为 EXECUTE 阶段之和，真实 $0.3488（2.77x 低估），污染 `check_exit` 预算守卫与 LLM 引用的剩余预算 | 抽取共享 `track_llm_call_cost(state, response)` 至 `optimizer/pure/cost_tracking.py`，四阶段 `_call_phase_llm` 在 `log_call` 后统一调用；phase_execute 删除私有 `_track_cost`、改用共享函数，消除双实现 |
+
+**验证**：`optimizer/test_pure.py` 新增 8 项单测——4 项 chain-skip（plan-style ready 不跳过 / skipped 仍跳过 / ready 无 steps 仍判空 / 运行时与 constants 双副本行为一致）+ 4 项 cost tracking（单次累计 / 多次累计 / cache+reasoning token / 缺 usage 为 no-op）；`TestToolContracts` + `TestCostTracking` 14 项通过，全量 261 项通过。`test_graph.py` 因预先存在的 `_execute_exit_reason_after_timing_update` 导入断裂未计入，与本次修复无关。
+

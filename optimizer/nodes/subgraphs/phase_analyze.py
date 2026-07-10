@@ -23,6 +23,7 @@ from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body
+from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.pure.pblock_plan import extract_selected_plan_from_payload
 from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
@@ -503,6 +504,8 @@ async def _call_phase_llm(state, deps, phase_tools, max_retries=3, retry_delay=2
                     state, model=model, messages=api_messages, tools=phase_tools,
                     response=response, phase="ANALYZE",
                 )
+            # Track cost so ANALYZE calls count toward the budget accumulator.
+            track_llm_call_cost(state, response)
             return response
         except Exception as e:
             last_exception = e

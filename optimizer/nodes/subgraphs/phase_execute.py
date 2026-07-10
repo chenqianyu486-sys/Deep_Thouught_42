@@ -56,6 +56,7 @@ from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_cont
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body, is_modifying_tcl
 from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS, POST_EVAL_TOOLS, SIDE_EFFECT_TOOLS, STRATEGY_MAP, STRATEGY_TOOL_NAMES, StrategyEntry
 from optimizer.pure.tool_chain_policy import HEAVY_CHAIN_SKILLS, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_CHECK_SKILLS, PLACE_ONLY_REGRESS_THRESHOLD, RAPIDWRIGHT_PRECHECK_ENABLED, UNPLACE_VERIFY_MAX_PLACED_CELLS, get_skill_chain_actions, has_skill_chain, should_skip_chain_for_empty_result, tool_uses_rw_precheck
+from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS
 from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
@@ -364,7 +365,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
             deps.compat.add_message("assistant", assistant_content, metadata)
 
         # Track cost
-        _track_cost(state, response)
+        track_llm_call_cost(state, response)
 
         # Extract step state
         step_state = extract_step_state(message)
@@ -1647,35 +1648,6 @@ async def _try_save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> No
     if state.control.needs_save and deps.vivado_session is not None:
         await _save_best_checkpoint(state, deps)
         state.control.needs_save = False
-
-
-def _track_cost(state: OptimizerState, response) -> None:
-    try:
-        usage = getattr(response, 'usage', None)
-        if usage:
-            prompt = getattr(usage, 'prompt_tokens', 0) or 0
-            completion = getattr(usage, 'completion_tokens', 0) or 0
-            raw_total = getattr(usage, 'total_tokens', 0) or 0
-            total = raw_total if raw_total > 0 else (prompt + completion)
-            cost = float(getattr(usage, 'cost', 0.0) or 0.0)
-            state.cost.total_prompt_tokens += prompt
-            state.cost.total_completion_tokens += completion
-            state.cost.total_tokens += total
-            state.cost.total_cost += cost
-            completion_details = getattr(usage, 'completion_tokens_details', None)
-            if completion_details:
-                reasoning = getattr(completion_details, 'reasoning_tokens', 0) or 0
-                state.cost.total_reasoning_tokens += reasoning
-            # Prompt caching metrics (OpenRouter returns these in usage object
-            # when cache: {prompt: true} is set in extra_body)
-            cache_read = getattr(usage, 'cache_read_input_tokens', None)
-            if cache_read is not None:
-                state.cost.total_cache_read_tokens += int(cache_read)
-            cache_create = getattr(usage, 'cache_creation_input_tokens', None)
-            if cache_create is not None:
-                state.cost.total_cache_creation_tokens += int(cache_create)
-    except Exception as e:
-        logger.debug(f"[EXECUTE] Cost tracking failed: {e}")
 
 
 async def _get_rw_timing_estimate(state: OptimizerState, deps: NodeDeps) -> float | None:
