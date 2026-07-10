@@ -42,6 +42,7 @@ from optimizer.pure.execute_contracts import (
     resolve_chain_step_runtime_override,
     should_exit_for_large_regression,
     should_block_strategy,
+    should_skip_reopen,
     tool_requires_post_chain_path_refresh,
     verdict_from_wns_values,
     should_recompute_chain_verdict,
@@ -185,12 +186,18 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
 
     # ── Skip reopen if Vivado already has this checkpoint loaded ──
     _resolved_path = str(iter_ckpt.resolve())
-    if state.control.current_dcp_path and str(state.control.current_dcp_path) == _resolved_path:
+    if should_skip_reopen(state.control.current_dcp_path, _resolved_path,
+                          state.control.live_design_dirty):
         logger.info(
             f"[EXECUTE] Vivado already has baseline DCP loaded ({_resolved_path}) — "
             f"skipping reopen (saves ~27s)"
         )
     else:
+        if state.control.live_design_dirty:
+            logger.info(
+                f"[EXECUTE] In-memory design is dirty (previous strategy modified "
+                f"it without saving best) - forcing reopen of baseline DCP: {_resolved_path}"
+            )
         # 1. Reload baseline DCP into Vivado
         await call_tool_fn(
             "vivado_open_checkpoint",
@@ -200,6 +207,8 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
             design_size_factor=state.timing.design_size_factor,
         )
         state.control.current_dcp_path = iter_ckpt.resolve()
+        # Vivado memory now exactly matches the reopened file.
+        state.control.live_design_dirty = False
 
     # 2. Refresh timing summary to get fresh baseline WNS
     timing_result = await call_tool_fn(
@@ -940,6 +949,18 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     # exist. The Pinned layer will show the new version so the
                     # LLM knows to re-fetch cell names before targeting them.
                     state.entity_registry.mark_stale()
+                    # Track divergence of Vivado memory from current_dcp_path
+                    # (P0-1 skip-reopen fix). open_checkpoint reloads a clean DCP
+                    # -> memory matches file (dirty=False, sync pointer). Any
+                    # other modifying tool diverges memory -> dirty=True, so the
+                    # next strategy switch forces a reopen instead of trusting a
+                    # stale path match that hides a dirty design.
+                    if tool_name == "vivado_open_checkpoint":
+                        if not tool_result.error and "dcp_path" in tool_args:
+                            state.control.current_dcp_path = Path(tool_args["dcp_path"]).resolve()
+                            state.control.live_design_dirty = False
+                    else:
+                        state.control.live_design_dirty = True
 
                 # Dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
@@ -1649,6 +1670,9 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
         # Vivado memory now holds best_checkpoint.dcp content — sync the
         # design pointer so strategy re-entry can skip redundant reopen (~15s).
         state.control.current_dcp_path = ckpt_path.resolve()
+        # Memory was just serialized to best_checkpoint.dcp, so it matches the
+        # file exactly - the design is clean for skip-reopen purposes.
+        state.control.live_design_dirty = False
         state.context.optimization_history.append(OptimizationAppliedRecord(
             strategy=state.strategy.current_strategy,
             params="",
@@ -2068,6 +2092,8 @@ async def _restore_pre_chain_checkpoint(state, deps, pre_chain_path: str) -> Non
         design_size_factor=state.timing.design_size_factor,
     )
     state.control.current_dcp_path = Path(pre_chain_path).resolve()
+    # Reopened a clean checkpoint - memory matches the file.
+    state.control.live_design_dirty = False
     try:
         restore_result = await call_tool_structured_fn(
             "vivado_report_timing_summary", {},
@@ -2237,6 +2263,16 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
             # Update current_dcp_path after opening a new checkpoint
             if target_tool == "vivado_open_checkpoint" and "dcp_path" in args:
                 state.control.current_dcp_path = Path(args["dcp_path"]).resolve()
+
+            # Track Vivado memory divergence for skip-reopen (P0-1 fix).
+            # open_checkpoint reloads a clean DCP (dirty=False); any other
+            # modifying chain tool (place/route/opt/phys_opt) diverges memory
+            # from current_dcp_path (dirty=True). A chain step that reaches here
+            # already succeeded (failures raise before this point).
+            if target_tool == "vivado_open_checkpoint":
+                state.control.live_design_dirty = False
+            elif target_tool in DESIGN_MODIFICATION_TOOLS:
+                state.control.live_design_dirty = True
 
             # Mark critical paths stale after placement-affecting chain tools
             if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):

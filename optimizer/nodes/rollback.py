@@ -55,6 +55,8 @@ async def rollback_node(
             logger.error(f"[ROLLBACK] Failed to open checkpoint: {result[:200]}")
             return NodeName.ITERATION_START
         state.control.current_dcp_path = ckpt.resolve()
+        # Reopened best_checkpoint - Vivado memory matches the file (clean).
+        state.control.live_design_dirty = False
 
         # Verify WNS after restore
         wns_result = await call_tool_fn(

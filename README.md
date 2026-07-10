@@ -112,6 +112,8 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 17d | 检查点同步修复（2026-07） | `_save_best_checkpoint()` 写入后同步更新 `state.control.current_dcp_path`，避免策略切换时因指针不一致触发无意义重载（~15s 浪费） |
 | 17e | 迭代开始 checkpoint 拷贝优化（2026-07） | `iteration_start` 节点和 `_ensure_iteration_start_checkpoint` 优先从 `best_checkpoint.dcp` 拷贝而非通过 Vivado 序列化写入（节省 ~5s/次） |
 | 17f | 临时路径修复（2026-07） | `pre_chain_pblock.dcp` 和 `pre_unplace_*` 检查点从硬编码 `/tmp/` 迁移到 `run_dir/`，消除并发任务覆盖风险 |
+| 17g | skip-reopen 脏设计守卫（P0-1，2026-07-11） | 新增 `ControlState.live_design_dirty` 标志；`_reload_baseline_on_switch` 跳过重载需同时满足路径匹配且 `not dirty`（纯函数 `should_skip_reopen`），否则强制 reopen。修复失败/无改善策略残留脏内存导致后续策略基线 WNS 错误（run-20260711_015650：-0.602 vs 真实 -0.542） |
+| 17h | directive 白名单收紧 + 动态回退（P0-2，2026-07-11） | 移除 Vivado 2025.1 拒绝的 directive（place 的 `NetDelay_high/medium/low`、route 的 `Congestion_Explore`/`Congestion_NetDelay_*`）；MCP `place_design`/`route_design` handler 检测到 Constraints 18-641 时自动用默认命令重试一次（`_is_unrecognized_directive_error`）；CongestionRouteExplore route directive 改用合法的 `AlternateRoutability` |
 
 **策略与迭代层面**:
 | # | 原则 | 实现方式 |

@@ -727,7 +727,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 }
@@ -761,7 +761,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 }
@@ -803,7 +803,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 }
@@ -868,7 +868,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 },
@@ -926,7 +926,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 },
@@ -980,7 +980,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 },
@@ -1055,7 +1055,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 },
@@ -1122,7 +1122,7 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, Congestion_Explore, Congestion_NetDelay_high/medium/low, "
+                                        "NoTimingRelaxation, Performance_Explore, "
                                         "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
                     },
                 },

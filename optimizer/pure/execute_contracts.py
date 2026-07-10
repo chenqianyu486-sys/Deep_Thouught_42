@@ -68,6 +68,27 @@ def should_block_strategy(verdict: str | None) -> bool:
     return verdict in NON_IMPROVING_VERDICTS
 
 
+def should_skip_reopen(
+    current_dcp_path: object | None,
+    resolved_target_path: str,
+    live_design_dirty: bool,
+) -> bool:
+    """Whether _reload_baseline_on_switch may skip reopening the checkpoint.
+
+    Skip only when the target checkpoint is already loaded AND the in-memory
+    design is clean. A dirty design (a prior strategy ran place/route/opt
+    without saving best) means Vivado memory diverged from ``current_dcp_path``
+    even though the path still matches - reopening is then mandatory, or the
+    dirty design's WNS pollutes the next strategy's baseline
+    (run-20260711_015650: -0.602 reported instead of real best -0.542).
+    """
+    if live_design_dirty:
+        return False
+    if not current_dcp_path:
+        return False
+    return str(current_dcp_path) == str(resolved_target_path)
+
+
 def build_post_eval_guidance(tool_name: str, verdict: str | None) -> str | None:
     """Return follow-up guidance after a post-eval verdict, if any."""
     if tool_name in POST_EVAL_TOOLS and verdict == "UNCHANGED":

@@ -473,6 +473,13 @@ class ControlState:
     run_dir: Optional[Path] = None
     best_checkpoint_path: Optional[Path] = None  # DCP saved when best_wns last improved, for rollback
     current_dcp_path: Optional[Path] = None  # DCP path currently loaded in Vivado
+    # True when Vivado's in-memory design has been modified by a strategy tool
+    # (place/route/opt/phys_opt) since current_dcp_path was loaded, so memory no
+    # longer matches the file. Skip-reopen in _reload_baseline_on_switch requires
+    # this to be False; otherwise a failed/non-improving strategy would leave a
+    # dirty design whose (wrong) WNS pollutes the next strategy's baseline
+    # (run-20260711_015650: -0.602 reported instead of real best -0.542).
+    live_design_dirty: bool = False
     post_rollback_analyze: bool = False  # set by EVALUATE when rollback detected, used by next ANALYZE
     # Iteration-level checkpoints for multi-granularity rollback.
     # Saved before each EXECUTE phase; capped at 3 entries.

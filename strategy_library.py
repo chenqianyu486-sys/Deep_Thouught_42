@@ -340,8 +340,8 @@ STRATEGIES = {
                    "and route directives have not been explored for congestion",
         "sequence": [
             {"step": "route_design", "platform": "Vivado",
-             "params": {"directive": "Congestion_Explore"},
-             "note": "Re-route with congestion-aware directive"},
+             "params": {"directive": "AlternateRoutability"},
+             "note": "Re-route with congestion/routability-aware directive (AlternateRoutability; Congestion_Explore is a Vivado strategy preset name, not a valid route_design -directive, rejected by Vivado 2025.1 with Constraints 18-641)"},
             {"step": "report_timing_summary", "platform": "Vivado", "params": None,
              "note": "Evaluate timing after congestion-aware routing"},
         ],

@@ -572,6 +572,18 @@ state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
 
 ---
 
+### 4.16 skip-reopen 脏设计守卫（P0-1，2026-07-11）
+
+`_reload_baseline_on_switch()` 的跳过重载优化（4.15）原仅比较 `current_dcp_path == 目标路径`。但 `current_dcp_path` 只在「成功写 best_checkpoint」或「显式 reopen」时更新--失败/无改善策略仍会修改 Vivado 内存（place/route/opt），却不更新该指针，于是「路径匹配」成立而内存已脏，跳过重载会读取脏设计的错误 WNS，污染后续所有策略基线（run-20260711_015650：报告 -0.602 而非真实 best -0.542）。
+
+修复：新增 `ControlState.live_design_dirty` 标志，语义为「Vivado 内存的时序相关状态已偏离 `current_dcp_path` 指向的文件」。跳过重载判定抽取为纯函数 `should_skip_reopen(current_dcp_path, target, live_design_dirty)`（`optimizer/pure/execute_contracts.py`），需同时满足「路径匹配」且「`not live_design_dirty`」方可跳过。
+
+置位规则：
+- 任何 DESIGN_MODIFICATION_TOOLS 调用（主循环 + auto-chain 循环）成功后置 `live_design_dirty=True`；`vivado_open_checkpoint` 成功后置 False 并同步 `current_dcp_path`。
+- `_save_best_checkpoint` 写 best 后置 False（内存已与 best_checkpoint 文件一致）；`_restore_pre_chain_checkpoint`、`rollback`、`init_analysis`、`save_output` 重载/写入后均置 False。
+
+场景：iter1 PBLOCK 成功写 best（dirty=False）-> 后续策略 chain 跑 P&R（dirty=True）-> 无改善不写 best -> 下次策略切换路径匹配但 dirty=True -> 强制 reopen，基线 WNS 正确。
+
 ## 5. 工具输出摘要化 + 历史自动裁剪
 
 ### 5.1 动机
@@ -761,8 +773,7 @@ SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", ...}
 PLACE_SAFE_DIRECTIVES = {"Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
     "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
     "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
-    "EarlyBlockPlacement", "LateBlockPlacement", "NetDelay_high", "NetDelay_medium",
-    "NetDelay_low", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "EarlyBlockPlacement", "LateBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
     "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
     "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
     "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
@@ -775,8 +786,7 @@ ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelay
     "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
     "Performance_NetDelay_medium", "Performance_NetDelay_low",
     "Performance_RefinePlacement", "Performance_WLBlockPlacement",
-    "Congestion_Explore", "Congestion_NetDelay_high", "Congestion_NetDelay_medium",
-    "Congestion_NetDelay_low", "SSI_Explore", "SSI_Quick",
+    "SSI_Explore", "SSI_Quick",
     "Area_Default", "Area_Explore", "AlternateRoutability",
 }
 ```
@@ -789,6 +799,8 @@ ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelay
 - `Performance_ExtraTimingOpt` — 需要 Extra Timing license，竞赛环境不可用
 
 在 `phase_execute.py` 的 `_execute_chain_actions()` 中，指令解析（Tier-1 LLM 提供 + Tier-2 策略默认）后增加黑名单检查：若 `args["directive"]` 在黑名单中，静默回退到 `STRATEGY_DEFAULT_DIRECTIVES` 中对应策略的默认指令，并记录 WARNING 日志。回退优先级：place→`place_def`，route→`route_def`；若无对应回退值则移除 `directive` 参数，让 Vivado 使用默认值。每次回退避免约 17 秒的失败 P&R 循环。
+
+**MCP 层 directive 动态回退（P0-2，2026-07-11）**：`VivadoMCP/vivado_mcp_server.py` 的 `place_design`/`route_design` handler 在 Vivado 返回 Constraints 18-641（directive not recognized）时，自动用无 directive 的默认命令重试一次，并在结果前缀 `[FALLBACK]` 说明。检测函数 `_is_unrecognized_directive_error(output)` 匹配 `18-641` 与 `not a recognized directive`。即使白名单未来再漂移，策略也不再瞬时失败。同时收紧白名单：移除 place 的 `NetDelay_high/medium/low` 与 route 的 `Congestion_Explore`/`Congestion_NetDelay_*`（后者是 Vivado 策略预设名而非 route_design -directive，被 2025.1 以 18-641 拒绝）。`strategy_library.py` 的 CongestionRouteExplore route directive 由 `Congestion_Explore` 改为合法的 `AlternateRoutability`。
 
 ---
 

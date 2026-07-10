@@ -142,6 +142,8 @@ async def init_analysis_node(
             if "error" in result.lower() and "opened successfully" not in result.lower():
                 raise RuntimeError(f"Failed to open checkpoint: {result}")
             state.control.current_dcp_path = input_dcp.resolve()
+            # Freshly loaded input DCP - memory matches the file (clean).
+            state.control.live_design_dirty = False
             logger.info("[init_analysis] Vivado checkpoint opened")
 
         async def _init_rapidwright():

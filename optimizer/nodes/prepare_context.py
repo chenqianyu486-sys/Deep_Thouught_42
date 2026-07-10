@@ -197,14 +197,14 @@ PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
     - ExtraTimingOpt / Performance_ExtraTimingOpt — logic-depth-limited paths
     - Performance_Explore / Performance_RefinePlacement — WNS stuck, squeeze placement
     - Congestion_SpreadLogic_high/medium/low — congestion-bound (check severity)
-    - NetDelay_high/medium/low — long-net / inter-SLR delay dominated
+    - Performance_NetDelay_high/medium/low — long-net / inter-SLR delay dominated
     - Area_Explore — area-pressure limited
     - SSI_SpreadLogic_high/low — multi-SLR designs
   Route directives — pick by bottleneck:
     - Explore (default, balanced)
     - AggressiveExplore / HigherDelayCost — timing-critical, squeeze delay
     - NoTimingRelaxation — prevent router from relaxing timing targets
-    - Congestion_Explore / Congestion_NetDelay_high/medium/low — congestion-bound
+    - NOTE: Congestion_Explore / Congestion_NetDelay_* are NOT valid route_design directives (Vivado 2025.1 rejects with Constraints 18-641); use AlternateRoutability below for congestion-bound designs
     - Performance_Explore — general performance route
     - SSI_Explore — multi-SLR (cross-SLR) designs
     - AlternateRoutability — routability-congested

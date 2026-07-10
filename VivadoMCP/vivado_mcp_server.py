@@ -84,12 +84,15 @@ OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 # place_design safe directives whitelist (consistent with OPT_SAFE_DIRECTIVES).
 # Any directive not in this set is rejected for defense-in-depth.
 # Explicitly excludes retiming-related directives (AddRetime, Performance_Retiming, etc.)
+# NetDelay_high/medium/low removed: rejected by Vivado 2025.1 with
+# Constraints 18-641 (run-20260711_015650). Use Performance_NetDelay_* instead.
+# The place/route handlers also fall back to the default directive when Vivado
+# rejects any whitelisted directive, so future whitelist drift is non-fatal.
 PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
     "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
     "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
-    "EarlyBlockPlacement", "LateBlockPlacement", "NetDelay_high", "NetDelay_medium",
-    "NetDelay_low", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "EarlyBlockPlacement", "LateBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
     "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
     "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
     "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
@@ -106,10 +109,28 @@ ROUTE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
     "Performance_NetDelay_medium", "Performance_NetDelay_low",
     "Performance_RefinePlacement", "Performance_WLBlockPlacement",
-    "Congestion_Explore", "Congestion_NetDelay_high", "Congestion_NetDelay_medium",
-    "Congestion_NetDelay_low", "SSI_Explore", "SSI_Quick",
+    "SSI_Explore", "SSI_Quick",
     "Area_Default", "Area_Explore", "AlternateRoutability",
 })
+# Note: Congestion_Explore / Congestion_NetDelay_high/medium/low removed - these
+# are Vivado *strategy preset* names, not route_design -directive values, and are
+# rejected by Vivado 2025.1 with Constraints 18-641 (run-20260711_015650).
+
+
+def _is_unrecognized_directive_error(output: str) -> bool:
+    """Return True if Vivado rejected a -directive as unrecognized (Constraints 18-641).
+
+    Used by the place_design/route_design handlers to auto-fall back to the
+    default directive when a whitelisted directive is rejected by the running
+    Vivado version. This keeps the toolchain robust to whitelist/version drift:
+    a rejected directive retries once with the plain command instead of failing
+    the whole strategy (run-20260711_015650: NetDelay_high / Congestion_Explore
+    caused instant strategy failure before this guard existed).
+    """
+    if not output or not isinstance(output, str):
+        return False
+    return ("18-641" in output) or ("not a recognized directive" in output)
+
 
 # TCL security primitives (blocked-command detection, safe quoting,
 # line completeness check) live in tcl_security.py for independent unit testing.
@@ -1850,7 +1871,7 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design. Vivado automatically preserves routing for unchanged nets, so no explicit reuse flag is needed. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, Congestion_Explore/_NetDelay_high/_medium/_low, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives).",
+            description="Run routing on the current design. Vivado automatically preserves routing for unchanged nets, so no explicit reuse flag is needed. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives). Congestion_Explore/_NetDelay_* are NOT valid route directives (Vivado 2025.1 rejects them); if a directive is rejected it auto-falls back to default routing.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2510,6 +2531,7 @@ async def call_tool(name: str, arguments: dict):
                                f"Use run_tcl for unplace_design or other custom commands.")
 
             cmd = "place_design"
+            used_directive = False  # True when cmd carries a -directive (eligible for fallback)
             if directive:
                 if directive.lower() == "unplace":
                     cmd += " -unplace"
@@ -2526,7 +2548,20 @@ async def call_tool(name: str, arguments: dict):
                             )
                         )]
                     cmd += f" -directive {tcl_quote(directive)}"
+                    used_directive = True
             output = run_tcl_command(cmd, timeout=timeout)
+            # Robustness: if Vivado rejects the directive as unrecognized (whitelist
+            # or version drift), retry once with the plain command so a bad
+            # directive does not fail the whole strategy (run-20260711_015650).
+            if used_directive and _is_unrecognized_directive_error(output):
+                logger.warning(
+                    f"place_design directive '{directive}' rejected by Vivado; "
+                    f"retrying with default placement"
+                )
+                output = run_tcl_command("place_design", timeout=timeout)
+                _fb_nl = chr(10)
+                output = (f"[FALLBACK] Directive '{directive}' was not recognized by "
+                          f"Vivado; retried with default placement.{_fb_nl}{_fb_nl}{output}")
             # Detect Vivado errors — return JSON error so chain execution can detect failure
             if re.search(r'^ERROR: \[', output, re.MULTILINE):
                 logger.error(f"place_design failed: {output[:300]}")
@@ -2574,6 +2609,7 @@ async def call_tool(name: str, arguments: dict):
                                f"Use run_tcl for custom routing commands.")
 
             cmd = "route_design"
+            used_directive = False  # True when cmd carries a -directive (eligible for fallback)
             if directive:
                 if any(c in directive for c in "{}[];\n"):
                     return [TextContent(type="text", text=f"Error: directive contains unsafe characters: {directive!r}")]
@@ -2587,8 +2623,21 @@ async def call_tool(name: str, arguments: dict):
                         )
                     )]
                 cmd += f" -directive {tcl_quote(directive)}"
+                used_directive = True
 
             output = run_tcl_command(cmd, timeout=timeout)
+            # Robustness: if Vivado rejects the directive as unrecognized (whitelist
+            # or version drift), retry once with the plain command so a bad
+            # directive does not fail the whole strategy (run-20260711_015650).
+            if used_directive and _is_unrecognized_directive_error(output):
+                logger.warning(
+                    f"route_design directive '{directive}' rejected by Vivado; "
+                    f"retrying with default routing"
+                )
+                output = run_tcl_command("route_design", timeout=timeout)
+                _fb_nl = chr(10)
+                output = (f"[FALLBACK] Directive '{directive}' was not recognized by "
+                          f"Vivado; retried with default routing.{_fb_nl}{_fb_nl}{output}")
             # Detect Vivado errors — return JSON error so chain execution can detect failure
             if re.search(r'^ERROR: \[', output, re.MULTILINE):
                 logger.error(f"route_design failed: {output[:300]}")

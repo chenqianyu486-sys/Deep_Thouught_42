@@ -90,6 +90,8 @@ async def _restore_best_checkpoint_for_delivery(
             return False
 
         state.control.current_dcp_path = best_checkpoint.resolve()
+        # Restored best_checkpoint into Vivado - memory matches the file (clean).
+        state.control.live_design_dirty = False
         state.timing.latest_wns = verified_wns
         logger.info(
             f"[save_output] Best checkpoint verified: WNS={verified_wns:.3f}ns"
