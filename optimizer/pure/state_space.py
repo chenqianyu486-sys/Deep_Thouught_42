@@ -1223,10 +1223,21 @@ def _convert_critical_path(entry) -> DashboardTimingPath:
                 "location": n.location,
             })
 
-    # Build cell type chain from path cell names
+    # Build cell type chain. Prefer real Vivado cell types from parsed path
+    # nodes (PathNode.cell_type) over name heuristics: MUXF7/MUXF8 cells in
+    # this design are named *_reg[..]_i_* and would otherwise be mislabeled LUT.
     from .critical_path import build_cell_type_chain
-    cells = entry.cells if isinstance(entry, CriticalPathEntry) else []
-    cell_type_chain, cell_type_counts = build_cell_type_chain(cells)
+    if isinstance(entry, CriticalPathEntry):
+        cells = entry.cells
+        node_types = {
+            n.name: n.cell_type
+            for n in entry.nodes
+            if n.kind == "cell" and n.cell_type
+        }
+    else:
+        cells = []
+        node_types = {}
+    cell_type_chain, cell_type_counts = build_cell_type_chain(cells, cell_types=node_types)
 
     return DashboardTimingPath(
         endpoint_name=endpoint,

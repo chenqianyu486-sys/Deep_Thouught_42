@@ -498,19 +498,22 @@ class StrategyState:
 # ── Flow control helpers ────────────────────────────────────────
 
 
+STRATEGY_NOT_APPLICABLE_TTL = 5
+
+
 def _ttl_for_reason(reason: str, current: int) -> int:
     """Compute blocked_until_iter based on failure reason.
 
     TTL scheme (per reason):
       - strategy_ineffective → short cooldown (1 iteration)
-      - strategy_not_applicable → medium cooldown (2 iterations)
+      - strategy_not_applicable → structural cooldown (STRATEGY_NOT_APPLICABLE_TTL; longer than no_improvement because the skill found nothing applicable)
       - no_improvement → longer cooldown (3 iterations)
       - tool_error / anything else → no TTL (immediate retriable)
     """
     if reason == "strategy_ineffective":
         return current + 1
     elif reason == "strategy_not_applicable":
-        return current + 2
+        return current + STRATEGY_NOT_APPLICABLE_TTL
     elif reason == "no_improvement":
         return current + 3
     else:  # tool_error, data_quality_error, unknown, etc.

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from optimizer.state import OptimizerState
+from optimizer.state import OptimizerState, _ttl_for_reason, STRATEGY_NOT_APPLICABLE_TTL
 from optimizer.pure.timing import (
     parse_timing_summary,
     is_valid_wns,
@@ -156,6 +156,26 @@ class TestStrategyToolFiltering:
         names = {tool["function"]["name"] for tool in filtered}
         assert names == {"vivado_physopt_and_route", "report_step_state"}
 
+    def test_netswap_exposes_analyze_dependency(self):
+        """NetSwap's execute tool needs candidates from analyze_net_swapping;
+        the analysis tool must be exposed alongside the primary tool in EXECUTE
+        (run-20260710_132555: 4 schema-error calls -> EXHAUSTED without it)."""
+        tools = [
+            self._tool("rapidwright_execute_net_swapping"),
+            self._tool("rapidwright_analyze_net_swapping"),
+            self._tool("vivado_place_design"),
+            self._tool("report_step_state"),
+        ]
+
+        filtered = filter_tools_for_phase(
+            tools, LoopPhase.EXECUTE, strategy="NetSwap"
+        )
+
+        names = {tool["function"]["name"] for tool in filtered}
+        assert "rapidwright_execute_net_swapping" in names
+        assert "rapidwright_analyze_net_swapping" in names
+        assert "vivado_place_design" not in names
+
     def test_unknown_execute_strategy_keeps_phase_toolset(self):
         tools = [
             self._tool("vivado_physopt_and_route"),
@@ -173,6 +193,30 @@ class TestStrategyToolFiltering:
             "rapidwright_analyze_congestion",
             "report_step_state",
         }
+
+
+class TestTtlForReason:
+    """Verify per-reason cooldown ordering (signal strength -> TTL length).
+
+    strategy_not_applicable (skill found nothing to do) is a stronger signal
+    than no_improvement (skill ran but no WNS gain), so it must cool down at
+    least as long. Regression guard for run-20260710_132555, where
+    MUXFTreeReorder failed in iter1 (TTL=2) and was re-tried in iter3.
+    """
+
+    def test_not_applicable_longer_than_no_improvement(self):
+        nai = _ttl_for_reason("strategy_not_applicable", 1)
+        ni = _ttl_for_reason("no_improvement", 1)
+        assert nai > ni
+        assert nai == 1 + STRATEGY_NOT_APPLICABLE_TTL
+
+    def test_ttl_ordering_by_signal_strength(self):
+        base = 5
+        assert _ttl_for_reason("tool_error", base) == base  # immediate retriable
+        assert _ttl_for_reason("strategy_ineffective", base) == base + 1
+        assert _ttl_for_reason("no_improvement", base) == base + 3
+        assert _ttl_for_reason("strategy_not_applicable", base) == base + STRATEGY_NOT_APPLICABLE_TTL
+        assert STRATEGY_NOT_APPLICABLE_TTL >= 4  # strictly > no_improvement's 3
 
 
 class TestToolContracts:

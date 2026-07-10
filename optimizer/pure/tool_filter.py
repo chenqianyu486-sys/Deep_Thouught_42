@@ -63,6 +63,17 @@ INDEPENDENT_RAPIDWRIGHT_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# Strategy dependency tools: strategies whose primary execute tool requires a
+# separate analysis tool to produce its inputs. The analysis tool is exposed
+# alongside the primary tool in EXECUTE so the LLM can generate the required
+# arguments. Without this, NetSwap's rapidwright_execute_net_swapping needs
+# `candidates` that only rapidwright_analyze_net_swapping can produce, but that
+# tool was never exposed (run-20260710_132555: 4 schema-error calls -> EXHAUSTED).
+STRATEGY_DEPENDENCY_TOOLS: dict[str, frozenset[str]] = {
+    "NetSwap": frozenset({"rapidwright_analyze_net_swapping"}),
+}
+
+
 # ── Per-phase tool allowlists ──────────────────────────────────────
 
 PHASE_TOOLS: dict[LoopPhase, frozenset[str]] = {
@@ -214,7 +225,8 @@ def filter_tools_for_phase(
     if phase == LoopPhase.EXECUTE and strategy:
         primary_tool = get_strategy_primary_tool(strategy)
         if primary_tool:
-            allowed = frozenset({primary_tool, "report_step_state"})
+            deps = STRATEGY_DEPENDENCY_TOOLS.get(strategy, frozenset())
+            allowed = frozenset({primary_tool, "report_step_state"}) | deps
 
     filtered = []
     for tool in all_tools:

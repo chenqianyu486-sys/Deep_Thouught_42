@@ -196,7 +196,7 @@ STRATEGIES = {
     },
     "NetSwap": {
         "name": "Net Swapping Optimization",
-        "trigger": "Routing congestion within SLICE sites, LUT pairs with swappable input nets",
+        "trigger": "Routing congestion within SLICE sites, LUT pairs with swappable input nets. 2-step in EXECUTE: call rapidwright_analyze_net_swapping first to obtain candidates, then rapidwright_execute_net_swapping with those candidates",
         "sequence": [
             {"step": "analyze_net_swapping", "platform": "RapidWright",
              "params": {"max_candidates": 20, "wirelength_threshold": 50},

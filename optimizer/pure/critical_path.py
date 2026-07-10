@@ -184,7 +184,31 @@ def heuristic_cell_type(short_name: str) -> str:
     return _heuristic_cell_type(short_name)
 
 
-def build_cell_type_chain(cells: list[str]) -> tuple[str, dict[str, int]]:
+def _normalize_cell_type(raw_type: str) -> str:
+    """Normalize a raw Vivado cell type (e.g. 'MUXF7', 'LUT6', 'FDRE') to the
+    label set used by build_cell_type_chain ('MUXF', 'LUT', 'FF', ...).
+
+    Returns 'unknown' for unrecognized types so callers can fall back.
+    """
+    t = raw_type.upper()
+    if t.startswith("MUXF"):
+        return "MUXF"
+    if t.startswith("CARRY"):
+        return "CARRY"
+    if t.startswith("DSP"):
+        return "DSP"
+    if t.startswith("RAMB") or t.startswith("RAM") or t.startswith("URAM"):
+        return "RAM"
+    if t.startswith("SRL"):
+        return "SRL"
+    if t.startswith("LUT"):
+        return "LUT"
+    if t in ("FDRE", "FDCE", "FDPE", "FDSE", "FDRSE"):
+        return "FF"
+    return "unknown"
+
+
+def build_cell_type_chain(cells: list[str], cell_types: dict[str, str] | None = None) -> tuple[str, dict[str, int]]:
     """Build a cell type chain string and type counts from a list of cell names.
 
     Each cell name is mapped to a type via heuristic_cell_type() on the leaf name.
@@ -200,9 +224,14 @@ def build_cell_type_chain(cells: list[str]) -> tuple[str, dict[str, int]]:
 
     type_names = []
     counts: dict[str, int] = {}
+    type_map = cell_types or {}
     for cell in cells:
         leaf = cell.split("/")[-1] if "/" in cell else cell
-        ctype = _heuristic_cell_type(leaf)
+        # Prefer the real Vivado cell type (from parsed PathNode.cell_type)
+        # over the name heuristic: MUXF7/MUXF8 cells in logicnets are named
+        # *_reg[..]_i_* and would otherwise be mislabeled as LUT.
+        raw = type_map.get(cell) or type_map.get(leaf)
+        ctype = _normalize_cell_type(raw) if raw else _heuristic_cell_type(leaf)
         # Normalize: use the known type label when available
         label = ctype if ctype != "unknown" else "?"
         counts[label] = counts.get(label, 0) + 1

@@ -263,7 +263,7 @@ def inject_merged_dashboard(
     # after a specific number of iterations.
     #   strategy_ineffective  → TTL=1
     #   no_improvement        → TTL=3
-    #   strategy_not_applicable → TTL=2
+    #   strategy_not_applicable → TTL=5 (STRATEGY_NOT_APPLICABLE_TTL; structural inapplicability cools down longer than no_improvement)
     # Each entry shows remaining iterations until re-available.
     _blocked: dict[str, str] = {}
     if state.context.failed_strategies:

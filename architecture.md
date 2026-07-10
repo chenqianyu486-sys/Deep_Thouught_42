@@ -102,9 +102,13 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
   - **解析失败保留策略（2026-07，P1 修复）**: `parse_design_state()` 在 `Design State` 字段缺失时返回 `None` 而非默认 `UNPLACED`，调用方保留上次已知状态。`vivado_route_design`/`vivado_physopt_and_route` 执行后显式置 `ROUTED`（它们必然产生已布线结果），`vivado_phys_opt_design` 保留原状态。修复了 `physopt_and_route` 后误翻转为 UNPLACED、对真实布线后 WNS 误报"线负载估计"的灾难性 bug（见 run-20260703_142810）。Dashboard 警告加守卫：`design_state=UNPLACED` 但存在真实 `wns_setup` 时降级为温和提示，不再误报线负载。
 - **比赛时钟处理**: `init_analysis` 通过 `get_clocks` + `get_property PERIOD` 提取时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。Dashboard Module 5 的时钟名从 `state.timing.critical_paths[0].clock.source_clock` 动态提取（2026-07 修复，此前硬编码 `clk_fpl26contest`），无 critical_paths 时回退到该默认名。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_catalog` 排除机制（2026-07 更新）**: `strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=2）在 catalog 中标为 `[BLOCKED]` 占位符（含剩余轮数/原因）；`tool_error` 完全移出 catalog（无 TTL，可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
+- **`strategy_catalog` 排除机制（2026-07 更新）**: `strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=5）在 catalog 中标为 `[BLOCKED]` 占位符（含剩余轮数/原因）；`tool_error` 完全移出 catalog（无 TTL，可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共23个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
-- **TTL 机制（按原因分级，2026-07 重构）**: `_ttl_for_reason()` 函数统一计算各失败原因的冷却期（`blocked_until_iter` 字段）：`strategy_ineffective`→1 轮、`strategy_not_applicable`→2 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（`blocked_until_iter=current`，立即重试）。`record_strategy_failure` 去重时刷新 `blocked_until_iter`。
+- **TTL 机制（按原因分级，2026-07 重构）**: `_ttl_for_reason()` 函数统一计算各失败原因的冷却期（`blocked_until_iter` 字段）：`strategy_ineffective`→1 轮、`strategy_not_applicable`→5 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（`blocked_until_iter=current`，立即重试）。`record_strategy_failure` 去重时刷新 `blocked_until_iter`。
+- **策略选择质量修复（2026-07-10，run-20260710_132555 复盘）**:
+  - `strategy_not_applicable` TTL 从 2 提升到 `STRATEGY_NOT_APPLICABLE_TTL=5`：结构性不适用（技能无可用目标）比 `no_improvement`（跑了无收益）信号更强，冷却应更长。此前 MUXFTreeReorder 在 iter1 失败（TTL=2）后于 iter3 被重试并以同样方式失败。
+  - `cell_type_chain` 优先使用 `PathNode.cell_type`（真实 Vivado 类型）而非名称启发式：MUXF7/MUXF8 cell 名为 `*_reg[..]_i_*`（匹配 LUT 的 `_i_` 模式），启发式误标为 LUT，导致 dashboard chain 与 CELL REGISTRY 自相矛盾，误导 MUXF 策略选择。
+  - NetSwap 依赖工具暴露：`rapidwright_execute_net_swapping` 需 `rapidwright_analyze_net_swapping` 产出 candidates，但后者此前未在任何阶段暴露。新增 `STRATEGY_DEPENDENCY_TOOLS` 映射，EXECUTE 阶段为 NetSwap 额外暴露 analyze 工具；catalog trigger 同步提示两步调用。
 
 ---
 
@@ -187,7 +191,7 @@ class CriticalPathEntry:
 | TCL 关键路径提取拦截 | `tool_router.py:vivado_run_tcl` 内容匹配 | 检测 `get_timing_paths`+`get_cells` 模式，返回 `[AUTO-GUIDANCE]` |
 | PBLOCK 数据质量提前退出 | `phase_execute.py` | `critical_path_cells` 全部过滤时跳过 MCP，记录 `data_quality_error` |
 | 冷却逻辑分层 | `phase_evaluate.py` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
-| 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective`（TTL=1）+ `no_improvement`（TTL=3）+ `strategy_not_applicable`（TTL=2）标为 `[BLOCKED]` 占位符；`tool_error` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
+| 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective`（TTL=1）+ `no_improvement`（TTL=3）+ `strategy_not_applicable`（TTL=5）标为 `[BLOCKED]` 占位符；`tool_error` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
 | 空结果模式匹配 | `iteration_end.py` | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久排除） |
 | Improvement 阈值（三档语义）| `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | `delta>0` 不冷却（best_checkpoint 已保存）；`delta>0.050` 重置无进展计数；`delta≤0` 计无进展。边际正收益 (0,0.050] 不惩罚 |
 
@@ -388,7 +392,7 @@ class StepState:
 
 **按原因分级 TTL（2026-07 `_ttl_for_reason()` 函数统一计算）**：
 - `reason="strategy_ineffective"` → `blocked_until_iter = current + 1`（1 轮冷却）
-- `reason="strategy_not_applicable"` → `blocked_until_iter = current + 2`（2 轮冷却）
+- `reason="strategy_not_applicable"` → `blocked_until_iter = current + 5`（5 轮冷却）
 - `reason="no_improvement"` → `blocked_until_iter = current + 3`（3 轮冷却）
 - `reason ∈ {tool_error, execution_failure, unknown}` → `blocked_until_iter = current`（无 TTL，立即重试）
 
@@ -408,7 +412,7 @@ class StepState:
 
 **历史黑洞修复**（2026-07-09）：迭代内 SWITCH_STRATEGY 直接回 SELECT_STRATEGY，**绕过 iteration_end**，故中途切换的无改进策略从不进入 `failed_strategies`，LLM 在 `strategy_outcomes` 中看不到已试策略（iter2 实测 6 个策略仅 1 个可见）。现在 `_handle_switch_strategy` 在切换时记录当前策略：若未已记录且未成功（不在 `optimization_history`），按 `delta≤0` 记 `no_improvement`、`delta=None` 记 `tool_error`。仅**新增**记录，不覆盖 EXECUTE 已记的更具体分类。
 
-**失败分类不覆盖**（2026-07-09）：`record_strategy_failure` 去重时，若新分类的 TTL **低于**现有分类（即试图把 EXECUTE 的语义化冷却降级为 `tool_error` 立即可重试），**保留**现有更严格分类。例如 EXECUTE 记 `strategy_not_applicable`（TTL=2），iteration_end 空结果重扫试图改记 `tool_error`（TTL=0），保留 `strategy_not_applicable`。仅当新 TTL ≥ 现有 TTL（同等或更严格）时才覆写并刷新 TTL。
+**失败分类不覆盖**（2026-07-09）：`record_strategy_failure` 去重时，若新分类的 TTL **低于**现有分类（即试图把 EXECUTE 的语义化冷却降级为 `tool_error` 立即可重试），**保留**现有更严格分类。例如 EXECUTE 记 `strategy_not_applicable`（TTL=5），iteration_end 空结果重扫试图改记 `tool_error`（TTL=0），保留 `strategy_not_applicable`。仅当新 TTL ≥ 现有 TTL（同等或更严格）时才覆写并刷新 TTL。
 
 **失败归因**（2026-07-09）：iteration_end 失败记录的 `tool` 字段取 `get_strategy_primary_tool(strategy)`（策略主执行工具），而非 `tools_used[:3]`（跨阶段、跨策略循环累积列表，曾把 CellReplication 的 `vivado_physopt_and_route` 错归到 Fanout 名下）。无策略映射时回退 `tools_used[:3]`。
 
@@ -460,7 +464,7 @@ DeepSeek V4 Flash 在长上下文场景下可能产生"沉默退化"——65% �
 
 ### 4.10 多策略循环
 
-`MAX_STRATEGY_CYCLES=5`。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因分级（`strategy_ineffective` 1 轮 / `strategy_not_applicable` 2 轮 / `no_improvement` 3 轮后自动解封；`tool_error` 无 TTL），而非永久阻止。
+`MAX_STRATEGY_CYCLES=5`。EVALUATE 的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因分级（`strategy_ineffective` 1 轮 / `strategy_not_applicable` 5 轮 / `no_improvement` 3 轮后自动解封；`tool_error` 无 TTL），而非永久阻止。
 
 ### 4.11 连续无进展自动检测（2026-07）
 
@@ -871,7 +875,7 @@ WNS_TARGET_THRESHOLD = 0.0
 
 # 失败策略 TTL（2026-07 `_ttl_for_reason()` 统一计算）
 # strategy_ineffective → current + 1
-# strategy_not_applicable → current + 2
+# strategy_not_applicable → current + 5
 # no_improvement → current + 3
 # tool_error / execution_failure / unknown → current（无 TTL）
 

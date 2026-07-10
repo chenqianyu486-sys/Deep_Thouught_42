@@ -6,7 +6,7 @@ and doesn't return false "Parsed 0 paths" results.
 
 import json
 import pytest
-from optimizer.pure.critical_path import parse_critical_path_cells, _is_valid_cell_name
+from optimizer.pure.critical_path import parse_critical_path_cells, _is_valid_cell_name, build_cell_type_chain
 
 
 # ── Test fixtures: real Vivado output samples ──
@@ -169,6 +169,57 @@ class TestParseCriticalPathCells:
 
 
 # ── Tests: _is_valid_cell_name ──
+
+class TestBuildCellTypeChain:
+    """Verify cell_type_chain uses real Vivado types when provided.
+
+    Regression guard for run-20260710_132555: MUXF7/MUXF8 cells in logicnets
+    are named *_reg[..]_i_* (matching the LUT _i_ pattern), so the name heuristic
+    mislabels them as "LUT". This made the dashboard show cell_type_chain with no
+    MUXF while the CELL REGISTRY listed MUXF7/MUXF8 - a contradiction that misled
+    strategy selection toward MUXF strategies that all returned "no data produced".
+    """
+
+    def test_muxf_cells_mislabeled_by_heuristic(self):
+        """Without real types, MUXF7 cells named *_i_* are mislabeled LUT."""
+        cells = [
+            "layer0_reg/data_out_reg[12]",
+            "layer0_inst/layer0_N7_inst/data_out_reg[21]_i_11",  # actually MUXF7
+            "layer0_inst/layer0_N7_inst/data_out[21]_i_3",        # actually MUXF7
+        ]
+        chain, _ = build_cell_type_chain(cells)
+        assert "MUXF" not in chain  # heuristic misses them
+
+    def test_real_types_fix_muxf_mislabel(self):
+        """With real Vivado types, MUXF7 cells appear correctly in the chain."""
+        cells = [
+            "layer0_reg/data_out_reg[12]",
+            "layer0_inst/layer0_N7_inst/data_out_reg[21]_i_11",
+            "layer0_inst/layer0_N7_inst/data_out[21]_i_3",
+        ]
+        types = {
+            "layer0_inst/layer0_N7_inst/data_out_reg[21]_i_11": "MUXF7",
+            "layer0_inst/layer0_N7_inst/data_out[21]_i_3": "MUXF7",
+        }
+        chain, counts = build_cell_type_chain(cells, cell_types=types)
+        assert chain.count("MUXF") == 2
+        assert counts["MUXF"] == 2
+        assert counts["FF"] == 1  # data_out_reg[12] -> FDRE -> FF
+
+    def test_falls_back_to_heuristic_when_no_types(self):
+        """cell_types=None preserves the original heuristic behavior."""
+        cells = ["layer0_reg/data_out_reg[41]", "layer0_inst/layer0_N25_inst/data_out[76]_i_19"]
+        chain, _ = build_cell_type_chain(cells, cell_types=None)
+        assert "FF" in chain and "LUT" in chain
+
+    def test_partial_types_use_real_where_available(self):
+        """When only some cells have real types, mix real + heuristic."""
+        cells = ["a/b_reg[0]", "a/c_i_5", "a/d_i_5"]
+        types = {"a/c_i_5": "MUXF8"}
+        chain, counts = build_cell_type_chain(cells, cell_types=types)
+        assert "MUXF" in chain
+        assert counts["MUXF"] == 1
+
 
 class TestIsValidCellName:
     """Verify cell name validation filters correctly."""
