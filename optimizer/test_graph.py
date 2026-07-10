@@ -28,7 +28,6 @@ from optimizer.nodes.check_exit import _competition_score_guard_reason
 from optimizer.nodes.iteration_end import iteration_end_node
 from optimizer.nodes.iteration_start import iteration_start_node
 from optimizer.nodes.save_output import (
-    _classify_design_state,
     _restore_best_checkpoint_for_delivery,
 )
 from optimizer.nodes.subgraphs.phase_execute import (
@@ -134,31 +133,6 @@ class TestEdges:
 
 
 class TestSaveOutputHelpers:
-    def test_status_routed_takes_precedence(self):
-        assert _classify_design_state("Routed") == "routed"
-
-    def test_empty_status_uses_timing_summary_routed_state(self):
-        timing_summary = """
-        --------------------------------------------------------------------------------
-        Design Timing Summary
-        --------------------------------------------------------------------------------
-        Design State      : Routed
-        """
-        assert _classify_design_state("", timing_summary) == "routed"
-
-    def test_empty_status_uses_timing_summary_placed_state(self):
-        timing_summary = "Design State      : Placed"
-        assert _classify_design_state("", timing_summary) == "placed"
-
-    def test_empty_status_uses_timing_summary_optimized_state(self):
-        # "Optimized" means the design is not yet placed (post-synthesis state).
-        # This must be recognized so save_output guard can detect unplaced designs.
-        timing_summary = "Design State      : Optimized"
-        assert _classify_design_state("", timing_summary) == "optimized"
-
-    def test_unknown_when_no_state_signal_exists(self):
-        assert _classify_design_state("", "Timing unavailable") == "unknown"
-
     def test_restore_best_checkpoint_before_delivery(self, tmp_path, monkeypatch):
         checkpoint = tmp_path / "best_checkpoint.dcp"
         checkpoint.touch()

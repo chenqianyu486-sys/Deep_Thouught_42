@@ -1206,3 +1206,21 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 | `VivadoMCP/vivado_mcp_server.py` | `place_design -unplace` 后关键路径 cell 行正则硬编码 Location 列，unplace 后 Location 为空导致三条 cell 正则全失配，返回 10 条路径但 cells 全空污染下游 | `RE_CELL_LINE`/`RE_CELL_LINE_BARE` 的 Location 改为可选 `(?:...)?`；追加条件收紧为 `len(cell_names)>=2`（不再 `or len(nodes)>=2`） |
 | `optimizer/pure/execute_contracts.py`、`optimizer/nodes/subgraphs/phase_select_strategy.py`、`optimizer/state.py` | FORMAT_GUARD 违规（LLM 返回纯文本但未调 `report_step_state`）未被校验重试，违规消息写入历史导致下一轮策略偏移；`consecutive_empty_responses` "双重为空"条件使有文本无工具的违规重置计数 | 新增 `detect_format_guard_violation` 纯函数；`extract_step_state` 提前到 `add_message` 之前，违规时跳过写入、注入强提示、重试（限 2 次，不消耗 `tool_round`）；新增 `consecutive_no_tool_call` 计数器，"无工具调用"即计数并退出 |
 | `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对已 routed DCP 返回 `Unknown/false/false`（`STATUS`/`IS_PLACED`/`IS_ROUTED` 在 `open_checkpoint` 后均返回空），误导 LLM 重新 place+route | 见 §15.1：`report_route_status -return_string` 文本解析兜底 |
+
+### 15.9 第五轮：unplaced 设计污染 best_checkpoint 与级联崩溃修复（2026-07-10）
+
+基于 `dcp_optimizer_run-20260710_002051` 四类日志（vivado/prompts/llm_response/optimization）交叉分析发现的 5 个缺陷。核心事故：`PlaceRouteDirectiveExplore` 用非法 directive（`Performance_NetDelay_high`）调用 `place_design` 失败后设计残留未完全布局，`physopt_and_route` 内部 `phys_opt_design`/`route_design` 双双失败（`Found unplaced instances`），但其 JSON 仍带 `post_optimization.wns=-0.003`（wireload 估算），被采信为 best 并覆盖了合法的 `-0.465` routed 检查点；最终输出 DCP 实为未布线设计，报告的 `-0.003` 是无效估算。`save_output` 的 `get_property STATUS` 因 DCP 内 STATUS 属性粘性误判为 "Routed"，未触发修复。
+
+| 文件 | 缺陷 | 修复 |
+|------|------|------|
+| `optimizer/pure/tool_router.py`、`optimizer/nodes/subgraphs/phase_execute.py` | `_save_best_checkpoint` 写盘前不校验 routed，unplaced 估算 WNS 覆盖合法 best（Bug #1 核心） | 新增 `verify_design_routed`（调 `vivado_check_design_status`，走 §15.1 的 `report_route_status` 兜底，非粘性 STATUS）；`_save_best_checkpoint` 写盘前校验 `is_routed`，非 routed 拒绝保存并清 `needs_save` |
+| `optimizer/nodes/subgraphs/phase_execute.py` | `physopt_and_route` JSON post-eval 路径在 `tool_result.ok=False`（partial/error）时仍用 `post_optimization.wns` 推进 `best_wns`/`needs_save`；`_track_wns_from_result` 无条件对 physopt 置 `design_state=ROUTED` | best 推进门禁 `metrics is not None and tool_result.ok`；physopt 仅在结果无 `error`/非 `partial` 时置 ROUTED，否则降级 UNPLACED |
+| `optimizer/nodes/subgraphs/phase_execute.py` | `_post_eval_hook` 对非 routed 报告仍更新 `latest_wns` 并推进 `best_wns`（与 `_track_wns_from_result` 的门禁不一致） | `design_state != ROUTED` 时丢弃 WNS、保留上一已知值并返回 None（与 `_track_wns_from_result:1527` 门禁对齐） |
+| `optimizer/nodes/save_output.py` | 交付前用 `get_property STATUS`+正则推断设计态，粘性 STATUS 把未布线 DCP 误判 "Routed"，未触发紧急 place+route | 改用 `_check_routed_state`（`vivado_check_design_status` 的 `is_placed`/`is_routed`）；非 routed 先 restore best 再紧急 place+route，修后仍非 routed 则报错；移除死函数 `_classify_design_state` 及 `re` 导入 |
+| `optimizer/nodes/subgraphs/phase_execute.py` | `unplaced_without_replace` 仅按 directive 字符串复位，失败的 `place_design`（非法 directive）也清标志 -> phase 退出自动回滚未触发 | 仅在 `not tool_result.error` 时清标志，失败的重布局保持标志使自动回滚生效 |
+| `optimizer/nodes/subgraphs/phase_select_strategy.py` | "Auto-refresh stale WNS" 直接把非 routed 报告的 WNS 写入 `latest_wns`（`-0.003` 估算首泄点） | `parse_design_state` 判定非 routed 时跳过 `latest_wns` 更新，保留上一已知值 |
+| `optimizer/nodes/rollback.py`、`optimizer/pure/state_space.py` | rollback 把 `high_fanout_nets=None`（与 `critical_paths=[]` 不一致），`_build_netlist_quality` 直接迭代 -> `TypeError: 'NoneType' object is not iterable`，iter3/4 全崩（Bug #2） | rollback 改 `high_fanout_nets=[]`；`_build_netlist_quality` 迭代加 `or []` 兜底 |
+| `optimizer/pure/tool_router.py` | LLM 把 `pin_paths` 等数组参数序列化为逗号字符串，MCP schema 拒绝 `is not of type 'array'`（Bug #3） | 新增 `_coerce_array_arguments`，对 `pin_paths`/`critical_paths`/`critical_path_cells`/`cell_names` 字符串自动切分为 list（list 值不动） |
+| `optimizer/pure/tool_summary.py` | `place_design` 非法 directive 错误（`not a recognized directive`）被当作普通 error 行，LLM 误判为 DRC 并 unplace 重试（Bug #4） | `place_design` 摘要优先检测 directive 未识别，置 `status=error` 并给明确提示（用合法 directive，勿 unplace 重试） |
+
+**验证**：`optimizer/test_routed_guards.py` 8 项新单测（array coerce + NoneType 兜底）；全量 246 项通过。重放该设计时应断言 `best_checkpoint.dcp` 经 `check_design_status` 得 `is_routed=true` 且 WNS 落在真实 routed 区间（`-0.465` 量级），不再出现 `-0.003` 估算伪改善。

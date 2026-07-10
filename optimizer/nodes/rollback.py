@@ -132,7 +132,11 @@ async def rollback_node(
         #    everything else comes from the old (wrong) design state.
         state.timing.critical_paths = []
         state.timing.congestion_data = None
-        state.timing.high_fanout_nets = None
+        # Use [] (not None) for list-typed fields: _build_netlist_quality
+        # iterates high_fanout_nets directly, and None would crash it with
+        # TypeError (run-20260710_002051 iter3/4 cascade). Matches
+        # critical_paths/failing_endpoint_names which are already [].
+        state.timing.high_fanout_nets = []
         state.timing.route_status = None
         state.timing.design_info = None
         state.timing.critical_path_spread = None

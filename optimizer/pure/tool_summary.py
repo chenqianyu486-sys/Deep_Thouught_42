@@ -259,6 +259,22 @@ def summarize_tool_result(
             summary_parts.append(f"WNS: {raw_result.strip()[:50]}")
 
     elif tool_name == "vivado_place_design":
+        # Surface "directive not recognized" errors prominently with a hint,
+        # so the LLM stops retrying invalid directives instead of mis-diagnosing
+        # a Constraints/DRC error and unplacing the design
+        # (run-20260710_002051: NetDelay_high then Performance_NetDelay_high
+        # were both invalid -> LLM unplaced -> corrupted best_wns).
+        for line in lines[:80]:
+            low = line.lower()
+            if "not a recognized directive" in low or "unrecognized directive" in low:
+                status = "error"
+                summary_parts.append(
+                    f"DIRECTIVE ERROR: {line.strip()[:300]} "
+                    f"-> use a supported directive (Default, Explore, "
+                    f"ExtraTimingOpt, ExtraPostPlacementOpt, WLDrivenBlockPlacement, "
+                    f"AltSpreadLogic, SSI_*) instead; do NOT unplace to retry."
+                )
+                break
         for line in lines[:50]:
             if any(kw in line.lower() for kw in ["error", "warning", "placed", "utilization", "slack"]):
                 stripped = line.strip()

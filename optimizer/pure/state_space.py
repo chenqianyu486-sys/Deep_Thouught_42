@@ -275,7 +275,9 @@ def _build_physical_congestion(state: OptimizerState) -> DashboardPhysicalConges
 def _build_netlist_quality(state: OptimizerState) -> DashboardNetlistQuality:
     """Build Module 4: netlist architecture quality metrics."""
     nets: list[DashboardHighFanoutNet] = []
-    for item in state.timing.high_fanout_nets:
+    # Guard against None (rollback/other paths may clear it): a None value
+    # would crash iteration with TypeError (run-20260710_002051 iter3/4).
+    for item in (state.timing.high_fanout_nets or []):
         if isinstance(item, dict):
             nets.append(DashboardHighFanoutNet(
                 net_name=item.get("net_name", item.get("net", "")),

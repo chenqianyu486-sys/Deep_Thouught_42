@@ -9,8 +9,8 @@ _save_best_checkpoint_on_timeout() (L5909-5942).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import re
 import sys
 import time
 from pathlib import Path
@@ -19,6 +19,7 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
+from ..pure.tool_router import verify_design_routed
 from ..pure.timing import parse_hold_timing, parse_pulse_width, parse_timing_summary
 from ..pure.trajectory import format_trajectory_summary
 from ..color import green
@@ -27,31 +28,6 @@ from ..color import green
 logger = logging.getLogger(__name__)
 
 BEST_WNS_VERIFY_TOLERANCE_NS = 0.005
-
-
-def _classify_design_state(status_text: str, timing_summary: str = "") -> str:
-    """Classify Vivado design state from STATUS, falling back to timing summary."""
-    status = (status_text or "").strip().lower()
-    if "routed" in status:
-        return "routed"
-    if "placed" in status:
-        return "placed"
-
-    match = re.search(
-        r"Design\s+State\s*(?:\||:)\s*([^\|\n\r\t]+)",
-        timing_summary or "",
-        re.IGNORECASE,
-    )
-    if match:
-        state = match.group(1).strip().lower()
-        if "routed" in state:
-            return "routed"
-        if "placed" in state:
-            return "placed"
-        if "optimized" in state:
-            return "optimized"
-
-    return "unknown"
 
 
 async def _restore_best_checkpoint_for_delivery(
@@ -162,6 +138,32 @@ async def _run_validation(
         return {"passed": False, "error": "validation timed out after 7200s"}
     except Exception as e:
         return {"passed": False, "error": str(e)}
+
+
+async def _check_routed_state(
+    state: OptimizerState, deps: NodeDeps
+) -> tuple[bool, bool]:
+    """Return (is_placed, is_routed) via vivado_check_design_status.
+
+    Uses the report_route_status fallback (reliable) rather than the sticky
+    get_property STATUS, which can label a partially-placed DCP as "Routed"
+    (architecture.md §15.1, run-20260710_002051). Conservative on parse
+    failure: (False, False) so repair/refuse paths engage.
+    """
+    try:
+        res = await call_tool_fn(
+            "vivado_check_design_status", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        try:
+            data = json.loads(res)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            data = {}
+        return bool(data.get("is_placed")), bool(data.get("is_routed"))
+    except Exception as e:
+        logger.warning(f"[save_output] check_design_status failed: {e}")
+        return False, False
 
 
 async def save_output_node(
@@ -290,38 +292,21 @@ async def save_output_node(
                     f"[save_output]   {res_type:5s}: baseline={base_val:>8d}, final={curr_val:>8d}, delta={delta:>+8d}"
                 )
         logger.info("[save_output] ========================================================")
-    # Guard: check design is routed before saving DCP.
+    # Guard: verify the design is actually routed before saving the DCP.
+    # Use vivado_check_design_status (is_routed via report_route_status
+    # fallback - reliable) instead of get_property STATUS, whose sticky value
+    # can label a partially-placed DCP as "Routed" (run-20260710_002051).
     if state.control.output_dcp and deps.vivado_session and delivery_ready:
         try:
-            status_result = await call_tool_fn(
-                "vivado_run_tcl",
-                {"command": "get_property STATUS [current_design]"},
-                deps.rapidwright_session, deps.vivado_session,
-                design_size_factor=state.timing.design_size_factor,
-            )
-            design_state = _classify_design_state(status_result)
-            if design_state == "unknown":
-                timing_summary = await call_tool_fn(
-                    "vivado_report_timing_summary",
-                    {},
-                    deps.rapidwright_session, deps.vivado_session,
-                    design_size_factor=state.timing.design_size_factor,
-                )
-                design_state = _classify_design_state(status_result, timing_summary)
-                if design_state != "unknown":
-                    logger.info(
-                        f"[save_output] Design state inferred from timing summary: {design_state}"
-                    )
-
-            needs_routing = design_state != "routed"
+            is_placed, is_routed = await _check_routed_state(state, deps)
+            needs_routing = not is_routed
             if needs_routing:
                 # Try restoring from best checkpoint first (fast, ~9s)
                 if (state.control.best_checkpoint_path
                         and state.control.best_checkpoint_path.exists()):
                     logger.warning(
-                        f"[save_output] Design not routed (state: {design_state}, "
-                        f"status: {status_result.strip() or '<empty>'}). "
-                        f"Restoring best checkpoint before save."
+                        f"[save_output] Design not routed (is_placed={is_placed}, "
+                        f"is_routed={is_routed}). Restoring best checkpoint before save."
                     )
                     await call_tool_fn(
                         "vivado_open_checkpoint",
@@ -330,31 +315,16 @@ async def save_output_node(
                         design_size_factor=state.timing.design_size_factor,
                     )
                     # Re-verify after restore
-                    status_result = await call_tool_fn(
-                        "vivado_run_tcl",
-                        {"command": "get_property STATUS [current_design]"},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
-                    design_state = _classify_design_state(status_result)
-                    if design_state == "unknown":
-                        timing_summary = await call_tool_fn(
-                            "vivado_report_timing_summary",
-                            {},
-                            deps.rapidwright_session, deps.vivado_session,
-                            design_size_factor=state.timing.design_size_factor,
-                        )
-                        design_state = _classify_design_state(status_result, timing_summary)
-                    if design_state == "routed":
+                    is_placed, is_routed = await _check_routed_state(state, deps)
+                    if is_routed:
                         logger.info("[save_output] Best checkpoint restored and routed")
                         needs_routing = False
 
             if needs_routing:
-                if design_state != "placed":
+                if not is_placed:
                     logger.warning(
-                        f"[save_output] Design still not placed (state: {design_state}, "
-                        f"status: {status_result.strip() or '<empty>'}). "
-                        f"Running emergency place+route."
+                        f"[save_output] Design still not placed (is_placed={is_placed}, "
+                        f"is_routed={is_routed}). Running emergency place+route."
                     )
                     await call_tool_fn(
                         "vivado_place_design", {"directive": "Default", "timeout": 3600},
@@ -367,6 +337,12 @@ async def save_output_node(
                     design_size_factor=state.timing.design_size_factor,
                 )
                 logger.info("[save_output] Emergency route completed")
+                _, is_routed = await _check_routed_state(state, deps)
+                if not is_routed:
+                    logger.error(
+                        "[save_output] Emergency place+route did not produce a "
+                        "routed design. The output DCP may be invalid."
+                    )
         except Exception as e:
             logger.warning(f"[save_output] Design state check/repair failed: {e}")
 
@@ -385,25 +361,14 @@ async def save_output_node(
                 logger.warning(f"[save_output] Failed to write DCP: {result}")
             else:
                 logger.info(f"[save_output] Output DCP written successfully")
-                # Verify design state after write — catch corrupt DCPs early
+                # Verify design state after write - catch corrupt DCPs early.
+                # Use the reliable check_design_status is_routed (not STATUS).
                 try:
-                    final_status = await call_tool_fn(
-                        "vivado_run_tcl",
-                        {"command": "get_property STATUS [current_design]"},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
-                    final_ts = await call_tool_fn(
-                        "vivado_report_timing_summary",
-                        {},
-                        deps.rapidwright_session, deps.vivado_session,
-                        design_size_factor=state.timing.design_size_factor,
-                    )
-                    final_state = _classify_design_state(final_status, final_ts)
-                    if final_state not in ("routed",):
+                    _, final_routed = await _check_routed_state(state, deps)
+                    if not final_routed:
                         logger.warning(
-                            f"[save_output] WARNING: Output DCP design state is '{final_state}' "
-                            f"(not 'routed'). The DCP may be corrupt — "
+                            f"[save_output] WARNING: Output DCP is NOT routed "
+                            f"(is_routed=false). The DCP may be corrupt - "
                             f"validate_dcps.py will likely fail."
                         )
                 except Exception as ve:

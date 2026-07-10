@@ -17,7 +17,7 @@ from .entities import (
     EntityRegistry,
     validate_and_sanitize_cell_args,
 )
-from .tool_contracts import ToolCallResult, build_tool_call_result, is_mcp_error_response
+from .tool_contracts import ToolCallResult, build_tool_call_result, coerce_payload_dict, is_mcp_error_response
 from .tool_catalog import DESIGN_MODIFICATION_TOOLS
 from .tool_runtime_policy import (
     _TOOL_TIMEOUT_DEFAULTS,
@@ -56,6 +56,26 @@ _NO_CACHE_TOOLS: frozenset[str] = frozenset({
     "design_data_read",
     "design_data_list_snapshots",
 })
+
+# LLMs occasionally serialize array-typed arguments as a comma-separated
+# string (observed: rapidwright_analyze_net_detour pin_paths), which the MCP
+# schema rejects with "is not of type 'array'". Coerce these known array
+# params from string->list so the call succeeds. Framework-injected values
+# are already lists and are left untouched.
+_ARRAY_STRING_PARAMS: frozenset[str] = frozenset({
+    "pin_paths",
+    "critical_paths",
+    "critical_path_cells",
+    "cell_names",
+})
+
+
+def _coerce_array_arguments(arguments: dict) -> None:
+    """In-place coerce known array params from comma-string to list."""
+    for key in _ARRAY_STRING_PARAMS:
+        val = arguments.get(key)
+        if isinstance(val, str):
+            arguments[key] = [s.strip() for s in val.split(",") if s.strip()]
 
 
 async def call_tool(
@@ -123,6 +143,7 @@ async def call_tool(
     # out of schema-validated MCP calls while preserving all real tool args.
     arguments = dict(arguments or {})
     user_timeout = arguments.pop("timeout", None)
+    _coerce_array_arguments(arguments)
 
     # Internal tool: retrieve raw tool output from side buffer
     if tool_name == "vivado_get_raw_tool_output":
@@ -433,3 +454,33 @@ async def call_tool_structured(
         run_dir=run_dir,
     )
     return build_tool_call_result(tool_name, raw_text)
+
+
+async def verify_design_routed(
+    rapidwright_session: Any,
+    vivado_session: Any,
+    design_size_factor: float = 1.0,
+) -> bool:
+    """Return True iff the in-memory Vivado design is fully routed.
+
+    Uses ``vivado_check_design_status``, whose ``is_routed`` falls back to
+    parsing ``report_route_status`` (reliable) when the STATUS/IS_ROUTED
+    properties return empty after ``open_checkpoint`` (architecture.md §15.1).
+    This is the reliable counterpart to ``get_property STATUS``, whose sticky
+    value can label a partially-placed DCP as "Routed".
+
+    Conservative: any error or parse failure returns False so that
+    best-checkpoint saves and output delivery are blocked rather than
+    trusting an unverified state.
+    """
+    try:
+        result = await call_tool(
+            "vivado_check_design_status", {},
+            rapidwright_session, vivado_session,
+            design_size_factor=design_size_factor,
+        )
+        data = coerce_payload_dict(result)
+        return bool(data and data.get("is_routed"))
+    except Exception as e:
+        logger.warning(f"[ROUTER] verify_design_routed check failed: {e}")
+        return False

@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal
+from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal, DesignState, parse_design_state
 from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
@@ -92,17 +92,27 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 entity_registry=state.entity_registry,
             )
             _parsed = parse_timing_summary(_refresh)
+            _ds = parse_design_state(_refresh)
             if _parsed and "wns" in _parsed:
-                state.timing.latest_wns = _parsed["wns"]
-                state.timing.latest_tns = _parsed.get("tns")
-                state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
-                # Mark all fields refreshed by vivado_report_timing_summary
-                # fresh (timing_summary AND cdc_paths) — matches the main-loop
-                # DASHBOARD_REFRESH_MAP handling so cdc_paths does not stay
-                # stale after the auto-refresh (F2).
-                for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
-                    state.timing.field_freshness[_f] = "fresh"
-                logger.info(f"[SELECT_STRATEGY] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
+                # Only adopt the WNS when the design is actually routed. A
+                # non-routed report returns optimistic wireload estimates that
+                # would pollute latest_wns and mislead strategy selection
+                # (run-20260710_002051: unplaced -0.003 estimate was adopted
+                # here and later corrupted best_wns). Preserve last known WNS.
+                if _ds is not None and _ds != DesignState.ROUTED:
+                    logger.warning(
+                        f"[SELECT_STRATEGY] Skipping stale WNS refresh: design "
+                        f"state is {_ds} (not routed); preserving last known WNS."
+                    )
+                else:
+                    state.timing.latest_wns = _parsed["wns"]
+                    state.timing.latest_tns = _parsed.get("tns")
+                    state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
+                    if _ds is not None:
+                        state.timing.design_state = _ds
+                    for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
+                        state.timing.field_freshness[_f] = "fresh"
+                    logger.info(f"[SELECT_STRATEGY] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
         except Exception as _e:
             logger.warning(f"[SELECT_STRATEGY] Auto-refresh failed: {_e}")
 

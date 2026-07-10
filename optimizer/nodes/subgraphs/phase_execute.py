@@ -23,6 +23,7 @@ from optimizer.pure.tool_filter import LoopPhase, filter_tools_for_phase, get_ph
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
+from optimizer.pure.tool_router import verify_design_routed
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
@@ -858,7 +859,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if directive == "unplace":
                         unplaced_without_replace = True
                     else:
-                        unplaced_without_replace = False
+                        # A real place attempt only clears the unplaced flag
+                        # if it succeeded. A failed place (e.g. unrecognized
+                        # directive) leaves the design unplaced, so the phase
+                        # exit auto-rollback must still fire
+                        # (run-20260710_002051: failed Performance_NetDelay_high
+                        # silently cleared the flag, leaving the design unplaced).
+                        if not tool_result.error:
+                            unplaced_without_replace = False
 
                 # Track critical path data
                 if tool_name == "vivado_extract_critical_path_cells":
@@ -928,7 +936,12 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             tool_name,
                             tool_result.payload or result,
                         )
-                        if metrics is not None:
+                        # Only adopt the embedded post-route WNS when the tool
+                        # succeeded. On error/partial (route_design failed, e.g.
+                        # design not fully placed) the post_optimization WNS is a
+                        # wireload estimate that would corrupt best_wns
+                        # (run-20260710_002051: -0.465 -> -0.003 artifact).
+                        if metrics is not None and tool_result.ok:
                             prev_wns = pre_tool_wns
                             new_wns = metrics["wns"]
                             new_tns = metrics["tns"]
@@ -1470,7 +1483,26 @@ def _track_wns_from_result(state: OptimizerState, tool_name: str, raw_result: st
     # falsely triggered the "WNS based on wireload estimates" dashboard warning
     # right after a real post-route WNS was captured (e.g. physopt_and_route).
     if tool_name in ("vivado_route_design", "vivado_physopt_and_route"):
-        state.timing.design_state = DesignState.ROUTED
+        if tool_name == "vivado_physopt_and_route":
+            # physopt_and_route may return status="partial" with an "error"
+            # field when its internal route_design fails (e.g. design not
+            # fully placed). In that case the design is NOT routed - claiming
+            # ROUTED would bypass downstream routed-guards
+            # (run-20260710_002051). Only mark ROUTED on a clean result.
+            try:
+                _data = json.loads(raw_result)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                _data = {}
+            _failed = isinstance(_data, dict) and (
+                bool(_data.get("error")) or _data.get("status") == "partial"
+            )
+            if _failed:
+                if state.timing.design_state == DesignState.ROUTED:
+                    state.timing.design_state = DesignState.UNPLACED
+            else:
+                state.timing.design_state = DesignState.ROUTED
+        else:
+            state.timing.design_state = DesignState.ROUTED
     elif tool_name == "vivado_phys_opt_design":
         # phys_opt preserves routing; only upgrade if we had no placement info
         if state.timing.design_state == DesignState.UNPLACED:
@@ -1567,6 +1599,24 @@ async def _save_best_checkpoint(state: OptimizerState, deps: NodeDeps) -> None:
     """
     if state.control.run_dir is None:
         return
+    # Guard: never overwrite best_checkpoint.dcp with a non-routed design.
+    # An unplaced/partially-placed design reports optimistic wireload WNS
+    # (run-20260710_002051: a failed physopt_and_route left the design
+    # unplaced but its stale STATUS labelled the DCP "Routed", so a -0.003ns
+    # estimate overwrote the real -0.465ns routed best). verify_design_routed
+    # uses report_route_status (reliable) instead of the sticky STATUS property.
+    if deps.vivado_session is not None:
+        if not await verify_design_routed(
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        ):
+            logger.error(
+                f"[EXECUTE] Refuse to save best_checkpoint: design NOT routed "
+                f"(best_wns={state.timing.best_wns:.3f}ns would be a wireload "
+                f"estimate). Keeping previous best_checkpoint.dcp unchanged."
+            )
+            state.control.needs_save = False
+            return
     try:
         ckpt_path = state.control.run_dir / "best_checkpoint.dcp"
         await call_tool_fn(
@@ -1832,6 +1882,16 @@ async def _post_eval_hook(state: OptimizerState, deps: NodeDeps, tool_name: str)
     if wns is None:
         return None
 
+    # Only adopt the WNS when the design is actually routed. A non-routed
+    # report_timing_summary returns optimistic wireload estimates; adopting
+    # them into latest_wns/best_wns corrupts state (run-20260710_002051:
+    # -0.465 -> -0.003 artifact). Discard and preserve the last known WNS.
+    if design_state != DesignState.ROUTED:
+        logger.warning(
+            f"[EXECUTE] Discarding WNS={wns:.3f}ns from {design_state} design "
+            f"(not routed - wireload estimate). Preserving last known WNS."
+        )
+        return None
     state.timing.latest_wns = wns
     if tns is not None:
         state.timing.latest_tns = tns
