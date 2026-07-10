@@ -226,16 +226,21 @@ STRATEGIES = {
         ],
     },
     "LogicResynthesis": {
-        "name": "Logic Resynthesis (synth_design -remap)",
+        "name": "Logic Resynthesis (opt_design -remap)",
         "trigger": "NN/datapath design with MUXF7/8 cascades, "
                    "100% logic delay or deep combinational levels on critical paths",
         "sequence": [
-            {"step": "vivado_run_tcl", "platform": "Vivado",
-             "params": {"command": "synth_design -remap -flatten_hierarchy rebuilt -top [current_top]"},
-             "note": "Re-synthesize logic with remapping. May reduce LUT levels by restructuring."},
-            {"step": "vivado_place_design", "platform": "Vivado", "params": None},
-            {"step": "vivado_route_design", "platform": "Vivado", "params": None},
-            {"step": "report_timing_summary", "platform": "Vivado", "params": None},
+            {"step": "opt_design_strategy", "platform": "RapidWright",
+             "params": {"directive": "Explore", "retarget": True},
+             "note": "Logic-equivalent resynthesis via opt_design -remap (NO FF insert, latency "
+                     "preserved). synth_design cannot run on an implemented DCP; opt_design -remap "
+                     "is the correct logic-equivalent remap. Auto-chains opt_design -> place -> route -> report."},
+            {"step": "place_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-place after netlist change"},
+            {"step": "route_design", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: re-route"},
+            {"step": "report_timing_summary", "platform": "Vivado", "params": None,
+             "note": "Auto-chained: evaluate timing"},
         ],
     },
     "PhysOptAggressive": {

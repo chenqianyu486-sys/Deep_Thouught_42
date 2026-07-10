@@ -912,8 +912,8 @@ class V2TestMode:
         {"name": "execute_opt_design_strategy", "tool": "rapidwright_execute_opt_design_strategy",
          "skill_name": "opt_design_strategy", "args": {"directive": "Explore", "retarget": True}},
         # ── NEW STRATEGIES (v2.1) ──────────────────────────────────
-        # Note: logic_resynthesis is a virtual strategy (TCL command via vivado_run_tcl),
-        # not a registered Skill class. It is exercised via physopt_aggressive below.
+        # Note: logic_resynthesis maps to rapidwright_execute_opt_design_strategy
+        # (same tool/skill as OptDesign), exercised via execute_opt_design_strategy above.
         {"name": "physopt_aggressive", "tool": "vivado_physopt_and_route",
          "skill_name": "physopt_strategy", "args": {"directive": "Explore", "design_is_routed": False}},
     ]

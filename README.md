@@ -150,7 +150,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
 | **CongestionSpreading** | 拥塞=HIGH | RapidWright + Vivado |
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
-| **LogicResynthesis** | NN/数据通路设计含 MUXF7/8 级联，关键路径上组合级数深 | Vivado (synth_design -remap) |
+| **LogicResynthesis** | NN/数据通路设计含 MUXF7/8 级联，关键路径上组合级数深 | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
 | **PhysOptAggressive** | WNS > -3.0，逻辑深度受限且有散布的设计 | Vivado (Explore 指令) |
 | **CombinationalRebalance** | 寄存器间深组合链（LUT6/MUXF7/MUXF8 级联，逻辑级数 >= 3） | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |
 | **LUTMUXFRepack** | NN/宽数据通路，MUXF7/MUXF8 + LUT6 级联在关键路径上 | Vivado (opt_design -AddRemap，通过 RapidWright 定点分析 + 自动链式) |

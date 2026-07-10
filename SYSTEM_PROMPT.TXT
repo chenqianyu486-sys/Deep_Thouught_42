@@ -24,6 +24,14 @@ rules:
        modifications; if it returns empty or the design has changed since
        init_analysis, re-run vivado_get_critical_high_fanout_nets to refresh
        before concluding the design has no high-fanout nets."
+    - "Prefer dedicated analysis tools over hand-written Tcl via vivado_run_tcl.
+       High-fanout analysis: vivado_get_critical_high_fanout_nets. Pin/cell extraction:
+       vivado_extract_critical_path_pins / vivado_extract_critical_path_cells. Do NOT
+       hand-write `foreach net [get_nets ...]` loops - tcl_security rejects multi-line
+       control flow and the dedicated tools already return structured results."
+    - "If vivado_get_critical_high_fanout_nets returns empty, either lower min_fanout and
+       retry, or conclude fanout optimization is not applicable for this design. Do NOT fall
+       back to hand-written foreach Tcl to 'confirm' the empty result."
 
 response_format:
   rule: "Every response MUST call report_step_state(step_id, result_status, flow_control) as structured tool call."
@@ -61,7 +69,7 @@ strategies:
     cell_replication: "Critical Path Cell Replication — duplicate cells on critical paths"
     congestion_spreading: "Congestion-Aware Cell Spreading — spread congested cells"
     net_swap: "Net Swapping — intra-SLICE routing optimization"
-    logic_resynthesis: "Logic Resynthesis — synth_design -remap"
+    logic_resynthesis: "Logic Resynthesis — opt_design -remap"
     physopt_aggressive: "Aggressive Physical Optimization — phys_opt_design with Explore directive"
     combinational_rebalance: "Combinational Logic Rebalancing — opt_design -remap (logic-equivalent, no FF insertion)"
     lut_muxf_repack: "LUT6+MUXF Co-Repack — opt_design -AddRemap (logic-equivalent repacking)"
@@ -111,3 +119,22 @@ NOTE: PBLOCK / strategy execution sequences and parameter defaults are defined
 authoritatively in the strategy_catalog (SELECT_STRATEGY) and skill_guidance
 (EXECUTE) sections of the Dashboard. Refer to those sections for the current
 execution chain and multiplier values.
+
+
+## TOOL PARAMETER REFERENCE (authoritative)
+
+Parameter names below are authoritative. Output field names (e.g. `checkpoint_path`
+returned by vivado_write_checkpoint) MUST NOT be reused as input parameter names.
+
+- vivado_run_tcl(command: str) - SINGLE-LINE Tcl only. Multi-line control flow
+  (foreach / while / for / if blocks) is REJECTED by tcl_security. For aggregation use
+  single-line forms: `join [lsort ...]`, `get_property -filter {...}`, `llength [...]`.
+  The parameter name is `command`, NOT `tcl_script` or `script`.
+- vivado_open_checkpoint(dcp_path: str) - input parameter is `dcp_path`. `checkpoint_path`
+  is an OUTPUT field name of vivado_write_checkpoint, NOT a valid input here.
+- vivado_write_checkpoint(dcp_path: str, force: bool) - input `dcp_path`; returns output
+  field `checkpoint_path`.
+- rapidwright_analyze_net_detour(pin_paths: list[str], detour_threshold: float) -
+  `pin_paths` is a FLAT list of pin strings for ONE path
+  (e.g. ["ff/Q", "lut1/I2", "lut1/O", "dst_ff/D"]), NOT a list-of-lists. To analyze
+  multiple paths, call the tool once per path.

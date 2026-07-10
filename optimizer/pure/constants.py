@@ -97,7 +97,7 @@ STRATEGY_MAP: dict[str, StrategyEntry] = {
     "OptDesign": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
     "RegisterRetiming": StrategyEntry("execute_register_retiming", "rapidwright_execute_register_retiming"),
     "SmartRetiming": StrategyEntry("smart_retiming", "rapidwright_smart_retiming"),
-    "LogicResynthesis": StrategyEntry("logic_resynthesis", "vivado_run_tcl"),
+    "LogicResynthesis": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
     "PhysOptAggressive": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
     "CombinationalRebalance": StrategyEntry("combinational_rebalancing_strategy", "rapidwright_execute_combinational_rebalancing_strategy"),
     "LUTMUXFRepack": StrategyEntry("lut_muxf_repack_strategy", "rapidwright_execute_lut_muxf_repack_strategy"),
