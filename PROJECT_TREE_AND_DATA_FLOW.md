@@ -386,7 +386,7 @@ make run_test_v2          # 完整 V2 测试 (工具+技能+P&R, ~10-30min)
 make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性)
 ```
 
-**核心测试文件**: [optimizer/test_mode.py](optimizer/test_mode.py)(76K, 完整V2编排)、[test_graph.py](optimizer/test_graph.py)(28K, NodeGraph测试)、[test_pure.py](optimizer/test_pure.py)(21K, 纯函数测试)、[skills/test_skill_framework.py](skills/test_skill_framework.py)(21K)、[VivadoMCP/test_vivado_mcp.py](VivadoMCP/test_vivado_mcp.py)(22K)。
+**核心测试文件**: [optimizer/test_mode.py](optimizer/test_mode.py)(76K, 完整V2编排)、[test_graph.py](optimizer/test_graph.py)(28K, NodeGraph测试)、[test_pure.py](optimizer/test_pure.py)(21K, 纯函数测试)、[skills/test_skill_framework.py](skills/test_skill_framework.py)(21K)、[VivadoMCP/test_vivado_mcp.py](VivadoMCP/test_vivado_mcp.py)(22K)、[tests/test_p2_fixes.py](tests/test_p2_fixes.py)(P2 回归：phys_opt WNS 守卫 / place_design 跳过 / fallback 去重，见 architecture.md §15.11)。
 
 ---
 

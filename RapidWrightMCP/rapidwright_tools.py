@@ -1426,13 +1426,28 @@ def analyze_critical_path_spread(
                 critical_paths_data = json.load(f)
         except Exception as e:
             return {"error": f"Error reading input file: {str(e)}"}
-    
+
+    # Unwrap DesignDataManager envelope {"_meta": {...}, "data": <list|json-string>}
+    # so input_file mode works with persisted snapshots. run-20260710_190708:
+    # passing a critical_paths.json or tool_output file left critical_paths_data
+    # as the envelope dict, and `critical_paths_data[0]` below raised KeyError: 0.
+    if isinstance(critical_paths_data, dict):
+        critical_paths_data = critical_paths_data.get("data", critical_paths_data)
+    if isinstance(critical_paths_data, str):
+        # tool_output files store the original tool result as a JSON string
+        try:
+            import json
+            critical_paths_data = json.loads(critical_paths_data)
+        except Exception as e:
+            return {"error": f"Error parsing input file data: {str(e)}"}
+
     if not critical_paths_data:
         return {"error": "No critical path data provided. Specify either critical_paths_data or input_file"}
 
     # Normalize: support list-of-dicts (from extract_critical_path_cells file)
-    # alongside list-of-lists (direct cell name arrays)
-    if critical_paths_data and isinstance(critical_paths_data[0], dict):
+    # alongside list-of-lists (direct cell name arrays). Guard with isinstance(list)
+    # so a non-list payload never hits a dict-key/char index.
+    if isinstance(critical_paths_data, list) and critical_paths_data and isinstance(critical_paths_data[0], dict):
         critical_paths_data = [p.get("cells", []) for p in critical_paths_data]
 
     try:

@@ -1241,3 +1241,17 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 **验证**：`optimizer/test_pure.py` 新增 8 项单测——4 项 chain-skip（plan-style ready 不跳过 / skipped 仍跳过 / ready 无 steps 仍判空 / 运行时与 constants 双副本行为一致）+ 4 项 cost tracking（单次累计 / 多次累计 / cache+reasoning token / 缺 usage 为 no-op）；`TestToolContracts` + `TestCostTracking` 14 项通过，全量 261 项通过。`test_graph.py` 因预先存在的 `_execute_exit_reason_after_timing_update` 导入断裂未计入，与本次修复无关。
 
+### 15.11 第八轮：P2 调优修复（2026-07-11，run-20260710_190708 复盘 P2 项）
+
+基于同一份三层交叉分析报告的 P2（调优）项修复。P0（chain-skip + 成本累计）见 §15.10，本轮处理 P2.6–P2.10 五项。
+
+| 编号 | 文件 | 缺陷 | 修复 |
+|------|------|------|------|
+| P2.6 | `optimizer/nodes/prepare_context.py` | EVALUATE 决策指引对 `verdict=IMPROVED` 给 CONTINUE / SWITCH_STRATEGY 等权，LLM 8 次 EVALUATE 全选 SWITCH_STRATEGY，单轮即放弃仍产增益的策略 | 强化 `verdict=IMPROVED` 指引为「PREFER CONTINUE 1-2 轮再 SWITCH」，并给出切换判据（2+ 轮收益递减或瓶颈转移） |
+| P2.7 | `strategy_library.py`、`optimizer/pure/context_snapshot.py`、`optimizer/nodes/subgraphs/phase_select_strategy.py` | `phys_opt` 类策略（PhysOpt / PhysOptAggressive / MUXFTreeReorder，链式 `vivado_phys_opt_design`/`physopt_and_route`）在 WNS<-0.5ns 时被 Vivado 明确告警无效（Physopt 32-745），却仍可选可执行；运行中 phys_opt 在 WNS=-0.542 执行两次零增益、~26s 浪费 | 新增 `PHYSOPT_CLASS_STRATEGIES` + `PHYSOPT_INEFFECTIVE_WNS_THRESHOLD=-0.5`；`context_snapshot` 在 WNS<阈值时将三类策略标 `[BLOCKED]`（catalog 展示），`phase_select_strategy` 新增 `_get_wns_ineffective_strategies` 并入阻断集（执行层拒绝），引导 LLM 改用 route-directive 探索 |
+| P2.8 | `optimizer/pure/tool_router.py` | `vivado_place_design`（非 unplace 指令）对已全部 placed 的设计是 no-op（Vivado Place 30-281「all instances are placed」），LLM 直调 `place_design ExtraTimingOpt` 在已布线设计上浪费 10.2s | `call_tool` 在派发 `vivado_place_design`（directive≠unplace）前用 `_session_is_fully_placed`（直连 MCP `check_design_status`，绕过缓存取新鲜 is_placed）短路：is_placed=True 时返回 `{"status":"skipped"}` 而非调用 MCP。对 opt_design 等链安全--place_design 只放置未放置 cell，is_placed=True 时调用必为 no-op；失败时返回 False（保守不跳过） |
+| P2.9 | `RapidWrightMCP/rapidwright_tools.py` | `analyze_critical_path_spread` 的 `input_file` 模式读 JSON 后直接 `critical_paths_data[0]` 索引；持久化快照是 DesignDataManager 信封 `{"_meta":..., "data": <list|json-string>}`，对信封 dict 做 `dict[0]` → `KeyError: 0`，input_file 模式不可用 | 读文件后解封信封：dict 取 `data`（若为 JSON 字符串再 `json.loads`）；归一化行加 `isinstance(list)` 守卫，非 list 载荷不再触发 dict-key/char 索引 |
+| P2.10 | `optimizer/pure/execute_contracts.py` | `resolve_chain_step_arguments` 同时 append `selected_plan.fallback_reason` 与 `skill_result_data["pblock_fallback_reason"]`（二者在 frozen-plan 路径同文本），单行告警出现 `reason \| reason`（2-3 次） | `pblock_fallback_reason` 改为 `if fallback_reason and fallback_reason not in notes` 去重，重复文本仅记录一次 |
+
+**验证**：`tests/test_p2_fixes.py` 新增 7 项单测--P2.7（常量 / catalog 阻断 / WNS 守卫三态）+ P2.8（is_placed 解析 / 失败保守返回）+ P2.10（同文本去重 / 异文本均保留），7 项通过。`optimizer/test_pure.py` + `tests/test_context_engineering_fixes.py` 251 项通过（2 项 `TestContradictionFixesP1` TTL 断言为预先存在，与本次修复无关；`test_graph.py` 仍因 `_execute_exit_reason_after_timing_update` 导入断裂未计入）。
+

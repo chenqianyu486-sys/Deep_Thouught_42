@@ -220,7 +220,12 @@ PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
    - EVALUATE: read-only tools to assess the WNS delta and decide next.
 
 DECISION GUIDANCE (choose flow_control based on verdict):
-   - verdict=IMPROVED: choose CONTINUE (keep refining same strategy) or SWITCH_STRATEGY.
+   - verdict=IMPROVED: PREFER CONTINUE for 1-2 more rounds - the strategy is still
+     yielding WNS gains, so extract its remaining value (e.g. a tighter pblock, a
+     different directive) before switching. Only choose SWITCH_STRATEGY if you have
+     evidence the gains have plateaued (2+ CONTINUE rounds with shrinking deltas) or
+     a different bottleneck now dominates. Abandoning after a single improving round
+     wastes strategies that are still working.
    - verdict=UNCHANGED: choose SWITCH_STRATEGY (same strategy is now blocked this iteration; CONTINUE will not help) or NEXT_ITERATION.
    - verdict=REGRESSED: choose SWITCH_STRATEGY, or ROLLBACK if WNS regressed beyond threshold (auto-rollback may trigger).
    - If consecutive strategies yield no improvement, choose EXHAUSTED to end this iteration.

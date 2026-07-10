@@ -33,6 +33,10 @@ from optimizer.pure.pblock_plan import (
     plan_requires_execution_rebuild,
 )
 from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP
+from strategy_library import (
+    PHYSOPT_CLASS_STRATEGIES,
+    PHYSOPT_INEFFECTIVE_WNS_THRESHOLD,
+)
 from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
@@ -199,10 +203,21 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                 # Guard: reject persistent TTL blocks and strategies that
                 # already stalled during the current iteration.
                 iteration_blocked = set(state.iteration.blocked_strategies)
-                blocked = _get_permanently_blocked_strategies(state) | iteration_blocked
+                wns_blocked = _get_wns_ineffective_strategies(state)
+                blocked = (
+                    _get_permanently_blocked_strategies(state)
+                    | iteration_blocked
+                    | wns_blocked
+                )
                 chosen_key = step_state.strategy_name
                 if chosen_key in blocked:
-                    if chosen_key in iteration_blocked:
+                    if chosen_key in wns_blocked:
+                        reason = (
+                            f"ineffective when WNS<"
+                            f"{PHYSOPT_INEFFECTIVE_WNS_THRESHOLD}ns (Vivado "
+                            f"Physopt 32-745); prefer route-directive strategies"
+                        )
+                    elif chosen_key in iteration_blocked:
                         reason = "already stalled in this iteration"
                     else:
                         unblock_iter = 0
@@ -482,6 +497,18 @@ def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
                 blocked.add(entry.strategy)
             # else: TTL expired, strategy is unblocked and can be retried
     return blocked
+
+
+def _get_wns_ineffective_strategies(state: OptimizerState) -> set[str]:
+    """Return phys_opt-class strategies blocked because WNS is deeply negative.
+
+    Vivado warns phys_opt is ineffective when WNS < -0.5ns (Physopt 32-745).
+    Block these so the LLM uses route-directive exploration instead.
+    """
+    wns = state.timing.latest_wns
+    if wns is None or wns >= PHYSOPT_INEFFECTIVE_WNS_THRESHOLD:
+        return set()
+    return set(PHYSOPT_CLASS_STRATEGIES)
 
 
 async def _ensure_pending_pblock_plan(state: OptimizerState, deps: NodeDeps) -> None:

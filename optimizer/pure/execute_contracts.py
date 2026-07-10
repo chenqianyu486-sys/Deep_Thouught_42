@@ -371,7 +371,10 @@ def resolve_chain_step_arguments(
                 "PBLOCK whole-design fallback active: omitting cells binding and forcing IS_SOFT=1"
             )
         fallback_reason = skill_result_data.get("pblock_fallback_reason")
-        if fallback_reason:
+        # Dedupe: in the frozen-plan path selected_plan.fallback_reason (appended
+        # above) and the top-level pblock_fallback_reason carry the same text, so
+        # appending both produced "reason | reason" warnings (run-20260710_190708).
+        if fallback_reason and fallback_reason not in notes:
             notes.append(fallback_reason)
         directive = args.get("directive")
         if directive in KNOWN_BROKEN_DIRECTIVES:

@@ -400,6 +400,19 @@ STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
     "CongestionRouteExplore": True,       # routing only, no logic change
 }
 
+# phys_opt-class strategies: their auto-chain runs vivado_phys_opt_design /
+# vivado_physopt_and_route, which Vivado warns is ineffective when WNS is deeply
+# negative (Physopt 32-745: "most effective when WNS is above -0.5ns"). When the
+# current WNS is below this threshold, block them so the LLM steers toward
+# route-directive exploration instead (run-20260710_190708: phys_opt ran twice
+# at WNS=-0.542 with zero gain, ~26s wasted).
+PHYSOPT_CLASS_STRATEGIES: frozenset[str] = frozenset({
+    "PhysOpt",
+    "PhysOptAggressive",
+    "MUXFTreeReorder",  # chains vivado_phys_opt_design
+})
+PHYSOPT_INEFFECTIVE_WNS_THRESHOLD: float = -0.5
+
 SKILL_EXECUTION_PATTERN = [
     "Use Vivado report_timing/extract_critical_path_cells to get path data",
     "Call appropriate skill via MCP tool",

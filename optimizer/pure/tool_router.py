@@ -78,6 +78,31 @@ def _coerce_array_arguments(arguments: dict) -> None:
             arguments[key] = [s.strip() for s in val.split(",") if s.strip()]
 
 
+async def _session_is_fully_placed(vivado_session) -> bool:
+    """Fresh check via vivado check_design_status: is every cell placed?
+
+    Calls the MCP session directly (bypassing the tool cache) so the result
+    reflects the current design state. Returns False on any failure so the
+    caller falls back to running place_design (conservative: do not skip).
+    """
+    try:
+        result = await asyncio.wait_for(
+            vivado_session.call_tool("check_design_status", {}),
+            timeout=60.0,
+        )
+        text_parts: list[str] = []
+        if result and getattr(result, "content", None):
+            for block in result.content:
+                if hasattr(block, "text"):
+                    text_parts.append(block.text)
+        text = "\n".join(text_parts)
+        data = json.loads(text) if text else {}
+        return bool(data.get("is_placed"))
+    except Exception as e:
+        logger.warning(f"[ROUTER] check_design_status for place guard failed: {e}")
+        return False
+
+
 async def call_tool(
     tool_name: str,
     arguments: dict,
@@ -278,6 +303,31 @@ async def call_tool(
 
     if session is None:
         return json.dumps({"error": f"No MCP session available for {tool_name}"})
+
+    # P2.8: place_design (non-unplace) is a no-op when every cell is already
+    # placed (Vivado Place 30-281: "all instances are placed"). Short-circuit
+    # with a fresh check_design_status so we do not waste a ~10s no-op run
+    # (run-20260710_190708: ExtraTimingOpt no-op on an already-routed design).
+    # Safe for all callers: place_design only places UNPLACED cells, so when
+    # is_placed is True the call cannot change anything (incl. after opt_design
+    # - if all cells remain placed, place_design is still a no-op).
+    if tool_name == "vivado_place_design":
+        _directive = str(arguments.get("directive", "")).lower()
+        if _directive != "unplace" and await _session_is_fully_placed(session):
+            logger.info(
+                f"[MCP_REQUEST] tool={tool_name}, args={sanitize_payload(arguments)}"
+                f" -> SKIPPED (design already fully placed; non-unplace place_design is a no-op)"
+            )
+            return json.dumps({
+                "status": "skipped",
+                "message": (
+                    "place_design skipped: design is already fully placed. "
+                    "place_design without -unplace cannot re-place an already-placed "
+                    "design (Vivado: 'all instances are placed'). Use a route directive "
+                    "or unplace first if re-placement is intended."
+                ),
+                "design_already_placed": True,
+            })
 
     # Execute via MCP
     logger.info(f"[MCP_REQUEST] tool={tool_name}, args={sanitize_payload(arguments)}")
