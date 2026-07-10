@@ -137,25 +137,10 @@ async def iteration_end_node(
         if len(state.iteration.narratives) > 20:
             state.iteration.narratives.pop(0)
 
-        # Record strategy lifecycle evaluation at end of iteration
+        # evaluation_wns_delta/evaluation_result are now set per-strategy at
+        # EVALUATE entry (phase_evaluate.py), not the cumulative iteration delta
+        # here - the cumulative value mislabelled strategies (run-20260710_190708).
         if state.strategy.current_strategy:
-            if wns_improved:
-                state.strategy.evaluation_result = "IMPROVED"
-                if (state.timing.best_wns > float('-inf')
-                        and state.timing.prev_best_wns is not None
-                        and state.timing.prev_best_wns > float('-inf')):
-                    state.strategy.evaluation_wns_delta = state.timing.best_wns - state.timing.prev_best_wns
-            elif (state.timing.best_wns > float('-inf')
-                    and state.timing.prev_best_wns is not None
-                    and state.timing.prev_best_wns > float('-inf')):
-                delta = state.timing.best_wns - state.timing.prev_best_wns
-                if delta < -0.001:
-                    state.strategy.evaluation_result = "REGRESSION"
-                    state.strategy.evaluation_wns_delta = delta
-                else:
-                    state.strategy.evaluation_result = "UNCHANGED"
-                    state.strategy.evaluation_wns_delta = 0.0
-
             # Record EVALUATE phase entry if not already the last entry
             from optimizer.state import PhaseEntry
             last_phase = state.strategy.phase_history[-1].phase if state.strategy.phase_history else ""

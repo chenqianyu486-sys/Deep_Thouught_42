@@ -214,6 +214,22 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
         state.strategy.phase_history = state.strategy.phase_history[-100:]
     state.strategy.current_phase = "EVALUATE"
 
+    # ── Per-strategy evaluation metadata for the Dashboard/log ──
+    # evaluation_wns_delta/evaluation_result must reflect THIS strategy's WNS
+    # change (best_wns now vs best_wns_at_entry), not the cumulative iteration
+    # gain. Previously iteration_end wrote the cumulative delta, so the EVALUATE
+    # Dashboard showed a stale value (run-20260710_190708: iter2 no-op showed
+    # 0.56 = whole-run gain) or the 0.0 default, misrepresenting the just-run
+    # strategy. _strategy_wns_delta_since_entry already uses best_wns_at_entry.
+    _eval_delta = _strategy_wns_delta_since_entry(state)
+    state.strategy.evaluation_wns_delta = _eval_delta if _eval_delta is not None else 0.0
+    if _eval_delta is not None and _eval_delta > 0:
+        state.strategy.evaluation_result = "IMPROVED"
+    elif _eval_delta is not None and _eval_delta < -0.001:
+        state.strategy.evaluation_result = "REGRESSION"
+    else:
+        state.strategy.evaluation_result = "UNCHANGED"
+
     # ── Handle pre-check regression (Vivado state unchanged) ──
     # Level 1 pre-check in EXECUTE detected directional WNS regression
     # and skipped the entire Vivado P&R chain. No rollback is needed

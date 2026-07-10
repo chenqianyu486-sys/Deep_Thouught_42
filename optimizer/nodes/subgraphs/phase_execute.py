@@ -307,6 +307,25 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     if not checkpoint_created and _is_strategy_reentry(state):
         await _reload_baseline_on_switch(state, deps)
 
+    # ── Strategy isolation: clear any pblock_tight left by a prior PBLOCK ──
+    # The PBLOCK strategy creates a `pblock_tight` constraint (hardcoded in
+    # pblock_strategy.py) and never removes it. Via skip-reopen it persisted
+    # into every later strategy's phys_opt/place/route, so they ran under an
+    # unintended constraint (run-20260710_190708). Deleting the pblock keeps
+    # the placed/routed geometry (and thus WNS) unchanged - only the constraint
+    # is removed. Runs for every strategy (re-entry reload, cross-iteration
+    # carryover, post-rollback) so none inherits a stale pblock. `catch` makes
+    # it a silent no-op when pblock_tight doesn't exist (the common case).
+    try:
+        await call_tool_fn(
+            "vivado_run_tcl",
+            {"command": "catch {delete_pblocks [get_pblocks -quiet pblock_tight]}"},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+    except Exception as e:
+        logger.warning(f"[EXECUTE] pblock_tight cleanup failed: {e}")
+
     # Auto-refresh stale critical_paths for netlist-modifying strategies that
     # need them (MUXFTreeReorder, LUTCascade, CombinationalRebalance, LUTMUXFRepack).
     # These strategies' chains auto-inject critical_paths from verified state data,

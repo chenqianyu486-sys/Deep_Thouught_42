@@ -349,6 +349,20 @@ async def save_output_node(
     # Write output DCP only after the best checkpoint was restored and verified.
     # On restore failure, the incrementally saved best output remains untouched.
     if state.control.output_dcp and deps.vivado_session and delivery_ready:
+        # Drop the PBLOCK strategy's pblock_tight from the delivered design.
+        # It is an optimization artifact that persisted into best_checkpoint.dcp
+        # (run-20260710_190708); removing it keeps the placed/routed geometry
+        # and timing unchanged, only dropping the stale constraint.
+        try:
+            await call_tool_fn(
+                "vivado_run_tcl",
+                {"command": "catch {delete_pblocks [get_pblocks -quiet pblock_tight]}"},
+                deps.rapidwright_session, deps.vivado_session,
+                design_size_factor=state.timing.design_size_factor,
+            )
+            logger.info("[save_output] Cleared pblock_tight constraint from delivered design")
+        except Exception as e:
+            logger.warning(f"[save_output] pblock_tight cleanup failed: {e}")
         try:
             logger.info(f"[save_output] Writing output DCP to {state.control.output_dcp}")
             result = await call_tool_fn(
