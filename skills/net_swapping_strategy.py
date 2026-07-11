@@ -215,14 +215,29 @@ def analyze_net_swapping(
         if device is None:
             return {"error": "Device not available"}
 
-        # Iterate over all sites, filter for SLICE types
-        for site in device.getAllSites():
+        # Iterate placed cells grouped by site instead of device.getAllSites(),
+        # which enumerates the entire fabric (incl. empty sites). On a 37K-cell
+        # design this is the difference between completing and timing out at 60s
+        # (P0-2, run-20260711_193102: 2x timeout). Only SLICE sites with placed
+        # LUT cells can yield swap candidates anyway.
+        site_map = {}  # site_name -> (site, site_inst)
+        for cell in design.getCells():
+            site_inst = cell.getSiteInst()
+            site = cell.getSite()
+            if site_inst is None or site is None:
+                continue
+            sname = str(site.getName())
+            if sname not in site_map:
+                site_map[sname] = (site, site_inst)
+
+        # Early-exit cap: collect a small pool then stop scanning, so
+        # max_candidates actually bounds runtime (the old code scanned every
+        # site before truncating). The final sort still picks the best of pool.
+        collect_cap = max(max_candidates * 2, 20)
+
+        for site_name, (site, site_inst) in site_map.items():
             site_type = str(site.getSiteTypeEnum()) if hasattr(site, "getSiteTypeEnum") else ""
             if "SLICE" not in site_type.upper():
-                continue
-
-            site_inst = design.getSiteInstFromSite(site)
-            if site_inst is None:
                 continue
 
             sites_scanned += 1
@@ -232,7 +247,6 @@ def analyze_net_swapping(
 
             site_col = site.getInstanceX()
             site_row = site.getInstanceY()
-            site_name = str(site.getName())
             found_candidate_in_site = False
 
             # Check all pairs of LUT cells in this SLICE
@@ -282,6 +296,10 @@ def analyze_net_swapping(
 
             if found_candidate_in_site:
                 sites_with_candidates += 1
+
+            # Early-exit once we have a large enough candidate pool.
+            if len(candidates) >= collect_cap:
+                break
 
         # Sort by wirelength reduction descending
         candidates.sort(key=lambda x: x["wirelength_reduction"], reverse=True)
@@ -515,13 +533,16 @@ def execute_net_swapping(
     version="1.0.0",
     display_name="Net Swapping Analysis",
     description="Identify net swap candidates within SLICE sites. "
-                "READ-ONLY. Finds pairs of LUT cells with identical INIT strings "
-                "where swapping input nets would reduce wirelength. "
-                "Use before execute_net_swapping.",
+                "READ-ONLY. Scans placed LUT cells grouped by site and finds pairs "
+                "with identical INIT strings where swapping input nets would reduce "
+                "wirelength. Use before execute_net_swapping. NOTE: max_candidates "
+                "bounds both returned results and scan early-exit (a larger value "
+                "scans more sites); on very large designs this may still exceed 60s "
+                "and time out - if so, pick a different strategy.",
     category=SkillCategory.ANALYSIS,
     idempotency="safe",
     side_effects=[],
-    timeout_ms=60000,
+    timeout_ms=120000,
     parameters=[
         ParameterSpec(
             name="max_candidates",

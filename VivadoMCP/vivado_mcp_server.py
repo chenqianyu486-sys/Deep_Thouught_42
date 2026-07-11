@@ -1832,7 +1832,7 @@ async def list_tools():
         ),
         Tool(
             name="place_design",
-            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing. Full whitelist: Default, Explore, ExtraTimingOpt, WLBlockPlacement, ExtraPostPlacementOpt, AltSpreadLogic_high/_medium/_low, SpreadLogic_high/_medium/_low, EarlyBlockPlacement, LateBlockPlacement, NetDelay_high/_medium/_low, SSI_SpreadLogic_high/_low, Quick, RuntimeOptimized, FlowQuick, FlowRuntimeOptimized, Congestion_Default/_SpreadLogic_high/_medium/_low, Area_Explore/_ExploreWithRemap/_ExploreSequentialArea, Performance_Explore/_ExplorePostRoute/_ExtraTimingOpt/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement. NOTE: Performance_Retiming and AddRetime are EXCLUDED (breaks equivalence).",
+            description="Run placement on the current design. Use directive 'unplace' to remove placement before re-placing. Valid directives are listed in the 'directive' enum below (authoritative - any directive not in the enum is rejected before reaching Vivado). Retiming directives (AddRetime, Performance_Retiming) are EXCLUDED because they break functional equivalence. If Vivado rejects a whitelisted directive (Constraints 18-641), the strategy aborts cleanly rather than silently falling back to default placement.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1878,7 +1878,7 @@ async def list_tools():
         ),
         Tool(
             name="route_design",
-            description="Run routing on the current design. Vivado automatically preserves routing for unchanged nets, so no explicit reuse flag is needed. Full whitelist: Default, Explore, AggressiveExplore, HigherDelayCost, LowerDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick, FlowQuick, FlowRuntimeOptimized, Performance_Explore/_NetDelay_high/_medium/_low/_RefinePlacement/_WLBlockPlacement, SSI_Explore/_Quick, Area_Default/_Explore, AlternateRoutability. NOTE: Performance_WLBlockPlacement and Performance_RefinePlacement are valid route directives (not just place directives). Congestion_Explore/_NetDelay_* are NOT valid route directives (Vivado 2025.1 rejects them); if a directive is rejected it auto-falls back to default routing.",
+            description="Run routing on the current design. Vivado automatically preserves routing for unchanged nets, so no explicit reuse flag is needed. Valid directives are listed in the 'directive' enum below (authoritative - any directive not in the enum is rejected before reaching Vivado). Congestion_Explore/_NetDelay_* are NOT valid route directives (Vivado 2025.1 rejects them); if a directive is rejected, routing auto-falls back to default.",
             inputSchema={
                 "type": "object",
                 "properties": {

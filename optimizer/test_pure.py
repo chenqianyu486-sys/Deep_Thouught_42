@@ -309,12 +309,39 @@ class TestToolContracts:
              {"status": "skipped", "analysis_summary": {"segments_found": 0}}),
             ("rapidwright_execute_fanout_strategy",
              {"status": "success", "optimized_cells": [], "critical_paths": []}),
+            # Fanout with successful_count>0 must NOT skip (P&R chain runs).
+            ("rapidwright_execute_fanout_strategy",
+             {"status": "success", "successful_count": 16}),
         ]
         for tool, data in cases:
             assert (
                 should_skip_chain_for_empty_result(tool, data)
                 == should_skip_chain_for_empty_result_runtime(tool, data)
             ), f"chain-skip divergence between constants and tool_chain_policy for {tool}"
+
+    def test_fanout_successful_count_runs_chain(self):
+        # run-20260711_232113: Fanout split 16 nets but the chain was skipped
+        # because successful_count wasn't recognized as an "effect" signal.
+        # With successful_count>0 the P&R chain must run; with 0 it still skips.
+        fanout_hit = {
+            "status": "success",
+            "successful_count": 16,
+            "failed_count": 9,
+            "checkpoint_path": "temp/fanout.dcp",
+            "results": [{"net_name": "n", "status": "success"}],
+        }
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_execute_fanout_strategy", fanout_hit
+        )
+        assert skip is False, "Fanout with successful_count>0 must run its P&R chain"
+        assert reason is None
+
+        fanout_miss = {"status": "success", "successful_count": 0}
+        skip, reason = should_skip_chain_for_empty_result(
+            "rapidwright_execute_fanout_strategy", fanout_miss
+        )
+        assert skip is True, "Fanout with 0 successes had no effect -> skip"
+        assert reason == "no data produced"
 
     def test_post_eval_and_chain_declarations_stay_centralized(self):
         assert "rapidwright_execute_pblock_strategy" in POST_EVAL_TOOLS

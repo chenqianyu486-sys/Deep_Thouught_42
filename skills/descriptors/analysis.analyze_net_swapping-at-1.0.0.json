@@ -3,12 +3,12 @@
   "specVersion": "3.0",
   "id": "analysis.analyze_net_swapping@1.0.0",
   "displayName": "Net Swapping Analysis",
-  "description": "Identify net swap candidates within SLICE sites. READ-ONLY. Finds pairs of LUT cells with identical INIT strings where swapping input nets would reduce wirelength. Use before execute_net_swapping.",
+  "description": "Identify net swap candidates within SLICE sites. READ-ONLY. Scans placed LUT cells grouped by site and finds pairs with identical INIT strings where swapping input nets would reduce wirelength. Use before execute_net_swapping. NOTE: max_candidates bounds both returned results and scan early-exit (a larger value scans more sites); on very large designs this may still exceed 60s and time out - if so, pick a different strategy.",
   "idempotency": "safe",
   "sideEffects": [],
   "timeout": {
-    "defaultMs": 60000,
-    "maxMs": 120000
+    "defaultMs": 120000,
+    "maxMs": 240000
   },
   "authentication": {
     "type": "none"

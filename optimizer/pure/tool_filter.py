@@ -71,6 +71,10 @@ INDEPENDENT_RAPIDWRIGHT_TOOLS: frozenset[str] = frozenset({
 # tool was never exposed (run-20260710_132555: 4 schema-error calls -> EXHAUSTED).
 STRATEGY_DEPENDENCY_TOOLS: dict[str, frozenset[str]] = {
     "NetSwap": frozenset({"rapidwright_analyze_net_swapping"}),
+    # Fanout's execute skill requires a `nets` list as input. Expose the fetch
+    # tool so the LLM can obtain it in EXECUTE when state data is empty/stale
+    # (P0-3: run-20260711_193102 - LLM idled 4 rounds with no way to fetch).
+    "Fanout": frozenset({"vivado_get_cached_high_fanout_nets"}),
 }
 
 

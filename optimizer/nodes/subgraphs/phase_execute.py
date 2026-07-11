@@ -550,6 +550,40 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"Cells used (preview): [{preview}].")
                             tool_args["critical_path_cells"] = cells
 
+                # Auto-inject high-fanout nets for the Fanout strategy when the
+                # LLM did not provide them (P0-3: run-20260711_193102 - Fanout's
+                # EXECUTE whitelist exposed only the execute tool + report_step_state,
+                # so the LLM had no way to obtain the required `nets` arg and idled
+                # 4 rounds). Unlike PBLOCK, this is non-overriding: LLM-provided
+                # nets always win; we only fill the gap from state.
+                if tool_name == "rapidwright_execute_fanout_strategy" and not tool_args.get("nets"):
+                    hf = state.timing.high_fanout_nets or []
+                    injected_nets = []
+                    for entry in hf:
+                        # high_fanout_nets is list[(net_name, fanout, path_count)];
+                        # Fanout skill expects [{"net_name": str, "fanout": int}].
+                        if isinstance(entry, dict):
+                            name = entry.get("net_name")
+                            fan = entry.get("fanout", 0)
+                        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                            name, fan = entry[0], entry[1]
+                        else:
+                            continue
+                        if name:
+                            injected_nets.append({"net_name": name, "fanout": int(fan or 0)})
+                    if injected_nets:
+                        tool_args["nets"] = injected_nets
+                        logger.info(
+                            f"[EXECUTE] Injected {len(injected_nets)} high-fanout nets "
+                            f"for {tool_name} from state.timing.high_fanout_nets"
+                        )
+                    else:
+                        logger.warning(
+                            f"[EXECUTE] No high-fanout nets to inject for {tool_name} "
+                            f"- state.timing.high_fanout_nets empty; LLM must call "
+                            f"vivado_get_cached_high_fanout_nets"
+                        )
+
                 # Data quality guard: if all critical path cells were filtered
                 # (pblock labels, device sites), skip the MCP call and inform LLM.
                 if (tool_name == "rapidwright_execute_pblock_strategy"
@@ -742,8 +776,10 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             )
                         elif tool_name == "vivado_get_cached_high_fanout_nets":
                             result += (
-                                "High-fanout net data is already in Dashboard Module 4 "
-                                "(Netlist Quality). Do not re-fetch — use the Dashboard values."
+                                "Dashboard Module 4 shows only the top-10 high-fanout nets; "
+                                "this tool returns the full cached list. You have hit the rate "
+                                "limit - reuse the previously returned list or the auto-injected "
+                                "nets for the Fanout strategy."
                             )
                         elif tool_name == "vivado_check_design_status":
                             result += (

@@ -654,6 +654,10 @@ def should_skip_chain_for_empty_result(
         not has_ready_plan
         and not skill_result_data.get("optimized_cells")
         and not skill_result_data.get("critical_paths")
+        # Fanout reports effect via successful_count (not optimized_cells/steps);
+        # >0 means it split nets, so don't treat as empty (run-20260711_232113:
+        # 16 splits were orphaned when the chain was wrongly skipped).
+        and (skill_result_data.get("successful_count") or 0) <= 0
     )
 
     if is_skipped:

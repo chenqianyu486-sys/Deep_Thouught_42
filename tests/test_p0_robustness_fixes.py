@@ -96,8 +96,11 @@ class TestP0DirectiveWhitelist:
             assert d in vms.ROUTE_SAFE_DIRECTIVES, f"{d} should remain"
 
     def test_place_whitelist_keeps_valid_directives(self):
+        # NOTE: Performance_NetDelay_high is a valid *route* directive only;
+        # Vivado 2025.1 rejects it for place_design (Constraints 18-641), so it
+        # was removed from PLACE_SAFE_DIRECTIVES (kept in ROUTE_SAFE_DIRECTIVES).
         for d in (
-            "Default", "Explore", "Performance_NetDelay_high",
+            "Default", "Explore", "Performance_Explore",
             "Congestion_SpreadLogic_high", "Area_Explore",
         ):
             assert d in vms.PLACE_SAFE_DIRECTIVES, f"{d} should remain"
@@ -139,3 +142,135 @@ class TestP0StrategyLibraryDirective:
         route_step = next(s for s in seq if s["step"] == "route_design")
         assert route_step["params"]["directive"] == "AlternateRoutability"
         assert route_step["params"]["directive"] != "Congestion_Explore"
+
+
+# ── P0-1 (run-20260711_193102): place/route_design descriptions must not
+# advertise directives removed from the whitelist. The LLM follows the
+# description text (not the enum) and burned 5 place_design calls on
+# Performance_NetDelay_high / _ExtraTimingOpt / _RefinePlacement. ─────────
+
+
+class TestP0DescriptionSync:
+    REMOVED_PLACE_DIRECTIVES = (
+        "Performance_ExtraTimingOpt",
+        "Performance_NetDelay_high",
+        "Performance_RefinePlacement",
+    )
+
+    def _tool_descriptions(self):
+        import asyncio
+        tools = asyncio.run(vms.list_tools())
+        return {t.name: t.description for t in tools}
+
+    def test_place_design_description_drops_full_whitelist(self):
+        desc = self._tool_descriptions()["place_design"]
+        assert "Full whitelist:" not in desc  # hardcoded list removed
+        for d in self.REMOVED_PLACE_DIRECTIVES:
+            assert d not in desc, f"place_design description still advertises {d}"
+
+    def test_route_design_description_drops_full_whitelist(self):
+        desc = self._tool_descriptions()["route_design"]
+        assert "Full whitelist:" not in desc
+
+    def test_descriptions_reference_enum_as_authoritative(self):
+        descs = self._tool_descriptions()
+        assert "enum" in descs["place_design"].lower()
+        assert "enum" in descs["route_design"].lower()
+
+
+# ── P0-3 (run-20260711_193102): Fanout's EXECUTE whitelist must expose a
+# high-fanout fetch tool (the LLM idled 4 rounds with no way to obtain the
+# required `nets` arg). ────────────────────────────────────────────────────
+
+
+class TestP0FanoutDataAccess:
+    def test_fanout_dependency_includes_fetch_tool(self):
+        from optimizer.pure.tool_filter import STRATEGY_DEPENDENCY_TOOLS
+        assert "Fanout" in STRATEGY_DEPENDENCY_TOOLS
+        assert "vivado_get_cached_high_fanout_nets" in STRATEGY_DEPENDENCY_TOOLS["Fanout"]
+
+    def test_fanout_execute_whitelist_keeps_fetch_tool(self):
+        from optimizer.pure.tool_filter import filter_tools_for_phase, LoopPhase
+
+        def mk(name):
+            return {"function": {"name": name, "parameters": {"properties": {}}}}
+
+        all_tools = [
+            mk("rapidwright_execute_fanout_strategy"),
+            mk("vivado_get_cached_high_fanout_nets"),
+            mk("vivado_route_design"),  # unrelated -> must be filtered out
+        ]
+        filtered = filter_tools_for_phase(all_tools, LoopPhase.EXECUTE, "Fanout")
+        names = {t["function"]["name"] for t in filtered}
+        assert "vivado_get_cached_high_fanout_nets" in names  # P0-3 B
+        assert "rapidwright_execute_fanout_strategy" in names
+        assert "vivado_route_design" not in names  # strategy narrowing holds
+
+
+# ── P0-2 (run-20260711_193102): NetSwap analysis must iterate placed cells
+# (not device.getAllSites()) and early-exit once enough candidates are found. ─
+
+
+class TestP0NetSwapScan:
+    def test_analyze_uses_placed_cells_not_all_sites(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import skills.net_swapping_strategy as nss
+
+        site = MagicMock()
+        site.getName.return_value = "SLICE_X0Y0"
+        site.getInstanceX.return_value = 0
+        site.getInstanceY.return_value = 0
+        site.getSiteTypeEnum.return_value = "SLICE"
+        cell = MagicMock()
+        cell.getSite.return_value = site
+        cell.getSiteInst.return_value = MagicMock()
+
+        design = MagicMock()
+        design.getCells.return_value = [cell]
+        device = MagicMock()
+        device.getAllSites.side_effect = AssertionError(
+            "P0-2: analyze_net_swapping must not call device.getAllSites()"
+        )
+        design.getDevice.return_value = device
+
+        monkeypatch.setattr(nss, "_find_lut_cells_in_site", lambda si: [])
+        res = nss.analyze_net_swapping(design, max_candidates=5)
+        assert "error" not in res
+        assert res["summary"]["sites_scanned"] == 1
+
+    def test_analyze_early_exit_and_truncation(self, monkeypatch):
+        from unittest.mock import MagicMock
+        import skills.net_swapping_strategy as nss
+
+        cells = []
+        for i in range(30):
+            site = MagicMock()
+            site.getName.return_value = f"SLICE_X{i}Y0"
+            site.getInstanceX.return_value = i
+            site.getInstanceY.return_value = 0
+            site.getSiteTypeEnum.return_value = "SLICE"
+            c = MagicMock()
+            c.getSite.return_value = site
+            c.getSiteInst.return_value = MagicMock()
+            cells.append(c)
+
+        design = MagicMock()
+        design.getCells.return_value = cells
+        design.getDevice.return_value = MagicMock()
+
+        info_i = {"cell": MagicMock(), "cell_name": "ci", "bel_name": "bi",
+                  "init": "0x1", "pin_net_map": {"A": "netA"}}
+        info_j = {"cell": MagicMock(), "cell_name": "cj", "bel_name": "bj",
+                  "init": "0x1", "pin_net_map": {"B": "netB"}}
+        monkeypatch.setattr(nss, "_find_lut_cells_in_site", lambda si: [info_i, info_j])
+        monkeypatch.setattr(nss, "_estimate_wirelength_reduction",
+                            lambda *a, **k: 100.0)
+        # max_candidates=5 -> collect_cap=max(10,20)=20 -> stop after 20 sites.
+        res = nss.analyze_net_swapping(design, max_candidates=5, wirelength_threshold=50.0)
+        assert len(res["candidates"]) == 5
+        assert res["summary"]["sites_scanned"] == 20  # early-exited, not all 30
+
+    def test_analyze_timeout_raised_to_120s(self):
+        from skills import SkillRegistry
+        skill = SkillRegistry.get("analyze_net_swapping")
+        assert skill.get_metadata().timeout_ms == 120000
