@@ -185,10 +185,10 @@ GLOBAL_NO_IMPROVEMENT_LIMIT = 3    # Global no-improvement limit (balanced: give
 PR_DIRECTIVE_COMBINATIONS = [
     ("Explore", "Explore", "default_after_physopt"),
     ("ExtraTimingOpt", "NoTimingRelaxation", "logic_depth_limited"),
-    ("WLBlockPlacement", "HigherDelayCost", "congestion_medium"),
-    ("SpreadLogic_high", "Explore", "congestion_high"),
+    ("AltSpreadLogic_medium", "HigherDelayCost", "congestion_medium"),
+    ("AltSpreadLogic_high", "Explore", "congestion_high"),
     ("ExtraPostPlacementOpt", "Default", "wns_stuck"),
-    ("AltSpreadLogic_high", "LowerDelayCost", "spread_needed"),
+    ("AltSpreadLogic_high", "Explore", "spread_needed"),
     ("Default", "HigherDelayCost", "route_critical"),
     ("Explore", "NoTimingRelaxation", "aggressive_setup"),
 ]

@@ -89,21 +89,51 @@ class TestP0DirectiveWhitelist:
             assert d not in vms.ROUTE_SAFE_DIRECTIVES, f"{d} should be removed"
 
     def test_route_whitelist_keeps_valid_directives(self):
+        # Audited against the Vivado 2025.1 route_design man page (10 directives);
+        # only those are whitelisted.
         for d in (
-            "Default", "Explore", "AlternateRoutability", "Performance_Explore",
-            "HigherDelayCost", "NoTimingRelaxation", "SSI_Explore",
+            "Default", "Explore", "AggressiveExplore", "HigherDelayCost",
+            "NoTimingRelaxation", "RuntimeOptimized", "Quick",
         ):
             assert d in vms.ROUTE_SAFE_DIRECTIVES, f"{d} should remain"
 
-    def test_place_whitelist_keeps_valid_directives(self):
-        # NOTE: Performance_NetDelay_high is a valid *route* directive only;
-        # Vivado 2025.1 rejects it for place_design (Constraints 18-641), so it
-        # was removed from PLACE_SAFE_DIRECTIVES (kept in ROUTE_SAFE_DIRECTIVES).
+    def test_route_whitelist_excludes_strategy_preset_names(self):
+        # Vivado implementation strategy-preset names are NOT valid route_design
+        # -directive values (2025.1 man page); all removed from the whitelist.
         for d in (
-            "Default", "Explore", "Performance_Explore",
-            "Congestion_SpreadLogic_high", "Area_Explore",
+            "Performance_Explore", "Performance_NetDelay_high",
+            "Performance_NetDelay_medium", "Performance_NetDelay_low",
+            "Performance_RefinePlacement", "Performance_WLBlockPlacement",
+            "SSI_Explore", "SSI_Quick", "Area_Default", "Area_Explore",
+            "AlternateRoutability", "FlowQuick", "FlowRuntimeOptimized",
+            "LowerDelayCost",
+        ):
+            assert d not in vms.ROUTE_SAFE_DIRECTIVES, f"{d} should be removed"
+
+    def test_place_whitelist_keeps_valid_directives(self):
+        # Audited against the Vivado 2025.1 place_design man page (23 directives);
+        # only those are whitelisted.
+        for d in (
+            "Default", "Explore", "ExtraTimingOpt", "ExtraPostPlacementOpt",
+            "AltSpreadLogic_high", "AltSpreadLogic_medium", "AltSpreadLogic_low",
+            "EarlyBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+            "Quick", "RuntimeOptimized",
         ):
             assert d in vms.PLACE_SAFE_DIRECTIVES, f"{d} should remain"
+
+    def test_place_whitelist_excludes_strategy_preset_names(self):
+        # Vivado implementation strategy-preset names are NOT valid place_design
+        # -directive values (2025.1 man page); all removed from the whitelist.
+        for d in (
+            "Performance_Explore", "Performance_ExplorePostRoute",
+            "Performance_WLBlockPlacement", "Area_Explore", "Area_ExploreWithRemap",
+            "Area_ExploreSequentialArea", "FlowQuick", "FlowRuntimeOptimized",
+            "Congestion_Default", "Congestion_SpreadLogic_high",
+            "Congestion_SpreadLogic_medium", "Congestion_SpreadLogic_low",
+            "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
+            "LateBlockPlacement", "WLBlockPlacement",
+        ):
+            assert d not in vms.PLACE_SAFE_DIRECTIVES, f"{d} should be removed"
 
 
 # ── P0-2: dynamic directive fallback detection ───────────────────────────
@@ -137,11 +167,14 @@ class TestP0DirectiveFallback:
 
 
 class TestP0StrategyLibraryDirective:
-    def test_congestion_route_explore_uses_alternate_routability(self):
+    def test_congestion_route_explore_uses_valid_directive(self):
+        # AlternateRoutability is a Vivado strategy-preset name, not a valid
+        # route_design -directive (2025.1 man page); replaced with AggressiveExplore.
         seq = STRATEGIES["CongestionRouteExplore"]["sequence"]
         route_step = next(s for s in seq if s["step"] == "route_design")
-        assert route_step["params"]["directive"] == "AlternateRoutability"
+        assert route_step["params"]["directive"] == "AggressiveExplore"
         assert route_step["params"]["directive"] != "Congestion_Explore"
+        assert route_step["params"]["directive"] != "AlternateRoutability"
 
 
 # ── P0-1 (run-20260711_193102): place/route_design descriptions must not

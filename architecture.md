@@ -769,25 +769,19 @@ BLOCKED_DIRECTIVES = {"AlternateFlowWithRetiming", "AddRetime"}
 BLOCKED_BOOL_OPTIONS = {"retime", "interconnect_retime"}
 SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", ...}
 
-# place_design/route_design 指令白名单（2026-06 新增）
-# 实际定义见 VivadoMCP/vivado_mcp_server.py L87-L112
-PLACE_SAFE_DIRECTIVES = {"Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
-    "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
-    "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
-    "EarlyBlockPlacement", "LateBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
-    "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
-    "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
-    "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
-    "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
-    "Performance_WLBlockPlacement",
+# place_design/route_design 指令白名单
+# 实际定义见 VivadoMCP/vivado_mcp_server.py（PLACE_SAFE_DIRECTIVES / ROUTE_SAFE_DIRECTIVES）
+# 2026-07-12 按 Vivado 2025.1 man page 逐条核验：仅保留 man page 列出的合法 -directive 值，
+# 移除全部 Vivado 策略预设名（Performance_*/Area_*/Flow*/SSI_*/Congestion_SpreadLogic_*/
+# SpreadLogic_*/LateBlockPlacement/WLBlockPlacement 拼写/LowerDelayCost/AlternateRoutability 等），
+# 它们是 set_property strategy 取值而非 -directive 值，Vivado 2025.1 以 Constraints 18-641 拒绝。
+PLACE_SAFE_DIRECTIVES = {"Default", "Explore", "ExtraTimingOpt", "ExtraPostPlacementOpt",
+    "AltSpreadLogic_high", "AltSpreadLogic_medium", "AltSpreadLogic_low",
+    "EarlyBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "Quick", "RuntimeOptimized",
 }
-ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelayCost", "LowerDelayCost",
-    "NoTimingRelaxation", "RuntimeOptimized", "Quick", "FlowQuick",
-    "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
-    "Performance_NetDelay_medium", "Performance_NetDelay_low",
-    "Performance_RefinePlacement", "Performance_WLBlockPlacement",
-    "SSI_Explore", "SSI_Quick",
-    "Area_Default", "Area_Explore", "AlternateRoutability",
+ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelayCost",
+    "NoTimingRelaxation", "RuntimeOptimized", "Quick",
 }
 ```
 
@@ -800,7 +794,7 @@ ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelay
 
 在 `phase_execute.py` 的 `_execute_chain_actions()` 中，指令解析（Tier-1 LLM 提供 + Tier-2 策略默认）后增加黑名单检查：若 `args["directive"]` 在黑名单中，静默回退到 `STRATEGY_DEFAULT_DIRECTIVES` 中对应策略的默认指令，并记录 WARNING 日志。回退优先级：place→`place_def`，route→`route_def`；若无对应回退值则移除 `directive` 参数，让 Vivado 使用默认值。每次回退避免约 17 秒的失败 P&R 循环。
 
-**MCP 层 directive 硬错误兜底（P0-2，2026-07-11，run-20260711_164134 复盘更新）**：`VivadoMCP/vivado_mcp_server.py` 的 `place_design`/`route_design` handler 在 Vivado 返回 Constraints 18-641（directive not recognized）时，返回 JSON `{"error": ...}` 硬失败，不再静默退化为默认命令（此前 `[FALLBACK]` 前缀的默认布局/布线导致 -0.643 回归被误归为策略失败）。检测函数 `_is_unrecognized_directive_error(output)` 匹配 `18-641` 与 `not a recognized directive`。同时收紧 place 白名单：移除 `NetDelay_high/medium/low` 与 `Performance_NetDelay_high/medium/low`（后者对 route_design 合法但对 place_design 被 2025.1 以 18-641 拒绝），route 移除 `Congestion_Explore`/`Congestion_NetDelay_*`（Vivado 策略预设名而非 route_design -directive）。`strategy_library.py` 的 CongestionRouteExplore route directive 由 `Congestion_Explore` 改为合法的 `AlternateRoutability`。
+**MCP 层 directive 硬错误兜底（P0-2，2026-07-11，run-20260711_164134 复盘更新）**：`VivadoMCP/vivado_mcp_server.py` 的 `place_design`/`route_design` handler 在 Vivado 返回 Constraints 18-641（directive not recognized）时，返回 JSON `{"error": ...}` 硬失败，不再静默退化为默认命令（此前 `[FALLBACK]` 前缀的默认布局/布线导致 -0.643 回归被误归为策略失败）。检测函数 `_is_unrecognized_directive_error(output)` 匹配 `18-641` 与 `not a recognized directive`。同时收紧 place 白名单：移除 `NetDelay_high/medium/low` 与 `Performance_NetDelay_high/medium/low`（后者对 route_design 合法但对 place_design 被 2025.1 以 18-641 拒绝），route 移除 `Congestion_Explore`/`Congestion_NetDelay_*`（Vivado 策略预设名而非 route_design -directive）。`strategy_library.py` 的 CongestionRouteExplore route directive 由 `Congestion_Explore` 改为合法的 `AlternateRoutability`。（2026-07-12 复审：`AlternateRoutability` 同为 Vivado 策略预设名，亦被 18-641 拒绝；已按 2025.1 man page 全面核验白名单，移除全部策略预设名条目，CongestionRouteExplore 改用合法的 `AggressiveExplore`。）
 
 ---
 

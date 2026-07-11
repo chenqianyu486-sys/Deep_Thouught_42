@@ -192,22 +192,20 @@ PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
   values from the safe whitelists; invalid values abort the chain and waste a
   full P&R run.
 
-  Place directives — pick by the CURRENT dominant bottleneck:
+  Place directives - pick by the CURRENT dominant bottleneck:
     - Explore (default, balanced)
-    - ExtraTimingOpt / Performance_ExtraTimingOpt — logic-depth-limited paths
-    - Performance_Explore / Performance_RefinePlacement — WNS stuck, squeeze placement
-    - Congestion_SpreadLogic_high/medium/low — congestion-bound (check severity)
-    - Performance_NetDelay_high/medium/low — long-net / inter-SLR delay dominated
-    - Area_Explore — area-pressure limited
-    - SSI_SpreadLogic_high/low — multi-SLR designs
-  Route directives — pick by bottleneck:
+    - ExtraTimingOpt - logic-depth-limited paths
+    - ExtraPostPlacementOpt - WNS stuck, squeeze placement
+    - AltSpreadLogic_high/medium/low - congestion-bound (check severity)
+    - EarlyBlockPlacement - RAM/DSP-block-anchored placement
+    - SSI_SpreadLogic_high/low - multi-SLR / long-net delay
+  Route directives - pick by bottleneck:
     - Explore (default, balanced)
-    - AggressiveExplore / HigherDelayCost — timing-critical, squeeze delay
-    - NoTimingRelaxation — prevent router from relaxing timing targets
-    - NOTE: Congestion_Explore / Congestion_NetDelay_* are NOT valid route_design directives (Vivado 2025.1 rejects with Constraints 18-641); use AlternateRoutability below for congestion-bound designs
-    - Performance_Explore — general performance route
-    - SSI_Explore — multi-SLR (cross-SLR) designs
-    - AlternateRoutability — routability-congested
+    - AggressiveExplore - timing-critical / congestion, explore more routes
+    - HigherDelayCost - squeeze delay over iterations
+    - NoTimingRelaxation - prevent router relaxing timing (congestion-bound)
+    - RuntimeOptimized / Quick - fast runtime
+    - NOTE: Congestion_Explore / Congestion_NetDelay_* / AlternateRoutability / SSI_Explore / Performance_* are Vivado strategy-preset names, NOT valid route_design -directive values (rejected by 2025.1 with Constraints 18-641).
 
   Guidance: match the directive to the dominant bottleneck reported in the
   Dashboard (congestion level, critical-path type, WNS slack distribution).

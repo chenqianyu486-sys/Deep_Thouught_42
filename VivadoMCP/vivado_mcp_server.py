@@ -84,38 +84,37 @@ OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 # place_design safe directives whitelist (consistent with OPT_SAFE_DIRECTIVES).
 # Any directive not in this set is rejected for defense-in-depth.
 # Explicitly excludes retiming-related directives (AddRetime, Performance_Retiming, etc.)
-# NetDelay_high/medium/low AND Performance_NetDelay_high/medium/low removed:
-# both are rejected by Vivado 2025.1 place_design with Constraints 18-641
-# (run-20260711_015650, run-20260711_164134). The Performance_NetDelay_*
-# variants are valid for route_design (ROUTE_SAFE_DIRECTIVES) but NOT place_design.
-# The place/route handlers return a hard error (not a silent default-placement
-# fallback) when Vivado rejects a whitelisted directive, so future whitelist
-# drift fails the strategy cleanly instead of causing a silent timing regression.
+#
+# Audited against the Vivado 2025.1 place_design man page, which enumerates 23
+# supported -directive values; only those are whitelisted. All Vivado implementation
+# STRATEGY preset names (Performance_*, Area_*, Flow*, Congestion_SpreadLogic_*,
+# SpreadLogic_*, LateBlockPlacement, and the WLBlockPlacement typo of
+# WLDrivenBlockPlacement) were removed: they are `set_property strategy` values,
+# NOT valid place_design -directive values, and are rejected by Vivado 2025.1 with
+# Constraints 18-641 (run-20260711_015650: NetDelay_high; run-20260711_164134:
+# Congestion_Explore). The handler returns a hard error (not a silent
+# default-placement fallback) when Vivado rejects a whitelisted directive, so
+# future whitelist drift fails the strategy cleanly instead of a silent regression.
 PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
-    "Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
-    "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
-    "AltSpreadLogic_low", "SpreadLogic_high", "SpreadLogic_medium", "SpreadLogic_low",
-    "EarlyBlockPlacement", "LateBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
-    "Quick", "RuntimeOptimized", "FlowQuick", "FlowRuntimeOptimized",
-    "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
-    "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
-    "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
-    "Performance_WLBlockPlacement",
+    "Default", "Explore", "ExtraTimingOpt", "ExtraPostPlacementOpt",
+    "AltSpreadLogic_high", "AltSpreadLogic_medium", "AltSpreadLogic_low",
+    "EarlyBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "Quick", "RuntimeOptimized",
 })
-# Note: "Conggestion_Default" (typo with double g in source docs) is intentionally excluded.
 
+# route_design safe directives whitelist. Audited against the Vivado 2025.1
+# route_design man page, which enumerates 10 supported -directive values; only
+# those are whitelisted. All Vivado implementation STRATEGY preset names
+# (Performance_*, Area_*, Flow*, SSI_*, AlternateRoutability, LowerDelayCost) were
+# removed: they are `set_property strategy` values, NOT valid route_design
+# -directive values, rejected by Vivado 2025.1 with Constraints 18-641
+# (run-20260711_015650: Congestion_Explore). The man page also lists
+# MoreGlobalIterations, AdvancedSkewModeling, and AlternateCLBRouting as valid;
+# not whitelisted only because no strategy uses them yet - add when needed.
 ROUTE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
-    "Default", "Explore", "AggressiveExplore", "HigherDelayCost", "LowerDelayCost",
-    "NoTimingRelaxation", "RuntimeOptimized", "Quick", "FlowQuick",
-    "FlowRuntimeOptimized", "Performance_Explore", "Performance_NetDelay_high",
-    "Performance_NetDelay_medium", "Performance_NetDelay_low",
-    "Performance_RefinePlacement", "Performance_WLBlockPlacement",
-    "SSI_Explore", "SSI_Quick",
-    "Area_Default", "Area_Explore", "AlternateRoutability",
+    "Default", "Explore", "AggressiveExplore", "HigherDelayCost",
+    "NoTimingRelaxation", "RuntimeOptimized", "Quick",
 })
-# Note: Congestion_Explore / Congestion_NetDelay_high/medium/low removed - these
-# are Vivado *strategy preset* names, not route_design -directive values, and are
-# rejected by Vivado 2025.1 with Constraints 18-641 (run-20260711_015650).
 
 
 def _is_unrecognized_directive_error(output: str) -> bool:

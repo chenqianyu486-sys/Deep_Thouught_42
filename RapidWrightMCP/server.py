@@ -718,17 +718,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 }
             }
@@ -760,9 +755,7 @@ async def list_tools() -> list[Tool]:
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 }
             }
@@ -794,17 +787,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 }
             }
@@ -859,17 +847,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 },
                 "required": ["critical_paths"]
@@ -917,17 +900,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 },
                 "required": ["critical_paths"]
@@ -979,9 +957,7 @@ async def list_tools() -> list[Tool]:
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 },
                 "required": ["critical_paths"]
@@ -1046,17 +1022,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 },
                 "required": ["nets"]
@@ -1113,17 +1084,12 @@ async def list_tools() -> list[Tool]:
                     "place_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's place_design directive (default Explore). "
-                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, Performance_Explore, "
-                                        "Performance_ExtraTimingOpt, Performance_RefinePlacement, Congestion_SpreadLogic_high/medium/low, "
-                                        "NetDelay_high/medium/low, Area_Explore, SSI_SpreadLogic_high/low. "
-                                        "Omit to use default Explore.",
+                                        "Pick from PLACE_SAFE_DIRECTIVES: Explore, ExtraTimingOpt, ExtraPostPlacementOpt, AltSpreadLogic_high/medium/low, EarlyBlockPlacement, SSI_SpreadLogic_high/low, Quick, RuntimeOptimized. Omit to use default Explore.",
                     },
                     "route_directive": {
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
-                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, "
-                                        "NoTimingRelaxation, Performance_Explore, "
-                                        "SSI_Explore, AlternateRoutability. Omit to use default Explore.",
+                                        "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
                 },
                 "required": ["critical_paths"]
