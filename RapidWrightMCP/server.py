@@ -1297,7 +1297,7 @@ Returns WNS (ns), max delay (ps), and clock period (ps).""",
             those cells), and writes a checkpoint.
 
             MUTATING: changes net topology, writes checkpoint file.
-            Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout.
+            Trigger: WNS stuck, critical path cells have delay >= delay_threshold OR fanout >= min_fanout.
             After this, call open_checkpoint, route_design, report_timing_summary (全为 VivadoMCP 工具).
 
             Risk control: If WNS regresses > 0.05ns after reroute, rollback to pre-replication checkpoint.
@@ -1348,6 +1348,11 @@ Returns WNS (ns), max delay (ps), and clock period (ps).""",
                         "type": "string",
                         "description": "Checkpoint filename prefix",
                         "default": "cell_replication"
+                    },
+                    "min_fanout": {
+                        "type": "integer",
+                        "description": "Minimum output-net fanout to flag a cell for replication (default: 30). Route-dominated paths are driven by high-fanout nets whose driver cells have small per-cell delay, so delay-only filtering misses them.",
+                        "default": 30
                     }
                 },
                 "required": ["critical_paths"]
@@ -1898,6 +1903,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                     max_replications=arguments.get("max_replications", 10),
                     temp_dir=arguments.get("temp_dir", "temp"),
                     checkpoint_prefix=arguments.get("checkpoint_prefix", "cell_replication"),
+                    min_fanout=arguments.get("min_fanout", 30),
                 )
 
         elif name == "analyze_register_retiming":
@@ -1966,6 +1972,23 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                         elif isinstance(val, (int, float)) and val > 0:
                             has_actionable_results = True
                         break
+                # Also inspect nested analysis_summary: some plan-only tools
+                # (e.g. lut_muxf_repack) store candidate counts under
+                # analysis_summary.<key> rather than top-level, which previously
+                # caused a false "no actionable results" llm_hint contradicting
+                # the tool's own message field (run-20260711_164134).
+                if not has_actionable_results:
+                    analysis = result.get("analysis_summary")
+                    if isinstance(analysis, dict):
+                        for key in ["lut_muxf_pairs", "lut5_candidates", "candidates",
+                                     "results", "pairs", "swaps_identified"]:
+                            val = analysis.get(key)
+                            if isinstance(val, (int, float)) and val > 0:
+                                has_actionable_results = True
+                                break
+                            if isinstance(val, (list, dict)) and len(val) > 0:
+                                has_actionable_results = True
+                                break
             if has_actionable_results:
                 result["llm_hint"] = (
                     "Tool returned in <1s with actionable results. "

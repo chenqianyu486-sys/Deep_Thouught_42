@@ -440,6 +440,44 @@ def parse_critical_path_cells(result: str) -> list[dict]:
     return []
 
 
+def derive_high_fanout_nets_from_paths(
+    critical_paths: list[dict],
+    min_fanout: int = 50,
+) -> list[tuple[str, int, int]]:
+    """Derive high-fanout nets directly from critical path node data.
+
+    The dedicated vivado_get_critical_high_fanout_nets tool parses the timing
+    report text and can miss high-fanout nets on critical paths (it requires a
+    '/' in the net-name token; run-20260711_164134: a fanout=107 critical net
+    was missed -> 0 high-fanout nets reported, misleading the LLM). The critical
+    path nodes already carry a 'fanout' field per net node, so this derives
+    high-fanout nets from that structured data as a robust supplement.
+
+    Returns list of (net_name, fanout, path_count) tuples sorted by fanout desc,
+    matching the format of parse_high_fanout_nets.
+    """
+    net_fanout: dict[str, int] = {}
+    net_paths: dict[str, int] = {}
+    for path in critical_paths:
+        nodes = path.get("nodes") or []
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("kind") != "net":
+                continue
+            name = node.get("name", "")
+            if not name:
+                continue
+            fanout = node.get("fanout")
+            if fanout is None or fanout < min_fanout:
+                continue
+            if name not in net_fanout or fanout > net_fanout[name]:
+                net_fanout[name] = fanout
+            net_paths[name] = net_paths.get(name, 0) + 1
+    return sorted(
+        ((name, fo, net_paths[name]) for name, fo in net_fanout.items()),
+        key=lambda t: t[1], reverse=True,
+    )
+
+
 def update_critical_paths(
     state: OptimizerState,
     cell_paths: list[dict],

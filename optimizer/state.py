@@ -523,6 +523,12 @@ def _ttl_for_reason(reason: str, current: int) -> int:
         return current + STRATEGY_NOT_APPLICABLE_TTL
     elif reason == "no_improvement":
         return current + 3
+    elif reason == "regression":
+        # Strategy made WNS worse (post_eval_regressed / auto-rollback). Block for
+        # the next iteration so it is not immediately re-selected (run-20260711_164134:
+        # PlaceRouteDirectiveExplore regressed twice across iterations because
+        # regressions were only per-iteration blocked, not recorded as failures).
+        return current + 2
     else:  # tool_error, data_quality_error, unknown, etc.
         return current
 

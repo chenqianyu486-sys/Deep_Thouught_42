@@ -102,9 +102,9 @@ Dashboard 7 模块 StateSpace 的详细格式、字段映射和 phase-aware filt
   - **解析失败保留策略（2026-07，P1 修复）**: `parse_design_state()` 在 `Design State` 字段缺失时返回 `None` 而非默认 `UNPLACED`，调用方保留上次已知状态。`vivado_route_design`/`vivado_physopt_and_route` 执行后显式置 `ROUTED`（它们必然产生已布线结果），`vivado_phys_opt_design` 保留原状态。修复了 `physopt_and_route` 后误翻转为 UNPLACED、对真实布线后 WNS 误报"线负载估计"的灾难性 bug（见 run-20260703_142810）。Dashboard 警告加守卫：`design_state=UNPLACED` 但存在真实 `wns_setup` 时降级为温和提示，不再误报线负载。
 - **比赛时钟处理**: `init_analysis` 通过 `get_clocks` + `get_property PERIOD` 提取时钟周期，用于 Fmax 计算（`Fmax = 1000 / (period - WNS)`）。Dashboard Module 5 的时钟名从 `state.timing.critical_paths[0].clock.source_clock` 动态提取（2026-07 修复，此前硬编码 `clk_fpl26contest`），无 critical_paths 时回退到该默认名。
 - **`do_not_repeat` 推导**: 从 `state.iteration.tools_used` 聚合被调用 > 3 次且 WNS delta < 0.01ns 的工具，最多 5 条
-- **`strategy_catalog` 排除机制（2026-07 更新）**: `strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=5）在 catalog 中标为 `[BLOCKED]` 占位符（含剩余轮数/原因）；`tool_error` 完全移出 catalog（无 TTL，可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。
+- **`strategy_catalog` 排除机制（2026-07 更新）**: `strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=5）、`regression`（TTL=2）在 catalog 中标为 `[BLOCKED]` 占位符（含剩余轮数/原因）；`tool_error` 完全移出 catalog（无 TTL，可立即重试）。排除逻辑在 `inject_merged_dashboard()` 中拆分 hard-exclude vs blocked 两组。`regression` 经 `_get_permanently_blocked_strategies` 跨迭代硬阻断（run-20260711_164134：回归策略此前仅本迭代冷却，下迭代被重选）。
 - **`field_freshness` 逐字段新鲜度追踪**: `refreshed_fields: set[str]` 升级为 `field_freshness: dict[str, str]`，为每个Dashboard字段独立追踪 `"fresh"`/`"stale"` 状态。`init_analysis` 完成后全部初始化为 `fresh`；工具调用通过 `DASHBOARD_REFRESH_MAP` 刷新对应字段为 `fresh`；设计修改工具（`DESIGN_MODIFICATION_TOOLS` 共23个，2026-06-27 补充5个缺失工具）执行后全部降级为 `stale`（EXECUTE 和 EVALUATE 两阶段均处理）。Dashboard 中每个值后显示 `[fresh]`/`[stale]` 标记，供LLM决策是否信任。
-- **TTL 机制（按原因分级，2026-07 重构）**: `_ttl_for_reason()` 函数统一计算各失败原因的冷却期（`blocked_until_iter` 字段）：`strategy_ineffective`→1 轮、`strategy_not_applicable`→5 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（`blocked_until_iter=current`，立即重试）。`record_strategy_failure` 去重时刷新 `blocked_until_iter`。
+- **TTL 机制（按原因分级，2026-07 重构）**: `_ttl_for_reason()` 函数统一计算各失败原因的冷却期（`blocked_until_iter` 字段）：`strategy_ineffective`→1 轮、`strategy_not_applicable`→5 轮、`no_improvement`→3 轮、`regression`→2 轮后自动解封；`tool_error`→无 TTL（`blocked_until_iter=current`，立即重试）。`record_strategy_failure` 去重时刷新 `blocked_until_iter`。`regression` 由 EVALUATE 自动回滚路径记录（`phase_evaluate.py`）。
 - **策略选择质量修复（2026-07-10，run-20260710_132555 复盘）**:
   - `strategy_not_applicable` TTL 从 2 提升到 `STRATEGY_NOT_APPLICABLE_TTL=5`：结构性不适用（技能无可用目标）比 `no_improvement`（跑了无收益）信号更强，冷却应更长。此前 MUXFTreeReorder 在 iter1 失败（TTL=2）后于 iter3 被重试并以同样方式失败。
   - `cell_type_chain` 优先使用 `PathNode.cell_type`（真实 Vivado 类型）而非名称启发式：MUXF7/MUXF8 cell 名为 `*_reg[..]_i_*`（匹配 LUT 的 `_i_` 模式），启发式误标为 LUT，导致 dashboard chain 与 CELL REGISTRY 自相矛盾，误导 MUXF 策略选择。
@@ -395,6 +395,7 @@ class StepState:
 - `reason="strategy_ineffective"` → `blocked_until_iter = current + 1`（1 轮冷却）
 - `reason="strategy_not_applicable"` → `blocked_until_iter = current + 5`（5 轮冷却）
 - `reason="no_improvement"` → `blocked_until_iter = current + 3`（3 轮冷却）
+- `reason="regression"` → `blocked_until_iter = current + 2`（2 轮冷却；EVALUATE 自动回滚时记录，经 `_get_permanently_blocked_strategies` 跨迭代硬阻断，防止回归策略被立即重选）
 - `reason ∈ {tool_error, execution_failure, unknown}` → `blocked_until_iter = current`（无 TTL，立即重试）
 
 **冷却逻辑分层**（`_cool_down_current_strategy_if_stalled()`）：
@@ -778,8 +779,7 @@ PLACE_SAFE_DIRECTIVES = {"Default", "Explore", "ExtraTimingOpt", "WLBlockPlaceme
     "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
     "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
     "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
-    "Performance_ExtraTimingOpt", "Performance_NetDelay_high", "Performance_NetDelay_medium",
-    "Performance_NetDelay_low", "Performance_RefinePlacement", "Performance_WLBlockPlacement",
+    "Performance_WLBlockPlacement",
 }
 ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelayCost", "LowerDelayCost",
     "NoTimingRelaxation", "RuntimeOptimized", "Quick", "FlowQuick",
@@ -800,7 +800,7 @@ ROUTE_SAFE_DIRECTIVES = {"Default", "Explore", "AggressiveExplore", "HigherDelay
 
 在 `phase_execute.py` 的 `_execute_chain_actions()` 中，指令解析（Tier-1 LLM 提供 + Tier-2 策略默认）后增加黑名单检查：若 `args["directive"]` 在黑名单中，静默回退到 `STRATEGY_DEFAULT_DIRECTIVES` 中对应策略的默认指令，并记录 WARNING 日志。回退优先级：place→`place_def`，route→`route_def`；若无对应回退值则移除 `directive` 参数，让 Vivado 使用默认值。每次回退避免约 17 秒的失败 P&R 循环。
 
-**MCP 层 directive 动态回退（P0-2，2026-07-11）**：`VivadoMCP/vivado_mcp_server.py` 的 `place_design`/`route_design` handler 在 Vivado 返回 Constraints 18-641（directive not recognized）时，自动用无 directive 的默认命令重试一次，并在结果前缀 `[FALLBACK]` 说明。检测函数 `_is_unrecognized_directive_error(output)` 匹配 `18-641` 与 `not a recognized directive`。即使白名单未来再漂移，策略也不再瞬时失败。同时收紧白名单：移除 place 的 `NetDelay_high/medium/low` 与 route 的 `Congestion_Explore`/`Congestion_NetDelay_*`（后者是 Vivado 策略预设名而非 route_design -directive，被 2025.1 以 18-641 拒绝）。`strategy_library.py` 的 CongestionRouteExplore route directive 由 `Congestion_Explore` 改为合法的 `AlternateRoutability`。
+**MCP 层 directive 硬错误兜底（P0-2，2026-07-11，run-20260711_164134 复盘更新）**：`VivadoMCP/vivado_mcp_server.py` 的 `place_design`/`route_design` handler 在 Vivado 返回 Constraints 18-641（directive not recognized）时，返回 JSON `{"error": ...}` 硬失败，不再静默退化为默认命令（此前 `[FALLBACK]` 前缀的默认布局/布线导致 -0.643 回归被误归为策略失败）。检测函数 `_is_unrecognized_directive_error(output)` 匹配 `18-641` 与 `not a recognized directive`。同时收紧 place 白名单：移除 `NetDelay_high/medium/low` 与 `Performance_NetDelay_high/medium/low`（后者对 route_design 合法但对 place_design 被 2025.1 以 18-641 拒绝），route 移除 `Congestion_Explore`/`Congestion_NetDelay_*`（Vivado 策略预设名而非 route_design -directive）。`strategy_library.py` 的 CongestionRouteExplore route directive 由 `Congestion_Explore` 改为合法的 `AlternateRoutability`。
 
 ---
 
@@ -1117,7 +1117,7 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 **根因**：`get_critical_high_fanout_nets` 内部基于 `report_timing -return_string` 文本正则解析。第一次调用时函数内部确有数据（Vivado MCP 日志显示执行了 26 次父网线名解析），但 `parse_high_fanout_nets` 的表格行格式匹配严格（要求 `line.split()` 恰好 3 部分），父网线名中的特殊字符可能导致解析跳过。
 
-**修复方向**：阈值降至 `min_fanout=50`；`parse_high_fanout_nets` 增加对异常网线名的容错。
+**修复方向**：阈值降至 `min_fanout=50`；`parse_high_fanout_nets` 增加对异常网线名的容错。**补充（P1-1，2026-07-11）**：新增 `derive_high_fanout_nets_from_paths()`（`optimizer/pure/critical_path.py`），从 `critical_paths` 的 `nodes`（已含 `fanout`）直接派生高扇出网，在 `init_analysis` 提取关键路径后补充到 `high_fanout_nets`，绕过脆弱文本解析（run-20260711_164134：fanout=107 关键网漏报为 0）。
 
 ### 15.3 Module 3（物理与拥塞指标）在策略切换后从 Dashboard 消失
 

@@ -479,20 +479,26 @@ async def _call_phase_llm(state, deps, phase_tools):
 
 
 def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
-    """Return strategy keys that are currently blocked (strategy_ineffective).
+    """Return strategy keys that are currently blocked by a non-retriable failure.
 
-    TTL-based: strategies with reason='strategy_ineffective' are blocked
-    until the current iteration reaches entry.blocked_until_iter.
-    After TTL expires, the strategy becomes selectable again.
+    TTL-based: strategies with a non-retriable reason (strategy_ineffective,
+    regression) are blocked until the current iteration reaches
+    entry.blocked_until_iter. After TTL expires, the strategy becomes
+    selectable again.
 
     Strategies with reason='tool_error' remain always selectable (retriable).
+    no_improvement / strategy_not_applicable carry TTLs but are surfaced to the
+    LLM via the dashboard (soft block) rather than hard-blocked here, to allow
+    re-try with different parameters. Regression is hard-blocked because a
+    strategy that made WNS worse should not be re-attempted verbatim
+    (run-20260711_164134: PlaceRouteDirectiveExplore regressed twice).
 
     Reads from state.context.failed_strategies (canonical V2 source).
     """
     blocked: set[str] = set()
     current_iter = state.iteration.current
     for entry in state.context.failed_strategies:
-        if entry.reason == "strategy_ineffective":
+        if entry.reason in ("strategy_ineffective", "regression"):
             if current_iter < entry.blocked_until_iter:
                 blocked.add(entry.strategy)
             # else: TTL expired, strategy is unblocked and can be retried

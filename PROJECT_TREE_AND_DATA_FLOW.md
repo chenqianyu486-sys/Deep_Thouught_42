@@ -402,7 +402,7 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 ### A.2 高扇出网线初始扫描结果为 0
 
-`init_analysis` 以 `min_fanout=100` 调用 `vivado_get_critical_high_fanout_nets`，`parse_high_fanout_nets()` 解析出 0 条。但 LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查得 34 条。阈值过高 + 父网线名解析边界情况导致 Dashboard 初始承载空数据。
+`init_analysis` 以 `min_fanout=100` 调用 `vivado_get_critical_high_fanout_nets`，`parse_high_fanout_nets()` 解析出 0 条。但 LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查得 34 条。阈值过高 + 父网线名解析边界情况导致 Dashboard 初始承载空数据。**补充（P1-1，2026-07-11）**：新增 `derive_high_fanout_nets_from_paths()`（`optimizer/pure/critical_path.py`），在 `init_analysis` 提取 critical_path 后从其 `nodes`（已含 `fanout`）派生高扇出网补充到 `high_fanout_nets`，绕过脆弱文本解析（run-20260711_164134：fanout=107 关键网漏报为 0）。
 
 ### A.3 Module 3 在策略切换后消失
 

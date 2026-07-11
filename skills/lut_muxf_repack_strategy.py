@@ -244,8 +244,9 @@ def generate_lut_muxf_repack_plan(
         status="ready",
         message=(f"Repack plan: {len(pairs)} LUT<->MUXF pairs "
                  f"({dir_counts}), {len(lut5_candidates)} LUT5 merge candidates. "
-                 f"Vivado opt_design {resolved_directive} will restructure "
-                 f"LUT6/MUXF adjacencies equivalently."),
+                 f"Vivado opt_design {resolved_directive} will attempt equivalent "
+                 f"LUT6/MUXF restructuring (diagnostic plan; opt_design re-derives "
+                 f"remap opportunities itself, so per-pair application is not guaranteed)."),
         preconditions_satisfied=True,
         steps=steps,
         analysis_summary={

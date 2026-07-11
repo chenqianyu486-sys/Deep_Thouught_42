@@ -113,14 +113,20 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 17e | 迭代开始 checkpoint 拷贝优化（2026-07） | `iteration_start` 节点和 `_ensure_iteration_start_checkpoint` 优先从 `best_checkpoint.dcp` 拷贝而非通过 Vivado 序列化写入（节省 ~5s/次） |
 | 17f | 临时路径修复（2026-07） | `pre_chain_pblock.dcp` 和 `pre_unplace_*` 检查点从硬编码 `/tmp/` 迁移到 `run_dir/`，消除并发任务覆盖风险 |
 | 17g | skip-reopen 脏设计守卫（P0-1，2026-07-11） | 新增 `ControlState.live_design_dirty` 标志；`_reload_baseline_on_switch` 跳过重载需同时满足路径匹配且 `not dirty`（纯函数 `should_skip_reopen`），否则强制 reopen。修复失败/无改善策略残留脏内存导致后续策略基线 WNS 错误（run-20260711_015650：-0.602 vs 真实 -0.542） |
-| 17h | directive 白名单收紧 + 动态回退（P0-2，2026-07-11） | 移除 Vivado 2025.1 拒绝的 directive（place 的 `NetDelay_high/medium/low`、route 的 `Congestion_Explore`/`Congestion_NetDelay_*`）；MCP `place_design`/`route_design` handler 检测到 Constraints 18-641 时自动用默认命令重试一次（`_is_unrecognized_directive_error`）；CongestionRouteExplore route directive 改用合法的 `AlternateRoutability` |
+| 17h | directive 白名单收紧 + 硬错误兜底（P0-2，2026-07-11） | 移除 Vivado 2025.1 拒绝的 directive（place 的 `NetDelay_high/medium/low` 与 `Performance_NetDelay_high/medium/low`、route 的 `Congestion_Explore`/`Congestion_NetDelay_*`）；MCP `place_design`/`route_design` handler 检测到 Constraints 18-641 时返回 JSON 错误（`_is_unrecognized_directive_error`），不再静默退化为默认布局/布线（run-20260711_164134：静默退化导致 -0.643 回归被误归为策略失败）；CongestionRouteExplore route directive 改用合法的 `AlternateRoutability` |
+| 17i | 回归策略跨迭代阻断（P0-1，2026-07-11） | 新增 `regression` 失败原因（TTL=current+2）；EVALUATE 自动回滚时 `record_strategy_failure(reason="regression")`；`_get_permanently_blocked_strategies` 增加对 `regression` 的拦截。修复回归策略仅本迭代冷却、下迭代被重选导致重复回归（run-20260711_164134：PlaceRouteDirectiveExplore 两次相同 -0.643 回归） |
+| 17j | CellReplication 扇出阈值（P0-2，2026-07-11） | 新增 `min_fanout` 参数（默认 30），过滤改为 `delay >= threshold OR fanout >= min_fanout`；新增 `_get_cell_max_output_fanout` 从 RapidWright 设计查询真实输出网扇出（不依赖 LLM 不可靠的 fanout 字段）。修复 cell 延迟全部 < 0.3ns 阈值导致 0 复制（run-20260711_164134） |
+| 17k | LUTMUXF llm_hint 矛盾修复（P0-3，2026-07-11） | 通用 `llm_hint` 后处理器增加对嵌套 `analysis_summary` 计数键（`lut_muxf_pairs` 等）的检查，消除"19 个候选"与"无可操作结果"的矛盾；skill `message` 改为诚实表述 opt_design AddRemap 不保证逐对生效 |
+| 17l | high_fanout_nets 派生补充（P1-1，2026-07-11） | 新增 `derive_high_fanout_nets_from_paths` 纯函数，从 `critical_paths` 的 `nodes`（已含 `fanout`）直接派生高扇出网，补充 `get_critical_high_fanout_nets` 脆弱文本解析的漏报（run-20260711_164134：fanout=107 关键网漏报为 0） |
+| 17m | rollback 通知注入回归成因（P1-3，2026-07-11） | 回滚通知注入被回滚策略名 + delta 详情，并告知 LLM 该策略已被下迭代阻断 |
+| 17n | MCP 时序与参数小修（P2，2026-07-11） | `close_current_design` 成功后直接置 `_design_open=False`（不再查询 STATUS）；`check_design_status` 在无设计时早返回，消除 4 次 "No open project" 错误；`analyze_critical_path_spread` 的 `input_file` 找不到时返回明确错误（期望文件路径而非工具名） |
 
 **策略与迭代层面**:
 | # | 原则 | 实现方式 |
 |---|-----------|----------------|
 | 18 | 编码领域知识 | 16 种策略带有触发条件；LLM 自主选择 |
 | 19 | 多策略循环 | 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`) |
-| 20 | TTL 策略重试（按原因分级） | `strategy_ineffective`→1 轮、`strategy_not_applicable`→2 轮、`no_improvement`→3 轮后自动解封；`tool_error`→无 TTL（立即重试） |
+| 20 | TTL 策略重试（按原因分级） | `strategy_ineffective`→1 轮、`strategy_not_applicable`→5 轮、`no_improvement`→3 轮、`regression`→2 轮后自动解封；`tool_error`→无 TTL（立即重试） |
 | 21 | 冷却逻辑分层 | 区分策略工具错误 vs 辅助工具错误；三档阈值：`delta>0` 不冷却（best 已保存）、`delta>0.050` 重置无进展计数、`delta≤0` 计无进展 |
 | 22 | 工具结果缓存 | 同 phase 内相同参数自动命中缓存；执行工具后自动失效 |
 | 23 | 工具调用频率限制 | `search_cells` 最多 3 次/phase，`vivado_run_tcl` 最多 2 次/phase |
@@ -147,7 +153,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | **Fanout** | 扇出 > 100，无分散 | RapidWright + Vivado |
 | **PinSwap** | WNS 停滞在 ~-0.3ns，LUT 引脚延迟方差大 | RapidWright + Vivado |
 | **LUTCascade** | >3 个 LUT 串联 | RapidWright + Vivado |
-| **CellReplication** | 扇出 > 10 或延迟 > 0.3ns | RapidWright + Vivado |
+| **CellReplication** | 扇出 >= 30 或延迟 >= 0.3ns | RapidWright + Vivado |
 | **CongestionSpreading** | 拥塞=HIGH | RapidWright + Vivado |
 | **NetSwap** | SLICE 内部布线拥塞 | RapidWright + Vivado |
 | **LogicResynthesis** | NN/数据通路设计含 MUXF7/8 级联，关键路径上组合级数深 | Vivado (opt_design -remap，通过 RapidWright 定点分析 + 自动链式) |

@@ -1471,6 +1471,12 @@ def analyze_critical_path_spread(
             import json
             with open(input_file, 'r') as f:
                 critical_paths_data = json.load(f)
+        except FileNotFoundError:
+            return {"error": (
+                f"input_file '{input_file}' not found. input_file expects a path "
+                f"to a JSON file, NOT a tool name. Pass the critical path data "
+                f"inline via the critical_paths_data argument instead."
+            )}
         except Exception as e:
             return {"error": f"Error reading input file: {str(e)}"}
 
@@ -2834,13 +2840,14 @@ def replicate_critical_cells(
     max_replications: int = 10,
     temp_dir: str = "temp",
     checkpoint_prefix: str = "cell_replication",
+    min_fanout: int = 30,
 ) -> dict:
-    """Replicate high-delay cells on critical paths to reduce timing.
+    """Replicate high-delay/high-fanout cells on critical paths to reduce timing.
 
-    Identifies cells with delay > threshold on critical paths, replicates them
-    using RapidWright FanOutOptimization (splits high-fanout nets driven by
-    those cells), and writes a checkpoint. The caller must re-route and verify
-    timing in Vivado.
+    Identifies cells with delay >= threshold OR output-net fanout >= min_fanout
+    on critical paths, replicates them using RapidWright FanOutOptimization
+    (splits high-fanout nets driven by those cells), and writes a checkpoint.
+    The caller must re-route and verify timing in Vivado.
 
     Args:
         critical_paths: List of path dicts, each with:
@@ -2849,6 +2856,8 @@ def replicate_critical_cells(
         max_replications: Maximum number of cells to replicate (default 10)
         temp_dir: Directory for checkpoint output (default "temp")
         checkpoint_prefix: Checkpoint filename prefix (default "cell_replication")
+        min_fanout: Minimum output-net fanout to flag a cell for replication
+            (default 30; route-dominated paths are fanout-bound)
 
     Returns:
         Dictionary with replications_performed, failed_count, checkpoint_path,
@@ -2878,6 +2887,7 @@ def replicate_critical_cells(
             max_replications=max_replications,
             temp_dir=temp_dir,
             checkpoint_prefix=checkpoint_prefix,
+            min_fanout=min_fanout,
         )
 
         if not result.success:

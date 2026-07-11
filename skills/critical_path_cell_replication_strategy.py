@@ -26,12 +26,14 @@ def execute_cell_replication(
     max_replications: int = 10,
     temp_dir: str = "temp",
     checkpoint_prefix: str = "cell_replication",
+    min_fanout: int = 30,
 ) -> dict:
     """Execute critical path cell replication and return results.
 
-    Identifies high-delay cells on critical paths (delay > threshold),
-    replicates them using RapidWright FanOutOptimization, and writes
-    a checkpoint. The caller must re-route and verify timing in Vivado.
+    Identifies cells worth replicating on critical paths (delay >= threshold OR
+    output-net fanout >= min_fanout), replicates them using RapidWright
+    FanOutOptimization, and writes a checkpoint. The caller must re-route and
+    verify timing in Vivado.
 
     Args:
         design: RapidWright Design object (mutated in-place)
@@ -41,6 +43,11 @@ def execute_cell_replication(
         max_replications: Maximum number of cells to replicate (safety cap)
         temp_dir: Directory for checkpoint output
         checkpoint_prefix: Checkpoint filename prefix
+        min_fanout: Minimum output-net fanout to flag a cell for replication.
+            Route-dominated paths are driven by high-fanout nets whose driver
+            cells have small per-cell delay, so filtering on delay alone misses
+            them (run-20260711_164134: all cells had delay 0.04-0.15 ns < 0.3
+            threshold -> 0 replications).
 
     Returns:
         dict with replication results, checkpoint path, and per-cell details
@@ -55,22 +62,27 @@ def execute_cell_replication(
             "message": "No critical paths provided",
         }
 
-    # Step 1: Identify high-delay cells across all paths
+    # Step 1: Identify cells worth replicating (high-delay OR high-fanout)
     high_delay_cells = _identify_high_delay_cells(
-        critical_paths, delay_threshold, max_replications
+        critical_paths, delay_threshold, max_replications,
+        min_fanout=min_fanout, design=design,
     )
 
     if not high_delay_cells:
         return {
             "replications_performed": 0,
             "skipped": True,
-            "message": f"No cells with delay > {delay_threshold} ns found on critical paths",
+            "message": (
+                f"No cells with delay >= {delay_threshold} ns or fanout >= {min_fanout} "
+                f"found on critical paths"
+            ),
             "delay_threshold": delay_threshold,
+            "min_fanout": min_fanout,
         }
 
     logger.info(
-        f"Found {len(high_delay_cells)} high-delay cells for replication "
-        f"(threshold={delay_threshold} ns)"
+        f"Found {len(high_delay_cells)} cells for replication "
+        f"(delay_threshold={delay_threshold} ns, min_fanout={min_fanout})"
     )
 
     # Step 2: Replicate cells using FanOutOptimization
@@ -166,15 +178,63 @@ def execute_cell_replication(
     }
 
 
+def _get_cell_max_output_fanout(design, cell_name: str) -> int | None:
+    """Return the max fanout among the cell's output nets, or None if not found.
+
+    The LLM-provided per-cell fanout is often inaccurate (the dashboard does not
+    surface per-cell fanout), so the actual output-net fanout is resolved from
+    the design when available.
+    """
+    try:
+        cell = design.getCell(cell_name)
+        if cell is None:
+            for c in design.getCells():
+                if str(c.getName()) == cell_name:
+                    cell = c
+                    break
+        if cell is None:
+            return None
+        max_fanout = 0
+        found = False
+        for pin in cell.getPinMappingsP2L().keySet():
+            pin_str = str(pin)
+            if pin_str in ("O", "Q", "O5", "O6"):
+                site_inst = cell.getSiteInst()
+                if site_inst is not None:
+                    site_pin = site_inst.getSitePinInst(pin_str)
+                    if site_pin is not None:
+                        net = site_pin.getNet()
+                        if net is not None:
+                            fo = net.getFanOut()
+                            if fo > max_fanout:
+                                max_fanout = fo
+                                found = True
+        return max_fanout if found else None
+    except Exception:
+        return None
+
+
 def _identify_high_delay_cells(
     critical_paths: list[dict],
     delay_threshold: float,
     max_replications: int,
+    min_fanout: int = 30,
+    design=None,
 ) -> list[dict]:
-    """Identify cells with delay above threshold across all critical paths.
+    """Identify cells worth replicating across all critical paths.
 
-    Deduplicates by cell name, keeping the highest delay occurrence.
-    Returns sorted list (highest delay first), capped at max_replications.
+    A cell is a candidate if EITHER its delay >= delay_threshold OR its
+    output-net fanout >= min_fanout. Route-dominated paths are driven by
+    high-fanout nets whose driver cells have small per-cell delay, so filtering
+    on delay alone misses them (run-20260711_164134: all cells had delay
+    0.04-0.15 ns < 0.3 threshold -> 0 replications).
+
+    When design is provided, the actual output-net fanout is looked up from the
+    design (the LLM-provided fanout is often inaccurate); otherwise the
+    LLM-provided fanout is used as a fallback.
+
+    Deduplicates by cell name, keeping the highest-fanout occurrence.
+    Returns sorted list (highest fanout first, then delay), capped at max_replications.
     """
     seen = {}  # cell_name -> {name, delay, type, fanout}
 
@@ -182,22 +242,33 @@ def _identify_high_delay_cells(
         cells = path.get("cells", [])
         for cell in cells:
             delay = cell.get("delay", 0.0)
-            if delay < delay_threshold:
-                continue
+            llm_fanout = cell.get("fanout", 0) or 0
             name = cell.get("name", "")
             if not name:
                 continue
-            # Keep highest delay per cell
-            if name not in seen or delay > seen[name]["delay"]:
+            # Resolve actual output-net fanout from the design when available
+            actual_fanout = llm_fanout
+            if design is not None:
+                looked_up = _get_cell_max_output_fanout(design, name)
+                if looked_up is not None:
+                    actual_fanout = looked_up
+            # Keep cells that are high-delay OR high-fanout
+            if delay < delay_threshold and actual_fanout < min_fanout:
+                continue
+            # Keep the entry with the highest fanout (then delay) per cell
+            prev = seen.get(name)
+            if prev is None or actual_fanout > prev["fanout"] or (
+                actual_fanout == prev["fanout"] and delay > prev["delay"]
+            ):
                 seen[name] = {
                     "name": name,
                     "delay": delay,
                     "type": cell.get("type", "unknown"),
-                    "fanout": cell.get("fanout", 0),
+                    "fanout": actual_fanout,
                 }
 
-    # Sort by delay descending, cap at max
-    ranked = sorted(seen.values(), key=lambda c: c["delay"], reverse=True)
+    # Sort by fanout descending (primary), then delay descending
+    ranked = sorted(seen.values(), key=lambda c: (c["fanout"], c["delay"]), reverse=True)
     return ranked[:max_replications]
 
 
@@ -267,7 +338,8 @@ def _find_nets_for_cell(design, cell_name: str, hint_fanout: int) -> list[dict]:
     display_name="Critical Path Cell Replication",
     description="Replicate high-delay cells on critical paths to reduce fanout/load. "
                 "MUTATING. Side effects: net topology changes, checkpoint file written. "
-                "Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout. "
+                "Trigger: WNS stuck, critical path cells have delay >= delay_threshold OR "
+                "output-net fanout >= min_fanout (route-dominated paths are fanout-bound). "
                 "After this, run vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.",
     category=SkillCategory.OPTIMIZATION,
     idempotency="non-idempotent",
@@ -285,6 +357,10 @@ def _find_nets_for_cell(design, cell_name: str, hint_fanout: int) -> list[dict]:
                       "Directory for intermediate checkpoint", default="temp"),
         ParameterSpec("checkpoint_prefix", str,
                       "Checkpoint filename prefix", default="cell_replication"),
+        ParameterSpec("min_fanout", int,
+                      "Minimum output-net fanout to flag a cell for replication "
+                      "(route-dominated paths are driven by high-fanout nets whose "
+                      "driver cells have small per-cell delay)", default=30),
     ],
     required_context=["design"],
     error_codes=["INVALID_PARAMETER", "RESOURCE_NOT_FOUND",
@@ -298,7 +374,8 @@ class CriticalPathCellReplicationSkill(Skill):
                 delay_threshold: float = 0.3,
                 max_replications: int = 10,
                 temp_dir: str = "temp",
-                checkpoint_prefix: str = "cell_replication") -> SkillResult:
+                checkpoint_prefix: str = "cell_replication",
+                min_fanout: int = 30) -> SkillResult:
         try:
             result = execute_cell_replication(
                 context.design,
@@ -307,6 +384,7 @@ class CriticalPathCellReplicationSkill(Skill):
                 max_replications,
                 temp_dir,
                 checkpoint_prefix,
+                min_fanout,
             )
             if "error" in result:
                 return SkillResult(success=False, data=result, error=result["error"])

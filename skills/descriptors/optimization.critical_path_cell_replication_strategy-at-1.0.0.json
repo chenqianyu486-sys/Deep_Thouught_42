@@ -3,7 +3,7 @@
   "specVersion": "3.0",
   "id": "optimization.critical_path_cell_replication_strategy@1.0.0",
   "displayName": "Critical Path Cell Replication",
-  "description": "Replicate high-delay cells on critical paths to reduce fanout/load. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: WNS stuck, critical path cells have delay > 0.3 ns with high fanout. After this, run vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.",
+  "description": "Replicate high-delay cells on critical paths to reduce fanout/load. MUTATING. Side effects: net topology changes, checkpoint file written. Trigger: WNS stuck, critical path cells have delay >= delay_threshold OR output-net fanout >= min_fanout (route-dominated paths are fanout-bound). After this, run vivado_open_checkpoint, vivado_route_design, vivado_report_timing_summary.",
   "idempotency": "non-idempotent",
   "sideEffects": [
     "net_topology",
@@ -45,6 +45,11 @@
         "description": "Checkpoint filename prefix",
         "default": "cell_replication",
         "minLength": 1
+      },
+      "min_fanout": {
+        "type": "integer",
+        "description": "Minimum output-net fanout to flag a cell for replication (route-dominated paths are driven by high-fanout nets whose driver cells have small per-cell delay)",
+        "default": 30
       }
     },
     "required": [

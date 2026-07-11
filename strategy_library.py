@@ -125,14 +125,14 @@ STRATEGIES = {
     },
     "CellReplication": {
         "name": "Critical Path Cell Replication",
-        "trigger": "High delay cells on critical paths (fanout > 10 or delay > 0.3 ns)",
+        "trigger": "High delay OR high-fanout cells on critical paths (delay >= 0.3 ns OR fanout >= 30)",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
              "params": {"num_paths": 50},
              "note": "Get critical path cell lists with delays"},
             {"step": "replicate_critical_cells", "platform": "RapidWright",
-             "params": {"delay_threshold": 0.3, "max_replications": 10},
-             "note": "Replicate high-delay cells, writes checkpoint"},
+             "params": {"delay_threshold": 0.3, "max_replications": 10, "min_fanout": 30},
+             "note": "Replicate high-delay/high-fanout cells, writes checkpoint"},
             {"step": "open_checkpoint", "platform": "Vivado", "params": None},
             {"step": "route_design", "platform": "Vivado", "params": None},
             {"step": "report_timing_summary", "platform": "Vivado", "params": None},

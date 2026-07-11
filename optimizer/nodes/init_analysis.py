@@ -16,7 +16,7 @@ import time
 from ..state import OptimizerState, DesignState, parse_design_state
 from ..deps import NodeDeps
 from ..edges import NodeName
-from ..pure.critical_path import parse_critical_path_cells, update_critical_paths
+from ..pure.critical_path import parse_critical_path_cells, update_critical_paths, derive_high_fanout_nets_from_paths
 from ..pure.timing import (
     parse_timing_summary, parse_high_fanout_nets, parse_resource_utilization,
     parse_hold_timing, parse_route_status, parse_control_sets,
@@ -264,6 +264,23 @@ async def init_analysis_node(
             cell_paths = parse_critical_path_cells(cells_json)
             if cell_paths:
                 update_critical_paths(state, cell_paths, iteration=0)
+                # Supplement high_fanout_nets from critical path node data. The
+                # dedicated get_critical_high_fanout_nets tool uses fragile text
+                # parsing that can miss high-fanout nets on critical paths
+                # (run-20260711_164134: fanout=107 net missed -> 0 reported).
+                _derived = derive_high_fanout_nets_from_paths(cell_paths, min_fanout=50)
+                if _derived:
+                    _existing = {
+                        n[0] for n in state.timing.high_fanout_nets
+                        if isinstance(n, (list, tuple)) and n
+                    }
+                    _added = [n for n in _derived if n[0] not in _existing]
+                    if _added:
+                        state.timing.high_fanout_nets.extend(_added)
+                        logger.info(
+                            f"[init_analysis] Supplemented {len(_added)} high-fanout "
+                            f"nets from critical path nodes (total {len(state.timing.high_fanout_nets)})"
+                        )
             result["cell_names_for_spread"] = [p["cells"] for p in cell_paths] if cell_paths else None
 
             # Step B7: Route status (M3: avg_wirelength, long_route_nets)

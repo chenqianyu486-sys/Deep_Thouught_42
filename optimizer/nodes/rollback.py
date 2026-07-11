@@ -93,6 +93,18 @@ async def rollback_node(
             best_wns_str = f"{state.timing.best_wns:.3f}" if state.timing.best_wns != float('-inf') else "N/A"
             tns_str = f"{state.timing.latest_tns:.3f}" if state.timing.latest_tns is not None else "N/A"
             fe_str = str(state.timing.latest_failing_endpoints) if state.timing.latest_failing_endpoints is not None else "N/A"
+            # Look up the regression cause (recorded by phase_evaluate on
+            # auto-rollback) so the LLM knows which strategy regressed and why.
+            _regression = next(
+                (f for f in reversed(state.context.failed_strategies) if f.reason == "regression"),
+                None,
+            )
+            _cause_line = ""
+            if _regression:
+                _cause_line = (
+                    "  -> Rolled-back strategy: " + _regression.strategy
+                    + " (" + _regression.detail + ")" + chr(10)
+                )
             notification = (
                 f"[SYSTEM — Rollback Occurred]\n"
                 f"The design was restored from best_checkpoint.dcp.\n"
@@ -100,8 +112,12 @@ async def rollback_node(
                 f"  → TNS: {tns_str}\n"
                 f"  → Failing endpoints: {fe_str}\n"
                 f"The previous iteration's degraded state was discarded. "
-                f"Continuing analysis from the best-known design state."
+                f"Continuing analysis from the best-known design state. "
+                f"The rolled-back strategy is blocked for the next iteration; "
+                f"choose a different strategy or fix its parameters."
             )
+            if _cause_line:
+                notification = _cause_line + notification
             deps.compat.add_message("user", notification)
             logger.info("[ROLLBACK] Rollback notification injected into LLM context")
 

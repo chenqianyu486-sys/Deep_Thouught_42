@@ -262,6 +262,23 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             f"[EVALUATE] WNS regression detected: latest={state.timing.latest_wns:.3f} "
             f"< best={state.timing.best_wns:.3f} (threshold={WNS_ROLLBACK_THRESHOLD:.3f})"
         ))
+        # Record the regressed strategy as a failure so it is blocked cross-iteration.
+        # Without this, regressions were only per-iteration blocked (cleared at the
+        # next iteration_start), allowing the same strategy to be re-selected and
+        # regress again (run-20260711_164134: PlaceRouteDirectiveExplore regressed in
+        # both iteration 1 and 2). Capture before clearing current_strategy below.
+        _regressed_strategy = state.strategy.current_strategy
+        if _regressed_strategy:
+            record_strategy_failure(
+                state,
+                strategy=_regressed_strategy,
+                reason="regression",
+                tool=get_strategy_primary_tool(_regressed_strategy) or "",
+                detail=(
+                    f"WNS regressed {state.timing.latest_wns:.3f}ns < best "
+                    f"{state.timing.best_wns:.3f}ns (auto-rollback)"
+                ),
+            )
         state.strategy.current_phase = ""
         state.strategy.current_strategy = ""
         state.control.done_reason = "rollback"

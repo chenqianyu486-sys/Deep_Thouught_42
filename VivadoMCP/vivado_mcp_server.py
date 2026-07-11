@@ -84,10 +84,13 @@ OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 # place_design safe directives whitelist (consistent with OPT_SAFE_DIRECTIVES).
 # Any directive not in this set is rejected for defense-in-depth.
 # Explicitly excludes retiming-related directives (AddRetime, Performance_Retiming, etc.)
-# NetDelay_high/medium/low removed: rejected by Vivado 2025.1 with
-# Constraints 18-641 (run-20260711_015650). Use Performance_NetDelay_* instead.
-# The place/route handlers also fall back to the default directive when Vivado
-# rejects any whitelisted directive, so future whitelist drift is non-fatal.
+# NetDelay_high/medium/low AND Performance_NetDelay_high/medium/low removed:
+# both are rejected by Vivado 2025.1 place_design with Constraints 18-641
+# (run-20260711_015650, run-20260711_164134). The Performance_NetDelay_*
+# variants are valid for route_design (ROUTE_SAFE_DIRECTIVES) but NOT place_design.
+# The place/route handlers return a hard error (not a silent default-placement
+# fallback) when Vivado rejects a whitelisted directive, so future whitelist
+# drift fails the strategy cleanly instead of causing a silent timing regression.
 PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "ExtraTimingOpt", "WLBlockPlacement",
     "ExtraPostPlacementOpt", "AltSpreadLogic_high", "AltSpreadLogic_medium",
@@ -97,8 +100,6 @@ PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Congestion_Default", "Congestion_SpreadLogic_high", "Congestion_SpreadLogic_medium",
     "Congestion_SpreadLogic_low", "Area_Explore", "Area_ExploreWithRemap",
     "Area_ExploreSequentialArea", "Performance_Explore", "Performance_ExplorePostRoute",
-    "Performance_ExtraTimingOpt", "Performance_NetDelay_high", "Performance_NetDelay_medium",
-    "Performance_NetDelay_low", "Performance_RefinePlacement",
     "Performance_WLBlockPlacement",
 })
 # Note: "Conggestion_Default" (typo with double g in source docs) is intentionally excluded.
@@ -583,7 +584,13 @@ def close_current_design() -> str:
     global _design_open
     if _design_open:
         output = run_tcl_command("close_design")
-        _sync_design_open_flag()
+        # close_design on an open design succeeds silently; only re-query STATUS
+        # if it errored. Querying STATUS on the now-closed design produces a
+        # noisy "No open project" error (run-20260711_164134: 4 such errors).
+        if "[ERROR]" in output or "ERROR:" in output:
+            _sync_design_open_flag()
+        else:
+            _design_open = False
         return output
     return "No design was open."
 
@@ -2550,18 +2557,25 @@ async def call_tool(name: str, arguments: dict):
                     cmd += f" -directive {tcl_quote(directive)}"
                     used_directive = True
             output = run_tcl_command(cmd, timeout=timeout)
-            # Robustness: if Vivado rejects the directive as unrecognized (whitelist
-            # or version drift), retry once with the plain command so a bad
-            # directive does not fail the whole strategy (run-20260711_015650).
+            # If Vivado rejects the directive as unrecognized (whitelist/version
+            # drift), fail the strategy cleanly instead of silently falling back
+            # to default placement. A silent default-placement fallback caused
+            # undetected timing regressions (run-20260711_164134: Performance_NetDelay_high
+            # rejected -> default placement -> WNS -0.542 -> -0.643, misattributed as
+            # a strategy regression rather than a directive failure).
             if used_directive and _is_unrecognized_directive_error(output):
-                logger.warning(
-                    f"place_design directive '{directive}' rejected by Vivado; "
-                    f"retrying with default placement"
+                logger.error(
+                    f"place_design directive '{directive}' rejected by Vivado (18-641); "
+                    f"aborting strategy instead of silent default-placement fallback"
                 )
-                output = run_tcl_command("place_design", timeout=timeout)
-                _fb_nl = chr(10)
-                output = (f"[FALLBACK] Directive '{directive}' was not recognized by "
-                          f"Vivado; retried with default placement.{_fb_nl}{_fb_nl}{output}")
+                return [TextContent(type="text", text=json.dumps({
+                    "error": (
+                        f"place_design directive '{directive}' was not recognized by "
+                        f"Vivado (Constraints 18-641). Strategy aborted to avoid a silent "
+                        f"default-placement timing regression. Pick a valid directive from "
+                        f"the place_design safe list or update PLACE_SAFE_DIRECTIVES."
+                    )
+                }))]
             # Detect Vivado errors — return JSON error so chain execution can detect failure
             if re.search(r'^ERROR: \[', output, re.MULTILINE):
                 logger.error(f"place_design failed: {output[:300]}")
@@ -2626,18 +2640,22 @@ async def call_tool(name: str, arguments: dict):
                 used_directive = True
 
             output = run_tcl_command(cmd, timeout=timeout)
-            # Robustness: if Vivado rejects the directive as unrecognized (whitelist
-            # or version drift), retry once with the plain command so a bad
-            # directive does not fail the whole strategy (run-20260711_015650).
+            # If Vivado rejects the directive as unrecognized (whitelist/version
+            # drift), fail the strategy cleanly instead of silently falling back
+            # to default routing (same rationale as place_design above).
             if used_directive and _is_unrecognized_directive_error(output):
-                logger.warning(
-                    f"route_design directive '{directive}' rejected by Vivado; "
-                    f"retrying with default routing"
+                logger.error(
+                    f"route_design directive '{directive}' rejected by Vivado (18-641); "
+                    f"aborting strategy instead of silent default-routing fallback"
                 )
-                output = run_tcl_command("route_design", timeout=timeout)
-                _fb_nl = chr(10)
-                output = (f"[FALLBACK] Directive '{directive}' was not recognized by "
-                          f"Vivado; retried with default routing.{_fb_nl}{_fb_nl}{output}")
+                return [TextContent(type="text", text=json.dumps({
+                    "error": (
+                        f"route_design directive '{directive}' was not recognized by "
+                        f"Vivado (Constraints 18-641). Strategy aborted to avoid a silent "
+                        f"default-routing fallback. Pick a valid directive from the "
+                        f"route_design safe list or update ROUTE_SAFE_DIRECTIVES."
+                    )
+                }))]
             # Detect Vivado errors — return JSON error so chain execution can detect failure
             if re.search(r'^ERROR: \[', output, re.MULTILINE):
                 logger.error(f"route_design failed: {output[:300]}")
@@ -3038,6 +3056,16 @@ async def call_tool(name: str, arguments: dict):
 
         elif name == "check_design_status":
             timeout = arguments.get("timeout", 30)
+            if not _design_open:
+                # No design is open - return early without querying (avoids the
+                # noisy "No open project" error from get_property on a closed
+                # design - run-20260711_164134).
+                return [TextContent(type="text", text=json.dumps({
+                    "design_open": False,
+                    "status": "no_design",
+                    "is_placed": False,
+                    "is_routed": False,
+                }, indent=2))]
             # Check if design is placed/routed.
             # Vivado's STATUS property reports completion messages like
             # "route_design Complete!" / "place_design Complete!" (lowercase
