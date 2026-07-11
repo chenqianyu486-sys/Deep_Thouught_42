@@ -45,21 +45,33 @@ def _get_lut_input_pin_map(cell) -> dict[str, str]:
     """Get BEL pin name -> net name mapping for a LUT cell's input pins.
 
     Returns dict like {"A1": "net_foo", "A2": "net_bar", ...}
-    Only includes pins that have a net connected.
+    Only includes pins that have a net connected. BEL pin names are
+    position-independent (A1-A6); the matching site pin is <pos><digit>
+    where <pos> is the LUT position from the BEL name (e.g. "B6LUT"->"B").
+    Uses SitePinInst.getNet() (verified API) instead of the non-existent
+    Cell.getNetFromSitePin().
     """
     pin_map = {}
-    site = cell.getSite()
-    if site is None:
+    site_inst = cell.getSiteInst()
+    if site_inst is None:
         return pin_map
+    bel = cell.getBEL()
+    if bel is None:
+        return pin_map
+    bel_name = str(bel.getName())
+    pos_letter = bel_name[0] if (bel_name and bel_name[0] in "ABCDEFGH") else "A"
 
     for pin_name in _LUT_INPUT_PINS:
+        digit = pin_name[1]  # "A1" -> "1"
         try:
-            # Get the net connected to this cell's physical pin
-            net = cell.getNetFromSitePin(site.getBELPin(pin_name))
-            if net is not None:
-                pin_map[pin_name] = str(net.getName())
+            site_pin = site_inst.getSitePinInst(f"{pos_letter}{digit}")
         except Exception:
             continue
+        if site_pin is None:
+            continue
+        net = site_pin.getNet()
+        if net is not None:
+            pin_map[pin_name] = str(net.getName())
     return pin_map
 
 

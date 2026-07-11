@@ -106,6 +106,10 @@ STRATEGY_MAP: dict[str, StrategyEntry] = {
     "LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
     # Combined strategies
     "PhysOpt+RegisterRetiming": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
+    # Vivado-only directive-exploration strategies (no RapidWright skill).
+    # Keep in sync with tool_catalog.STRATEGY_MAP.
+    "PlaceRouteDirectiveExplore": StrategyEntry("place_route_directive_explore", "vivado_place_design"),
+    "CongestionRouteExplore": StrategyEntry("congestion_route_explore", "vivado_route_design"),
 }
 
 # Backward-compatible reverse mapping: tool → skill_id.

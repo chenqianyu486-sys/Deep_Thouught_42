@@ -9,6 +9,7 @@ and CLASSPATH pointing to the local RapidWright git submodule for Java classes.
 """
 import logging
 import os
+import re
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,52 @@ def _resolve_net_name(design, requested_name: str):
             if resolved is not None:
                 return resolved, full
 
+    # 5. Leaf-segment suffix match: the caller may have used a wrong/extra
+    # hierarchy prefix (e.g. "layer0_inst/.../M0w[5]" when the real net is
+    # "layer0_reg/M0w[5]"). Match by the leaf segment (after the last "/").
+    if "/" in requested_name:
+        leaf = requested_name.rsplit("/", 1)[-1]
+        leaf_suffix_lower = "/" + leaf.lower()
+        for full in _net_name_full_list:
+            if full.lower().endswith(leaf_suffix_lower):
+                resolved = _net_name_lower_index.get(full.lower())
+                if resolved is not None:
+                    return resolved, full
+
+    # 6. Wire-suffix variant: Vivado timing reports sometimes drop the "w"
+    # suffix on LUT/MUXF output wire nets ("M1[21]" vs the stored "M1w[21]").
+    # Try inserting "w" before "[" for M<digit>[ patterns, then re-resolve.
+    m = re.search(r"M\d+\[", requested_name)
+    if m:
+        wvariant = requested_name[:m.end() - 1] + "w" + requested_name[m.end() - 1:]
+        net, _ = _resolve_net_name(design, wvariant)
+        if net is not None:
+            return net, str(net.getName())
+
     return None, requested_name
+
+
+def _suggest_nets(requested_name: str, max_suggestions: int = 5) -> list[str]:
+    """Return up to max_suggestions actual design net names sharing the
+    requested name's leaf prefix, so the caller can retry with valid names.
+
+    Called when _resolve_net_name fails, to surface the real net names
+    (e.g. requested "M1[21]" -> suggest "layer1_reg/M1w[47]", ...).
+    """
+    if not _net_name_full_list or not requested_name:
+        return []
+    leaf = requested_name.rsplit("/", 1)[-1].lower()
+    prefix = leaf.split("[", 1)[0]  # "m0w[5]" -> "m0w"; "m1[21]" -> "m1"
+    if not prefix:
+        return []
+    matches = []
+    for full in _net_name_full_list:
+        full_leaf = full.rsplit("/", 1)[-1].lower()
+        if full_leaf.startswith(prefix):
+            matches.append(full)
+            if len(matches) >= max_suggestions:
+                break
+    return matches
 
 
 def _clear_caches() -> None:
@@ -994,7 +1040,8 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
                         "split_factor": 0,
                         "original_fanout": 0,
                         "status": "error",
-                        "message": f"Net '{net_name}' not found in design"
+                        "message": f"Net '{net_name}' not found in design",
+                        "suggestion": _suggest_nets(net_name),
                     })
                     failed_count += 1
                     continue

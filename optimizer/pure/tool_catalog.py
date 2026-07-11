@@ -32,6 +32,11 @@ STRATEGY_MAP: dict[str, StrategyEntry] = {
     "MUXFTreeReorder": StrategyEntry("muxf_tree_reorder_strategy", "rapidwright_execute_muxf_tree_reorder_strategy"),
     "LogicOptimization": StrategyEntry("opt_design_strategy", "rapidwright_execute_opt_design_strategy"),
     "PhysOpt+RegisterRetiming": StrategyEntry("physopt_strategy", "vivado_physopt_and_route"),
+    # Vivado-only directive-exploration strategies (no RapidWright skill).
+    # Without these entries get_strategy_primary_tool() returns None and
+    # iteration_end misattributes failures to the first strategy's tools.
+    "PlaceRouteDirectiveExplore": StrategyEntry("place_route_directive_explore", "vivado_place_design"),
+    "CongestionRouteExplore": StrategyEntry("congestion_route_explore", "vivado_route_design"),
 }
 
 SKILL_TOOL_MAP: dict[str, str] = {

@@ -27,19 +27,34 @@ _PIN_PRIORITY = {"A6": 0, "A5": 1, "A4": 2, "A3": 3, "A2": 4, "A1": 5}
 
 
 def _get_lut_pins(cell) -> dict[str, str]:
-    """Get current BEL pin -> net mapping for a LUT cell.
+    """Get {bel_pin_name: net_name} for a LUT cell's input pins (A1-A6).
 
-    Returns dict of {bel_pin_name: net_name} for input pins only.
+    BEL pin names are position-independent (always A1-A6); the matching site
+    pin name is <pos><digit> where <pos> is the LUT position derived from the
+    BEL name (e.g. "A6LUT"->"A", "B6LUT"->"B"). Uses Cell.getSiteInst() +
+    SitePinInst.getNet() (the verified RapidWright API) instead of the
+    non-existent Cell.getNetFromSitePin() that previously threw AttributeError
+    on every candidate (run-20260711_041512, 0 swaps).
     """
     pin_map = {}
     bel = cell.getBEL()
     if bel is None:
         return pin_map
-    for bel_pin in bel.getPins():
-        if str(bel_pin.getName()) in _PIN_PRIORITY:
-            net = cell.getNetFromSitePin(bel_pin)
-            if net is not None:
-                pin_map[str(bel_pin.getName())] = str(net.getName())
+    site_inst = cell.getSiteInst()
+    if site_inst is None:
+        return pin_map
+    bel_name = str(bel.getName())
+    pos_letter = bel_name[0] if (bel_name and bel_name[0] in "ABCDEFGH") else "A"
+    for digit in "123456":
+        try:
+            site_pin = site_inst.getSitePinInst(f"{pos_letter}{digit}")
+        except Exception:
+            continue
+        if site_pin is None:
+            continue
+        net = site_pin.getNet()
+        if net is not None:
+            pin_map[f"A{digit}"] = str(net.getName())
     return pin_map
 
 
@@ -214,95 +229,78 @@ def execute_pin_swapping(
             if not pin_map:
                 continue
 
-            # Find which pins are on the critical path
-            # Strategy: try to move the critical signal to A6 or A5
-            # Check if A6/A5 are occupied by non-critical signals
-            current_pins = sorted(pin_map.keys(),
-                                  key=lambda p: _PIN_PRIORITY.get(p, 99))
-
-            # Try swapping the slowest-used pin with A6 or A5
+            # Pin selection: move the slowest occupied input's net onto a
+            # faster FREE pin (A6 fastest, A1 slowest). This is a move, not
+            # an exchange -- the free pin has no net, so the previous code's
+            # net_fast = pin_map.get(fastest_free) was always None and every
+            # candidate was silently skipped (0 swaps). The LUT INIT is
+            # permuted to match the new pin assignment so logical equivalence
+            # is preserved.
             fastest_free = None
             for pin in ["A6", "A5"]:
-                if pin in pin_map:
-                    continue
-                fastest_free = pin
-                break
-
+                if pin not in pin_map:
+                    fastest_free = pin
+                    break
             if fastest_free is None:
-                # A6 and A5 are both occupied — try next fastest
+                # A6 and A5 both occupied - no faster free pin available.
                 continue
 
-            # Find slowest occupied pin
-            slowest_pin = None
-            for pin in reversed(["A6", "A5", "A4", "A3", "A2", "A1"]):
-                if pin in pin_map and pin != fastest_free:
-                    slowest_pin = pin
-                    break
-
+            # Slowest occupied pin = highest delay rank (A1 slowest).
+            slowest_pin = max(
+                (p for p in pin_map if p != fastest_free),
+                key=lambda p: _PIN_PRIORITY.get(p, 99),
+                default=None,
+            )
             if slowest_pin is None:
                 continue
 
-            # Get nets to swap
-            net_fast = pin_map.get(fastest_free)
-            net_slow = pin_map.get(slowest_pin)
-
-            if net_fast is None or net_slow is None:
+            net_slow_name = pin_map.get(slowest_pin)
+            if net_slow_name is None:
                 continue
 
-            # Perform the swap using RapidWright ECO
-            # Use site pin swapping — disconnect and reconnect
+            # Permute INIT first; skip the swap entirely if permutation is
+            # invalid, rather than moving pins without updating the truth
+            # table (which would break logical equivalence).
+            init_str = _get_lut_init(cell)
+            new_init = _permute_lut_init(init_str, slowest_pin, fastest_free, cell_type)
+            if new_init is None:
+                continue
+
+            # Execute the pin move via RapidWright ECO. Connect the net to the
+            # fast pin first, then release the slow pin, so the net is never
+            # left dangling if a step fails mid-move.
+            success = False
             try:
-                from com.xilinx.rapidwright.design import Design
-                from com.xilinx.rapidwright.design.tools import LUTTools
-
-                # Attempt LUTTools pin swap if available
-                # Otherwise do manual disconnect/reconnect
-                success = False
-
-                # Method 1: Direct pin swap via disconnect/reconnect
-                try:
-                    site_pin_fast = site.getBELPin(fastest_free)
-                    site_pin_slow = site.getBELPin(slowest_pin)
-
-                    if site_pin_fast is not None and site_pin_slow is not None:
-                        # Disconnect current nets from their pins
-                        design.disconnectPin(site, site_pin_fast)
-                        design.disconnectPin(site, site_pin_slow)
-
-                        # Reconnect in swapped positions
-                        design.connectPin(site, site_pin_slow, net_fast)
-                        design.connectPin(site, site_pin_fast, net_slow)
-
-                        success = True
-                except Exception as e:
-                    logger.debug(f"Pin swap via disconnect/reconnect failed for {cell_name}: {e}")
-
-                if success:
-                    swaps_successful += 1
-                    swap_details.append({
-                        "cell": cell_name,
-                        "swapped": f"{slowest_pin}<->{fastest_free}",
-                        "net_on_slow_pin": net_slow,
-                        "net_on_fast_pin": net_fast,
-                        "status": "success",
-                    })
-                else:
-                    swap_details.append({
-                        "cell": cell_name,
-                        "status": "failed",
-                        "message": "Could not perform pin swap",
-                    })
-
-                swaps_attempted += 1
-
+                bel = cell.getBEL()
+                bel_pin_slow = bel.getPin(slowest_pin)
+                bel_pin_fast = bel.getPin(fastest_free)
+                site_inst = cell.getSiteInst()
+                net_obj = design.getNet(net_slow_name)
+                if (bel_pin_slow is None or bel_pin_fast is None
+                        or site_inst is None or net_obj is None):
+                    continue
+                design.connectPin(site_inst, bel_pin_fast, net_obj)
+                design.disconnectPin(site_inst, bel_pin_slow)
+                cell.setProperty("INIT", new_init)
+                success = True
             except Exception as e:
                 logger.debug(f"Pin swap failed for {cell_name}: {e}")
+
+            swaps_attempted += 1
+            if success:
+                swaps_successful += 1
+                swap_details.append({
+                    "cell": cell_name,
+                    "swapped": f"{slowest_pin}->{fastest_free}",
+                    "net_moved": net_slow_name,
+                    "status": "success",
+                })
+            else:
                 swap_details.append({
                     "cell": cell_name,
                     "status": "failed",
-                    "message": str(e),
+                    "message": "Could not perform pin swap",
                 })
-                swaps_attempted += 1
 
         except Exception as e:
             logger.warning(f"Error processing cell {cell_name}: {e}")

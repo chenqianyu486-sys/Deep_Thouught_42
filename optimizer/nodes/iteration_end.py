@@ -170,14 +170,15 @@ async def iteration_end_node(
                     and state.control.done_reason != "iteration_success"):
                 reason = _determine_failure_reason(state, strategy_label)
                 # Derive the failing tool from the strategy's primary execute
-                # tool, not tools_this_iter[:3]. The iter list accumulates
-                # analysis + prior-strategy tools across the multi-strategy loop
-                # and misattributes failures (e.g. Fanout recorded with
-                # CellReplication's vivado_physopt_and_route). Fall back to the
-                # iter list only when no strategy mapping exists.
+                # tool, not tools_this_iter. The iter list accumulates analysis
+                # + prior-strategy tools across the multi-strategy loop and
+                # misattributes failures (e.g. PlaceRouteDirectiveExplore
+                # recorded with LUTMUXFRepack's rapidwright_execute_lut_muxf_repack_strategy,
+                # run-20260711_041512). Fall back to the LAST tools in the iter
+                # list (the just-finished strategy's tools), never the first.
                 _failure_tool = (
                     get_strategy_primary_tool(strategy_label)
-                    or ", ".join(tools_this_iter[:3])
+                    or ", ".join(tools_this_iter[-3:])
                 )
                 record_strategy_failure(
                     state,
