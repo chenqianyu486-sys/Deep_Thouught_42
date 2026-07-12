@@ -404,6 +404,8 @@ make run_init_analysis    # 初始分析测试 (无LLM, 验证Dashboard完整性
 
 `init_analysis` 以 `min_fanout=100` 调用 `vivado_get_critical_high_fanout_nets`，`parse_high_fanout_nets()` 解析出 0 条。但 LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查得 34 条。阈值过高 + 父网线名解析边界情况导致 Dashboard 初始承载空数据。**补充（P1-1，2026-07-11）**：新增 `derive_high_fanout_nets_from_paths()`（`optimizer/pure/critical_path.py`），在 `init_analysis` 提取 critical_path 后从其 `nodes`（已含 `fanout`）派生高扇出网补充到 `high_fanout_nets`，绕过脆弱文本解析（run-20260711_164134：fanout=107 关键网漏报为 0）。
 
+**补充（2026-07-12，run-20260712_013828 P0-1 回归根因）**：即使 ANALYZE 拿到真实高扇出网，数据也只存在于对话历史——`phase_analyze.py` 工具循环未将 `vivado_get_critical_high_fanout_nets` 结果解析回 `state.timing.high_fanout_nets`（仅 `init_analysis` 解析），叠加 rollback 清空（`rollback.py:157`），EXECUTE 阶段缓存与 `design_data_read` 均返回空。LLM 在缓存空时幻觉网络名（用时序报告热点标签 `M1[21]` 而非真实 `M1w[21]`）喂给 fanout 工具，造成 -1.220ns 回归。修复三处：(1) `phase_analyze.py` 新增 handler 将 live 高扇出结果解析入 state + 第 4 个 ANALYZE 入口自动刷新块（stale 时重新获取，rollback 后恢复）；(2) `VivadoMCP` `extract_critical_path_cells` 对 `top_delay_nodes` net 节点用 `get_property PARENT` 解析为父网络名，消除热点标签与网表名歧义；(3) `phase_execute.py` Fanout 注入改为 overriding（`state.timing.high_fanout_nets` 非空时覆盖 LLM nets，附 `[DATA INTEGRITY]`）+ `optimize_fanout_batch` 加 `MIN_FANOUT_TO_SPLIT=50` 守卫跳过低扇出网。
+
 ### A.3 Module 3 在策略切换后消失
 
 `state_space.py` 构建的 Module 3（物理与拥塞指标）在 EVALUATE/SELECT_STRATEGY 阶段被过滤移出 Dashboard。第二次策略选择时 LLM 无法获取拥塞/高扇出/路由状态数据，基于过期信息做出决策。

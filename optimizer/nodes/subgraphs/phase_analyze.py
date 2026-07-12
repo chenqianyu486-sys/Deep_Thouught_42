@@ -21,7 +21,7 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
-from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization
+from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization, parse_high_fanout_nets
 from optimizer.pure.critical_path import refresh_violation_summary
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body
 from optimizer.pure.cost_tracking import track_llm_call_cost
@@ -135,6 +135,35 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 logger.info(f"[ANALYZE] Auto-refreshed resource_utilization: {_util}")
         except Exception as _e3:
             logger.warning(f"[ANALYZE] Auto-refresh resource_utilization failed: {_e3}")
+
+    # ── Auto-refresh stale high_fanout_nets ──
+    # High-fanout nets drive the Fanout strategy's verified net list. After
+    # rollback the cache is cleared (rollback.py) and the live-fetched results
+    # must be re-acquired so EXECUTE has verified net names instead of an empty
+    # cache (run-20260712_013828: empty cache -> LLM hallucinated net names ->
+    # -1.220ns regression). Matches the timing_summary/design_info/
+    # resource_utilization auto-refresh pattern above.
+    if state.timing.field_freshness.get("high_fanout_nets") == "stale":
+        try:
+            _hf_report = await call_tool_fn(
+                tool_name="vivado_get_critical_high_fanout_nets",
+                arguments={"num_paths": 50, "min_fanout": 50},
+                rapidwright_session=deps.rapidwright_session,
+                vivado_session=deps.vivado_session,
+                raw_tool_outputs=state.context.raw_tool_outputs,
+                tool_cache=state.context.tool_cache,
+                design_size_factor=state.timing.design_size_factor,
+                entity_registry=state.entity_registry,
+            )
+            _hf_parsed = parse_high_fanout_nets(_hf_report)
+            if _hf_parsed:
+                state.timing.high_fanout_nets = _hf_parsed
+                state.timing.field_freshness["high_fanout_nets"] = "fresh"
+                logger.info(
+                    f"[ANALYZE] Auto-refreshed high_fanout_nets: {len(_hf_parsed)} nets"
+                )
+        except Exception as _e4:
+            logger.warning(f"[ANALYZE] Auto-refresh high_fanout_nets failed: {_e4}")
 
     while True:
         tool_round += 1
@@ -309,6 +338,24 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 _track_wns_from_result(state, tool_name, result)
                 if tool_name in ("rapidwright_analyze_pblock_region", "rapidwright_execute_pblock_strategy"):
                     _update_pending_pblock_state_from_result(state, result)
+
+                # Persist live-fetched high-fanout nets into state so they
+                # survive into the snapshot / cached tool / EXECUTE phase.
+                # Without this the data the LLM fetched only lives in
+                # conversation history and is lost on rollback
+                # (run-20260712_013828: Fanout EXECUTE saw an empty cache and
+                # hallucinated net names, causing a -1.220ns regression).
+                if tool_name == "vivado_get_critical_high_fanout_nets":
+                    try:
+                        _nets = parse_high_fanout_nets(result)
+                        if _nets:
+                            state.timing.high_fanout_nets = _nets
+                            logger.info(
+                                f"[ANALYZE] Persisted {len(_nets)} high-fanout nets "
+                                f"from live fetch into state"
+                            )
+                    except Exception as _e_hf:
+                        logger.debug(f"[ANALYZE] parse_high_fanout_nets failed: {_e_hf}")
 
                 # Sync canonical cell names into the entity registry from
                 # search_cells results (compression-resistant SSOT).

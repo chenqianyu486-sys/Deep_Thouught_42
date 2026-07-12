@@ -722,6 +722,12 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 - **CELL NAME CONTRACT 补充**：声明执行工具会自动注入 verified state data 并在覆盖 LLM 输入时发 `[DATA INTEGRITY]` 通知，对齐"[CELL REGISTRY] canonical"声明与"框架强制覆盖"的实际行为。
 - **`truncation_advisory` 诚实化**：注明 `design_data_read` 返回持久化快照（不调用 Vivado/RapidWright），stale 字段的持久化值可能滞后于实时设计，需用提取工具刷新。
 
+**高扇出/热点网络名一致性修复**（2026-07-12，run-20260712_013828 分析，P0-1 回归根因）：
+- **`high_fanout_nets` 跨阶段持久化**（`phase_analyze.py`）：此前 LLM 在 ANALYZE 调用 `vivado_get_critical_high_fanout_nets` 拿到的真实网络只存在于对话历史，从未写入 `state.timing.high_fanout_nets`（仅 `init_analysis.py:238` 解析）；叠加 rollback 清空（`rollback.py:157`），EXECUTE 阶段缓存全空。现 ANALYZE 工具循环新增 handler 将 live 结果经 `parse_high_fanout_nets` 解析入 state；并新增第 4 个 ANALYZE 入口自动刷新块（stale 时调 `vivado_get_critical_high_fanout_nets`），匹配 timing_summary/design_info/resource_utilization 模式，rollback 后自动恢复。
+- **热点网络名解析**（`VivadoMCP/vivado_mcp_server.py` `_resolve_hotspot_net_names`）：Vivado `report_timing` 丢弃 LUT/MUXF 输出线的 'w' 后缀（报告显示 `M1[76]`，真实网表为 `M1w[76]`），而热点 pipeline 是唯一不解析网络名的路径，LLM 曾把热点标签当网络名喂给 fanout 工具。现 `extract_critical_path_cells` 对 `top_delay_nodes` 的 net-kind 节点用 `get_property PARENT` 解析为父网络名（复用 `get_critical_high_fanout_nets` 的解析模式），仅解析热点来源（≤8 个唯一名）以约束开销。
+- **Fanout 注入改为 overriding**（`phase_execute.py`）：原 Fanout 注入是 "non-overriding"（仅当 LLM 未提供 nets 时填充），LLM 提供幻觉网络名时注入被跳过。现当 `state.timing.high_fanout_nets` 非空时**始终 override** LLM 提供的 nets（附 `[DATA INTEGRITY]` 通知），匹配 critical_paths override 模式；为空时回退 LLM nets。
+- **Fanout 工具最小扇出守卫**（`RapidWrightMCP/rapidwright_tools.py` `MIN_FANOUT_TO_SPLIT=50`）：`optimize_fanout_batch` 对 `original_fanout < 50` 的网标记 `skipped` 不拆分（此前 fanout=2 的网也被 split_factor=2 拆分，造成 -1.220ns 回归）。skipped 网不递增 `successful_count`，故 `should_skip_chain_for_empty_result` 检测到 `successful_count==0` 时跳过 Vivado P&R chain（避免无谓空转）。
+
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
 - `vivado_run_tcl`: 2

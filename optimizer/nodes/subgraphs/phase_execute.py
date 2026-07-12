@@ -549,13 +549,16 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                         f"Cells used (preview): [{preview}].")
                             tool_args["critical_path_cells"] = cells
 
-                # Auto-inject high-fanout nets for the Fanout strategy when the
-                # LLM did not provide them (P0-3: run-20260711_193102 - Fanout's
-                # EXECUTE whitelist exposed only the execute tool + report_step_state,
-                # so the LLM had no way to obtain the required `nets` arg and idled
-                # 4 rounds). Unlike PBLOCK, this is non-overriding: LLM-provided
-                # nets always win; we only fill the gap from state.
-                if tool_name == "rapidwright_execute_fanout_strategy" and not tool_args.get("nets"):
+                # Auto-inject high-fanout nets for the Fanout strategy.
+                # NOTE: always overrides LLM-provided nets with verified state
+                # data when available - matches the critical_paths override
+                # pattern above. LLM-provided net names have been wrong
+                # (hallucinated from timing-report labels that drop the 'w'
+                # suffix, e.g. "M1[21]" vs the real "M1w[21]"), causing a
+                # -1.220ns regression (run-20260712_013828). When state has no
+                # verified nets, fall back to LLM-provided nets (the tool-side
+                # MIN_FANOUT_TO_SPLIT guard rejects harmful low-fanout splits).
+                if tool_name == "rapidwright_execute_fanout_strategy":
                     hf = state.timing.high_fanout_nets or []
                     injected_nets = []
                     for entry in hf:
@@ -571,12 +574,25 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         if name:
                             injected_nets.append({"net_name": name, "fanout": int(fan or 0)})
                     if injected_nets:
+                        had_llm_nets = bool(tool_args.get("nets"))
+                        if had_llm_nets:
+                            logger.warning(
+                                f"[EXECUTE] Overriding LLM-provided nets with verified "
+                                f"state data ({len(injected_nets)} high-fanout nets) for {tool_name}"
+                            )
+                            if deps.compat is not None:
+                                deps.compat.add_message("user",
+                                    f"[DATA INTEGRITY] Overriding LLM-provided nets with "
+                                    f"{len(injected_nets)} verified high-fanout nets from state "
+                                    f"for {tool_name}. State data is resolved via "
+                                    f"vivado_get_critical_high_fanout_nets (parent net names)."
+                                )
                         tool_args["nets"] = injected_nets
                         logger.info(
                             f"[EXECUTE] Injected {len(injected_nets)} high-fanout nets "
                             f"for {tool_name} from state.timing.high_fanout_nets"
                         )
-                    else:
+                    elif not tool_args.get("nets"):
                         logger.warning(
                             f"[EXECUTE] No high-fanout nets to inject for {tool_name} "
                             f"- state.timing.high_fanout_nets empty; LLM must call "

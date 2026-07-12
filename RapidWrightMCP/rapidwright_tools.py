@@ -39,6 +39,17 @@ _tile_info_cache: Dict[str, Dict[str, Any]] = {}
 _net_name_lower_index: Dict[str, Any] = {}
 _net_name_full_list: list[str] = []
 
+# Minimum real fanout for a net to benefit from splitting in fanout_strategy.
+# Splitting a low-fanout net (e.g. fanout=2 -> 2 parts of 1) only adds driver
+# overhead with no timing benefit, and has caused regressions when the LLM
+# supplied fabricated net names whose real fanout was tiny (run-20260712_013828:
+# a fanout=2 net was split into 2 parts, contributing to a -1.220ns regression).
+# Matches the high-fanout scan threshold (min_fanout=50 in init_analysis and
+# vivado_get_critical_high_fanout_nets). Nets below this are reported as
+# "skipped" and do not increment successful_count, so the framework skips the
+# Vivado P&R chain when no net was actually split.
+MIN_FANOUT_TO_SPLIT: int = 50
+
 
 def _build_net_name_index() -> None:
     """Build a case-insensitive index of all net names in the current design.
@@ -1056,6 +1067,27 @@ def optimize_fanout_batch(net_configs: list[dict]) -> dict:
                 #   fanout 500-1500 -> k=3-5
                 #   fanout >1500    -> k=5-8
                 original_fanout = net.getFanOut()
+                # Skip nets whose real fanout is too low to benefit from
+                # splitting. See MIN_FANOUT_TO_SPLIT docstring.
+                if original_fanout < MIN_FANOUT_TO_SPLIT:
+                    results.append({
+                        "net_name": resolved_name,
+                        "requested_net_name": net_name,
+                        "fanout": fanout,
+                        "split_factor": 0,
+                        "original_fanout": original_fanout,
+                        "status": "skipped",
+                        "message": (
+                            f"Net '{resolved_name}' fanout {original_fanout} "
+                            f"< {MIN_FANOUT_TO_SPLIT} threshold; too low to "
+                            f"benefit from splitting"
+                        ),
+                    })
+                    logger.info(
+                        f"Skipping net '{resolved_name}': fanout {original_fanout} "
+                        f"below split threshold {MIN_FANOUT_TO_SPLIT}"
+                    )
+                    continue
                 if original_fanout < 200:
                     split_factor = 2
                 elif original_fanout <= 500:

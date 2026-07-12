@@ -796,6 +796,62 @@ def get_critical_high_fanout_nets(
     return "\n".join(result_lines)
 
 
+def _resolve_hotspot_net_names(paths: list, max_nets: int = 8) -> None:
+    """Resolve raw Vivado timing-report net labels in top_delay_nodes to their
+    parent net names, in place.
+
+    Vivado's report_timing drops the "w" suffix on LUT/MUXF output wire nets
+    (the report shows "M1[76]" but the actual netlist net is "M1w[76]"). These
+    truncated labels surface as top_delay_hotspots and were misused as net
+    names by downstream fanout optimization (run-20260712_013828: -1.220ns
+    regression). get_critical_high_fanout_nets resolves the same labels via
+    get_property PARENT; this applies the same resolution to the hotspot
+    pipeline so the names the LLM sees match the netlist.
+
+    Only net-kind nodes in top_delay_nodes (the hotspot source) are resolved;
+    cell nodes and the full per-node breakdown are left untouched. Resolution
+    is best-effort: on any failure the original label is kept.
+    """
+    pending: list = []
+    seen: set = set()
+    for path in paths:
+        for node in path.get("top_delay_nodes", []) or []:
+            if node.get("kind") != "net":
+                continue
+            name = node.get("name") or ""
+            if name and name not in seen:
+                seen.add(name)
+                pending.append(name)
+                if len(pending) >= max_nets:
+                    break
+        if len(pending) >= max_nets:
+            break
+    if not pending:
+        return
+
+    resolved: dict = {}
+    for name in pending:
+        try:
+            # Single-line command (passes tcl_line_is_complete brace/bracket
+            # balance check). get_nets resolves the short report form; PARENT
+            # returns the fully-qualified netlist net (e.g. layer1_reg/M1w[76]).
+            cmd = f"get_property PARENT [get_nets {{{name}}}]"
+            result = run_tcl_command(cmd, timeout=30.0).strip()
+            if (result and result != name and "/" in result
+                    and not result.startswith(("get_", "ERROR", "WARNING", "[ERROR"))):
+                resolved[name] = result
+        except Exception as e:
+            logger.warning(f"Hotspot net-name resolution failed for '{name}': {e}")
+
+    if not resolved:
+        return
+
+    for path in paths:
+        for node in path.get("top_delay_nodes", []) or []:
+            if node.get("kind") == "net" and node.get("name") in resolved:
+                node["name"] = resolved[node["name"]]
+
+
 def extract_critical_path_cells(
     num_paths: int = 50,
     output_file: str = None,
@@ -1078,6 +1134,10 @@ def extract_critical_path_cells(
                     "is_cross_clock": is_cross,
                 },
             })
+
+    # Resolve truncated Vivado net labels (e.g. "M1[76]" -> "M1w[76]") in the
+    # hotspot source so names match the netlist and downstream fanout tooling.
+    _resolve_hotspot_net_names(all_paths)
 
     # Write to file if specified, otherwise return JSON
     if output_file:
