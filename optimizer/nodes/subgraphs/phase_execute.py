@@ -59,7 +59,7 @@ from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS, POST_EVAL_TOO
 from optimizer.pure.tool_chain_policy import HEAVY_CHAIN_SKILLS, PLACE_ONLY_CHECK_ENABLED, PLACE_ONLY_CHECK_SKILLS, PLACE_ONLY_REGRESS_THRESHOLD, RAPIDWRIGHT_PRECHECK_ENABLED, UNPLACE_VERIFY_MAX_PLACED_CELLS, get_skill_chain_actions, has_skill_chain, should_skip_chain_for_empty_result, tool_uses_rw_precheck
 from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP, PHASE_TOOL_RATE_LIMITS
-from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary
+from optimizer.pure.critical_path import parse_critical_path_cells, update_critical_paths, refresh_violation_summary, derive_cells_rich
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.color import green, yellow
@@ -345,6 +345,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         "rapidwright_flatten_lut_cascade",
         "rapidwright_execute_combinational_rebalancing_strategy",
         "rapidwright_execute_lut_muxf_repack_strategy",
+        "rapidwright_replicate_critical_cells",
     })
     _current_tool = STRATEGY_MAP.get(state.strategy.current_strategy, StrategyEntry("", "")).execute_tool
     if _current_tool in _netlist_strategy_refresh_tools and state.timing.critical_paths_stale:
@@ -689,6 +690,31 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     had_llm_data = bool(tool_args.get("critical_paths"))
                     if state.timing.critical_paths:
                         paths = [cp.cells for cp in state.timing.critical_paths[:10] if cp.cells]
+                        if paths:
+                            if had_llm_data:
+                                logger.warning(
+                                    f"[EXECUTE] Overriding LLM-provided critical_paths "
+                                    f"with verified state data ({len(paths)} paths) for {tool_name}"
+                                )
+                                if deps.compat is not None:
+                                    deps.compat.add_message("user",
+                                        f"[DATA INTEGRITY] Overriding LLM-provided critical_paths "
+                                        f"with {len(paths)} verified paths from state for {tool_name}. "
+                                        f"State data is extracted via vivado_extract_critical_path_cells.")
+                            tool_args["critical_paths"] = paths
+                            logger.info(f"[EXECUTE] Injected {len(paths)} critical paths for {tool_name}")
+
+                # Auto-inject critical_paths (rich object shape) for cell replication.
+                # Unlike its string-array siblings, replicate_critical_cells requires
+                # cells:[{name,delay,type,fanout}] and is not covered by the blocks
+                # above. derive_cells_rich builds that shape from verified state
+                # nodes (run-20260711_230953: 3 validation failures from the LLM
+                # passing strings/missing critical_paths). The skill looks up real
+                # fanout from the design, so per-cell fanout here is advisory only.
+                if tool_name == "rapidwright_replicate_critical_cells":
+                    had_llm_data = bool(tool_args.get("critical_paths"))
+                    if state.timing.critical_paths:
+                        paths = [{"cells": cells} for cp in state.timing.critical_paths[:10] if (cells := derive_cells_rich(cp))]
                         if paths:
                             if had_llm_data:
                                 logger.warning(

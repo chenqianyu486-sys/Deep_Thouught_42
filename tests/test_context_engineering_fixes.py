@@ -682,24 +682,25 @@ class TestContradictionFixesP1:
     """P1 strategy-history completeness: non-overwrite of stricter failure reasons."""
 
     def test_stricter_failure_reason_not_downgraded_to_tool_error(self):
-        """P1-2D/3C: EXECUTE records strategy_not_applicable (TTL=2). iteration_end's
-        independent empty-result re-scan must not overwrite it with tool_error (TTL=0,
+        """P1-2D/3C: EXECUTE records strategy_not_applicable (TTL=5, see
+        STRATEGY_NOT_APPLICABLE_TTL in state.py). iteration_end's independent
+        empty-result re-scan must not overwrite it with tool_error (TTL=0,
         instantly retriable) - that would contradict the execution-time verdict."""
         from optimizer.state import record_strategy_failure
         s = OptimizerState()
         s.iteration.current = 2
-        # EXECUTE-time record: strategy_not_applicable -> blocked_until_iter = 4
+        # EXECUTE-time record: strategy_not_applicable -> blocked_until_iter = 7 (2 + 5)
         record_strategy_failure(s, strategy="LUTCascade", reason="strategy_not_applicable",
                                 tool="rapidwright_flatten_lut_cascade", detail="chain_skipped")
         entry = s.context.failed_strategies[0]
         assert entry.reason == "strategy_not_applicable"
-        assert entry.blocked_until_iter == 4
+        assert entry.blocked_until_iter == 7
         # iteration_end re-scan tries to downgrade to tool_error (TTL=0) -> must be preserved.
         record_strategy_failure(s, strategy="LUTCascade", reason="tool_error",
                                 tool="rapidwright_flatten_lut_cascade", detail="empty result")
         assert len(s.context.failed_strategies) == 1     # no duplicate
         assert entry.reason == "strategy_not_applicable"  # not downgraded
-        assert entry.blocked_until_iter == 4              # cooldown preserved
+        assert entry.blocked_until_iter == 7              # cooldown preserved
 
     def test_equally_strict_reason_refreshes_ttl(self):
         """A re-failure with an equally-or-more restrictive reason must refresh the TTL."""
@@ -708,10 +709,10 @@ class TestContradictionFixesP1:
         s.iteration.current = 2
         record_strategy_failure(s, strategy="PhysOpt", reason="strategy_not_applicable",
                                 tool="vivado_physopt_and_route", detail="first")
-        assert s.context.failed_strategies[0].blocked_until_iter == 4
-        # Re-fail at iter 3 with strategy_not_applicable (TTL=2 -> blocked until 5 >= 4) -> refresh.
+        assert s.context.failed_strategies[0].blocked_until_iter == 7
+        # Re-fail at iter 3 with strategy_not_applicable (TTL=5 -> blocked until 8 >= 7) -> refresh.
         s.iteration.current = 3
         record_strategy_failure(s, strategy="PhysOpt", reason="strategy_not_applicable",
                                 tool="vivado_physopt_and_route", detail="second")
-        assert s.context.failed_strategies[0].blocked_until_iter == 5
+        assert s.context.failed_strategies[0].blocked_until_iter == 8
 

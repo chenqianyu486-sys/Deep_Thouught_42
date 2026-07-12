@@ -307,3 +307,54 @@ class TestP0NetSwapScan:
         from skills import SkillRegistry
         skill = SkillRegistry.get("analyze_net_swapping")
         assert skill.get_metadata().timeout_ms == 120000
+
+
+class TestP0ReplicateCriticalPathsShape:
+    """P0-2 (run-20260711_230953): replicate_critical_cells requires critical_paths
+    as [{"cells":[{"name","delay","type","fanout"}]}], but the LLM was shown string
+    arrays and this tool had no auto-inject override (unlike its siblings) -> 3 input
+    validation failures. derive_cells_rich builds the rich object shape from
+    CriticalPathEntry.nodes and is now wired into the EXECUTE override. These tests
+    pin that data contract so it cannot silently regress to dead code again.
+    """
+
+    @staticmethod
+    def _entry_with_nodes():
+        from optimizer.state import CriticalPathEntry, PathNode
+        return CriticalPathEntry(
+            cells=[
+                "layer0_reg/data_out_reg[17]",
+                "layer0_inst/layer0_N7_inst/data_out[21]_i_33",
+            ],
+            nodes=[
+                PathNode(kind="cell", name="layer0_reg/data_out_reg[17]",
+                         cell_type="FDRE", incr_delay=0.081, cumul_delay=0.109),
+                PathNode(kind="net", name="layer0_inst/layer0_N7_inst/M0w[4]",
+                         incr_delay=0.302, cumul_delay=0.412, fanout=81, net_status="routed"),
+                PathNode(kind="cell", name="layer0_inst/layer0_N7_inst/data_out[21]_i_33",
+                         cell_type="LUT6", incr_delay=0.420, cumul_delay=0.558),
+            ],
+        )
+
+    def test_derive_cells_rich_produces_schema_valid_object_shape(self):
+        from optimizer.pure.critical_path import derive_cells_rich
+        rich = derive_cells_rich(self._entry_with_nodes())
+        # Only cell-kind nodes are included (net node filtered out).
+        assert isinstance(rich, list) and len(rich) == 2
+        for c in rich:
+            assert set(c.keys()) == {"name", "delay", "type", "fanout"}
+            assert "/" in c["name"]  # schema pattern ^.+/.+$
+            assert isinstance(c["delay"], float)
+            assert isinstance(c["fanout"], int)
+        assert rich[1]["delay"] == 0.420  # high-delay cell preserved
+
+    def test_skill_consumes_injected_shape(self):
+        """The shape the override injects must feed _identify_high_delay_cells."""
+        from optimizer.pure.critical_path import derive_cells_rich
+        from skills.critical_path_cell_replication_strategy import _identify_high_delay_cells
+        injected = [{"cells": derive_cells_rich(self._entry_with_nodes())}]
+        candidates = _identify_high_delay_cells(
+            injected, delay_threshold=0.3, max_replications=10, min_fanout=30, design=None)
+        names = [c["name"] for c in candidates]
+        assert "layer0_inst/layer0_N7_inst/data_out[21]_i_33" in names  # 0.42ns >= 0.3
+        assert "layer0_reg/data_out_reg[17]" not in names  # 0.081ns < 0.3, fanout 0 < 30

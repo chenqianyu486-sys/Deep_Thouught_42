@@ -284,7 +284,7 @@ if tool_name in ("rapidwright_execute_pblock_strategy", "rapidwright_analyze_pbl
         cells = extract_registry_cells_for_inject(state.entity_registry, state.timing.critical_paths)
         tool_args["critical_path_cells"] = cells  # 始终覆盖 LLM 提供的数据
 ```
-> **数据完整性保护（2026-06）**: LLM 可能通过 TCL 提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。**2026-06 增强**：注入逻辑统一改用 `extract_registry_cells_for_inject()`（注册表 + critical paths），替换原 pblock 子串过滤与零过滤的不一致实现；`rapidwright_optimize_cell_placement` 新增同源 auto-inject（详见 §12.4）。
+> **数据完整性保护（2026-06）**: LLM 可能通过 TCL 提取含扇出分支的污染数据。上述注入已改为**始终覆盖** LLM 提供的参数，并记录 warning 日志 + 向 LLM 上下文注入 `[DATA INTEGRITY]` 警告。同一机制也应用于 `critical_paths` 参数（CombinationalRebalance / LUTMUXFRepack / MUXFTreeReorder / LUTCascade 策略）。**CellReplication auto-inject（2026-07-12，`dcp_optimizer_run-20260711_230953`）**：`rapidwright_replicate_critical_cells` 的 schema 要求 `critical_paths` 为对象数组 `[{"cells":[{"name","delay","type","fanout"}]}]`，与上述 string-array sibling 工具形状不同，且原先不在 auto-inject 列表，导致 LLM 三次 input validation 失败。现为其新增专属 override 分支，用 `derive_cells_rich()`（`optimizer/pure/critical_path.py`，从 `CriticalPathEntry.nodes` 构建富对象）注入经核验的 state 数据；skill 端 `_identify_high_delay_cells` 再用 design 查真实 output-net fanout 覆盖传入值。**2026-06 增强**：注入逻辑统一改用 `extract_registry_cells_for_inject()`（注册表 + critical paths），替换原 pblock 子串过滤与零过滤的不一致实现；`rapidwright_optimize_cell_placement` 新增同源 auto-inject（详见 §12.4）。
 
 > **区域尺寸绑定 cell 化（2026-07-05）**：上述注入的 `critical_path_cells` 不仅用于质心定位，还是 pblock 的**绑定对象**（chain 仅 `add_cells_to_pblock(cells=critical_path_cells)`，见 [constants.py](optimizer/pure/constants.py) `SKILL_CHAIN_ACTIONS`）。但 `generate_pblock_plan` 原先用 `target_lut_count`（全设计 LUT）× multiplier 计算区域容量，导致「能装下整个设计的大区域 + 只绑 50 个 cell + is_soft=True」的零约束空壳（见 `dcp_optimizer_run-20260705_130916`：63652-LUT 区域仅绑 50 cell，+0.049ns 实为 P&R 噪声）。现改为：当 `critical_path_cells` 可解析（≥50% 匹配）时，`_estimate_bound_cell_resources()` 按 cell 类型（`LUT*`→luts、`FD*`→ffs、`MUXF*`→luts、`DSP*`→dsps、`RAMB*`→brams）求和，区域尺寸 = 绑定 cell 资源 × multiplier；`utilization_density` 改为**绑定 cell 占区域容量的真实密度**（不再是全设计/区域）；`is_soft` 随之基于真实密度判定（绑定 cell 少 → 低密度 → 硬 pblock `IS_SOFT=0`，真正起约束作用）。不可解析时回退全设计尺寸（`sizing_basis="whole_design"`）。新增 result 字段 `sizing_basis`/`bound_resources`/`bound_cell_count` 透出尺寸依据；`next_steps` 文案对齐为 `unplace_cells(cells=critical_path_cells)`。`adaptive_multiplier` 仍用 `target_lut_count`（全设计）做 small/medium/large 分类——这是全设计属性。
 
@@ -1027,6 +1027,7 @@ EntityRegistry
 | `rapidwright_execute_lut_muxf_repack_strategy` | ✅ | state.timing.critical_paths |
 | `rapidwright_execute_muxf_tree_reorder_strategy` | ✅ | state.timing.critical_paths |
 | `rapidwright_optimize_cell_placement` | ✅ **新增** | `extract_registry_cells_for_inject()`（注册表 + critical paths） |
+| `rapidwright_replicate_critical_cells` | ✅ **新增** | `derive_cells_rich()`（从 `CriticalPathEntry.nodes` 构建富对象 `{name,delay,type,fanout}`；skill 端再用 design 查真实 fanout） |
 | `rapidwright_optimize_lut_input_cone` | router 校验 | pin 格式校验 |
 
 `extract_registry_cells_for_inject()` 优先取 critical path 上的 cell，再用注册表最近见过的 cell 回填，统一了 pblock 子串过滤与零过滤的不一致。
