@@ -13,6 +13,7 @@ import math
 import re
 import shutil
 import time
+from collections import deque
 
 from pathlib import Path
 
@@ -2201,6 +2202,46 @@ async def _restore_pre_chain_checkpoint(state, deps, pre_chain_path: str) -> Non
         )
 
 
+async def _probe_cell_count(deps, design_size_factor: float = 1.0) -> int | None:
+    """Count hierarchical cells via TCL. Returns None on any failure.
+
+    Used to detect whether a netlist-mutating chain step (opt_design) actually
+    changed the cell count. None is treated as 'changed' (conservative: trigger
+    re-place) so a probe failure never silently leaves stale placement.
+    """
+    try:
+        probe = await call_tool_structured_fn(
+            "vivado_run_tcl",
+            {"command": "llength [get_cells -hier -quiet]"},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=design_size_factor,
+        )
+        return int((probe.raw_text or "").strip().splitlines()[-1])
+    except Exception:
+        return None
+
+
+async def _probe_design_fully_placed(deps, design_size_factor: float = 1.0) -> bool:
+    """Is every primitive placed? Returns False on any failure.
+
+    Mirrors tool_router._session_is_fully_placed but goes through the public
+    MCP boundary (vivado_check_design_status) so nodes don't call tool_router
+    internals directly. False-on-failure is conservative: a place_design that
+    *would* be a no-op is the case we must inject an unplace for, so failing
+    open (inject) is safer than failing closed (skip).
+    """
+    try:
+        result = await call_tool_structured_fn(
+            "vivado_check_design_status", {},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=design_size_factor,
+        )
+        data = json.loads(result.raw_text) if result.raw_text else {}
+        return bool(data.get("is_placed"))
+    except Exception:
+        return False
+
+
 async def _execute_single_chain_actions(state, deps, tool_name, skill_result_data, tools_called):
     """Auto-execute chained MCP tools after a skill completes.
 
@@ -2260,6 +2301,13 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
     # Used by the Level 2 place-only check to compare against post-place timing.
     chain_baseline_wns = state.timing.latest_wns
 
+    # P1/P3 fix baseline: cell count before any chain step runs. opt_design is
+    # always the first step of its chains (no open_checkpoint precedes it), so
+    # this is the correct pre-opt_design baseline for the netlist-mutation
+    # probe. See _probe_cell_count / netlist_mutated usage below.
+    pre_chain_cell_count = await _probe_cell_count(deps, state.timing.design_size_factor)
+    netlist_mutated = False
+
     # Save pre-chain state for rollback on failure
     pre_chain_path = None
     try:
@@ -2273,7 +2321,9 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
     except Exception as e:
         logger.warning(f"[chain] Could not save pre-chain checkpoint: {e}")
 
-    for step in chain:
+    chain_queue = deque(chain)
+    while chain_queue:
+        step = chain_queue.popleft()
         target_tool = step["tool"]
         args, directive_note = resolve_chain_step_arguments(
             tool_name,
@@ -2290,6 +2340,30 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
         )
         if runtime_note:
             logger.warning(runtime_note)
+
+        # P1/P3 fix: when a prior chain step mutated the netlist (open_checkpoint
+        # of a RapidWright-modified DCP, or opt_design that changed cell count)
+        # AND this place_design would be a no-op (design fully placed), insert a
+        # place_design -unplace first so the new netlist gets a real re-place.
+        # Without this, tool_router's no-op skip leaves the new netlist carrying
+        # stale placement into route_design (run-20260712_080906 fanout: -0.465
+        # -> -1.621 regression). The synthetic unplace step reuses the entire
+        # loop body, so dispatch / dirty tracking / UNPLACE_VERIFY guard / error
+        # rollback all apply automatically.
+        if (target_tool == "vivado_place_design"
+                and str(args.get("directive", "")).lower() != "unplace"
+                and netlist_mutated
+                and await _probe_design_fully_placed(deps, state.timing.design_size_factor)):
+            logger.info(
+                f"[chain] Inserting place_design -unplace before re-place: "
+                f"netlist mutated by prior step of {tool_name} and design is "
+                f"fully placed -> place would be a no-op on stale placement"
+            )
+            chain_queue.appendleft(step)  # original re-place step runs after unplace
+            chain_queue.appendleft({"tool": "vivado_place_design",
+                                    "args": {"directive": "unplace"}})
+            netlist_mutated = False
+            continue
 
         try:
             logger.info(f"[chain] Auto-executing {target_tool} after {tool_name}")
@@ -2341,6 +2415,24 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
             # already succeeded (failures raise before this point).
             if target_tool == "vivado_open_checkpoint":
                 state.control.live_design_dirty = False
+                # open_checkpoint loads a RapidWright-written DCP (fanout split,
+                # lut-cascade flatten) whose netlist differs from the baseline.
+                # These chains only run when the skill produced real changes
+                # (empty results skip the chain earlier), so a reload here means
+                # the netlist mutated and the preserved placement is now stale.
+                netlist_mutated = True
+            elif target_tool == "vivado_opt_design":
+                state.control.live_design_dirty = True
+                # opt_design may remap in-place (cell count unchanged, placement
+                # still valid -> no re-place needed) or restructure (retarget /
+                # sweep / merge -> cell count changes -> re-place needed). Probe
+                # cell count vs the pre-chain baseline to discriminate. Probe
+                # failure is treated as mutated (conservative).
+                post_cell_count = await _probe_cell_count(deps, state.timing.design_size_factor)
+                if post_cell_count is None or pre_chain_cell_count is None:
+                    netlist_mutated = True
+                elif post_cell_count != pre_chain_cell_count:
+                    netlist_mutated = True
             elif target_tool in DESIGN_MODIFICATION_TOOLS:
                 state.control.live_design_dirty = True
 
