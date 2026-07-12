@@ -728,6 +728,8 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 - **Fanout 注入改为 overriding**（`phase_execute.py`）：原 Fanout 注入是 "non-overriding"（仅当 LLM 未提供 nets 时填充），LLM 提供幻觉网络名时注入被跳过。现当 `state.timing.high_fanout_nets` 非空时**始终 override** LLM 提供的 nets（附 `[DATA INTEGRITY]` 通知），匹配 critical_paths override 模式；为空时回退 LLM nets。
 - **Fanout 工具最小扇出守卫**（`RapidWrightMCP/rapidwright_tools.py` `MIN_FANOUT_TO_SPLIT=50`）：`optimize_fanout_batch` 对 `original_fanout < 50` 的网标记 `skipped` 不拆分（此前 fanout=2 的网也被 split_factor=2 拆分，造成 -1.220ns 回归）。skipped 网不递增 `successful_count`，故 `should_skip_chain_for_empty_result` 检测到 `successful_count==0` 时跳过 Vivado P&R chain（避免无谓空转）。
 
+- **NET NAME CONTRACT 引导补齐**（`prepare_context.py` BASE_FORMAT_GUARD + `state_space.py`）：上述持久化/热点解析/overriding 三项属防御层，但引导层仍只讲 cell 名、未提 net 名空间，LLM 仍会手抄时序报告 net 名或跨命名空间误用。现 `BASE_FORMAT_GUARD` 新增 **NET NAME CONTRACT** 段：明确 `rapidwright_execute_fanout_strategy` 的 `nets` 属 NET 名空间（≠cell 名），权威来源为 Module 4 `high_fanout_nets`/`vivado_get_cached_high_fanout_nets`，`delay_hotspots` 中 `[net]` 标签=net 名、cell 类型标签（`[LUT6]`/`[FDRE]`/`[MUXF7]`）=cell 名；声明框架已 auto-inject+override nets（附 `[DATA INTEGRITY]`），禁止从时序报告手抄（`M1[21]`≠`M1w[21]`）。同时把 Fanout 补进 STALE DATA HANDLING 与 EXECUTE addendum 的自动注入说明，对齐代码侧 `NETLIST_MODIFYING_STRATEGIES` 定义。Dashboard Module 2 `delay_hotspots` 与 Module 4 `high_fanout_nets` 追加 inline 命名空间注释。引导层与防御层对齐。
+
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
 - `vivado_run_tcl`: 2

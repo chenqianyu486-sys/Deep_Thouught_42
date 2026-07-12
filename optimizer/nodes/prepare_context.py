@@ -65,6 +65,25 @@ CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
     marked stale; re-fetch via vivado_extract_critical_path_cells or
     rapidwright_search_cells before targeting cells again.
 
+NET NAME CONTRACT — CRITICAL FOR FANOUT TOOL CALLS:
+  - rapidwright_execute_fanout_strategy takes a `nets` argument of NET names
+    (e.g. 'M1w[21]') - a DIFFERENT name-space from cell names. Never feed
+    hierarchical cell names to it, and never feed net names to cell-targeting
+    tools.
+  - Authoritative net-name source: Module 4 `high_fanout_nets` in the Dashboard
+    (or vivado_get_cached_high_fanout_nets). In Module 2 `delay_hotspots`,
+    entries tagged `[net]` are NET names; entries tagged with a cell type
+    (`[LUT6]`, `[FDRE]`, `[MUXF7]`...) are cell names - mind the distinction.
+  - The framework AUTO-INJECTS and OVERRIDES the `nets` argument from verified
+    state data (vivado_get_critical_high_fanout_nets, resolved to parent net
+    names). Simply call the tool directly. If your supplied nets are replaced
+    you receive a [DATA INTEGRITY] notice - expected, NOT an error. If instead
+    you get a warning that no verified nets are available, fetch ONCE with
+    vivado_get_critical_high_fanout_nets(min_fanout=50) then retry.
+  - NEVER hand-copy net names from timing-report text: Vivado drops the 'w'
+    suffix on LUT/MUXF output nets (report shows 'M1[21]' but the netlist net
+    is 'M1w[21]'), so report-copied names are wrong and cause regressions.
+
 DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
   The competition requires STRICT design logic equivalence. Any optimization must preserve
   functional correctness. Use validation tools to verify consistency after modifications.
@@ -101,6 +120,10 @@ STALE DATA HANDLING — CRITICAL:
     auto-injected as verified state data for pblock/combinational execution
     tools. When your provided cells/paths are replaced you receive a
     [DATA INTEGRITY] notice — that is expected, not an error.
+  - High-fanout nets: auto-refreshed at ANALYZE entry when stale, and
+    auto-injected+overridden as verified state data for
+    rapidwright_execute_fanout_strategy (see NET NAME CONTRACT). You do NOT
+    need to fetch nets manually for the fanout tool.
   When you MUST refresh manually:
   - Before a cell-targeting operation whose critical paths still show `[stale]`
     AND were not auto-refreshed above: call vivado_extract_critical_path_cells
@@ -156,6 +179,13 @@ AUTO-INJECTED STRATEGY DATA (DO NOT extract before calling execution tools):
   wastes rounds and hits the no-progress limit. If the Dashboard shows
   critical_paths as [stale], refresh ONCE with vivado_extract_critical_path_cells(num_paths=10),
   then immediately call the execution tool.
+  For Fanout strategy, the `nets` argument is automatically injected AND
+  overridden from verified high_fanout_nets state data (parent net names) -
+  call rapidwright_execute_fanout_strategy directly and do NOT hand-copy net
+  names from timing reports (they drop the 'w' suffix). If your supplied nets
+  are replaced you receive a [DATA INTEGRITY] notice; this is expected, not an
+  error. If no verified nets are available, fetch ONCE with
+  vivado_get_critical_high_fanout_nets(min_fanout=50) then retry.
 
 PBLOCK AUTO-CHAIN BEHAVIOR (prefer LOCAL pblock, auto-fallback when too narrow):
   rapidwright_execute_pblock_strategy auto-chains: unplace_cells(cells=critical_path_cells) →

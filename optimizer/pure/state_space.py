@@ -740,6 +740,7 @@ def format_state_space_for_llm(
                 if p.delay_hotspots:
                     if phase in (LoopPhase.ANALYZE, LoopPhase.SELECT_STRATEGY, None):
                         lines.append(f"      delay_hotspots:  # top contributors")
+                        lines.append(f"      # [net] tag = NET name (fanout tool only); cell-type tags [LUT6]/[FDRE]/[MUXF7] = cell name (cell tools only)")
                         for h in p.delay_hotspots:
                             pct_str = f" ({h['pct_of_path']:.0%})" if h.get('pct_of_path') is not None else ""
                             loc_str = f" @ {h['location']}" if h.get('location') else ""
@@ -906,7 +907,7 @@ def format_state_space_for_llm(
         if nq.cell_type_summary:
             lines.append(f"  top_cell_types: {nq.cell_type_summary}{_tag('design_info')}")
         if nq.high_fanout_nets:
-            lines.append(f"  high_fanout_nets:{_tag('high_fanout_nets')}  # {len(nq.high_fanout_nets)} nets")
+            lines.append(f"  high_fanout_nets:{_tag('high_fanout_nets')}  # {len(nq.high_fanout_nets)} NET names (not cell names); auto-injected into rapidwright_execute_fanout_strategy")
             for net in nq.high_fanout_nets[:10]:
                 rep = " (replicated)" if net.is_replicated else ""
                 lines.append(f"    - {net.net_name}: fanout={net.fanout_count}{rep}")
