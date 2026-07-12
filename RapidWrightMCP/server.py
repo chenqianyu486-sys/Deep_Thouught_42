@@ -776,7 +776,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "description": "opt_design directive (Explore, ExploreWithAreaDuplication, ExploreSequentialArea, RuntimeOptimized, AddRemap)",
+                        "description": "opt_design directive (Explore, ExploreArea, ExploreWithRemap, ExploreSequentialArea, RuntimeOptimized, RQS, AddRemap)",
                         "default": "Explore"
                     },
                     "retarget": {
@@ -836,7 +836,7 @@ async def list_tools() -> list[Tool]:
                     },
                     "directive": {
                         "type": "string",
-                        "description": "opt_design directive (Explore, AddRemap, ExploreWithAreaDuplication)",
+                        "description": "opt_design directive (Explore, AddRemap, ExploreArea, ExploreWithRemap)",
                         "default": "Explore"
                     },
                     "retarget": {

@@ -66,7 +66,7 @@ STRATEGIES = {
         ],
     },
     "OptDesign": {
-        "name": "Logic Optimization (opt_design) (can try ExploreSequentialArea for sequential area optimization, DataSpreadMem for memory spreading)",
+        "name": "Logic Optimization (opt_design) (can try ExploreSequentialArea for sequential area optimization, ExploreArea for area reduction)",
         "trigger": "Logic-depth limited design (>70% logic delay), "
                    "6-7 LUT levels on critical paths",
         "ff_prerequisite": "",

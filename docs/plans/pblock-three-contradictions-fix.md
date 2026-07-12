@@ -63,8 +63,8 @@ unplace_cells [关键cell]  →  create_and_apply_pblock(只约束关键cell)
 
 **改动**：
 1. **VivadoMCP 新增 `unplace_cells` 工具**（[vivado_mcp_server.py](VivadoMCP/vivado_mcp_server.py)）：
-   - 参数 `cells: list[str]`，构造 `unplace_cells [get_cells [list <tcl_quote每个cell>]]`
-   - `unplace_cells` 不在 [BLOCKED_TCL_COMMANDS](VivadoMCP/tcl_security.py#L16)，已放行
+   - 参数 `cells: list[str]`，构造 `unplace_cell [get_cells [list <tcl_quote每个cell>]]`（Vivado 命令为单数 `unplace_cell`）
+   - `unplace_cell` 不在 [BLOCKED_TCL_COMMANDS](VivadoMCP/tcl_security.py#L16)，已放行
    - 加 list_tools 条目 + 错误检测（`^ERROR: \[`）
 2. **`create_and_apply_pblock` 新增 `cells: list[str]` 参数**（[vivado_mcp_server.py:1518](VivadoMCP/vivado_mcp_server.py#L1518)）：
    - 若提供且非空：`add_cells_to_pblock pb [get_cells [list <tcl_quote>]]`（pblock 只约束关键 cell）

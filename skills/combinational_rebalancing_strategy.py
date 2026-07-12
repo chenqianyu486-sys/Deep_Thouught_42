@@ -26,7 +26,7 @@ from skills.strategy_plan import StrategyPlan, StrategyStep
 _COMB_TYPES = {"LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6",
                "MUXF7", "MUXF8", "MUXF9", "CARRY4", "CARRY8"}
 
-ALLOWED_DIRECTIVES = ["Default", "Explore", "ExploreWithAreaDuplication", "AddRemap"]
+ALLOWED_DIRECTIVES = ["Default", "Explore", "ExploreArea", "ExploreWithRemap", "AddRemap"]
 
 
 def _is_comb_cell(cell) -> bool:

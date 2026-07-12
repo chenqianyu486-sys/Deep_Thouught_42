@@ -64,6 +64,13 @@ _last_dcp_path: Optional[str] = None
 # PhysOpt safety guard: block retiming directives that cause functional errors
 PHYSOPT_BLOCKED_DIRECTIVES: frozenset[str] = frozenset({"AlternateFlowWithRetiming", "AddRetime"})
 PHYSOPT_BLOCKED_BOOL_OPTIONS: frozenset[str] = frozenset({"retime", "interconnect_retime", "insert_negative_edge_ffs", "restruct_opt"})
+# Audited against the Vivado 2025.1 phys_opt_design man page, which enumerates 10
+# -directive values (Explore, ExploreWithHoldFix, ExploreWithAggressiveHoldFix,
+# AggressiveExplore, AlternateReplication, AggressiveFanoutOpt,
+# AlternateFlowWithRetiming, AddRetime, RuntimeOptimized, RQS). "Default" is not
+# explicitly listed but is valid (universal across Vivado -directive commands,
+# confirmed in libxv_common.so). AlternateFlowWithRetiming and AddRetime are in
+# the BLOCKED set above (retiming breaks functional equivalence).
 PHYSOPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "AggressiveExplore", "RuntimeOptimized",
     "ExploreWithHoldFix", "ExploreWithAggressiveHoldFix",
@@ -74,22 +81,28 @@ PHYSOPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 OPT_BLOCKED_DIRECTIVES: frozenset[str] = frozenset({"AddRetime"})
 # opt_design safe directives whitelist (consistent with PHYSOPT_SAFE_DIRECTIVES).
 # Any directive not in this set is rejected - defense in depth.
+# Audited against the Vivado 2025.1 opt_design man page, which enumerates 7
+# supported -directive values (Explore, ExploreArea, ExploreWithRemap,
+# ExploreSequentialArea, RuntimeOptimized, RQS, Default). AddRemap is valid per
+# Vivado binary (libxv_implflow.so) though absent from the man page. The former
+# entries ExploreWithAreaDuplication / NoBramOptimization / NoDspOptimization /
+# DataSpreadMem were NOT in the man page or binary — removed (they would be
+# rejected by Vivado with Constraints 18-641).
 OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
-    "Default", "Explore", "ExploreWithAreaDuplication",
-    "ExploreSequentialArea", "NoBramOptimization",
-    "NoDspOptimization", "RuntimeOptimized", "DataSpreadMem",
+    "Default", "Explore", "ExploreArea", "ExploreWithRemap",
+    "ExploreSequentialArea", "RuntimeOptimized", "RQS",
     "AddRemap",
 })
 
 # place_design safe directives whitelist (consistent with OPT_SAFE_DIRECTIVES).
 # Any directive not in this set is rejected for defense-in-depth.
-# Explicitly excludes retiming-related directives (AddRetime, Performance_Retiming, etc.)
 #
-# Audited against the Vivado 2025.1 place_design man page, which enumerates 23
-# supported -directive values; only those are whitelisted. All Vivado implementation
-# STRATEGY preset names (Performance_*, Area_*, Flow*, Congestion_SpreadLogic_*,
+# Audited against the Vivado 2025.1 place_design man page, which enumerates 22
+# supported -directive values; all are whitelisted (none perform retiming —
+# place_design has no retiming directives). All Vivado implementation STRATEGY
+# preset names (Performance_*, Area_*, Flow*, Congestion_SpreadLogic_*,
 # SpreadLogic_*, LateBlockPlacement, and the WLBlockPlacement typo of
-# WLDrivenBlockPlacement) were removed: they are `set_property strategy` values,
+# WLDrivenBlockPlacement) were excluded: they are `set_property strategy` values,
 # NOT valid place_design -directive values, and are rejected by Vivado 2025.1 with
 # Constraints 18-641 (run-20260711_015650: NetDelay_high; run-20260711_164134:
 # Congestion_Explore). The handler returns a hard error (not a silent
@@ -98,22 +111,26 @@ OPT_SAFE_DIRECTIVES: frozenset[str] = frozenset({
 PLACE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "ExtraTimingOpt", "ExtraPostPlacementOpt",
     "AltSpreadLogic_high", "AltSpreadLogic_medium", "AltSpreadLogic_low",
-    "EarlyBlockPlacement", "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "EarlyBlockPlacement", "WLDrivenBlockPlacement",
+    "ExtraNetDelay_high", "ExtraNetDelay_low",
+    "SSI_SpreadLogic_high", "SSI_SpreadLogic_low",
+    "SSI_SpreadSLLs", "SSI_BalanceSLLs", "SSI_BalanceSLRs", "SSI_HighUtilSLRs",
+    "RQS", "Auto_1", "Auto_2", "Auto_3",
     "Quick", "RuntimeOptimized",
 })
 
 # route_design safe directives whitelist. Audited against the Vivado 2025.1
-# route_design man page, which enumerates 10 supported -directive values; only
-# those are whitelisted. All Vivado implementation STRATEGY preset names
+# route_design man page, which enumerates 10 supported -directive values; all
+# are whitelisted. All Vivado implementation STRATEGY preset names
 # (Performance_*, Area_*, Flow*, SSI_*, AlternateRoutability, LowerDelayCost) were
-# removed: they are `set_property strategy` values, NOT valid route_design
+# excluded: they are `set_property strategy` values, NOT valid route_design
 # -directive values, rejected by Vivado 2025.1 with Constraints 18-641
-# (run-20260711_015650: Congestion_Explore). The man page also lists
-# MoreGlobalIterations, AdvancedSkewModeling, and AlternateCLBRouting as valid;
-# not whitelisted only because no strategy uses them yet - add when needed.
+# (run-20260711_015650: Congestion_Explore).
 ROUTE_SAFE_DIRECTIVES: frozenset[str] = frozenset({
     "Default", "Explore", "AggressiveExplore", "HigherDelayCost",
-    "NoTimingRelaxation", "RuntimeOptimized", "Quick",
+    "NoTimingRelaxation", "MoreGlobalIterations",
+    "AdvancedSkewModeling", "AlternateCLBRouting",
+    "RuntimeOptimized", "Quick",
 })
 
 
@@ -1917,7 +1934,7 @@ async def list_tools():
             description="Unplace specific cells (local unplace) without disturbing the rest of the design. "
                         "Used by the PBLOCK auto-chain to unplace only critical-path cells before re-placing "
                         "them under a pblock, keeping other cells' placement/routing intact (incremental P&R). "
-                        "Equivalent to Vivado `unplace_cells [get_cells [list <cells>]]`. "
+                        "Equivalent to Vivado `unplace_cell [get_cells [list <cells>]]`. "
                         "Cell names must be canonical hierarchical names (from the cell registry).",
             inputSchema={
                 "type": "object",
@@ -1956,7 +1973,7 @@ async def list_tools():
         ),
         Tool(
             name="run_tcl",
-            description="Execute a Tcl command in Vivado. Use ONLY for strategy-specific commands (e.g., detailed path reporting). Do NOT use for ad-hoc timing analysis — use report_timing_summary instead. RECOMMENDED reports via run_tcl: 'report_clock_interaction' (CDC analysis), 'report_critical_paths' (path decomposition), 'report_pipeline_analysis' (pipeline bottlenecks), 'report_design_analysis -congestion' (detailed congestion), 'report_methodology' (methodology checks). Use the dedicated tools for 'report_qor_suggestions' and 'report_high_fanout_nets' instead of run_tcl.",
+            description="Execute a Tcl command in Vivado. Use ONLY for strategy-specific commands (e.g., detailed path reporting). Do NOT use for ad-hoc timing analysis — use report_timing_summary instead. RECOMMENDED reports via run_tcl: 'report_clock_interaction' (CDC analysis), 'report_timing -max_paths N -return_string' (path decomposition), 'report_pipeline_analysis' (pipeline bottlenecks), 'report_design_analysis -congestion' (detailed congestion), 'report_methodology' (methodology checks). Use the dedicated tools for 'report_qor_suggestions' and 'report_high_fanout_nets' instead of run_tcl.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -2392,12 +2409,11 @@ after this tool via SKILL_CHAIN_ACTIONS.
 Directives:
   - Default: Default optimization
   - Explore (default): Balanced optimization for UltraScale+
-  - ExploreWithAreaDuplication: Area-focused optimization
+  - ExploreArea: Area-focused optimization (reduces LUT count)
+  - ExploreWithRemap: Aggressive LUT remapping to compress logic levels
   - ExploreSequentialArea: Area-focused with sequential awareness
-  - NoBramOptimization: Disable BRAM optimization
-  - NoDspOptimization: Disable DSP optimization
   - RuntimeOptimized: Fast optimization for large designs
-  - DataSpreadMem: Optimize memory data spreading
+  - RQS: Use report_qor_suggestions-recommended directive
   - AddRemap: Aggressive LUT remapping (may reduce logic levels)
 
 BLOCKED directive (causes functional errors - DO NOT use):
@@ -2409,7 +2425,7 @@ All directives in the whitelist above are safe for functional correctness.""",
                 "properties": {
                     "directive": {
                         "type": "string",
-                        "enum": ["Default", "Explore", "ExploreWithAreaDuplication", "ExploreSequentialArea", "NoBramOptimization", "NoDspOptimization", "RuntimeOptimized", "DataSpreadMem", "AddRemap"],
+                        "enum": ["Default", "Explore", "ExploreArea", "ExploreWithRemap", "ExploreSequentialArea", "RuntimeOptimized", "RQS", "AddRemap"],
                         "default": "Explore",
                         "description": "opt_design directive. Explore: balanced. AddRemap: aggressive LUT remapping."
                     },
@@ -2654,7 +2670,10 @@ async def call_tool(name: str, arguments: dict):
             if not isinstance(cells, list) or not cells:
                 return [TextContent(type="text", text=json.dumps(
                     {"error": "unplace_cells requires a non-empty 'cells' list"}))]
-            # Build: unplace_cells [get_cells [list {c1} {c2} ...]]
+            # Build: unplace_cell [get_cells [list {c1} {c2} ...]]
+            # NOTE: Vivado command is singular "unplace_cell" (not "unplace_cells").
+            # The MCP tool name keeps plural for readability but the TCL command
+            # sent to Vivado must be singular (man page: unplace_cell).
             # tcl_quote brace-wraps each name; names containing '}' raise to
             # preserve brace balance (injection-safe).
             try:
@@ -2663,7 +2682,7 @@ async def call_tool(name: str, arguments: dict):
                 return [TextContent(type="text", text=json.dumps(
                     {"error": f"unplace_cells: unsafe cell name: {e}"}
                 ))]
-            cmd = f"unplace_cells [get_cells [list {quoted}]]"
+            cmd = f"unplace_cell [get_cells [list {quoted}]]"
             output = run_tcl_command(cmd, timeout=timeout)
             if re.search(r'^ERROR: \[', output, re.MULTILINE):
                 logger.error(f"unplace_cells failed: {output[:300]}")
@@ -3089,6 +3108,25 @@ async def call_tool(name: str, arguments: dict):
                 cmd += " -retarget"
 
             result_text = run_tcl_command(cmd, timeout=timeout)
+
+            # If Vivado rejects the directive as unrecognized (whitelist/version
+            # drift), fail the strategy cleanly — same pattern as place_design/
+            # route_design handlers. Without this, a rejected directive only
+            # matches the generic ^ERROR check below, returning a vague error
+            # instead of a clear directive-rejection message.
+            if directive and _is_unrecognized_directive_error(result_text):
+                logger.error(
+                    f"opt_design directive '{directive}' rejected by Vivado (18-641); "
+                    f"aborting strategy instead of silent fallback"
+                )
+                return [TextContent(type="text", text=json.dumps({
+                    "error": (
+                        f"opt_design directive '{directive}' was not recognized by "
+                        f"Vivado (Constraints 18-641). Strategy aborted to avoid a silent "
+                        f"default-optimization regression. Pick a valid directive from "
+                        f"the opt_design safe list or update OPT_SAFE_DIRECTIVES."
+                    )
+                }))]
 
             # Detect Vivado errors — return JSON error so chain execution can detect failure
             if re.search(r'^ERROR: \[', result_text, re.MULTILINE):

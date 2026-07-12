@@ -2499,7 +2499,7 @@ def execute_opt_design_strategy(
     """Generate opt_design execution plan for Vivado.
 
     Args:
-        directive: opt_design directive (Explore, ExploreWithAreaDuplication, AddRemap, etc.)
+        directive: opt_design directive (Explore, ExploreArea, ExploreWithRemap, AddRemap, etc.)
         retarget: Whether to retarget logic to equivalent primitives
 
     Returns:

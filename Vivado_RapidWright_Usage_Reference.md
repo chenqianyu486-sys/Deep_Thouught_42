@@ -206,28 +206,27 @@ synth_design [-top <arg>] [-part <arg>] [-include_dirs <args>]
 
 **完整语法**:
 ```
-opt_design [-retarget] [-propconst] [-sweep] [-rm_dont_touch] 
-  [-bufg] [-resynth] [-merge_equivalent] [-remap] [-bram_enable_opt] 
-  [-bram_power_opt] [-muxf_remap] [-carry_remap] [-force_remap] 
-  [-shreg_min_size <arg>] [-dsp_register_opt] [-bram_register_opt] 
-  [-uram_register_opt] [-dsp_remap] [-lut_comb_red] [-fanout_opt] 
-  [-hold_fix] [-sll_reg_hold_fix] [-tns_cleanup] [-directive <arg>]
+opt_design [-retarget] [-propconst] [-sweep] [-bram_power_opt]
+  [-remap] [-aggressive_remap] [-resynth_area] [-resynth_seq_area]
+  [-resynth_remap] [-directive <arg>] [-muxf_remap]
+  [-hier_fanout_limit <arg>] [-bufg_opt] [-mbufg_opt]
+  [-shift_register_opt] [-dsp_register_opt] [-srl_remap_modes <args>]
+  [-control_set_merge] [-control_set_opt] [-merge_equivalent_drivers]
+  [-carry_remap] [-debug_log] [-property_opt_only] [-quiet] [-verbose]
 ```
 
 **常用 directive**:
 
 | Directive | 用途 |
 |---|---|
-| `Default` | 默认优化 |
-| `Explore` | 探索性优化（多算法） |
+| `Default` | 默认优化（retarget、propconst、sweep、bram_power_opt 等） |
+| `Explore` | 探索性优化，运行额外算法以改善 QoR |
+| `ExploreArea` | Explore + resynth_area，减少 LUT 数量 |
+| `ExploreWithRemap` | Explore + aggressive_remap，压缩逻辑级数 |
+| `ExploreSequentialArea` | Explore + resynth_seq_area，减少寄存器和组合逻辑 |
+| `RuntimeOptimized` | 无 bram_power_opt，最快运行时间 |
+| `RQS` | 由 QoR 建议文件驱动的策略选择 |
 | `AddRemap` | LUT 重新映射 |
-| `AreaMultThresholdDSP` | 面积优化，DSP 阈值 |
-| `SSI` | SSI 堆叠硅互连优化 |
-| `PowerOpt` | 功耗优化 |
-| `NoBramPowerOpt` | 禁用 BRAM 功耗优化 |
-| `FlowQuickOptimization` | 快速优化 |
-| `RuntimeOptimized` | 运行时间优化 |
-| `LogicCompaction` | 逻辑压缩 |
 
 ### 4.2 实现命令
 
@@ -237,62 +236,46 @@ opt_design [-retarget] [-propconst] [-sweep] [-rm_dont_touch]
 
 **完整语法**:
 ```
-place_design [-directive <arg>] [-no_lc] [-no_srlextract] 
-  [-no_timing_driven] [-post_place_opt] [-incremental] [-unplace] 
-  [-effort_level <arg>] [-timing_summary] [-quiet] [-verbose]
+place_design [-directive <arg>] [-no_timing_driven] [-timing_summary]
+  [-unplace] [-post_place_opt] [-no_psip] [-clock_vtree_type <arg>]
+  [-no_bufg_opt] [-ultrathreads] [-quiet] [-verbose]
 ```
 
 **关键参数**:
 - `-directive`: 布局策略（见下方策略表）
-- `-post_place_opt`: 布局后立即运行 opt_design
+- `-post_place_opt`: 布局后优化关键路径
 - `-unplace`: 仅取消布局，不进行新布局
 - `-no_timing_driven`: 禁用时序驱动（拥塞场景可选）
-- `-effort_level <low|medium|high>`: 努力级别
+- `-no_psip`: 禁用布局器中物理综合（PSIP）
+- `-no_bufg_opt`: 禁用全局缓冲插入
 
 **常用 directive 详解**:
 
 | Directive | 适用场景 | 关键算法 |
 |---|---|---|
-| `Default` | 通用 | 平衡速度和 QoR |
-| `Explore` | 时序紧张 | 多算法迭代（增成本） |
-| `ExtraTimingOpt` | 严重时序违例 | 额外时序优化 |
-| `WLBlockPlacement` | 拥塞 | 线长块布局 |
-| `ExtraPostPlacementOpt` | 精细优化 | 布局后增强优化 |
-| `AddRetime` | 性能提升 | 启用 retiming |
-| `AltSpreadLogic_high` | 拥塞 | 高密度逻辑展开 |
-| `AltSpreadLogic_medium` | 中等拥塞 | 中等逻辑展开 |
-| `AltSpreadLogic_low` | 轻拥塞 | 轻度逻辑展开 |
-| `SpreadLogic_high` | 严重拥塞 | 高扇出逻辑分散 |
-| `SpreadLogic_medium` | 中等拥塞 | 中扇出逻辑分散 |
-| `SpreadLogic_low` | 轻拥塞 | 轻扇出逻辑分散 |
-| `EarlyBlockPlacement` | 模块化设计 | 早期块布局 |
-| `LateBlockPlacement` | 模块化设计 | 后期块布局 |
-| `NetDelay_high` | 长距离信号 | 高网络延迟优化 |
-| `NetDelay_medium` | 中距离信号 | 中网络延迟优化 |
-| `NetDelay_low` | 短距离信号 | 低网络延迟优化 |
-| `SSI_SpreadLogic_high` | SSI 器件 | 跨 SLR 逻辑分散 |
-| `SSI_SpreadLogic_low` | SSI 器件 | 跨 SLR 轻度分散 |
-| `Quick` | 快速迭代 | 最短时间 |
-| `RuntimeOptimized` | 时间敏感 | 优化运行时间 |
-| `FlowQuick` | 流程快速 | 跳过部分优化 |
-| `FlowRuntimeOptimized` | 流程时间优化 | 平衡时间 |
-| `Congestion_Default` | 拥塞优先 | 拥塞感知 |
-| `Congestion_SpreadLogic_high` | 严重拥塞 | 高拥塞展开 |
-| `Congestion_SpreadLogic_medium` | 中拥塞 | 中等展开 |
-| `Congestion_SpreadLogic_low` | 轻拥塞 | 轻度展开 |
-| `Area_Explore` | 面积优化 | 面积探索 |
-| `Area_ExploreWithRemap` | 面积+重映射 | 增强面积优化 |
-| `Area_ExploreSequentialArea` | 顺序逻辑面积 | 优化时序电路 |
-| `Performance_Explore` | 性能探索 | 性能优化多算法 |
-| `Performance_ExplorePostRoute` | 布线后性能 | 后布线性能调优 |
-| `Performance_ExtraTimingOpt` | 极端时序 | 极限时序优化 |
-| `Performance_NetDelay_high` | 性能+高延迟 | 性能+网络延迟 |
-| `Performance_NetDelay_medium` | 性能+中延迟 | 性能+中网络延迟 |
-| `Performance_NetDelay_low` | 性能+低延迟 | 性能+低网络延迟 |
-| `Performance_Retiming` | 性能+retiming | 性能+寄存器重定时 |
-| `Performance_RefinePlacement` | 性能精调 | 精细布局 |
-| `Performance_WLBlockPlacement` | 性能+块布局 | 性能+块布局 |
-| `Phys_Opt` | 物理优化 | 启用物理优化 |
+| `Default` | 通用 | 默认布局 |
+| `Explore` | 时序紧张 | 增强细节布局和后布局优化 |
+| `EarlyBlockPlacement` | 模块化设计 | RAM/DSP 早期时序驱动布局 |
+| `WLDrivenBlockPlacement` | 拥塞 | RAM/DSP 线长驱动布局 |
+| `ExtraNetDelay_high` | 高扇出长距离 | 最高悲观度网络延迟估计 |
+| `ExtraNetDelay_low` | 低扇出短距离 | 最低悲观度网络延迟估计 |
+| `AltSpreadLogic_high` | 严重拥塞 | 最高程度逻辑展开 |
+| `AltSpreadLogic_medium` | 中等拥塞 | 中等程度逻辑展开 |
+| `AltSpreadLogic_low` | 轻拥塞 | 最低程度逻辑展开 |
+| `ExtraPostPlacementOpt` | 精细优化 | 增强布局后优化 |
+| `ExtraTimingOpt` | 严重时序违例 | 备选时序驱动算法 |
+| `SSI_SpreadLogic_high` | SSI 器件 | 跨 SLR 最高程度逻辑分散 |
+| `SSI_SpreadLogic_low` | SSI 器件 | 跨 SLR 最低程度逻辑分散 |
+| `SSI_SpreadSLLs` | SSI 器件 | 跨 SLR 分区，为高连接区域分配额外空间 |
+| `SSI_BalanceSLLs` | SSI 器件 | 跨 SLR 均衡 SLL |
+| `SSI_BalanceSLRs` | SSI 器件 | 均衡各 SLR 单元数 |
+| `SSI_HighUtilSLRs` | SSI 器件 | 各 SLR 内紧凑布局 |
+| `RuntimeOptimized` | 时间敏感 | 最少迭代，更快运行时间 |
+| `Quick` | 快速迭代 | 最快运行时间，非时序驱动 |
+| `RQS` | 策略建议 | 由 QoR 建议文件驱动的策略选择 |
+| `Auto_1` | ML 驱动 | 机器学习最佳预测指令 |
+| `Auto_2` | ML 驱动 | 机器学习次佳预测指令 |
+| `Auto_3` | ML 驱动 | 机器学习第三佳预测指令 |
 
 #### `route_design`
 
@@ -300,52 +283,37 @@ place_design [-directive <arg>] [-no_lc] [-no_srlextract]
 
 **完整语法**:
 ```
-route_design [-directive <arg>] [-no_timing_driven] [-no_power] 
-  [-preserve] [-incremental] [-unroute] [-nets <args>] 
-  [-physical_direct_route] [-effort_level <arg>] [-tns_cleanup] 
-  [-ultrascale_plus] [-delay] [-auto_delay] [-topology]
+route_design [-unroute <arg>] [-release_memory] [-nets <args>]
+  [-physical_nets] [-pins <args>] [-directive <arg>] [-tns_cleanup]
+  [-no_timing_driven] [-preserve] [-delay] [-auto_delay]
+  [-max_delay <arg>] [-min_delay <arg>] [-timing_summary] [-finalize]
+  [-ultrathreads] [-eco] [-no_psir] [-quiet] [-verbose]
 ```
 
 **关键参数**:
-- `-directive`: 布线策略
+- `-directive`: 布线策略（见下方策略表）
 - `-no_timing_driven`: 禁用时序驱动
 - `-preserve`: 保留已有布线
-- `-unroute`: 仅取消布线
+- `-unroute`: 取消布线
 - `-nets`: 仅对指定网络布线
 - `-tns_cleanup`: TNS 清理
+- `-finalize`: 完成部分布线的连接
+- `-eco`: 增量 ECO 模式布线
 
 **常用 directive**:
 
 | Directive | 适用场景 |
 |---|---|
-| `Default` | 默认 |
-| `Explore` | 拥塞严重时的多算法 |
-| `AggressiveExplore` | 极度拥塞，激进探索 |
-| `HigherDelayCost` | 优化高网络延迟（长距离） |
-| `LowerDelayCost` | 优化低网络延迟（短距离） |
-| `NoTimingRelaxation` | 不放宽时序约束 |
-| `RuntimeOptimized` | 优化运行时间 |
-| `Quick` | 最短时间 |
-| `FlowQuick` | 流程快速 |
-| `FlowRuntimeOptimized` | 流程时间优化 |
-| `Performance_Explore` | 性能探索 |
-| `Performance_NetDelay_high` | 性能+高延迟 |
-| `Performance_NetDelay_medium` | 性能+中延迟 |
-| `Performance_NetDelay_low` | 性能+低延迟 |
-| `Performance_RefinePlacement` | 性能精调 |
-| `Performance_WLBlockPlacement` | 性能+块布局 |
-| `Conggestion_Default` | 拥塞优先 |
-| `Congestion_Explore` | 拥塞探索 |
-| `Congestion_NetDelay_high` | 拥塞+高延迟 |
-| `Congestion_NetDelay_medium` | 拥塞+中延迟 |
-| `Congestion_NetDelay_low` | 拥塞+低延迟 |
-| `SSI_Explore` | SSI 器件探索 |
-| `SSI_Quick` | SSI 器件快速 |
-| `Power_Default` | 功耗优化 |
-| `Power_Explore` | 功耗探索 |
-| `Area_Default` | 面积优化 |
-| `Area_Explore` | 面积探索 |
-| `AlternateRoutability` | 可布线性优先 |
+| `Default` | 默认布线 |
+| `Explore` | 初始布线后探索不同关键路径布线 |
+| `AggressiveExplore` | 极度拥塞，更激进的关键路径探索（运行时间显著增加） |
+| `NoTimingRelaxation` | 不放宽时序约束，运行更长时间以达标 |
+| `MoreGlobalIterations` | 全程使用详细时序分析，运行更多全局迭代 |
+| `HigherDelayCost` | 延迟优先于迭代次数，用运行时间换取性能 |
+| `AdvancedSkewModeling` | 高偏斜时钟网络，使用更精确的偏斜模型 |
+| `AlternateCLBRouting` | UltraScale 器件布通困难，使用备选布线算法 |
+| `RuntimeOptimized` | 最少迭代，更快运行时间 |
+| `Quick` | 最快运行时间，非时序驱动 |
 
 #### `phys_opt_design`
 
@@ -353,13 +321,14 @@ route_design [-directive <arg>] [-no_timing_driven] [-no_power]
 
 **完整语法**:
 ```
-phys_opt_design [-fanout_opt] [-placement_opt] [-routing_opt] 
-  [-slr_crossing_opt] [-rewire] [-insert_negative_edge_ffs] 
-  [-critical_cell_opt] [-dsp_register_opt] [-bram_register_opt] 
-  [-uram_register_opt] [-bram_enable_opt] [-shift_register_opt] 
-  [-hold_fix] [-aggressive_hold_fix] [-retime] 
-  [-force_replication_on_nets <args>] [-directive <arg>] 
-  [-critical_pin_opt] [-clock_opt] [-path_groups <args>] 
+phys_opt_design [-fanout_opt] [-placement_opt] [-memory_rewire_opt]
+  [-routing_opt] [-slr_crossing_opt] [-restruct_opt]
+  [-insert_negative_edge_ffs] [-interconnect_retime] [-lut_opt]
+  [-casc_opt] [-critical_cell_opt] [-dsp_register_opt]
+  [-bram_register_opt] [-uram_register_opt] [-bram_enable_opt]
+  [-shift_register_opt] [-hold_fix] [-aggressive_hold_fix] [-retime]
+  [-force_replication_on_nets <args>] [-directive <arg>]
+  [-critical_pin_opt] [-clock_opt] [-path_groups <args>]
   [-tns_cleanup] [-sll_reg_hold_fix] [-quiet] [-verbose]
 ```
 
@@ -371,7 +340,7 @@ phys_opt_design [-fanout_opt] [-placement_opt] [-routing_opt]
 | `-placement_opt` | 重新布局优化 | 时序违例 |
 | `-routing_opt` | 重新布线优化 | 拥塞 |
 | `-slr_crossing_opt` | SLR 交叉优化 | 跨 SLR 路径 |
-| `-rewire` | 重新连接逻辑 | 简化逻辑 |
+| `-memory_rewire_opt` | BRAM/URAM 关键信号引脚重新连接 | Versal 器件 BRAM/URAM 时序 |
 | `-insert_negative_edge_ffs` | 插入负沿触发器 | 时序优化 |
 | `-critical_cell_opt` | 关键路径单元优化 | 关键路径 |
 | `-dsp_register_opt` | DSP 寄存器优化 | DSP 时序 |
@@ -394,18 +363,16 @@ phys_opt_design [-fanout_opt] [-placement_opt] [-routing_opt]
 | Directive | 用途 |
 |---|---|
 | `Default` | 默认物理优化 |
-| `Explore` | 探索性物理优化 |
-| `AggressiveExplore` | 激进物理优化 |
-| `AddRetime` | 物理优化+retiming |
-| `AlternateReplication` | 替代复制策略 |
-| `Performance_Explore` | 性能物理优化 |
-| `Performance_AggressiveExplore` | 激进性能物理优化 |
-| `FlowQuick` | 快速物理优化 |
-| `RuntimeOptimized` | 运行时间优化 |
-| `Area_Explore` | 面积物理优化 |
-| `Power_Explore` | 功耗物理优化 |
-| `Congestion_Default` | 拥塞物理优化 |
-| `AlternateRoutability` | 可布线性优先 |
+| `Explore` | 多算法多轮探索，包括高扇出复制 |
+| `ExploreWithHoldFix` | 多算法探索 + hold 违例修复 |
+| `ExploreWithAggressiveHoldFix` | 多算法探索 + 激进 hold 违例修复 |
+| `AggressiveExplore` | 更激进的探索算法 |
+| `AlternateReplication` | 备选关键单元复制策略 |
+| `AggressiveFanoutOpt` | 更激进的高扇出优化 |
+| `AlternateFlowWithRetiming` | 激进复制 + DSP/BRAM 优化 + retiming [BLOCKED: retiming] |
+| `AddRetime` | 默认流程 + retiming [BLOCKED: retiming] |
+| `RuntimeOptimized` | 减少优化，最短运行时间（fanout_opt + critical_cell_opt + placement_opt + bram_enable_opt） |
+| `RQS` | 由 QoR 建议文件驱动的策略选择 |
 
 ### 4.3 时序报告命令
 
@@ -516,7 +483,6 @@ get_property STATS.CONGESTION_LEVEL [get_runs impl_1]
 | `report_methodology` | 方法学检查 | Vivado 建议 |
 | `report_qor_suggestions` | QoR 建议 | 改进策略 |
 | `report_high_fanout_nets` | 高扇出网络 | 扇出 > 阈值 |
-| `report_critical_paths` | 关键路径 | 延迟分解 |
 | `report_pipeline_analysis` | 流水线分析 | 性能瓶颈 |
 
 ### 4.5 约束命令
