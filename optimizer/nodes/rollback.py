@@ -18,6 +18,7 @@ from ..state import OptimizerState
 from ..deps import NodeDeps
 from ..edges import NodeName
 from ..pure.tool_router import call_tool as call_tool_fn
+from ..pure.freshness import mark_all_fields_stale
 from ..color import green, yellow
 from .subgraphs.phase_handoff import reset_design_fingerprint
 
@@ -145,10 +146,7 @@ async def rollback_node(
         #    re-acquired. This triggers auto-refresh in ANALYZE/SELECT_STRATEGY
         #    entry for timing_summary (other fields are marked stale and
         #    re-fetched on LLM demand).
-        for field in state.timing.field_freshness:
-            state.timing.field_freshness[field] = "stale"
-        state.timing.critical_paths_stale = True
-        state.timing.critical_paths_stale_reason = "rollback"
+        mark_all_fields_stale(state.timing, reason="rollback")
         logger.info("[ROLLBACK] All field_freshness marked stale")
 
         # 3. Clear in-memory analysis data from the failed iteration.

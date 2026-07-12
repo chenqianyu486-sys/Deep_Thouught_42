@@ -11,7 +11,7 @@ import json
 import logging
 import time
 
-from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal, DesignState, parse_design_state
+from optimizer.state import OptimizerState, PhaseEntry, LLMCallRecord, record_flow_signal
 from optimizer.deps import NodeDeps
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_router import call_tool as call_tool_fn
@@ -22,12 +22,13 @@ from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.execute_contracts import detect_format_guard_violation
-from optimizer.pure.timing import parse_timing_summary
 from optimizer.nodes.subgraphs.phase_handoff import build_phase_handoff, transition_phase
 from optimizer.pure.context_snapshot import inject_merged_dashboard, inject_pinned_cell_registry, extract_system_message
 from optimizer.pure.constants import build_llm_extra_body
 from optimizer.pure.cost_tracking import track_llm_call_cost
+from optimizer.pure.freshness import run_phase_entry_refresh
 from optimizer.pure.tool_catalog import DESIGN_MODIFICATION_TOOLS
+from optimizer.pure.freshness import mark_all_fields_stale
 from optimizer.pure.pblock_plan import (
     PBLOCK_EXECUTE_DEFAULT_RESOURCE_MULTIPLIER,
     extract_selected_plan_from_payload,
@@ -84,44 +85,11 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     llm_summary = ""
     assistant_content = ""
 
-    # ── Auto-refresh stale timing data on SELECT_STRATEGY entry ──
-    if state.timing.field_freshness.get("timing_summary") == "stale":
-        try:
-            _refresh = await call_tool_fn(
-                tool_name="vivado_report_timing_summary", arguments={},
-                rapidwright_session=deps.rapidwright_session,
-                vivado_session=deps.vivado_session,
-                raw_tool_outputs=state.context.raw_tool_outputs,
-                iteration=state.iteration.current,
-                tool_round=0,
-                tool_cache=state.context.tool_cache,
-                design_size_factor=state.timing.design_size_factor,
-                entity_registry=state.entity_registry,
-            )
-            _parsed = parse_timing_summary(_refresh)
-            _ds = parse_design_state(_refresh)
-            if _parsed and "wns" in _parsed:
-                # Only adopt the WNS when the design is actually routed. A
-                # non-routed report returns optimistic wireload estimates that
-                # would pollute latest_wns and mislead strategy selection
-                # (run-20260710_002051: unplaced -0.003 estimate was adopted
-                # here and later corrupted best_wns). Preserve last known WNS.
-                if _ds is not None and _ds != DesignState.ROUTED:
-                    logger.warning(
-                        f"[SELECT_STRATEGY] Skipping stale WNS refresh: design "
-                        f"state is {_ds} (not routed); preserving last known WNS."
-                    )
-                else:
-                    state.timing.latest_wns = _parsed["wns"]
-                    state.timing.latest_tns = _parsed.get("tns")
-                    state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
-                    if _ds is not None:
-                        state.timing.design_state = _ds
-                    for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
-                        state.timing.field_freshness[_f] = "fresh"
-                    logger.info(f"[SELECT_STRATEGY] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
-        except Exception as _e:
-            logger.warning(f"[SELECT_STRATEGY] Auto-refresh failed: {_e}")
+    # ── Auto-refresh stale timing_summary on SELECT_STRATEGY entry (data-driven) ──
+    # Replaces hardcoded block; see freshness.py RefreshSpec table.
+    # adopt_wns=False: a non-routed WNS is NOT adopted (wireload estimate would
+    # pollute latest_wns); the field stays stale in that case.
+    await run_phase_entry_refresh(state, deps, LoopPhase.SELECT_STRATEGY)
 
     while True:
         tool_round += 1
@@ -311,14 +279,14 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
 
                 # Track dashboard freshness (mirrors ANALYZE/EVALUATE pattern)
                 if tool_name in DESIGN_MODIFICATION_TOOLS:
-                    state.timing.critical_paths_stale = True
-                    state.timing.critical_paths_stale_reason = (
-                        "checkpoint reloaded"
-                        if tool_name == "vivado_open_checkpoint"
-                        else "place/route changed"
+                    mark_all_fields_stale(
+                        state.timing,
+                        reason=(
+                            "checkpoint reloaded"
+                            if tool_name == "vivado_open_checkpoint"
+                            else "place/route changed"
+                        ),
                     )
-                    for field in state.timing.field_freshness:
-                        state.timing.field_freshness[field] = "stale"
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)
                 if refreshable:
                     for field in refreshable:

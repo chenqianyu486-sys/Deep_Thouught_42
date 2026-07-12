@@ -21,8 +21,9 @@ from optimizer.pure.model_select import classify_task
 from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
-from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization, parse_high_fanout_nets
+from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_high_fanout_nets
 from optimizer.pure.critical_path import refresh_violation_summary
+from optimizer.pure.freshness import run_phase_entry_refresh
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, build_llm_extra_body
 from optimizer.pure.cost_tracking import track_llm_call_cost
 from optimizer.pure.pblock_plan import extract_selected_plan_from_payload
@@ -60,110 +61,12 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     # the whole analysis phase, leaving the log header's phase/strategy blank).
     state.strategy.current_phase = "ANALYZE"
 
-    # ── Auto-refresh stale timing data on ANALYZE entry ──
-    if state.timing.field_freshness.get("timing_summary") == "stale":
-        try:
-            _refresh = await call_tool_fn(
-                tool_name="vivado_report_timing_summary", arguments={},
-                rapidwright_session=deps.rapidwright_session,
-                vivado_session=deps.vivado_session,
-                raw_tool_outputs=state.context.raw_tool_outputs,
-                iteration=state.iteration.current,
-                tool_round=0,
-                tool_cache=state.context.tool_cache,
-                design_size_factor=state.timing.design_size_factor,
-                entity_registry=state.entity_registry,
-            )
-            _parsed = parse_timing_summary(_refresh)
-            if _parsed and "wns" in _parsed:
-                state.timing.latest_wns = _parsed["wns"]
-                state.timing.latest_tns = _parsed.get("tns")
-                state.timing.latest_failing_endpoints = _parsed.get("failing_endpoints")
-                # Mark all fields refreshed by vivado_report_timing_summary
-                # fresh (timing_summary AND cdc_paths) — matches the main-loop
-                # DASHBOARD_REFRESH_MAP handling so cdc_paths does not stay
-                # stale after the auto-refresh (F2).
-                for _f in DASHBOARD_REFRESH_MAP.get("vivado_report_timing_summary", frozenset()):
-                    state.timing.field_freshness[_f] = "fresh"
-                logger.info(f"[ANALYZE] Auto-refreshed stale WNS: {_parsed['wns']:.3f}ns")
-        except Exception as _e:
-            logger.warning(f"[ANALYZE] Auto-refresh failed: {_e}")
-
-    # ── Rollback-scenario auto-refresh ──
-    # After rollback, critical_paths was cleared and critical_paths_stale=True.
-    # Refresh design_info (fast, ~30s) so the LLM has structural data even
-    # before it calls any analysis tools. critical_paths are left for the LLM
-    # to re-extract on demand (may need vivado_extract_critical_path_cells).
-    if state.timing.critical_paths_stale and not state.timing.critical_paths:
-        if state.timing.field_freshness.get("design_info") == "stale":
-            try:
-                _info_result = await call_tool_fn(
-                    tool_name="rapidwright_get_design_info", arguments={},
-                    rapidwright_session=deps.rapidwright_session,
-                    vivado_session=deps.vivado_session,
-                    raw_tool_outputs=state.context.raw_tool_outputs,
-                    tool_cache=state.context.tool_cache,
-                    design_size_factor=state.timing.design_size_factor,
-                    entity_registry=state.entity_registry,
-                )
-                if _info_result and "error" not in _info_result.lower():
-                    state.timing.field_freshness["design_info"] = "fresh"
-                    logger.info("[ANALYZE] Auto-refreshed design_info after rollback")
-            except Exception as _e2:
-                logger.warning(f"[ANALYZE] Auto-refresh design_info failed: {_e2}")
-
-    # ── Auto-refresh stale resource_utilization ──
-    # Utilization informs strategy selection (area-pressure vs timing-bound).
-    # Without this, utilization stays stale from init_analysis throughout the
-    # iteration after any design modification. Refresh once on ANALYZE entry
-    # so the LLM has current LUT/FF/DSP/BRAM figures when choosing a strategy.
-    if state.timing.field_freshness.get("resource_utilization") == "stale":
-        try:
-            _util_report = await call_tool_fn(
-                tool_name="vivado_report_utilization_for_pblock", arguments={},
-                rapidwright_session=deps.rapidwright_session,
-                vivado_session=deps.vivado_session,
-                raw_tool_outputs=state.context.raw_tool_outputs,
-                tool_cache=state.context.tool_cache,
-                design_size_factor=state.timing.design_size_factor,
-                entity_registry=state.entity_registry,
-            )
-            _util = parse_resource_utilization(_util_report)
-            if _util is not None:
-                state.timing.resource_utilization = _util
-                state.timing.field_freshness["resource_utilization"] = "fresh"
-                logger.info(f"[ANALYZE] Auto-refreshed resource_utilization: {_util}")
-        except Exception as _e3:
-            logger.warning(f"[ANALYZE] Auto-refresh resource_utilization failed: {_e3}")
-
-    # ── Auto-refresh stale high_fanout_nets ──
-    # High-fanout nets drive the Fanout strategy's verified net list. After
-    # rollback the cache is cleared (rollback.py) and the live-fetched results
-    # must be re-acquired so EXECUTE has verified net names instead of an empty
-    # cache (run-20260712_013828: empty cache -> LLM hallucinated net names ->
-    # -1.220ns regression). Matches the timing_summary/design_info/
-    # resource_utilization auto-refresh pattern above.
-    if state.timing.field_freshness.get("high_fanout_nets") == "stale":
-        try:
-            _hf_report = await call_tool_fn(
-                tool_name="vivado_get_critical_high_fanout_nets",
-                arguments={"num_paths": 50, "min_fanout": 50},
-                rapidwright_session=deps.rapidwright_session,
-                vivado_session=deps.vivado_session,
-                raw_tool_outputs=state.context.raw_tool_outputs,
-                tool_cache=state.context.tool_cache,
-                design_size_factor=state.timing.design_size_factor,
-                entity_registry=state.entity_registry,
-            )
-            _hf_parsed = parse_high_fanout_nets(_hf_report)
-            if _hf_parsed:
-                state.timing.high_fanout_nets = _hf_parsed
-                state.timing.field_freshness["high_fanout_nets"] = "fresh"
-                logger.info(
-                    f"[ANALYZE] Auto-refreshed high_fanout_nets: {len(_hf_parsed)} nets"
-                )
-        except Exception as _e4:
-            logger.warning(f"[ANALYZE] Auto-refresh high_fanout_nets failed: {_e4}")
+    # ── Auto-refresh stale dashboard fields on ANALYZE entry (data-driven) ──
+    # Replaces 4 hardcoded per-field blocks; see freshness.py RefreshSpec table.
+    # Covers: timing_summary, design_info (post-rollback), resource_utilization,
+    # high_fanout_nets, route_status, congestion_data. critical_path_cells is
+    # deliberately excluded — re-extraction is expensive and targeting-dependent.
+    await run_phase_entry_refresh(state, deps, LoopPhase.ANALYZE)
 
     while True:
         tool_round += 1

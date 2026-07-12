@@ -24,6 +24,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.tool_router import verify_design_routed
+from optimizer.pure.freshness import mark_all_fields_stale, mark_critical_paths_stale, mark_critical_paths_fresh
 from optimizer.pure.model_select import classify_task
 from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.step_state import extract_step_state
@@ -231,12 +232,7 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
             state.timing.design_state = ds
 
     # 3. Mark all state as stale — nothing from the previous strategy is valid
-    state.timing.critical_paths_stale = True
-    state.timing.critical_paths_stale_reason = "strategy switch"
-    for field in state.timing.field_freshness:
-        state.timing.field_freshness[field] = "stale"
-    # Ensure critical_path_cells freshness entry exists even if not yet extracted
-    state.timing.field_freshness["critical_path_cells"] = "stale"
+    mark_all_fields_stale(state.timing, reason="strategy switch")
     state.entity_registry.mark_stale()
     # Step 2 above already obtained a current WNS via vivado_report_timing_summary.
     # Re-mark timing_summary/cdc_paths fresh when that refresh succeeded, so the
@@ -1006,19 +1002,18 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                     if is_modifying_tcl(_tcl_cmd):
                         _design_changed = True
                 if _design_changed:
-                    state.timing.critical_paths_stale = True
                     # open_checkpoint reloads a (possibly different) DCP but
                     # does not run place/route — label it distinctly so the
                     # LLM knows the stale mark is a conservative reload, not a
                     # layout change.
-                    state.timing.critical_paths_stale_reason = (
-                        "checkpoint reloaded"
-                        if tool_name == "vivado_open_checkpoint"
-                        else "place/route changed"
+                    mark_all_fields_stale(
+                        state.timing,
+                        reason=(
+                            "checkpoint reloaded"
+                            if tool_name == "vivado_open_checkpoint"
+                            else "place/route changed"
+                        ),
                     )
-                    # Mark all dashboard fields stale — design has changed
-                    for field in state.timing.field_freshness:
-                        state.timing.field_freshness[field] = "stale"
                     # Bump entity registry snapshot version: design changes
                     # (opt_design/phys_opt/route) can merge/split/rename cells,
                     # so previously registered canonical names may no longer
@@ -2036,8 +2031,7 @@ async def _lightweight_chain_validation(state, deps, tool_name, tools_called):
         )
         state.iteration.tools_used.append("vivado_place_design")
         tools_called.append("vivado_place_design")
-        state.timing.critical_paths_stale = True
-        state.timing.critical_paths_stale_reason = "place/route changed"
+        mark_critical_paths_stale(state.timing, reason="place/route changed")
 
         # Re-evaluate WNS
         verdict = await _post_eval_hook(state, deps, "vivado_place_design")
@@ -2352,8 +2346,7 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
 
             # Mark critical paths stale after placement-affecting chain tools
             if target_tool in ("vivado_place_design", "vivado_create_and_apply_pblock"):
-                state.timing.critical_paths_stale = True
-                state.timing.critical_paths_stale_reason = "place/route changed"
+                mark_critical_paths_stale(state.timing, reason="place/route changed")
 
             # ── Level 2: Vivado Place-Only timing check ──────────────
             # After a real place_design (not unplace), evaluate place-only
@@ -2543,13 +2536,7 @@ async def _auto_refresh_critical_paths(state: OptimizerState, deps: NodeDeps) ->
     cell_paths = parse_critical_path_cells(result.raw_text)
     if cell_paths:
         update_critical_paths(state, cell_paths, iteration=state.iteration.current)
-        state.timing.critical_paths_stale = False
-        state.timing.critical_paths_stale_reason = ""
-        # Keep the field_freshness dict in sync with the boolean flag —
-        # otherwise the Dashboard renders the contradictory "stale=false [stale]"
-        # (F4: two staleness systems must not drift).
-        if "critical_path_cells" in state.timing.field_freshness:
-            state.timing.field_freshness["critical_path_cells"] = "fresh"
+        mark_critical_paths_fresh(state.timing)
         logger.info(f"[EXECUTE] Auto-refreshed {len(cell_paths)} critical paths")
     # cell_paths 为空时不修改 stale 标志 — 下次触发时重试
 

@@ -29,6 +29,7 @@ from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
+from optimizer.pure.freshness import mark_all_fields_stale
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.constants import WNS_TARGET_THRESHOLD, DASHBOARD_REFRESH_MAP, DESIGN_MODIFICATION_TOOLS, WNS_ROLLBACK_THRESHOLD, PHASE_TOOL_RATE_LIMITS, build_llm_extra_body, STRATEGY_TOOL_NAMES, HOLD_VIOLATION_THRESHOLD_NS, PULSE_WIDTH_VIOLATION_THRESHOLD_NS, NETLIST_MODIFYING_STRATEGIES, EQUIVALENCE_FF_CHANGE_THRESHOLD, EQUIVALENCE_LUT_CHANGE_THRESHOLD
 from optimizer.pure.cost_tracking import track_llm_call_cost
@@ -629,14 +630,14 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                 # symmetry with EXECUTE — EVALUATE allowlist is read-only but
                 # the guard must exist for consistency and future tool additions).
                 if tool_name in DESIGN_MODIFICATION_TOOLS:  # pragma: defensive-guard
-                    state.timing.critical_paths_stale = True
-                    state.timing.critical_paths_stale_reason = (
-                        "checkpoint reloaded"
-                        if tool_name == "vivado_open_checkpoint"
-                        else "place/route changed"
+                    mark_all_fields_stale(
+                        state.timing,
+                        reason=(
+                            "checkpoint reloaded"
+                            if tool_name == "vivado_open_checkpoint"
+                            else "place/route changed"
+                        ),
                     )
-                    for field in state.timing.field_freshness:
-                        state.timing.field_freshness[field] = "stale"
                     state.entity_registry.mark_stale()
                 # Track dashboard freshness (applies to ALL tools, not just timing)
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)

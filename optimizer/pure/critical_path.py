@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from ..state import OptimizerState
 
 from ..state import CriticalPathEntry, ViolationSummary, PathCluster, PathNode, ClockDomainInfo
+from .freshness import mark_critical_paths_fresh
 
 logger = logging.getLogger(__name__)
 
@@ -517,8 +518,7 @@ def update_critical_paths(
         for p in sorted_paths
     ]
     state.timing.critical_paths_iteration = iteration
-    state.timing.critical_paths_stale = False
-    state.timing.critical_paths_stale_reason = ""
+    mark_critical_paths_fresh(state.timing)
 
     # Recompute violation summary from updated critical paths
     from .timing import compute_violation_summary
