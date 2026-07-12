@@ -355,7 +355,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         stalled_strategies=list(state.iteration.blocked_strategies),
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
-    await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path))
+    await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path), iteration=state.iteration.current)
     return LoopPhase.EXECUTE
 
 

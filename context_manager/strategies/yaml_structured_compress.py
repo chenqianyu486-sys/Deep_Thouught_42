@@ -421,7 +421,8 @@ class YAMLStructuredCompressor(CompressionStrategy):
         preserve_turns: int = 20,
         min_importance_threshold: float = 0.3,
         max_chars_multiplier: float = 1.0,
-        preserve_role_turns: int = 6
+        preserve_role_turns: int = 6,
+        max_chars_tier: str = "default",
     ):
         """
         Args:
@@ -432,13 +433,22 @@ class YAMLStructuredCompressor(CompressionStrategy):
             preserve_role_turns: Number of recent messages to keep with original API roles
                 (user/assistant/tool) instead of embedding in YAML. This preserves
                 role-structured context for the LLM's API-level role processing.
+            max_chars_tier: Tier for _get_adaptive_max_chars() budget selection.
+                "worker" — tighter budgets (faster responses).
+                "planner" — larger budgets (more context for strategic decisions).
+                "default" — moderate budgets (fallback).
         """
         self.token_budget = token_budget
         self.preserve_turns = preserve_turns
         self.min_importance_threshold = min_importance_threshold
         self.max_chars_multiplier = max_chars_multiplier
         self.preserve_role_turns = preserve_role_turns
+        self._max_chars_tier = max_chars_tier
         self._tools_compressed_count = 0  # Tracks tool results compressed to markers in current pass
+
+    def get_name(self) -> str:
+        """Return strategy name for logging and event bus."""
+        return {"worker": "worker", "planner": "planner"}.get(self._max_chars_tier, "yaml_structured")
 
     def compress(self, messages: List[Message], context: CompressionContext) -> List[Message]:
         """Compress messages into YAML format with FPGA design state.
@@ -902,42 +912,59 @@ class YAMLStructuredCompressor(CompressionStrategy):
     def _get_adaptive_max_chars(self, content: str) -> int:
         """Calculate adaptive max_chars based on content type and structure.
 
-        Strategy:
-        - Timing reports: up to 8000 chars (critical path info is in middle)
-        - Utilization reports: 4000 chars
-        - Error messages: 6000 chars (preserve full context for debugging)
-        - Short messages: 2000 chars (already short)
-        - General: 4000 chars
+        Budgets vary by ``_max_chars_tier``:
+
+        ==================== ========= ======== ==========
+        Content condition    default   worker    planner
+        ==================== ========= ======== ==========
+        Short guard          len<1000  len<500   len<1000
+          → cap                2000      1000      2500
+        Timing (``\\n>20``)    8000      8000     16000
+        Timing (short)         5000      5000     12000
+        Utilization            4000      2000      5000
+        Route                  4000      2000      5000
+        Error               min(len,6000) min(len,3000) min(len,8000)
+        General              min(len,4000) min(len,1500) min(len,5000)
+        ==================== ========= ======== ==========
         """
         content_len = len(content)
         content_lower = content.lower()
+        tier = self._max_chars_tier
 
-        # Short messages - don't need large budget
-        if content_len < 1000:
-            return min(content_len, 2000)
+        # ── Short message guard — tier-specific thresholds ──
+        if tier == "worker":
+            if content_len < 500:
+                return min(content_len, 1000)
+        else:
+            if content_len < 1000:
+                return min(content_len, 2500 if tier == "planner" else 2000)
 
-        # Timing reports - need more space for critical path details
-        if ('timing' in content_lower and
-            ('wns' in content_lower or 'slack' in content_lower or 'critical' in content_lower)):
-            # Check if it has multi-line critical path info
+        # ── Timing reports ──
+        is_timing = (
+            'timing' in content_lower
+            and ('wns' in content_lower or 'slack' in content_lower or 'critical' in content_lower)
+        )
+        if is_timing:
             if content.count('\n') > 20:
-                return 8000  # Long timing report - preserve middle sections
-            return 5000
+                return 16000 if tier == "planner" else 8000
+            return 12000 if tier == "planner" else 5000
 
-        # Utilization reports
+        # ── Utilization ──
         if 'utilization' in content_lower or 'resource' in content_lower:
-            return 4000
+            return {"planner": 5000, "worker": 2000}.get(tier, 4000)
 
-        # Routing reports
+        # ── Route ──
         if 'route' in content_lower and ('net' in content_lower or 'wire' in content_lower):
-            return 4000
+            return {"planner": 5000, "worker": 2000}.get(tier, 4000)
 
-        # Error messages - preserve full context for debugging
+        # ── Error ──
         if 'error' in content_lower or 'failed' in content_lower:
-            return min(content_len, 6000)
+            caps = {"planner": 8000, "worker": 3000, "default": 6000}
+            return min(content_len, caps.get(tier, 6000))
 
-        # Default - moderate truncation
-        return min(content_len, 4000)
+        # ── General fallback ──
+        general_caps = {"planner": 5000, "worker": 1500, "default": 4000}
+        return min(content_len, general_caps.get(tier, 4000))
 
     def _score_line(self, line: str, report_type: str) -> float:
         """Score line importance based on content and report type."""

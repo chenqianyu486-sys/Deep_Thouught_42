@@ -147,6 +147,7 @@ async def transition_phase(
     handoff: PhaseHandoff,
     tool_cache: dict | None = None,
     design_fingerprint: str | None = None,
+    iteration: int = 0,
 ) -> None:
     """Archive current phase messages and start a fresh message segment.
 
@@ -163,6 +164,7 @@ async def transition_phase(
         design_fingerprint: Optional design-state fingerprint. When provided and
             unchanged from the last transition, tool_cache is preserved (no clear).
             When None (default), always clear for backward compatibility.
+        iteration: Current optimizer iteration (included in archive snapshot).
     """
     if deps.compat is None or deps.memory_manager is None:
         return
@@ -176,7 +178,7 @@ async def transition_phase(
         if current_count > 2:
             try:
                 deps.memory_manager._historical_memory.add(
-                    content=_format_phase_archive(from_phase, current_messages, handoff),
+                    content=_format_phase_archive(from_phase, current_messages, handoff, iteration=iteration),
                     importance=0.6,
                     task_type=f"phase_{from_phase.value}",
                 )
@@ -234,20 +236,41 @@ def _format_phase_archive(
     phase: LoopPhase,
     messages: list,
     handoff: PhaseHandoff,
+    iteration: int = 0,
 ) -> str:
-    """Create a compressed summary of phase messages for archival."""
-    parts = [f"[Phase: {phase.value}]", f"Messages: {len(messages)}"]
+    """Create a compressed summary of phase messages for archival.
+
+    Args:
+        phase: The phase being archived.
+        messages: Working memory messages from the phase.
+        handoff: PhaseHandoff with WNS / LLM summary.
+        iteration: Current optimizer iteration (included in output).
+
+    Truncation rules:
+    - LLM summary content beyond 500 chars: append " [TRUNCATED]"
+    - Message sample content beyond 200 chars: append " [TRUNCATED]"
+    """
+    parts = [
+        f"[Phase: {phase.value}]",
+        f"iteration={iteration}",
+        f"messages={len(messages)}",
+    ]
 
     if handoff.llm_summary:
-        parts.append(f"LLM Summary: {handoff.llm_summary[:500]}")
+        summary = handoff.llm_summary
+        if len(summary) > 500:
+            summary = summary[:500] + " [TRUNCATED]"
+        parts.append(f"LLM Summary: {summary}")
 
     if handoff.wns is not None:
         parts.append(f"WNS: {handoff.wns:.3f}ns")
 
     parts.append("---")
-    # Last few messages as samples
+    # Last few messages as samples (with TRUNCATED marker)
     for msg in messages[-3:]:
-        content = str(getattr(msg, 'content', ''))[:200]
+        content = str(getattr(msg, 'content', ''))
+        if len(content) > 200:
+            content = content[:200] + " [TRUNCATED]"
         role = str(getattr(msg, 'role', 'unknown'))
         parts.append(f"[{role}] {content}")
 

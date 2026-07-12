@@ -145,19 +145,10 @@ class MemoryManager:
             return
         self._compressing = True
 
-        # Select compression strategy based on model tier
-        if model_tier == "planner":
-            from .strategies.planner_compress import PlannerCompressor
-            strategy = PlannerCompressor()
-            strategy_name = "planner"
-        elif model_tier == "worker":
-            from .strategies.worker_compress import WorkerCompressor
-            strategy = WorkerCompressor()
-            strategy_name = "worker"
-        else:
-            from .strategies.yaml_structured_compress import YAMLStructuredCompressor
-            strategy = YAMLStructuredCompressor()
-            strategy_name = compression_type
+        # Select compression strategy — tier drives char-budget, not a different class.
+        from .strategies.yaml_structured_compress import YAMLStructuredCompressor
+        tier = model_tier if model_tier in ("worker", "planner") else "default"
+        strategy = YAMLStructuredCompressor(max_chars_tier=tier)
 
         logger.info(
             "[COMPRESSION] Starting compression: type=%s, model_tier=%s, force_aggressive=%s",
@@ -196,7 +187,18 @@ class MemoryManager:
             # Rebuild: system messages + compressed non-system messages
             compressed = system_messages + compressed_non_system
 
-            summary = self._create_summary_from_messages(all_messages)
+            # Compute token estimates BEFORE the summary so the snapshot can include them.
+            original_tokens = self._estimator.estimate_from_messages(all_messages)
+            compressed_tokens = self._estimator.estimate_from_messages(compressed)
+
+            strategy_name = strategy.get_name() if hasattr(strategy, 'get_name') else ""
+            summary = self._create_summary_from_messages(
+                all_messages,
+                context,
+                original_tokens=original_tokens,
+                compressed_tokens=compressed_tokens,
+                strategy_name=strategy_name,
+            )
             self._historical_memory.add(
                 content=summary,
                 importance=0.8,
@@ -207,13 +209,10 @@ class MemoryManager:
             for msg in compressed:
                 self._working_store.add(msg)
 
-            original_tokens = self._estimator.estimate_from_messages(all_messages)
-            compressed_tokens = self._estimator.estimate_from_messages(compressed)
-
             self._event_bus.emit(ContextEvent(
                 event_type=EventType.CONTEXT_COMPRESSED,
                 data={
-                    "compression_type": strategy_name,
+                    "compression_type": strategy.get_name(),
                     "original_count": len(all_messages),
                     "compressed_count": len(compressed),
                     "original_tokens": original_tokens,
@@ -242,12 +241,84 @@ class MemoryManager:
         finally:
             self._compressing = False
 
-    def _create_summary_from_messages(self, messages: list[Message]) -> str:
-        """Create summary from messages for archival."""
-        lines = [f"[Archived {len(messages)} messages]"]
-        for msg in messages[-10:]:
-            lines.append(f"{msg.role.value}: {msg.content[:100]}...")
-        return "\n".join(lines)
+    def _create_summary_from_messages(
+        self,
+        messages: list[Message],
+        context: CompressionContext,
+        *,
+        original_tokens: int = 0,
+        compressed_tokens: int = 0,
+        strategy_name: str = "",
+    ) -> str:
+        """压缩快照：含关键运行参数 + 尾部消息样本。
+
+        Args:
+            messages: 压缩前的全部消息列表。
+            context: CompressionContext（须含 iteration / best_wns / current_wns /
+                     force_aggressive / failed_strategies 及可选的 model_context_config）。
+            original_tokens: 压缩前的 token 估算数（0 = 未估算）。
+            compressed_tokens: 压缩后的 token 估算数（0 = 未估算）。
+            strategy_name: 压缩策略名称（用于日志标识）。
+
+        截断规则：
+        - 消息采样内容超过 300 字符时，末尾追加 " [TRUNCATED]"
+        - failed_strategies 超过 5 条时，末尾追加 " ... and N more"
+        """
+        parts: list[str] = []
+
+        # ── 元信息 ──
+        lines: list[str] = [
+            "[Compression Snapshot]",
+            f"  strategy={strategy_name or 'unknown'}",
+            f"  iteration={context.iteration}",
+            f"  force_aggressive={context.force_aggressive}",
+        ]
+        if context.model_context_config:
+            lines.append(f"  model_tier={context.model_context_config.model_tier}")
+            lines.append(f"  token_budget={context.model_context_config.token_budget}")
+        lines.append(f"  messages={len(messages)}")
+        if original_tokens > 0:
+            saved = original_tokens - compressed_tokens
+            pct = (1 - compressed_tokens / original_tokens) * 100 if original_tokens > 0 else 0
+            lines.append(f"  tokens={original_tokens} -> {compressed_tokens} ({saved} saved, {pct:.0f}%)")
+        parts.append("\n".join(lines))
+
+        # ── 时序与策略状态 ──
+        ts: list[str] = ["--- Timing ---"]
+        if context.best_wns is not None and context.best_wns != float('-inf'):
+            ts.append(f"  best_wns={context.best_wns:.3f}ns")
+        if context.current_wns is not None:
+            ts.append(f"  current_wns={context.current_wns:.3f}ns")
+        if context.clock_period is not None:
+            ts.append(f"  clock_period={context.clock_period:.3f}ns")
+        parts.append("\n".join(ts))
+
+        # ── 失败策略 ──
+        fl: list[str] = [f"--- Failed strategies: {len(context.failed_strategies)} ---"]
+        shown = context.failed_strategies[:5]
+        for fs in shown:
+            fl.append(
+                f"  {fs.get('strategy', '?')}: {fs.get('reason', '?')} "
+                f"(iter={fs.get('iteration', '?')})"
+            )
+        if len(context.failed_strategies) > 5:
+            fl.append(f"  ... and {len(context.failed_strategies) - 5} more")
+        parts.append("\n".join(fl))
+
+        # ── 尾部消息采样（带 [TRUNCATED] 标记） ──
+        sample_count = min(5, len(messages))
+        if sample_count > 0:
+            sample: list[str] = ["--- Last messages ---"]
+            for msg in messages[-sample_count:]:
+                role = getattr(msg, 'role', '?')
+                role_str = role.value if hasattr(role, 'value') else str(role)
+                msg_content = str(getattr(msg, 'content', ''))
+                if len(msg_content) > 300:
+                    msg_content = msg_content[:300] + " [TRUNCATED]"
+                sample.append(f"  [{role_str}] {msg_content}")
+            parts.append("\n".join(sample))
+
+        return "\n".join(parts)
 
     def _get_current_wns(self) -> Optional[float]:
         for call in reversed(self._tool_call_details):
