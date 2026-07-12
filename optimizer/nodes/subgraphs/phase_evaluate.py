@@ -368,6 +368,14 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                         f"no-progress evaluations — forcing SWITCH_STRATEGY"
                     )
                     flow_signal = "SWITCH_STRATEGY"
+                    if deps.compat is not None:
+                        deps.compat.add_message("user",
+                            f"[SYSTEM — Forced SWITCH_STRATEGY]\n"
+                            f"Your flow_control signal was overridden: {state.context.consecutive_no_progress} "
+                            f"consecutive EVALUATE rounds showed no WNS improvement (delta <= 0). "
+                            f"The framework is forcing a strategy switch to avoid stalling. "
+                            f"Choose a different strategy in the next SELECT_STRATEGY phase."
+                        )
 
             # Handle terminal signals
             if flow_signal == "DONE":

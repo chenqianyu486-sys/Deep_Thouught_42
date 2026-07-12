@@ -343,6 +343,12 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
 # When called, all dashboard field_freshness entries are marked "stale"
 # so the LLM knows which data may no longer be current.
 # Auto-derived from STRATEGY_TOOL_NAMES with extra modification tools appended.
+# NOTE: restart_vivado is intentionally NOT in this set. It is not an
+# LLM-callable tool (no rapidwright_/vivado_ prefix -> router rejects at
+# tool_router.py:301; not in any PHASE_TOOLS allowlist). It only fires
+# internally via MCP server auto-recovery (_restart_and_reopen), which
+# reopens the SAME DCP - so field_freshness stays valid. Adding it here
+# would have no effect (the stale-marking code is unreachable for it).
 DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset(
     STRATEGY_TOOL_NAMES
     | {

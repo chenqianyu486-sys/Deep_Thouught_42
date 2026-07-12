@@ -90,17 +90,9 @@ POST_EVAL_TOOLS: frozenset[str] = frozenset({
     "rapidwright_execute_muxf_tree_reorder_strategy",
 })
 
-DESIGN_MODIFICATION_TOOLS: frozenset[str] = frozenset(
-    STRATEGY_TOOL_NAMES
-    | {
-        "vivado_create_and_apply_pblock",
-        "vivado_unplace_cells",
-        "vivado_open_checkpoint",
-        "rapidwright_optimize_fanout_batch",
-        "rapidwright_execute_physopt_strategy",
-        "rapidwright_smart_retiming",
-        "vivado_opt_design",
-    }
-)
-
-SIDE_EFFECT_TOOLS: frozenset[str] = DESIGN_MODIFICATION_TOOLS
+# DESIGN_MODIFICATION_TOOLS and SIDE_EFFECT_TOOLS are re-exported from
+# constants.py (single source of truth). Previously defined locally from
+# a parallel STRATEGY_TOOL_NAMES; the two copies could drift. See
+# constants.py for the authoritative definition and restart_vivado
+# exclusion rationale.
+from .constants import DESIGN_MODIFICATION_TOOLS, SIDE_EFFECT_TOOLS  # noqa: E402,F401
