@@ -1,9 +1,10 @@
 # Vivado 2025.1 与 RapidWright 使用参考
 
-> **版本**: 2026-06-29
+> **版本**: 2026-07-12
 > **适用对象**: Claude Code（离线参考）
 > **范围**: Vivado 2025.1 命令、参数、报告；RapidWright API、模块、操作流程
 > **性质**: 事实陈述，不含代码示例
+> **校验方法**: Vivado 命令语法/指令取自本地 `vivado <cmd> -help`（Vivado v2025.1, SW Build 6140274）；实现策略及其内部 step 指令映射通过 `create_project` + `set_property strategy` 在 xcvu3p 与 xcvu9p 两个器件上实测验证。RapidWright API 取自本地 `javap` 与 `RELEASE_NOTES.TXT`（bundled 版本 2025.2.1-beta）。
 
 ---
 
@@ -65,17 +66,26 @@
 
 ### 1.4 Vivado 2025.1 CLI 关键参数
 
+取自 `vivado -help`（启动器参数，非 TCL 命令参数）:
+
 | 参数 | 作用 |
 |---|---|
-| `-mode batch` | 批处理模式（不启动 GUI） |
-| `-mode tcl` | TCL 交互模式 |
-| `-mode gui` | GUI 模式（默认） |
-| `-source <file>` | 启动时执行 TCL 脚本 |
-| `-notrace` | 关闭消息回显 |
-| `-log <file>` | 指定 log 文件 |
-| `-journal <file>` | 指定 journal 文件 |
+| `-mode <gui\|tcl\|batch>` | 启动模式（默认 gui） |
+| `-source <file>` | 启动时 source 指定 TCL 文件 |
+| `-script <file>` | 执行指定脚本文件后退出 |
+| `-init` | source `vivado.tcl` 文件 |
+| `-log <file>` | 指定 log 文件（默认 vivado.log） |
+| `-journal <file>` | 指定 journal 文件（默认 vivado.jou） |
+| `-nolog` / `-nojournal` | 不生成 log / journal |
+| `-applog` / `-appjournal` | 以追加模式打开 log / journal |
 | `-tempDir <dir>` | 指定临时目录 |
-| `-lic_waittime <sec>` | 等待许可证秒数 |
+| `-tclargs <arg>` | 向 TCL 传入 argc/argv 参数 |
+| `-robot <arg>` | Robot JAR 文件名 |
+| `-version` | 输出版本信息后退出 |
+| `-verbose` | 暂停消息上限 |
+| `[<project>]` | 直接加载 .xpr 工程或 .dcp 检查点 |
+
+> 注：旧文档列出的 `-notrace`、`-lic_waittime` 在 `vivado` 启动器中**均不存在**。
 
 ---
 
@@ -165,54 +175,59 @@
 
 **功能**: 综合 RTL 代码
 
-**完整语法**:
+**完整语法**（取自 `synth_design -help`）:
 ```
-synth_design [-top <arg>] [-part <arg>] [-include_dirs <args>]
-  [-generic <args>] [-verilog_define <args>] [-flatten_hierarchy <arg>]
-  [-rtl_skip_constraints] [-rtl_skip_ip] [-mode <arg>] [-directive <arg>]
-  [-retiming] [-resource_sharing <arg>] [-shreg_min_size <arg>]
-  [-max_dsp <arg>] [-max_bram <arg>] [-max_uram <arg>] [-max_buram <arg>]
-  [-no_lc] [-no_srlextract] [-keep_equivalent_registers] [-fsm_extraction <arg>]
-  [-hierarchical_block_threshold <arg>] [-hierarchical_block_replicate <arg>]
-  [-hierarchical_block <args>] [-fanout_limit <arg>] [-bufg <arg>]
-  [-mvcstyle <arg>] [-debug_log] [-sweep] [-quiet] [-verbose]
+synth_design [-name <arg>] [-part <arg>] [-constrset <arg>] [-top <arg>]
+  [-include_dirs <args>] [-generic <args>] [-define <args>]
+  [-verilog_define <args>] [-vhdl_define <args>]
+  [-flatten_hierarchy <arg>] [-gated_clock_conversion <arg>]
+  [-directive <arg>] [-rtl] [-lint] [-file <arg>] [-bufg <arg>]
+  [-no_lc] [-lut_cascade] [-shreg_min_size <arg>] [-mode <arg>]
+  [-fsm_extraction <arg>] [-rtl_skip_mlo] [-rtl_skip_ip]
+  [-rtl_skip_constraints] [-srl_style <arg>]
+  [-keep_equivalent_registers] [-resource_sharing <arg>]
+  [-cascade_dsp <arg>] [-control_set_opt_threshold <arg>]
+  [-incremental_mode <arg>] [-max_bram <arg>] [-max_uram <arg>]
+  [-max_dsp <arg>] [-max_bram_cascade_height <arg>]
+  [-max_uram_cascade_height <arg>] [-global_retiming <arg>]
+  [-no_srlextract] [-assert] [-no_timing_driven] [-sfcu]
+  [-debug_log] [-quiet] [-verbose]
 ```
 
-**常用 directive（综合策略）**:
+> 注：旧文档列出的 `-retiming`、`-max_buram`、`-hierarchical_block*`、`-fanout_limit`、`-mvcstyle`、`-sweep` 在 2025.1 的 `synth_design` 中均**不存在**（`-sweep` 属于 `opt_design`；retiming 用 `-global_retiming`；层级块相关选项不属于 `synth_design`）。
+
+**directive（综合策略，大小写敏感，取自 -help）**:
 
 | Directive | 用途 |
 |---|---|
-| `Default` | 默认平衡策略 |
-| `RuntimeOptimized` | 最短综合时间 |
-| `AreaOptimized_high` | 高面积优化 |
-| `AreaOptimized_medium` | 中等面积优化 |
-| `AreaMapLargeShiftRegToBRAM` | 大移位寄存器映射到 BRAM |
-| `AlternateRoutability` | 可布线性优化 |
-| `AreaMultThresholdDSP` | 面积优化，DSP 阈值 |
-| `FewerCarryChains` | 减少进位链 |
-| `FlowOptimized_high` | 高流程优化 |
-| `FlowAreaOptimized_high` | 高面积+流程优化 |
-| `FlowAlternateRoutability` | 可布线性+流程优化 |
-| `FlowPerfOptimized_high` | 高性能+流程优化 |
-| `FlowPerfThresholdCarry` | 性能+进位链优化 |
-| `PerformanceOptimized` | 默认性能优化 |
-| `PerformanceRetiming` | 性能优化+retiming |
-| `PerformanceExtraTimingOpt` | 高级时序优化 |
-| `AggressiveExplore` | 激进探索 |
+| `default` | 默认综合流程（注意全小写） |
+| `RuntimeOptimized` | 减少 RTL/时序优化以缩短综合时间 |
+| `AreaOptimized_high` | 通用面积优化（含 AreaMapLargeShiftRegToBRAM、AreaThresholdUseDSP） |
+| `AreaOptimized_medium` | 通用面积优化（三元加法器、进位链阈值、面积优化复用器） |
+| `AlternateRoutability` | 改善可布线性，减少 MUXF/CARRY 使用 |
+| `AreaMapLargeShiftRegToBRAM` | 检测大移位寄存器并用 BRAM 实现 |
+| `AreaMultThresholdDSP` | 降低 DSP 推断阈值 |
+| `FewerCarryChains` | 提高用 LUT 替代进位链的操作数阈值 |
+| `PerformanceOptimized` | 通用时序优化（含逻辑级数缩减，代价为面积） |
+| `LogicCompaction` | 配置乘法器 LUT/进位链以便布局器紧凑打包 |
+| `PowerOptimized_high` | 高功耗优化 |
+| `PowerOptimized_medium` | 中等功耗优化 |
+
+> 注：旧文档列出的 `FlowOptimized_high`、`FlowAreaOptimized_high`、`FlowAlternateRoutability`、`FlowPerfOptimized_high`、`FlowPerfThresholdCarry`、`PerformanceRetiming`、`PerformanceExtraTimingOpt`、`AggressiveExplore` 在 2025.1 的 `synth_design` 中均**不存在**；retiming 由 `-global_retiming` 选项控制，而非 directive。
 
 #### `opt_design`
 
 **功能**: 逻辑优化（综合后/实现后均可运行）
 
-**完整语法**:
+**完整语法**（取自 `opt_design -help`）:
 ```
-opt_design [-retarget] [-propconst] [-sweep] [-bram_power_opt]
-  [-remap] [-aggressive_remap] [-resynth_area] [-resynth_seq_area]
-  [-resynth_remap] [-directive <arg>] [-muxf_remap]
-  [-hier_fanout_limit <arg>] [-bufg_opt] [-mbufg_opt]
-  [-shift_register_opt] [-dsp_register_opt] [-srl_remap_modes <args>]
-  [-control_set_merge] [-control_set_opt] [-merge_equivalent_drivers]
-  [-carry_remap] [-debug_log] [-property_opt_only] [-quiet] [-verbose]
+opt_design [-retarget] [-propconst] [-sweep] [-bram_power_opt] [-remap]
+  [-aggressive_remap] [-resynth_remap] [-resynth_area] [-resynth_seq_area]
+  [-directive <arg>] [-muxf_remap] [-hier_fanout_limit <arg>]
+  [-bufg_opt] [-mbufg_opt] [-shift_register_opt] [-dsp_register_opt]
+  [-srl_remap_modes <arg>] [-control_set_merge] [-control_set_opt]
+  [-merge_equivalent_drivers] [-carry_remap] [-debug_log]
+  [-property_opt_only] [-quiet] [-verbose]
 ```
 
 **常用 directive**:
@@ -226,7 +241,7 @@ opt_design [-retarget] [-propconst] [-sweep] [-bram_power_opt]
 | `ExploreSequentialArea` | Explore + resynth_seq_area，减少寄存器和组合逻辑 |
 | `RuntimeOptimized` | 无 bram_power_opt，最快运行时间 |
 | `RQS` | 由 QoR 建议文件驱动的策略选择 |
-| `AddRemap` | LUT 重新映射 |
+| `AddRemap` | LUT 重新映射（注：`-help` 未列出，但 2025.1 运行时合法，RC=0） |
 
 ### 4.2 实现命令
 
@@ -234,20 +249,27 @@ opt_design [-retarget] [-propconst] [-sweep] [-bram_power_opt]
 
 **功能**: 布局（Place）
 
-**完整语法**:
+**完整语法**（取自 `place_design -help`）:
 ```
-place_design [-directive <arg>] [-no_timing_driven] [-timing_summary]
-  [-unplace] [-post_place_opt] [-no_psip] [-clock_vtree_type <arg>]
-  [-no_bufg_opt] [-ultrathreads] [-quiet] [-verbose]
+place_design [-directive <arg>] [-subdirective <args>] [-no_timing_driven]
+  [-eco] [-timing_summary] [-unplace] [-post_place_opt] [-no_psip]
+  [-psip_options <args>] [-sll_align_opt] [-clock_vtree_type <arg>]
+  [-no_bufg_opt] [-ultrathreads] [-no_noc_opt]
+  [-net_delay_weight <arg>] [-quiet] [-verbose]
 ```
 
 **关键参数**:
 - `-directive`: 布局策略（见下方策略表）
+- `-subdirective`: 按布局阶段（Floorplan/GPlace/DPlace）施加子策略，格式 `<phase>.<sub>.<low|med|high>`，可多选（Tcl 列表）
 - `-post_place_opt`: 布局后优化关键路径
 - `-unplace`: 仅取消布局，不进行新布局
 - `-no_timing_driven`: 禁用时序驱动（拥塞场景可选）
 - `-no_psip`: 禁用布局器中物理综合（PSIP）
+- `-psip_options`: 显式开启 PSIP 阶段某些优化（critical_cell_opt/fanout_opt/retime 等）
 - `-no_bufg_opt`: 禁用全局缓冲插入
+- `-no_noc_opt`: 禁用 NoC 相关布局优化（Versal）
+- `-net_delay_weight`: 网络延迟权重
+- `-eco`: ECO 模式，保留已有布局仅放置新增单元
 
 **常用 directive 详解**:
 
@@ -277,18 +299,22 @@ place_design [-directive <arg>] [-no_timing_driven] [-timing_summary]
 | `Auto_2` | ML 驱动 | 机器学习次佳预测指令 |
 | `Auto_3` | ML 驱动 | 机器学习第三佳预测指令 |
 
+> 注：`place_design -help` 的 "Supported values include" 仅列出 5 个（`Default`/`Explore`/`AggressiveExplore`/`RuntimeOptimized`/`Quick`），但该列表**非穷举**。上表中其余 directive（`AltSpreadLogic_*`、`ExtraNetDelay_*`、`SSI_*`、`WLDrivenBlockPlacement`、`ExtraPostPlacementOpt`、`ExtraTimingOpt`、`RQS`、`Auto_1/2/3`）经 `set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE` 实测均为合法值（被预设实现策略使用）。注意 `WLBlockPlacement`（无 "Driven"）不存在，正确名为 `WLDrivenBlockPlacement`。
+
 #### `route_design`
 
 **功能**: 布线（Route）
 
-**完整语法**:
+**完整语法**（取自 `route_design -help`）:
 ```
-route_design [-unroute <arg>] [-release_memory] [-nets <args>]
-  [-physical_nets] [-pins <args>] [-directive <arg>] [-tns_cleanup]
+route_design [-unroute] [-release_memory] [-nets <args>] [-physical_nets]
+  [-pins <arg>] [-directive <arg>] [-tns_cleanup]
   [-no_timing_driven] [-preserve] [-delay] [-auto_delay]
-  [-max_delay <arg>] [-min_delay <arg>] [-timing_summary] [-finalize]
+  -max_delay <arg> -min_delay <arg> [-timing_summary] [-finalize]
   [-ultrathreads] [-eco] [-no_psir] [-quiet] [-verbose]
 ```
+
+> 注：`-unroute` 不带参数（旧文档误写为 `-unroute <arg>`）；`-pins` 取单值 `<arg>`（旧文档误写为 `<args>`）。`-max_delay`/`-min_delay` 与 `-delay`/`-auto_delay` 配合使用。
 
 **关键参数**:
 - `-directive`: 布线策略（见下方策略表）
@@ -319,17 +345,18 @@ route_design [-unroute <arg>] [-release_memory] [-nets <args>]
 
 **功能**: 物理优化（布局后/布线后）
 
-**完整语法**:
+**完整语法**（取自 `phys_opt_design -help`）:
 ```
-phys_opt_design [-fanout_opt] [-placement_opt] [-memory_rewire_opt]
-  [-routing_opt] [-slr_crossing_opt] [-restruct_opt]
-  [-insert_negative_edge_ffs] [-interconnect_retime] [-lut_opt]
-  [-casc_opt] [-critical_cell_opt] [-dsp_register_opt]
+phys_opt_design [-fanout_opt] [-placement_opt] [-routing_opt]
+  [-slr_crossing_opt] [-insert_negative_edge_ffs] [-restruct_opt]
+  [-interconnect_retime] [-lut_opt] [-casc_opt] [-cell_group_opt]
+  [-equ_drivers_opt] [-critical_cell_opt] [-dsp_register_opt]
   [-bram_register_opt] [-uram_register_opt] [-bram_enable_opt]
   [-shift_register_opt] [-hold_fix] [-aggressive_hold_fix] [-retime]
   [-force_replication_on_nets <args>] [-directive <arg>]
   [-critical_pin_opt] [-clock_opt] [-path_groups <args>]
-  [-tns_cleanup] [-sll_reg_hold_fix] [-quiet] [-verbose]
+  [-tns_cleanup] [-sll_reg_hold_fix] [-memory_rewire_opt]
+  [-quiet] [-verbose]
 ```
 
 **选项详解**:
@@ -341,6 +368,12 @@ phys_opt_design [-fanout_opt] [-placement_opt] [-memory_rewire_opt]
 | `-routing_opt` | 重新布线优化 | 拥塞 |
 | `-slr_crossing_opt` | SLR 交叉优化 | 跨 SLR 路径 |
 | `-memory_rewire_opt` | BRAM/URAM 关键信号引脚重新连接 | Versal 器件 BRAM/URAM 时序 |
+| `-restruct_opt` | 关键路径逻辑重构 | 关键路径 |
+| `-interconnect_retime` | 互连重定时 | 跨互连 retiming |
+| `-lut_opt` | LUT 优化 | 关键 LUT |
+| `-casc_opt` | 级联优化 | DSP/进位级联 |
+| `-cell_group_opt` | 单元组优化 | 关键单元组 |
+| `-equ_drivers_opt` | 等价驱动合并 | 等价驱动网络 |
 | `-insert_negative_edge_ffs` | 插入负沿触发器 | 时序优化 |
 | `-critical_cell_opt` | 关键路径单元优化 | 关键路径 |
 | `-dsp_register_opt` | DSP 寄存器优化 | DSP 时序 |
@@ -380,27 +413,32 @@ phys_opt_design [-fanout_opt] [-placement_opt] [-memory_rewire_opt]
 
 **功能**: 时序综合报告
 
-**完整语法**:
+**完整语法**（取自 `report_timing_summary -help`）:
 ```
-report_timing_summary [-delay_type <arg>] [-min_slack <arg>] 
-  [-max_slack <arg>] [-path_type <arg>] [-report_unconstrained] 
-  [-check_timing_verbose] [-sort_by <arg>] [-of_objects <args>] 
-  [-max_paths <arg>] [-nworst <arg>] [-unique_pins] 
-  [-include_headers] [-file <arg>] [-append] [-return_string] 
-  [-warn_on_violation] [-slack_lesser_than <arg>] 
-  [-slack_greater_than <arg>] [-quiet] [-verbose]
+report_timing_summary [-check_timing_verbose] [-delay_type <arg>]
+  [-no_detailed_paths] [-setup] [-hold] [-max_paths <arg>]
+  [-nworst <arg>] [-unique_pins] [-path_type <arg>] [-no_reused_label]
+  [-input_pins] [-no_pr_attribute] [-no_pblock] [-routable_nets]
+  [-slack_lesser_than <arg>] [-report_unconstrained]
+  [-significant_digits <arg>] [-no_header] [-file <arg>] [-append]
+  [-name <arg>] [-return_string] [-warn_on_violation] [-datasheet]
+  [-cells <args>] [-rpx <arg>] [-quiet] [-verbose]
 ```
 
+> 注：旧文档列出的 `-min_slack`、`-max_slack`、`-sort_by`、`-of_objects`、`-include_headers`、`-slack_greater_than` 在 `report_timing_summary` 中**均不存在**（`-sort_by`/`-of_objects`/`-slack_greater_than` 属于 `report_timing`；`-include_headers` 应为 `-no_header`）。
+
 **关键参数**:
-- `-delay_type min|max`: max=setup 检查，min=hold 检查
+- `-delay_type max|min|min_max`: max=setup 检查，min=hold 检查，min_max=两者
+- `-setup` / `-hold`: 仅报告 setup / hold 检查
 - `-max_paths <N>`: 报告的路径数
 - `-nworst <N>`: 每个时钟组的最差路径数
 - `-slack_lesser_than <value>`: 仅报告 slack 小于该值
-- `-slack_greater_than <value>`: 仅报告 slack 大于该值
 - `-path_type summary|short|full|end`: 报告详细程度
+- `-no_detailed_paths`: 不输出详细路径，仅汇总
 - `-return_string`: 返回字符串而非写入文件
 - `-file <name>`: 输出到文件
 - `-append`: 追加到文件
+- `-rpx <name>`: 输出可重打开的报告对象（Report Object）
 
 **报告内容**:
 - WNS (Worst Negative Slack): 最差负 slack
@@ -414,24 +452,35 @@ report_timing_summary [-delay_type <arg>] [-min_slack <arg>]
 
 **功能**: 详细时序路径报告
 
-**完整语法**:
+**完整语法**（取自 `report_timing -help`）:
 ```
-report_timing [-delay_type <arg>] [-min_slack <arg>] [-max_slack <arg>] 
-  [-path_type <arg>] [-report_unconstrained] [-check_timing_verbose] 
-  [-sort_by <arg>] [-of_objects <args>] [-max_paths <arg>] 
-  [-nworst <arg>] [-unique_pins] [-include_headers] [-file <arg>] 
-  [-append] [-return_string] [-warn_on_violation] 
-  [-slack_lesser_than <arg>] [-slack_greater_than <arg>] 
-  [-cells <args>] [-from <args>] [-to <args>] [-through <args>] 
-  [-rise] [-fall] [-quiet] [-verbose]
+report_timing [-from <args>] [-rise_from <args>] [-fall_from <args>]
+  [-to <args>] [-rise_to <args>] [-fall_to <args>]
+  [-through <args>] [-rise_through <args>] [-fall_through <args>]
+  [-delay_type <arg>] [-setup] [-hold] [-max_paths <arg>]
+  [-nworst <arg>] [-unique_pins] [-path_type <arg>] [-input_pins]
+  [-no_header] [-no_reused_label] [-slack_lesser_than <arg>]
+  [-slack_greater_than <arg>] [-group <args>] [-sort_by <arg>]
+  [-no_report_unconstrained] [-user_ignored] [-of_objects <args>]
+  [-significant_digits <arg>] [-column_style <arg>] [-file <arg>]
+  [-append] [-name <arg>] [-no_pr_attribute] [-no_pblock]
+  [-routable_nets] [-return_string] [-warn_on_violation]
+  [-cells <args>] [-rpx <arg>] [-quiet] [-verbose]
 ```
+
+> 注：旧文档列出的 `-min_slack`/`-max_slack`/`-check_timing_verbose`/`-include_headers`/`-rise`/`-fall` 在 `report_timing` 中**均不存在**。方向过滤用 `-rise_from`/`-fall_from`/`-rise_to`/`-fall_to`/`-rise_through`/`-fall_through`（非 `-rise`/`-fall`）；`-include_headers` 应为 `-no_header`。
 
 **关键参数**:
 - `-from <args>`: 起点（cell pin、port 等）
 - `-to <args>`: 终点
 - `-through <args>`: 经过的 cell/pin
+- `-rise_from`/`-fall_from`/`-rise_to`/`-fall_to`/`-rise_through`/`-fall_through`: 按跳变方向过滤
 - `-cells <args>`: 限定到指定层级单元
-- `-delay_type min|max`: 路径类型
+- `-delay_type max|min|min_max`: 路径类型
+- `-setup` / `-hold`: 仅报告 setup / hold
+- `-group <args>`: 限定路径组
+- `-sort_by <arg>`: 排序方式
+- `-of_objects <args>`: 针对指定路径对象报告
 - `-max_paths <N>`: 路径数
 
 **报告内容**: 单条路径的完整延迟分解（logic delay / net delay / clock skew）
@@ -440,13 +489,23 @@ report_timing [-delay_type <arg>] [-min_slack <arg>] [-max_slack <arg>]
 
 **功能**: 设计分析（时序、拥塞、复杂度等）
 
-**完整语法**:
+**完整语法**（取自 `report_design_analysis -help`）:
 ```
-report_design_analysis [-congestion] [-timing] 
-  [-complexity] [-logic_level_distribution] [-logic_level_depth <arg>] 
-  [-logic_level_distribution_max <arg>] [-file <arg>] 
-  [-append] [-return_string] [-quiet] [-verbose]
+report_design_analysis [-file <arg>] [-csv <arg>] [-append] [-return_string]
+  [-complexity] [-cells <args>] [-bounding_boxes <args>]
+  [-hierarchical_depth <arg>] [-rent_greater_than <arg>]
+  [-instances_greater_than <arg>] [-instances_lesser_than <arg>]
+  [-av_fanout_greater_than <arg>] [-congestion] [-min_congestion_level <arg>]
+  [-timing] [-setup] [-hold] [-show_all] [-full_logical_pin]
+  [-routed_vs_estimated] [-logic_level_distribution]
+  [-logic_level_dist_paths <arg>] [-min_level <arg>] [-max_level <arg>]
+  [-return_timing_paths] [-of_timing_paths <args>] [-max_paths <arg>]
+  [-extend] [-routes] [-end_point_clocks <args>] [-logic_levels <arg>]
+  [-qor_summary] [-json <arg>] [-name <arg>] [-no_pr_attribute]
+  [-quiet] [-verbose]
 ```
+
+> 注：旧文档列出的 `-logic_level_depth`、`-logic_level_distribution_max` **不存在**；逻辑级数过滤用 `-logic_levels`/`-min_level`/`-max_level`，分布路径用 `-logic_level_dist_paths`。`-json <arg>` 可直接输出 JSON。
 
 **分析维度**:
 
@@ -510,8 +569,8 @@ get_property STATS.CONGESTION_LEVEL [get_runs impl_1]
 |---|---|
 | `create_pblock` | 创建 Pblock |
 | `add_cells_to_pblock` | 添加 cells 到 Pblock |
-| `add_aps_to_pblock` | 添加引脚到 Pblock |
-| `resize_pblock` | 调整 Pblock 大小 |
+| `resize_pblock` | 调整 Pblock 大小（-add/-remove/-from/-to） |
+| `delete_pblock` | 删除 Pblock |
 | `set_property LOC` | 锁定 cell 位置 |
 | `set_property BEL` | 锁定 cell 内部 BEL |
 | `set_property FIXED_ROUTE` | 固定路由 |
@@ -572,12 +631,16 @@ set paths [get_timing_paths -max_paths 10 -slack_lesser_than 0]
 foreach path $paths { ... }
 ```
 
-### 5.3 JSON 输出命令
+### 5.3 结构化/机器可读输出
 
-支持 `-json` 的命令（2025.1）:
-- `report_timing_summary -return_string`（部分）
-- `report_utilization`（部分）
-- `report_design_analysis`
+各报告命令的结构化输出参数（取自 -help，2025.1）:
+- `report_design_analysis -json <file>`：直接输出 JSON（本表唯一带 `-json` 的命令）
+- `report_design_analysis -csv <file>`：输出 CSV
+- `report_timing_summary -rpx <file>` / `report_timing -rpx <file>` / `report_methodology -rpx` / `report_drc -rpx` / `report_power -rpx`：输出可重打开的 Report Object（.rpx，XML 格式）
+- `report_utilization -spreadsheet_file <file>`：输出电子表格
+- 其余报告命令多以 `-return_string` 返回纯文本字符串供 TCL 解析
+
+> 注：旧文档称 `report_timing_summary`/`report_utilization` 支持 `-json`，实测二者**无 `-json` 参数**。
 
 ### 5.4 报告关键数据格式
 
@@ -623,18 +686,30 @@ WNS(ns)  TNS(ns)  WHS(ns)  THS(ns)  TPWS(ns)
 ### 6.3 `open_checkpoint` 完整语法
 
 ```
-open_checkpoint [-part <arg>] [-strict] [-quiet] [-verbose] <files>
+open_checkpoint [-part <arg>] [-ignore_timing] [-quiet] [-verbose] <file>
 ```
 
 **关键参数**:
 - `-part <arg>`: 切换目标器件
-- `-strict`: 严格模式（不允许 DCP 与当前工程器件不匹配）
+- `-ignore_timing`: 不加载时序数据（仅读网表/布局/布线），加速加载
+- `<file>`: DCP 文件路径
+
+> 注：旧文档列出的 `-strict` 在 `open_checkpoint` 中**不存在**。
 
 ### 6.4 `write_checkpoint` 完整语法
 
 ```
-write_checkpoint [-force] [-quiet] [-verbose] <file>
+write_checkpoint [-force] [-cell <arg>] [-logic_function_stripped] [-encrypt]
+  [-key <arg>] [-quiet] [-verbose] [<file>]
 ```
+
+**关键参数**:
+- `-force`: 覆盖已存在文件
+- `-cell <arg>`: 仅写出指定 cell 的 DCP（模块复用/out-of-context）
+- `-logic_function_stripped`: 剥离逻辑功能信息（保密）
+- `-encrypt`: 写出加密 DCP
+- `-key <arg>`: 加密密钥
+- `[<file>]`: 输出路径（不指定时写到工程默认位置）
 
 **典型用法**:
 ```
@@ -651,137 +726,49 @@ write_checkpoint -force post_route.dcp
 
 ## 7. 预设实现策略（Implementation Strategy）完整列表
 
-### 7.1 预设策略
+### 7.1 校验说明与默认策略
 
-| 策略名称 | 内部配置（place / phys_opt / route） | 用途 |
-|---|---|---|
-| `Default` | Default / Default / Default | 通用 |
-| `Flow_Quick` | Quick / - / Quick | 最快编译 |
-| `Flow_RuntimeOptimized` | Quick / - / Quick | 快速迭代 |
-| `Flow_PerfOptimized_high` | Explore / Explore / Explore | 高性能 |
-| `Flow_PerfOptimized_medium` | Default / Default / Explore | 中等性能 |
-| `Flow_AreaOptimized_high` | AltSpreadLogic_high / AlternateReplication / Explore | 高面积优化 |
-| `Flow_AreaOptimized_medium` | AltSpreadLogic_high / AlternateReplication / Default | 中等面积优化 |
-| `Flow_AlternateRoutability` | AltSpreadLogic_high / - / Explore | 可布线性 |
-| `Flow_MapPhysOpt` | Default / Default / Default | 启用物理优化 |
-| `Flow_PostRoutePhysOpt` | Default / Default / Default + post-route phys_opt | 布线后物理优化 |
-| `Flow_RemapPhysOpt` | - / AddRemap / - | 物理优化+重映射 |
-| `Flow_CongOptimized` | SpreadLogic_high / - / Explore | 拥塞优化 |
+> **重要更正**：旧文档本节列出的 ~70 个策略名（`Flow_PerfOptimized_*`、`Flow_AreaOptimized_*`、`Flow_MapPhysOpt`、`Flow_PostRoutePhysOpt`、`Flow_RemapPhysOpt`、`Flow_CongOptimized`、`Performance_AggressiveExplore`、`Performance_RetimingExplore`、`Performance_NetDelay_medium`、`Performance_SpreadLogic`、`Performance_BalancePlace`、`Performance_BalanceSLR`、`Performance_HighUtilSLR`、`Performance_ExplorePostRoute`、`Performance_NetDelayOptimization`、`Performance_PlaceDesOpt`、`Performance_RemapPhysOpt`、`Performance_PhysOpt`、`Performance_Aggressive`、`Performance_CriticalPathsOpt`、`Area_ExploreSequentialArea`、`Area_ExploreLUTRemap`、`Area_ReduceLUTs*`、`Area_ShiftRegTo*`、`Area_MapLargeShiftRegToBRAM`、`Congestion_Default`、`Congestion_AltSpreadLogic_*`、`Congestion_Explore`、`Congestion_NetDelay_*`、`Congestion_RouteFlow`、`Congestion_BalanceRoute`、`Congestion_Place_BalanceSLR*`、全部 `Power_*`、全部 `SSI_*`、全部 `Block_*`）经 `set_property strategy` 在 **xcvu3p 与 xcvu9p 两个器件上实测**，均报 `Strategy 'X' is not supported by the flow 'Vivado Implementation 2025'`，即**在 Vivado 2025.1 中不存在**。`get_impl_strategies` 在 batch TCL 中未注册，无法穷举；完整列表以 UG904 2025.1 或 GUI 为准。下表为实测有效的策略及其权威内部 step 指令映射（通过设置策略后读取 `STEPS.*.ARGS.DIRECTIVE` 获得）。
 
-### 7.2 Performance 系列
+- **默认策略**：`Vivado Implementation Defaults`（opt=Default / place=Default / phys_opt=Default / route=Default，phys_opt 启用）。注意默认策略名不是 `Default`。
 
-| 策略 | 内部配置 |
-|---|---|
-| `Performance_Explore` | Explore / Explore / Explore |
-| `Performance_ExtraTimingOpt` | ExtraTimingOpt / Default / Default |
-| `Performance_AggressiveExplore` | AggressiveExplore / AggressiveExplore / AggressiveExplore |
-| `Performance_Retiming` | Default / AddRetime / Default |
-| `Performance_RetimingExplore` | Explore / AddRetime / Explore |
-| `Performance_NetDelay_high` | WLBlockPlacement / Default / HigherDelayCost |
-| `Performance_NetDelay_medium` | WLBlockPlacement / Default / Default |
-| `Performance_NetDelay_low` | WLBlockPlacement / Default / LowerDelayCost |
-| `Performance_WLBlockPlacement` | WLBlockPlacement / Default / Default |
-| `Performance_RefinePlacement` | ExtraPostPlacementOpt / Default / NoTimingRelaxation |
-| `Performance_SpreadLogic` | SpreadLogic_high / Default / Default |
-| `Performance_BalancePlace` | BalancePlace / Default / Default |
-| `Performance_BalanceSLR` | BalanceSLR / Default / Default |
-| `Performance_HighUtilSLR` | HighUtilSLR / Default / Default |
-| `Performance_ExplorePostRoute` | Explore / Default / Explore |
-| `Performance_NetDelayOptimization` | WLBlockPlacement / Default / HigherDelayCost |
-| `Performance_PlaceDesOpt` | Default / Default / Default |
-| `Performance_RemapPhysOpt` | Default / AddRemap / Default |
-| `Performance_PhysOpt` | Default / Default / Default + post-route phys_opt |
-| `Performance_Aggressive` | AggressiveExplore / AggressiveExplore / AggressiveExplore |
-| `Performance_CriticalPathsOpt` | Explore / Explore / Explore |
+### 7.2 实测有效策略及内部配置（opt / place / phys_opt / route）
 
-### 7.3 Area 系列
+| 策略名称 | opt_design | place_design | phys_opt_design | route_design | 备注 |
+|---|---|---|---|---|---|
+| `Flow_Quick` | RuntimeOptimized | Quick | -(禁用) | Quick | 最快编译 |
+| `Flow_RuntimeOptimized` | RuntimeOptimized | RuntimeOptimized | -(禁用) | RuntimeOptimized | 快速迭代 |
+| `Performance_Explore` | Explore | Explore | Explore | Explore | 高性能通用 |
+| `Performance_ExtraTimingOpt` | Default | ExtraTimingOpt | Explore | NoTimingRelaxation | 额外时序优化 |
+| `Performance_Retiming` | Default | ExtraPostPlacementOpt | AlternateFlowWithRetiming | Explore | 含 retiming |
+| `Performance_NetDelay_high` | Default | ExtraNetDelay_high | AggressiveExplore | NoTimingRelaxation | 高悲观度网络延迟 |
+| `Performance_NetDelay_low` | Explore | ExtraNetDelay_low | AggressiveExplore | NoTimingRelaxation | 低悲观度网络延迟 |
+| `Performance_WLBlockPlacement` | Explore | WLDrivenBlockPlacement | Explore | Explore | RAM/DSP 线长驱动 |
+| `Performance_RefinePlacement` | Default | ExtraPostPlacementOpt | Explore | Explore | 精细布局优化 |
+| `Performance_BalanceSLLs` | Default | SSI_BalanceSLLs | Explore | Explore | 跨 SLR 均衡 SLL |
+| `Performance_BalanceSLRs` | Default | SSI_BalanceSLRs | Explore | Explore | 跨 SLR 均衡单元数 |
+| `Performance_HighUtilSLRs` | Default | SSI_HighUtilSLRs | Explore | Explore | 各 SLR 紧凑布局 |
+| `Area_Explore` | ExploreArea | Default | -(禁用) | Default | 面积探索（仅 opt 改变） |
+| `Area_ExploreWithRemap` | ExploreWithRemap | Default | -(禁用) | Default | 面积探索 + remap |
+| `Congestion_SpreadLogic_high` | Default | AltSpreadLogic_high | AggressiveExplore | AlternateCLBRouting | 严重拥塞 |
+| `Congestion_SpreadLogic_medium` | Default | AltSpreadLogic_medium | Explore | AlternateCLBRouting | 中等拥塞 |
+| `Congestion_SpreadLogic_low` | Default | AltSpreadLogic_low | Explore | AlternateCLBRouting | 轻拥塞 |
 
-| 策略 | 内部配置 |
-|---|---|
-| `Area_Explore` | AltSpreadLogic_high / AlternateReplication / - |
-| `Area_ExploreWithRemap` | AltSpreadLogic_high / AlternateReplication + AddRemap / - |
-| `Area_ExploreSequentialArea` | AltSpreadLogic_high / Default / - |
-| `Area_ExploreLUTRemap` | AltSpreadLogic_high / AddRemap / - |
-| `Area_ReduceLUTs` | AltSpreadLogic_high / Default / Default |
-| `Area_ReduceLUTs_with_Retiming` | AltSpreadLogic_high / AddRetime / Default |
-| `Area_ShiftRegToBRAM` | AltSpreadLogic_high / Default / Default |
-| `Area_MapLargeShiftRegToBRAM` | Default / Default / Default + 映射选项 |
-| `Area_ShiftRegToURAM` | AltSpreadLogic_high / Default / Default |
+> 说明：表中 "phys_opt -(禁用)" 表示该策略 `STEPS.PHYS_OPT_DESIGN.IS_ENABLED=0`，即不运行物理优化步骤。所有已测策略的 `STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED=0`（布线后物理优化默认关闭）。`Area_*` 系列仅改变 opt_design directive，place/route/phys_opt 均为 Default 且禁用 phys_opt。
 
-### 7.4 Flow 系列
+### 7.3 已删除/不存在的策略类别（2025.1）
 
-| 策略 | 内部配置 |
-|---|---|
-| `Flow_Quick` | Quick / - / Quick |
-| `Flow_RuntimeOptimized` | Quick / - / Quick |
-| `Flow_PerfOptimized_high` | Explore / Explore / Explore |
-| `Flow_PerfOptimized_medium` | Default / Default / Explore |
-| `Flow_AreaOptimized_high` | AltSpreadLogic_high / AlternateReplication / Explore |
-| `Flow_AreaOptimized_medium` | AltSpreadLogic_high / AlternateReplication / Default |
-| `Flow_AlternateRoutability` | AltSpreadLogic_high / - / Explore |
-| `Flow_MapPhysOpt` | Default / Default / Default |
-| `Flow_PostRoutePhysOpt` | Default / Default / Default + post-route phys_opt |
-| `Flow_RemapPhysOpt` | - / AddRemap / - |
-| `Flow_CongOptimized` | SpreadLogic_high / - / Explore |
+以下类别在 Vivado 2025.1 的 "Vivado Implementation 2025" flow 中**已不存在**（实测在 xcvu3p 与 xcvu9p 上均不支持）：
 
-### 7.5 Congestion 系列
+- **Flow_\***：除 `Flow_Quick`、`Flow_RuntimeOptimized` 外，其余 `Flow_PerfOptimized_*`/`Flow_AreaOptimized_*`/`Flow_MapPhysOpt`/`Flow_PostRoutePhysOpt`/`Flow_RemapPhysOpt`/`Flow_CongOptimized`/`Flow_AlternateRoutability` 均无效。
+- **Power_\***：`Power_Default`/`Power_Explore`/`Power_Optimized`/`Power_Low` 全部无效（功耗优化改由 `power_opt_design` 命令或工程选项控制）。
+- **SSI_\***：`SSI_Default`/`SSI_Explore`/`SSI_Quick`/`SSI_BalancePlace`/`SSI_BalanceSLR`/`SSI_HighUtilSLR`/`SSI_SpreadLogic_*`/`SSI_AltSpreadLogic_*`/`SSI_PerfOptimized`/`SSI_AreaOptimized` 全部无效。SSI 相关优化已并入 `Performance_BalanceSLLs`/`Performance_BalanceSLRs`/`Performance_HighUtilSLRs` 三个策略（其 place directive 使用 `SSI_BalanceSLLs`/`SSI_BalanceSLRs`/`SSI_HighUtilSLRs`）。
+- **Block_\***：`Block_Default`/`Block_Explore`/`Block_High`/`Block_Low`/`Block_Quick` 全部无效。
+- **Congestion_\***：仅 `Congestion_SpreadLogic_high/medium/low` 有效，其余 `Congestion_Default`/`Congestion_AltSpreadLogic_*`/`Congestion_Explore`/`Congestion_NetDelay_*`/`Congestion_RouteFlow`/`Congestion_BalanceRoute`/`Congestion_Place_BalanceSLR*` 无效。
+- **Area_\***：仅 `Area_Explore`/`Area_ExploreWithRemap` 有效，其余无效。
+- **Performance_\***：仅上表 9 个有效，其余 `Performance_AggressiveExplore`/`Performance_RetimingExplore`/`Performance_NetDelay_medium`/`Performance_SpreadLogic`/`Performance_BalancePlace`/`Performance_BalanceSLR`/`Performance_HighUtilSLR`/`Performance_ExplorePostRoute`/`Performance_NetDelayOptimization`/`Performance_PlaceDesOpt`/`Performance_RemapPhysOpt`/`Performance_PhysOpt`/`Performance_Aggressive`/`Performance_CriticalPathsOpt` 无效。
 
-| 策略 | 内部配置 |
-|---|---|
-| `Congestion_Default` | Default / Default / Default |
-| `Congestion_SpreadLogic_high` | SpreadLogic_high / Default / Default |
-| `Congestion_SpreadLogic_medium` | SpreadLogic_medium / Default / Default |
-| `Congestion_SpreadLogic_low` | SpreadLogic_low / Default / Default |
-| `Congestion_AltSpreadLogic_high` | AltSpreadLogic_high / Default / Default |
-| `Congestion_AltSpreadLogic_medium` | AltSpreadLogic_medium / Default / Default |
-| `Congestion_AltSpreadLogic_low` | AltSpreadLogic_low / Default / Default |
-| `Congestion_Explore` | Explore / Default / Explore |
-| `Congestion_NetDelay_high` | WLBlockPlacement / Default / HigherDelayCost |
-| `Congestion_NetDelay_medium` | WLBlockPlacement / Default / Default |
-| `Congestion_NetDelay_low` | WLBlockPlacement / Default / LowerDelayCost |
-| `Congestion_RouteFlow` | Default / Default / Explore |
-| `Congestion_BalanceRoute` | Default / Default / BalanceRoute |
-| `Congestion_Place_BalanceSLR` | BalanceSLR / Default / Default |
-| `Congestion_Place_BalanceSLR_BalanceRoute` | BalanceSLR / Default / BalanceRoute |
-| `Congestion_Place_BalanceSLR_ExploreRoute` | BalanceSLR / Default / Explore |
-
-### 7.6 Power 系列
-
-| 策略 | 内部配置 |
-|---|---|
-| `Power_Default` | Default / Default / Default + power |
-| `Power_Explore` | Explore / Explore / Explore + power |
-| `Power_Optimized` | Default / Default / Default + power opt |
-| `Power_Low` | Default / Default / Default + power low |
-
-### 7.7 SSI 系列
-
-| 策略 | 内部配置 |
-|---|---|
-| `SSI_Default` | Default / Default / Default |
-| `SSI_Explore` | Explore / Explore / Explore |
-| `SSI_Quick` | Quick / - / Quick |
-| `SSI_BalancePlace` | BalancePlace / Default / Default |
-| `SSI_BalanceSLR` | BalanceSLR / Default / Default |
-| `SSI_HighUtilSLR` | HighUtilSLR / Default / Default |
-| `SSI_SpreadLogic_high` | SpreadLogic_high / Default / Default |
-| `SSI_SpreadLogic_low` | SpreadLogic_low / Default / Default |
-| `SSI_AltSpreadLogic_high` | AltSpreadLogic_high / Default / Default |
-| `SSI_AltSpreadLogic_low` | AltSpreadLogic_low / Default / Default |
-| `SSI_PerfOptimized` | Explore / Default / Explore |
-| `SSI_AreaOptimized` | AltSpreadLogic_high / Default / Default |
-
-### 7.8 Block 设计与模块化
-
-| 策略 | 用途 |
-|---|---|
-| `Block_Default` | 块设计默认 |
-| `Block_Explore` | 块设计探索 |
-| `Block_High` | 块设计高性能 |
-| `Block_Low` | 块设计低资源 |
-| `Block_Quick` | 块设计快速 |
-
-### 7.9 Implementation Strategy 应用方式
+### 7.4 Implementation Strategy 应用方式
 
 **工程模式**:
 ```
@@ -817,20 +804,24 @@ phys_opt_design -directive <DirectiveName>
 
 ### 8.2 版本对应表
 
+发布日期取自 bundled `RELEASE_NOTES.TXT`（旧文档日期系统性偏早约 1 年，已全部纠正）:
+
 | RapidWright 版本 | 发布日期 | 对应 Vivado |
 |---|---|---|
-| v2025.2.2-beta | 2025-06-05 | Vivado 2025.2 |
-| v2025.2.1-beta | 2025-02-19 | Vivado 2025.2 |
-| v2025.2.0-beta | 2024-12-02 | Vivado 2025.2 |
-| v2025.1.3-beta | 2024-10-03 | Vivado 2025.1 |
-| v2025.1.1-beta | 2024-08-13 | Vivado 2025.1 |
-| v2025.1.0-beta | 2024-06-25 | Vivado 2025.1 |
-| v2024.2.3-beta | 2024-05-29 | Vivado 2024.2 |
-| v2024.2.2-beta | 2024-03-26 | Vivado 2024.2 |
-| v2024.2.1-beta | 2024-01-15 | Vivado 2024.2 |
-| v2024.2.0-beta | 2023-12-05 | Vivado 2024.2 |
+| v2025.2.1-beta | 2026-02-18 | Vivado 2025.2 |
+| v2025.2.0-beta | 2025-12-01 | Vivado 2025.2 |
+| v2025.1.3-beta | 2025-10-02 | Vivado 2025.1 |
+| v2025.1.2-beta | 2025-10-02（Maven jar 损坏，已废弃，用 2025.1.3） | Vivado 2025.1 |
+| v2025.1.1-beta | 2025-08-13 | Vivado 2025.1 |
+| v2025.1.0-beta | 2025-06-25 | Vivado 2025.1 |
+| v2024.2.3-beta | 2025-05-29 | Vivado 2024.2 |
+| v2024.2.2-beta | 2025-03-25 | Vivado 2024.2 |
+| v2024.2.1-beta | 2025-01-15 | Vivado 2024.2 |
+| v2024.2.0-beta | 2024-12-04 | Vivado 2024.2 |
 
-**FPL26 比赛固定 commit**: `f63afef`（比赛仓库通过 git submodule 引入）
+> **本仓库 bundled 版本**：`2025.2.1-beta`（由 `RapidWright/jars/rapidwright-api-lib-2025.2.1.jar` 与 `RELEASE_NOTES.TXT` 顶端条目确认），对应 Vivado 2025.2。注：本仓库 DCP 为 Vivado 2025.1 生成，RapidWright 2025.2.x 可向下兼容读取 2025.1 DCP。
+
+> **关于 "固定 commit f63afef"**：旧文档与本仓库 `FPL26_Claude_Code_Reference.md` 均称比赛固定 RapidWright commit `f63afef`（对应 v2025.1.3-beta）。但本仓库中 `RapidWright/` 在 git tree 中以普通目录（mode `040000`，非 gitlink `160000`） vendored，`.git/modules/RapidWright` 不存在，故该 commit 无法在本地核对；且实际 bundled 版本为 2025.2.1-beta，与 v2025.1.3-beta 不符。以实际 bundled 版本为准。
 
 ### 8.3 安装方式
 
@@ -893,11 +884,13 @@ java -jar rapidwright-<version>.jar
 
 ### 8.5 依赖
 
-- Or-tools 9.14.6206
-- protobuf 4.31.1
-- Jacl 1.4.1（XDC TCL 解析）
-- ELK（NetlistBrowser 原理图）
-- JUnit 5（测试）
+（取自 `RapidWright/jars/` 实际 jar 版本）
+- Or-tools 9.14.6206（`ortools-java-9.14.6206.jar`）
+- protobuf 4.31.1（`protobuf-java-4.31.1.jar`）
+- Jacl 1.4.1（`jacl-1.4.1.jar`，XDC TCL 解析）
+- ELK 0.10.0（`org.eclipse.elk.*-0.10.0.jar`，NetlistBrowser 原理图）
+- JUnit 5.7.1（`junit-jupiter-*-5.7.1.jar`，测试）
+- 另含 guava 33.6.0-jre、jgrapht-core 1.3.0、kryo 5.2.1、commons-io 2.20.0 等
 
 ---
 
@@ -908,51 +901,40 @@ java -jar rapidwright-<version>.jar
 ```
 com.xilinx.rapidwright
 ├── device                           # 器件模型
-│   ├── Device                       # FPGA 器件
+│   ├── Device                       # FPGA 器件（含 AWS_F1/PYNQ_Z1/KCU105 常量）
 │   ├── Tile                         # 物理瓦片
 │   ├── Site                         # 物理位置
 │   ├── PIP                          # 可编程互连点
 │   ├── BEL                          # 基本逻辑单元
-│   ├── Wire                         # 物理连线
-│   ├── Node                         # RRG 节点
-│   ├── PartNameTools                # 器件名工具
-│   └── Series                       # 器件系列
+│   ├── Wire / Node                  # 物理连线 / 节点
+│   ├── Part / Series / FamilyType   # 器件名 / 系列 / 架构
+│   ├── ClockRegion / SLR            # 时钟区域 / SSI SLR
+│   └── SiteTypeEnum / TileTypeEnum / BELTypeEnum  # 类型枚举
 ├── design                           # 物理设计
 │   ├── Design                       # 顶层设计
-│   ├── Cell                         # 实例 cell
-│   ├── Net                          # 网络
-│   ├── Pin                          # 引脚
-│   ├── Port                         # 端口
-│   ├── SiteInst                     # 站点实例
-│   ├── SitePinInst                  # 站点引脚实例
-│   └── UnplaceCellException         # 异常
-├── place                            # 布局
-│   ├── Placer                       # 布局器基类
-│   ├── ...
-│   └── Router
-├── route                            # 路由
-│   ├── RWRoute                      # 时序驱动路由器
-│   └── ...
-├── ecopt                            # ECO
-│   ├── ECOTools                     # ECO 工具
-│   └── ...
+│   ├── Cell / Net / SiteInst        # cell / 网络 / 站点实例
+│   ├── SitePinInst / Port / PinType # 站点引脚实例 / 端口 / 引脚类型
+│   ├── NetType                      # 网络类型枚举（WIRE/GND/VCC/UNKNOWN）
+│   ├── DesignTools                  # 设计工具（createMissingSitePinInsts 等）
+│   ├── Module / ModuleInst          # 预实现模块
+│   └── Unisim / UnisimManager       # 原语映射
+├── eco                              # ECO（旧文档误写为 ecopt）
+│   └── ECOTools                     # ECO 工具
+├── rwroute                          # 路由（旧文档误写为 route）
+│   ├── RWRoute                      # 时序/线长驱动路由器
+│   └── GlobalSignalRouting
+├── router                           # 路由底层
+│   └── RouteNode                    # 路由节点
 ├── bitstream                        # 比特流
-│   ├── Bitstream                    # 比特流读取
-│   └── ...
-├── debug                            # 调试
-│   ├── ...
-│   └──
-├── gui                              # GUI
-│   ├── NetlistBrowser               # 网表浏览器
-│   └── ...
+├── gui                              # GUI（NetlistBrowser）
 ├── interchange                      # FPGA Interchange
-│   ├── ...
-│   └──
 └── util                             # 工具
+    ├── VivadoTools                  # 调用 Vivado（reportRouteStatus/runTcl 等）
     ├── JobScheduler                 # 任务调度
-    ├── FileTools                    # 文件工具
-    └── ...
+    └── FileTools                    # 文件工具
 ```
+
+> 注：包名经 `javap`/jar 核对。RapidWright 无独立 `place` 包（布局由 Vivado 或外部 placer 完成）；`ECOTools` 在 `eco` 包（非 `ecopt`）；`RWRoute` 在 `rwroute` 包（非 `route`）；`VivadoTools`/`JobScheduler`/`FileTools` 在 `util` 包。
 
 ### 9.2 核心类详解
 
@@ -964,16 +946,25 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getDevice(String partName)` | 获取指定器件 |
-| `getDevice(Device.AWS_F1)` | 获取 AWS F1 实例器件 |
-| `getName()` | 获取器件名 |
-| `getTiles()` | 获取所有 Tile |
-| `getTile(int row, int col)` | 获取指定坐标 Tile |
-| `getSites()` | 获取所有 Site |
-| `getAllPIPs()` | 获取所有 PIP |
-| `getWires()` | 获取所有 Wire |
-| `getBELs()` | 获取所有 BEL |
-| `getRootTimingModel()` | 获取根时序模型 |
+| `getDevice(String partName)` | 静态，按器件名获取 Device |
+| `getDevice(Part part)` | 静态，按 Part 对象获取 Device |
+| `getName()` | 器件名 |
+| `getTiles()` | 所有 Tile（`Tile[][]`） |
+| `getTile(int row, int col)` / `getTile(String)` / `getTile(int)` | 按坐标/名/索引取 Tile |
+| `getRows()` / `getColumns()` | 行列数 |
+| `getSite(String)` | 按名取 Site |
+| `getAllSitesOfType(SiteTypeEnum)` | 按类型取所有 Site |
+| `getAllCompatibleSites(SiteTypeEnum)` | 按类型取所有兼容 Site |
+| `getBELs(SiteTypeEnum)` / `getBEL(SiteTypeEnum, String)` | 按类型取 BEL |
+| `getSLRs()` / `getNumOfSLRs()` / `getMasterSLR()` | SSI SLR 信息 |
+| `getClockRegions()` / `getClockRegion(int, int)` | 时钟区域 |
+| `getNode(String)` / `getWire(String)` | 取 Node / Wire |
+| `getSeries()` / `getFamilyType()` / `getArchitecture()` | 系列/架构 |
+| `getActivePackage()` / `getPackages()` | 封装 |
+| `AWS_F1` / `PYNQ_Z1` / `KCU105` | 预置器件名常量（String） |
+| `RAPIDWRIGHT_VERSION` | RapidWright 版本字符串 |
+
+> 注：旧文档列出的 `getSites()`、`getAllPIPs()`、`getWires()`、`getBELs()`（无参）、`getRootTimingModel()` 在 `Device` 中**均不存在**；Site 按 `getSite(String)`/`getAllSitesOfType` 查询，PIP 按 Tile 取（`tile.getPIPs()`），Wire 按 `getWire(String)`/`getWireCount()`，BEL 按 `getBELs(SiteTypeEnum)`。`AWS_F2` 不存在。
 
 **支持的器件系列**:
 - 7-Series (Artix-7, Kintex-7, Virtex-7, Zynq-7000)
@@ -989,24 +980,26 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `readCheckpoint(String path)` | 读取 DCP |
+| `readCheckpoint(String path)` | 静态，读取 DCP 返回 Design |
+| `readCheckpoint(String, CodePerfTracker)` | 读取 DCP（带性能跟踪） |
 | `writeCheckpoint(String path)` | 写出 DCP |
-| `readCheckpoint(String path, CodePerfTracker)` | 读取 DCP（带性能跟踪） |
-| `getPartName()` | 获取目标器件名 |
-| `setPartName(String partName)` | 设置目标器件名 |
-| `getName()` | 获取设计名 |
-| `getNets()` | 获取所有网络 |
-| `getCells()` | 获取所有 cell |
-| `getPlace()` | 布局状态 |
-| `getRoute()` | 布线状态 |
-| `getTopEDIF()` | 获取顶层 EDIF |
-| `getO() ` | 设计状态 |
+| `getPartName()` / `setPartName(String)` | 目标器件名 |
+| `getName()` / `setName(String)` | 设计名 |
+| `getNets()` / `getNet(String)` | 所有网络 / 按名取网络 |
+| `getCells()` | 所有 cell |
+| `getSiteInsts()` | 所有 SiteInst |
+| `getTopEDIF()` / `getNetlist()` | 顶层 EDIF 网表 |
+| `unrouteDesign()` / `unplaceDesign()` | 清除布线 / 清除布局 |
+| `updateDesignWithCheckpointPlaceAndRoute(String)` | 从 DCP 同步布局布线 |
+| `createAndPlaceCell(...)` | 创建并放置 cell |
 
 **检查点操作参数**:
 - `Design.readCheckpoint(path)`: 默认行为
 - 内部调用: `CodePerfTracker` 跟踪
 
 **DCP 读取性能**: 加载 DCP 比 Vivado 快 3-5 倍
+
+> 注：旧文档列出的 `getPlace()`、`getRoute()`、`getO()` 在 `Design` 中**均不存在**。布局/布线状态分别由 `cell.isPlaced()` 与 `net.hasPIPs()` 判定，或用 `unplaceDesign()`/`unrouteDesign()` 清除。
 
 #### `Net` 类
 
@@ -1016,25 +1009,29 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取网络名 |
-| `getSource()` | 获取源引脚 |
-| `getSinks()` | 获取所有 sink |
-| `getPins()` | 获取所有引脚 |
-| `getFanout()` | 获取扇出数 |
-| `getType()` | 获取类型（GND/VCC/SIGNAL） |
-| `isPIPPlaced()` | 是否已布 PIP |
-| `getPIPs()` | 获取所有 PIP |
-| `getRouteTree()` | 获取路由树 |
-| `getSourceSiteInst()` | 获取源 site 实例 |
-| `setSource(PortInst)` | 设置源 |
-| `addSink(PortInst)` | 添加 sink |
-| `disconnect()` | 断开网络 |
-| `getCriticalPath()` | 获取关键路径 |
+| `getName()` / `setName(String)` | 网络名 |
+| `getType()` | 网络类型（`NetType`） |
+| `getSource()` | 源 SitePinInst |
+| `getSinkPins()` | 所有 sink SitePinInst（`List<SitePinInst>`） |
+| `getPins()` | 所有引脚（`List<SitePinInst>`） |
+| `getFanOut()` | 扇出数（int） |
+| `hasPIPs()` | 是否已布 PIP |
+| `getPIPs()` / `getCopyOfPIPs()` | 所有 PIP |
+| `setSource(SitePinInst)` | 设置源（参数是 SitePinInst，非 PortInst） |
+| `addPin(SitePinInst)` / `removePin(SitePinInst)` | 增删引脚 |
+| `unroute()` | 取消本网布线 |
+| `getSiteInsts()` | 关联的 SiteInst 集合 |
+| `getSourceTile()` | 源所在 Tile |
+| `lockRouting()` / `unlockRouting()` | 锁定/解锁布线 |
+| `isStaticNet()` / `isVCCNet()` / `isGNDNet()` / `isClockNet()` | 网络性质判断 |
 
-**Net 类型常量**:
+**Net 类型常量**（`NetType` 枚举）:
+- `NetType.WIRE`（普通信号网）
 - `NetType.GND`
 - `NetType.VCC`
-- `NetType.SIGNAL`
+- `NetType.UNKNOWN`
+
+> 注：旧文档列出的 `getSinks()`、`getFanout()`、`isPIPPlaced()`、`getRouteTree()`、`getSourceSiteInst()`、`addSink()`、`disconnect()`、`getCriticalPath()` 在 `Net` 中**均不存在**；正确名见上表。`NetType.SIGNAL` 不存在，普通信号网为 `NetType.WIRE`。
 
 #### `Cell` 类
 
@@ -1044,17 +1041,27 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取 cell 名 |
-| `getType()` | 获取 cell 类型 |
-| `getBEL()` | 获取 BEL 位置 |
-| `setBEL(BEL bel)` | 设置 BEL 位置 |
-| `getSiteInst()` | 获取 site 实例 |
-| `getPins()` | 获取所有引脚 |
-| `getPin(String name)` | 获取指定引脚 |
-| `isLocked()` | 是否锁定 |
-| `setLocked(boolean)` | 设置锁定 |
-| `getTile()` | 获取所在 Tile |
+| `getName()` / `updateName(String)` | cell 名 |
+| `getType()` / `setType(String)` | cell 类型字符串 |
+| `getEDIFCellInst()` / `getEDIFHierCellInst()` | 关联 EDIF 单元实例 |
+| `getBEL()` | 所在 BEL（BEL 在构造时设定，无 `setBEL(BEL)`） |
+| `getBELName()` / `getSiteName()` | BEL 名 / site 名 |
+| `getSiteInst()` / `setSiteInst(SiteInst)` | site 实例 |
+| `getSite()` / `getTile()` | 所在 Site / Tile |
+| `getBELPin(EDIFPortInst)` / `getBELPin(EDIFHierPortInst)` | 按 EDIF 端口取 BELPin |
+| `getCorrespondingSitePinName(String)` / `getSitePinFromLogicalPin(String, List)` | 取 site pin 名 |
+| `getPinMappingsL2P()` / `getPinMappingsP2L()` | 逻辑<->物理引脚映射 |
+| `getPhysicalPinMapping(String)` / `getPhysicalPinMappings()` | 物理引脚映射 |
+| `isPlaced()` | 是否已布局 |
 | `unplace()` | 取消布局 |
+| `isLocked()` / `setLocked(boolean)` | 锁定状态 |
+| `isBELFixed()` / `setBELFixed(boolean)` / `isSiteFixed()` | BEL/Site 固定 |
+| `fixPin(String)` / `unFixPin(String)` | 固定/解除固定引脚映射 |
+| `copyCell(String, EDIFHierCellInst)` | 复制 cell |
+| `connectStaticSourceToPins(NetType, String...)` | 连接静态源到引脚 |
+| `addProperty(String, ...)` / `getProperty(String)` | EDIF 属性操作 |
+
+> 注：旧文档列出的 `getPins()`、`setBEL(BEL)`、`getPin(String)` 在 `Cell` 中**均不存在**（`getType()` 与 `unplace()` 实际存在，上一篇纠正有误已修正）。引脚经 `getBELPin`/`getCorrespondingSitePinName`/`getPinMappings*` 获取；BEL 在构造时设定，不可运行时修改。
 
 **Cell 类型**:
 - LUT（LUT1-LUT6）
@@ -1074,14 +1081,21 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取 site 名 |
-| `getType()` | 获取类型（SLICE/DSP/BRAM 等） |
-| `getBELs()` | 获取所有 BEL |
-| `getBEL(String name)` | 获取指定 BEL |
-| `getTile()` | 获取所在 Tile |
-| `getRows()` / `getColumns()` | 获取坐标 |
-| `isAvailable()` | 是否可用 |
-| `getSitePinInsts()` | 获取所有 site pin |
+| `getName()` | site 名 |
+| `getSiteTypeEnum()` | site 类型（`SiteTypeEnum`，如 SLICE/DSP48E2） |
+| `getAlternateSiteTypeEnums()` | 可切换的备选类型 |
+| `getBEL(String)` / `getBELs()` | 取 BEL |
+| `getTile()` / `getDevice()` | 所在 Tile / 所属 Device |
+| `getInstanceX()` / `getInstanceY()` | 实例坐标（`getRows`/`getColumns` 在 Device 上） |
+| `getRpmX()` / `getRpmY()` | RPM 坐标 |
+| `getIntTile()` | 关联的互连 Tile |
+| `getSitePinCount()` / `getPinName(int)` / `getPinIndex(String)` | site pin 信息 |
+| `getBELPins(int)` / `getBELPin(String)` | site wire 上的 BELPin |
+| `getSitePIPs()` / `getSitePIPCount()` | site 内 PIP |
+| `getClockRegion()` | 所属时钟区域 |
+| `isInputPin(int)` / `isOutputPin(int)` | pin 方向判断 |
+
+> 注：旧文档列出的 `getType()`（应为 `getSiteTypeEnum`）、`getRows()`/`getColumns()`（在 `Device` 上，Site 用 `getInstanceX/Y`）、`isAvailable()`、`getSitePinInsts()`（在 `SiteInst` 上）在 `Site` 中**均不存在**。
 
 **常见 Site 类型**:
 - SLICE（逻辑）
@@ -1101,13 +1115,20 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取 Tile 名 |
-| `getType()` | 获取 Tile 类型 |
-| `getSites()` | 获取所有 Site |
-| `getWires()` | 获取所有 Wire |
-| `getPIPs()` | 获取所有 PIP |
-| `getRow()` / `getCol()` | 获取坐标 |
-| `getSliceSites()` | 获取所有 SLICE |
+| `getName()` / `getRootName()` | Tile 名 / 根名 |
+| `getTileTypeEnum()` | Tile 类型（`TileTypeEnum`） |
+| `getSites()` / `getSiteIndex(Site)` | 所含 Site |
+| `getPIPs()` / `getPIPs(int)` / `getBackwardPIPs(int)` | 所含 PIP |
+| `getRow()` / `getColumn()` | 坐标（注意无 `getCol`） |
+| `getTileXCoordinate()` / `getTileYCoordinate()` | 物理坐标 |
+| `getWireCount()` / `getWireName(int)` / `getWireIndex(String)` / `getWireNames()` | Wire 信息 |
+| `getWireConnections(int)` | Wire 连接关系 |
+| `getTileNeighbor(int, int)` / `getTileXYNeighbor(int, int)` | 相邻 Tile |
+| `getManhattanDistance(Tile)` | 曼哈顿距离 |
+| `getClockRegion()` / `getSLR()` | 所属时钟区域 / SLR |
+| `getDevice()` | 所属 Device |
+
+> 注：旧文档列出的 `getType()`（应为 `getTileTypeEnum`）、`getWires()`（应为 `getWireCount`/`getWireNames`）、`getCol()`（应为 `getColumn`）、`getSliceSites()`（应为 `getSites`）在 `Tile` 中**均不存在**。
 
 **Tile 类型**:
 - CLB（可配置逻辑块）
@@ -1126,11 +1147,17 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getStartWire()` | 获取起始 Wire |
-| `getEndWire()` | 获取结束 Wire |
-| `isPIPDownhill()` | 是否下坡 PIP |
+| `getStartWire()` / `getEndWire()` | 起/止 Wire |
+| `getStartWireName()` / `getEndWireName()` | 起/止 Wire 名 |
+| `getStartWireIndex()` / `getEndWireIndex()` | 起/止 Wire 索引 |
+| `getStartNode()` / `getEndNode()` | 起/止 Node |
+| `getTile()` / `setTile(Tile)` | 所在 Tile |
+| `getPIPType()` | PIP 类型（`PIPType` 枚举，含方向信息） |
 | `isBidirectional()` | 是否双向 |
-| `getTile()` | 获取所在 Tile |
+| `isReversed()` / `isPIPFixed()` / `isRouteThru()` | 是否反向/固定/旁路 |
+| `getAllPossibleEndWires()` | 所有可能的终止 Wire |
+
+> 注：旧文档列出的 `isPIPDownhill()` 在 `PIP` 中**不存在**；方向/类型信息由 `getPIPType()`（返回 `PIPType` 枚举）获取。
 
 **PIP 类型**:
 - PIP 单向（仅 start→end）
@@ -1144,11 +1171,17 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取 BEL 名 |
-| `getType()` | 获取类型 |
-| `getSite()` | 获取所在 Site |
-| `getPins()` | 获取所有引脚 |
-| `getPin(String name)` | 获取指定引脚 |
+| `getName()` | BEL 名 |
+| `getBELType()` | BEL 类型字符串 |
+| `getBELClass()` | BEL 类别（`BELClass`） |
+| `getSiteTypeEnum()` | 所属 Site 类型（BEL 不持有 Site 引用） |
+| `getPins()` | 所有 BELPin（`BELPin[]`） |
+| `getPin(String)` / `getPin(int)` | 取 BELPin |
+| `isLUT()` / `isFF()` / `isCarry()` | 是否 LUT/FF/进位 |
+| `isStaticSource()` / `isGndSource()` / `isVccSource()` | 是否静态源 |
+| `canInvert()` / `getInvertingPin()` / `getNonInvertingPin()` | 反相相关 |
+
+> 注：旧文档列出的 `getType()`（应为 `getBELType`）、`getSite()`（BEL 无 Site 引用，仅有 `getSiteTypeEnum`）在 `BEL` 中**均不存在**。
 
 **常见 BEL 类型**:
 - LUT（6输入 LUT）
@@ -1166,37 +1199,59 @@ com.xilinx.rapidwright
 
 | 方法 | 功能 |
 |---|---|
-| `getSite()` | 获取 Site |
-| `getCells()` | 获取所有 Cell |
-| `getSitePinInsts()` | 获取所有 SitePinInst |
-| `place(Cell, BEL)` | 布局 Cell |
-| `unplaceCell(Cell)` | 取消布局 |
-| `isUsed()` | 是否被使用 |
+| `getSite()` / `getSiteName()` | 对应 Site / site 名 |
+| `getSiteTypeEnum()` / `getPrimarySiteTypeEnum()` | site 类型 |
+| `getCellMap()` / `getCell(String)` / `getCell(BEL)` | cell 集合 / 取 cell |
+| `addCell(Cell)` / `createCell(...)` | 添加 / 创建 cell |
+| `getSitePinInsts()` / `getSitePinInst(String)` | 所有 SitePinInst / 按名取 |
+| `addPin(SitePinInst)` / `removePin(SitePinInst)` | 增删 site pin |
+| `getBELs()` / `getBEL(String)` / `getBELPin(...)` | BEL 信息 |
+| `place(Site)` | 将本 SiteInst 布局到指定 Site |
+| `unPlace()` | 取消本 SiteInst 布局 |
+| `isPlaced()` | 是否已布局 |
+| `isAnchor()` / `isSiteLocked()` / `setSiteLocked(boolean)` | 锚点/锁定 |
+| `getTile()` / `getName()` | Tile / 名 |
+| `getConnectedNets()` | 相连网络 |
 
-#### `PortInst` / `SitePinInst` 类
+> 注：旧文档列出的 `getCells()`（应为 `getCellMap`/`getCell`）、`place(Cell, BEL)`（SiteInst 只有 `place(Site)`，放置 cell 到 BEL 用 `cell.setSiteInst(si)` + `cell.setBEL(bel)`）、`unplaceCell(Cell)`（应为 `unPlace`）、`isUsed()`（应为 `isPlaced`）在 `SiteInst` 中**均不存在**。
 
-**功能**: 端口实例 / Site 引脚实例
+#### `SitePinInst` / `PortInst` 类
 
-**关键方法**:
+**功能**: Site 引脚实例（`SitePinInst`，物理层）/ 端口实例（`PortInst`，逻辑层）
+
+**`SitePinInst` 关键方法**:
 
 | 方法 | 功能 |
 |---|---|
-| `getName()` | 获取名字 |
-| `getCell()` | 获取关联 Cell |
-| `getNet()` | 获取关联 Net |
-| `isOutward()` | 方向（输入/输出） |
+| `getName()` / `getSitePinName()` | 引脚名 / site pin 名 |
+| `getSiteInst()` / `setSiteInst(SiteInst)` | 所属 SiteInst |
+| `getNet()` / `setNet(Net)` | 关联 Net |
+| `getPort()` / `setPort(Port)` | 关联逻辑 Port |
+| `isOutPin()` | 是否输出引脚（方向判断） |
+| `getPinType()` / `setPinType(PinType)` | 引脚类型 |
+| `isRouted()` / `setRouted(boolean)` | 是否已布线 |
+| `getSite()` / `getTile()` | 所属 Site / Tile |
+| `getBELPin()` | 关联 BELPin |
+| `getConnectedNode()` / `getConnectedWireIndex()` | 连接 Node / Wire |
+| `isLUTInputPin()` | 是否 LUT 输入引脚 |
+
+> 注：旧文档列出的 `getCell()`（SitePinInst 无此方法，用 `getSiteInst`）、`isOutward()`（应为 `isOutPin`）在 `SitePinInst` 中**均不存在**。`PortInst` 为逻辑端口实例（关联 EDIFPort/Net），与物理层 `SitePinInst` 不同。
 
 ### 9.3 关键枚举与常量
 
-| 枚举 | 用途 |
+| 枚举/常量 | 用途 |
 |---|---|
-| `Device.AWS_F1` | AWS F1 实例 (xcvu9p) |
-| `Device.AWS_F2` | AWS F2 实例 (xcvu47p) |
-| `NetType` | 网络类型 (GND/VCC/SIGNAL) |
-| `SiteTypeEnum` | Site 类型 |
-| `BELType` | BEL 类型 |
-| `TileTypeEnum` | Tile 类型 |
-| `PIPDirection` | PIP 方向 |
+| `Device.AWS_F1` | AWS F1 器件名常量（String，xcvu9p） |
+| `Device.PYNQ_Z1` / `Device.KCU103` / `Device.KCU105` | 其它预置器件名常量 |
+| `NetType` | 网络类型枚举（`WIRE`/`GND`/`VCC`/`UNKNOWN`） |
+| `SiteTypeEnum` | Site 类型枚举（SLICE/DSP48E2/RAMB36…） |
+| `TileTypeEnum` | Tile 类型枚举（INT/CLB/CLE_*/BRAM/…） |
+| `BELClass` | BEL 类别枚举（BEL 上 `getBELClass()`） |
+| `PIPType` | PIP 类型枚举（PIP 上 `getPIPType()`，含方向） |
+| `PinType` | SitePinInst 引脚类型枚举 |
+| `FamilyType` / `Series` | 器件架构/系列枚举 |
+
+> 注：旧文档列出的 `Device.AWS_F2`（不存在，Device 仅有 `AWS_F1`/`PYNQ_Z1`/`KCU105` 等常量）、`BELType`（应为 `BELClass`，`getBELType()` 返回 String 而非枚举）、`PIPDirection`（应为 `PIPType`）均**有误**；`NetType` 取值为 `WIRE`/`GND`/`VCC`/`UNKNOWN`，无 `SIGNAL`。
 
 ### 9.4 Java API 入口
 
@@ -1239,7 +1294,7 @@ design = Design.readCheckpoint("input.dcp")
 
 # 获取所有网络
 for net in design.getNets():
-    print(f"Net: {net.getName()}, Fanout: {net.getFanout()}")
+    print(f"Net: {net.getName()}, Fanout: {net.getFanOut()}")
 
 # 写出 DCP
 design.writeCheckpoint("output.dcp")
@@ -1318,29 +1373,35 @@ design.writeCheckpoint("/path/to/output.dcp")
 
 ### 11.1 RWRoute
 
-**功能**: 时序驱动路由器
+**功能**: 时序/线长驱动路由器
 
-**位置**: `com.xilinx.rapidwright.route`
+**位置**: `com.xilinx.rapidwright.rwroute.RWRoute`（旧文档误写为 `com.xilinx.rapidwright.route`）
 
-**模式**:
+**CLI 调用**（取自 `java -cp ... com.xilinx.rapidwright.rwroute.RWRoute --help`）:
+```
+USAGE: <input.dcp|input.phys> <output.dcp>
+```
+即仅接受两个位置参数（输入 DCP/phys、输出 DCP），**无 `--input`/`--output`/`--routeMode`/`--maxIterations`/`--timingWeight` 等 CLI 标志**。
+
+**模式**（通过编程 API 配置，非 CLI）:
 - Timing-driven routing（时序驱动，默认）
 - Wirelength-driven routing（线长驱动）
-- Partial routing（部分路由）
+- Partial routing（部分路由，由 `PartialRouter` 提供）
 
-**关键参数**:
+**关键配置**（在 Java 代码中通过 `RWRouteConfig`/`Connection` 等 API 设置，非命令行参数）:
 
-| 参数 | 默认 | 说明 |
+| 配置项 | 默认 | 说明 |
 |---|---|---|
-| `--input` | 必填 | 输入 DCP |
-| `--output` | 必填 | 输出 DCP |
-| `--routeMode` | TIMING | 路由模式 |
-| `--maxIterations` | 100 | 最大迭代次数 |
-| `--timingWeight` | 1.0 | 时序权重 |
-| `--wirelengthWeight` | 0.5 | 线长权重 |
-| `--congestionWeight` | 0.5 | 拥塞权重 |
-| `--numThreads` | 1 | 线程数 |
+| routeMode | TIMING | 路由模式（TIMING/WIRELENGTH） |
+| maxIterations | 100 | 最大迭代次数 |
+| timingWeight | 1.0 | 时序权重 |
+| wirelengthWeight | 0.5 | 线长权重 |
+| congestionWeight | 0.5 | 拥塞权重 |
+| numThreads | 1 | 线程数 |
 
-**性能**（3,855 nets 设计）:
+> 注：旧文档把上述配置项写成 CLI `--flag`，实测 `RWRoute --help` 仅输出 `USAGE: <input.dcp|input.phys> <output.dcp>`。这些权重/迭代参数是内部配置，需在代码中设置。
+
+**性能**（3,855 nets 设计，来自 RWRoute 论文/教程）:
 - 总路由时间: 8.21 秒
 - 迭代次数: 7
 - 数据路径延迟: 2,331 ps（与 Vivado 一致）
@@ -1350,7 +1411,7 @@ design.writeCheckpoint("/path/to/output.dcp")
 - 7-Series
 - UltraScale
 - UltraScale+
-- Versal（部分）
+- Versal（部分，2025.2.0 起初步支持 SLR crossing）
 
 **与 Vivado route_design 对比**:
 - 速度: RWRoute 快 10-100 倍
@@ -1361,40 +1422,51 @@ design.writeCheckpoint("/path/to/output.dcp")
 
 **功能**: 工程变更指令（ECO）
 
-**关键方法**:
+**关键方法**（包 `com.xilinx.rapidwright.eco`，均静态）:
 
 | 方法 | 功能 |
 |---|---|
-| `disconnectNet(Net)` | 断开网络 |
-| `connectNet(Net, PortInst, PortInst)` | 连接网络 |
-| `removeCell(Cell)` | 移除 cell |
-| `addCell(...)` | 添加 cell |
-| `replaceCell(...)` | 替换 cell |
-| `mergeNets(...)` | 合并网络 |
-| `splitNet(...)` | 拆分网络 |
+| `disconnectNet(Design, EDIFHierPortInst...)` | 断开网络（按层级端口实例） |
+| `disconnectNetPath(Design, List<String>)` | 断开指定路径上的网络 |
+| `connectNet(Design, Cell, String, Net)` | 将 cell 引脚连到指定 Net |
+| `connectNet(Design, List<String>)` | 按层级名连接网络 |
+| `removeCell(Design, List<EDIFHierCellInst>, Map)` | 移除 cell |
+| `removeCellPath(Design, List<String>, Map)` | 移除指定路径上的 cell |
+| `createCell(Design, EDIFCell, List<String>)` | 创建 cell（非 `addCell`） |
+| `createAndPlaceInlineCellOnInputPin(...)` | 在输入引脚创建并放置内联 cell |
+| `createNet(Design, List<String>)` | 创建网络 |
+| `refactorCell(Design, EDIFHierCellInst, EDIFHierCellInst)` | 重构/替换 cell（非 `replaceCell`） |
 
 **典型场景**:
 - 时序违例后定点修改
 - 修复保持时间违例
 - 优化关键路径
 
+> 注：旧文档列出的 `disconnectNet(Net)`/`connectNet(Net,PortInst,PortInst)`/`removeCell(Cell)` 签名不符（实际以 `Design` + `EDIFHierPortInst`/`EDIFHierCellInst` 为参数），`addCell`（应为 `createCell`）、`replaceCell`（应为 `refactorCell`）、`mergeNets`、`splitNet` 在 `ECOTools` 中**均不存在**。
+
 ### 11.3 DesignTools
 
 **功能**: 通用设计工具
 
-**关键方法**:
+**关键方法**（包 `com.xilinx.rapidwright.design`，均静态）:
 
 | 方法 | 功能 |
 |---|---|
-| `createMissingSitePinInsts(Design)` | 创建缺失的 site pin 实例 |
-| `optimizeFanout(Design, Net, int k)` | 高扇出网络优化（按 k 分割） |
-| `optimizeLUTInputCone(Design, LUT)` | 优化 LUT 输入锥 |
-| `analyzeFabricForPblock(Design, long lutCount, ...)` | 分析 pblock 候选区域 |
-| `convertFabricRegionToPblock(...)` | 转换区域为 pblock |
-| `reportTimingSummary(Design)` | 时序报告 |
-| `parallelRouterInit(Design, int threads)` | 并行路由初始化 |
+| `createMissingSitePinInsts(Design)` / `(Design, Net)` | 创建缺失的 site pin 实例 |
+| `calculateUtilization(Design, PBlock)` | 计算 PBlock 资源利用 |
+| `placeCell(Cell, Design)` | 放置单个 cell |
+| `fullyUnplaceCell(Cell, Map)` | 完全取消放置 cell |
+| `optimizeLUT1Inverters(Design)` | LUT1 反相器优化 |
+| `unroutePins(Net, Collection<SitePinInst>)` | 取消指定 pin 布线 |
+| `unrouteSourcePin(SitePinInst)` / `unrouteSourcePins(List)` | 取消源 pin 布线 |
+| `routeAlternativeOutputSitePin(Net, SitePinInst)` | 布线备选输出 site pin |
+| `findRoutingPath(RouteNode, RouteNode)` | 查找布线路径 |
+| `stampPlacement(Design, Module, Map)` | 模块布局盖戳 |
+| `getRoutedSitePin(Cell, Net, String)` | 取已布线 site pin |
 
-**扇出优化示例参数**:
+> 注：旧文档列出的 `optimizeFanout(Design,Net,int)`、`optimizeLUTInputCone(Design,LUT)`、`analyzeFabricForPblock`、`convertFabricRegionToPblock`、`reportTimingSummary(Design)`、`parallelRouterInit(Design,int)` 在 `DesignTools` 中**均不存在**。扇出优化与 LUT 输入锥优化是独立工具类（`FanOutOptimization`/`LUTInputConeOpt`，见 RELEASE_NOTES），不在 `DesignTools`；`reportTimingSummary` 是 Vivado TCL 命令，非 RapidWright 方法。
+
+**扇出优化经验参数**（独立工具，按 k 分割负载）:
 - `k=2-3`: fanout 200-500
 - `k=3-5`: fanout 500-1500
 - `k=5-8`: fanout > 1500
@@ -1403,15 +1475,23 @@ design.writeCheckpoint("/path/to/output.dcp")
 
 **功能**: 调用 Vivado 工具
 
-**关键方法**:
+**关键方法**（包 `com.xilinx.rapidwright.util`，均静态）:
 
 | 方法 | 功能 |
 |---|---|
-| `reportPlaceStatus(...)` | 调用 Vivado `report_place_status` |
-| `reportRouteStatus(...)` | 调用 Vivado `report_route_status` |
-| `getVivadoDcpLoadError(...)` | 获取 Vivado 加载错误 |
-| `checkDcpAgainstVivado(...)` | 与 Vivado 交叉验证 DCP |
-| `runVivadoWithArguments(...)` | 执行 Vivado 命令 |
+| `reportRouteStatus(Design)` / `(Path)` | 调用 Vivado `report_route_status`，返回 `ReportRouteStatusResult` |
+| `placeDesign(Path, Path, boolean)` | 调用 Vivado 布局 |
+| `routeDesignAndGetStatus(Design, Path)` | 布线并返回状态 |
+| `placeAndRouteDesignAndGetStatus(Design, Path)` | 布局+布线并返回状态 |
+| `writeBitstream(Design, Path)` / `(Path, Path, boolean)` | 生成比特流 |
+| `getWorstSetupSlack(Path, Path, boolean)` | 取最差 setup slack |
+| `runTcl(Path, String/Path, boolean)` | 执行 Vivado TCL 脚本 |
+| `roundTripDCPThruVivado(Design/Path, ...)` | DCP 经 Vivado 往返校验 |
+| `searchVivadoLog(List<String>, String)` | 搜索 Vivado 日志 |
+
+**预置命令常量**: `REPORT_ROUTE_STATUS`、`PLACE_DESIGN`、`ROUTE_DESIGN`、`WRITE_CHECKPOINT`、`WRITE_EDIF`
+
+> 注：旧文档列出的 `reportPlaceStatus`（无此方法，布局状态用 `placeAndRouteDesignAndGetStatus`）、`getVivadoDcpLoadError`（不存在）、`checkDcpAgainstVivado`（应为 `roundTripDCPThruVivado`）、`runVivadoWithArguments`（应为 `runTcl`）在 `VivadoTools` 中**均不存在**。
 
 ### 11.5 Bitstream
 
@@ -1432,26 +1512,20 @@ design.writeCheckpoint("/path/to/output.dcp")
 - 原理图导出（基于 ELK）
 - 2025.2.0 起的 Unit Instance Schematic Viewer
 
-### 11.7 任务调度 (JobScheduler)
+### 11.7 并行化与任务调度
 
-**功能**: 并行化任务
+RapidWright 无 `JobScheduler` 类（在 `build/libs/rapidwright.jar` 与 `jars/rapidwright-api-lib-2025.2.1.jar` 中均**不存在**，旧文档该小节为虚构内容）。RWRoute 内部使用 Java 标准并发机制（`ExecutorService` 等）；部分工具方法通过并行流（`Stream.parallel()`）加速。
 
-**关键方法**:
+### 11.8 报告解析
 
-| 方法 | 功能 |
-|---|---|
-| `scheduleJob(Runnable)` | 调度任务 |
-| `waitForAllJobs()` | 等待所有任务 |
-| `setThreadCount(int)` | 设置线程数 |
+**功能**: 解析 Vivado 报告文件
 
-### 11.8 报告 (ReportTimingData)
-
-**功能**: 时序报告生成
+**实际类**: `com.xilinx.rapidwright.examples.ReportTimingExample`（旧文档名为 `ReportTimingData`，该类**不存在**）
 
 **支持**:
-- 解析 Vivado 时序报告
-- 解析 Vivado utilization 报告
-- 生成 RapidWright 内部时序报告
+- 解析 Vivado 时序报告（`report_timing` / `report_timing_summary`）
+- 提取 WNS/TNS/WHS/THS 等关键值
+- 示例代码演示如何从日志中解析延迟数据
 
 ---
 

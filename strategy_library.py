@@ -110,7 +110,9 @@ STRATEGIES = {
     },
     "LUTCascade": {
         "name": "LUT Cascade Flattening",
-        "trigger": ">3 LUT levels in series on critical paths",
+        "trigger": ">3 LUT levels in series on critical paths AND logic-delay "
+                   "dominated (logic_delay_pct > 50%); do NOT pick for "
+                   "route-dominated paths (LUT restructuring cannot reduce route delay)",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
              "params": {"num_paths": 50},
@@ -227,8 +229,10 @@ STRATEGIES = {
     },
     "LogicResynthesis": {
         "name": "Logic Resynthesis (opt_design -remap)",
-        "trigger": "NN/datapath design with MUXF7/8 cascades, "
-                   "100% logic delay or deep combinational levels on critical paths",
+        "trigger": "NN/datapath design with MUXF7/8 cascades AND logic-delay "
+                   "dominated (logic_delay_pct > 50%) on critical paths; do NOT "
+                   "pick for route-dominated paths (opt_design -remap cannot "
+                   "reduce route delay)",
         "sequence": [
             {"step": "opt_design_strategy", "platform": "RapidWright",
              "params": {"directive": "Explore", "retarget": True},
@@ -256,7 +260,10 @@ STRATEGIES = {
     "CombinationalRebalance": {
         "name": "Combinational Logic Rebalancing (validation-safe retiming)",
         "trigger": "Deep combinational chains (LUT6/MUXF7/MUXF8 cascades) "
-                   "between registers on critical paths, logic levels >= 3",
+                   "between registers on critical paths, logic levels >= 3, AND "
+                   "logic-delay dominated (logic_delay_pct > 50%); do NOT pick "
+                   "for route-dominated paths (logic rebalancing cannot reduce "
+                   "route delay)",
         "ff_prerequisite": "",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
@@ -279,9 +286,12 @@ STRATEGIES = {
     },
     "LUTMUXFRepack": {
         "name": "LUT6+MUXF Co-Repack (validation-safe LUT merge)",
-        "trigger": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascade on critical "
-                   "paths (flatten_lut_cascade likely returns optimized_count=0 on cones "
-                   "exceeding 6-input LUT limit — run it in ANALYZE to confirm)",
+        "trigger": "NN/wide-datapath design with MUXF7/MUXF8 + LUT6 cascade on "
+                   "critical paths AND logic-delay dominated (logic_delay_pct > "
+                   "50%); do NOT pick for route-dominated paths (LUT/MUXF "
+                   "repacking cannot reduce route delay). (flatten_lut_cascade "
+                   "likely returns optimized_count=0 on cones exceeding 6-input "
+                   "LUT limit — run it in ANALYZE to confirm)",
         "ff_prerequisite": "",
         "sequence": [
             {"step": "extract_critical_path_cells", "platform": "Vivado",
