@@ -169,8 +169,6 @@ class CriticalPathEntry:
 | 位置 | 来源 | 限制 |
 |------|------|------|
 | Context Dashboard | `format_state_space_for_llm()` | top 8, 6 cells/path |
-| Planner Handoff | `_generate_planner_handoff()` | top 5, 6 cells/path |
-| Worker Handoff | `_generate_worker_handoff()` | top 3, 6 cells/path |
 
 ### 2.2 关键信息保护（实现机制表）
 
@@ -518,7 +516,7 @@ state.context.optimization_history.append(OptimizationAppliedRecord(
 **每策略基线**（2026-07-09 修复）：`wns_before` 取 `_current_strategy_baseline_wns(state)`——当前策略进入 EXECUTE 时记录的 `PhaseEntry.best_wns_at_entry`（与 cooldown 的 `_strategy_wns_delta_since_entry` 同源），无匹配条目时回退 `prev_best_wns`。此前用 `prev_best_wns`（迭代开始时冻结一次），导致同迭代内后续策略的 delta 全部以迭代起始 WNS 为基准（PhysOpt 记 +0.335ns 而实际仅 +0.012ns），误导 LLM 高估策略贡献。
 
 **消费方**：
-- **Handoff**（`pure/handoff.py`）：`_format_optimization_history()` 在 planner/worker handoff 末尾追加 `APPLIED OPTIMIZATIONS` 段落
+- **Handoff**（`pure/handoff.py`）：`_format_optimization_history()` 在 planner/worker handoff 末尾追加 `APPLIED OPTIMIZATIONS` 段落。2026-07-12 精简：移除了与 Dashboard StateSpace 重叠的 TRAJECTORY（narrative 趋势）、FAILED STRATEGIES（blocked_strategies）、STATUS 信号，handoff 仅保留 rollback_notice + optimization_history 两项 Dashboard 不覆盖的信息。`build_situation_summary`、`build_status_signal`、`_format_failed_strategies`、`_format_trajectory_brief`、`_count_consecutive_same_strategy` 五个辅助函数同步删除。
 - **Dashboard**（`pure/state_space.py`）：`applied_optimizations` 独立段落，列出每条记录的 `strategy: WNS_before→WNS_after (iter N)`
 
 ### 4.13 设计指纹缓存保留（2026-07）
@@ -570,6 +568,32 @@ state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
 优化：在调用 `vivado_open_checkpoint` 前检查 `state.control.current_dcp_path` 是否已匹配目标检查点路径。若已匹配（`str(state.control.current_dcp_path) == str(iter_ckpt.resolve())`），跳过重新加载，仅刷新时序报告。`current_dcp_path` 在 `vivado_open_checkpoint` 成功执行后更新，auto-chain 中同样更新（`phase_execute.py` L1869-1871）。每次跳过节省约 27 秒。
 
 **Bug 修复（2026-07-04）**：`_save_best_checkpoint()` 通过 Vivado 成功写入 `best_checkpoint.dcp` 后，仅更新了 `best_checkpoint_path` 但未同步更新 `current_dcp_path`。导致后续策略切换时 `_reload_baseline_on_switch` 路径比较失效——Vivado 内存实际已持有 best checkpoint 内容，但系统误认为设计指针仍指向 iteration start DCP，触发无意义重载（~15s 浪费）。修复：在 `_save_best_checkpoint` 中增加 `state.control.current_dcp_path = ckpt_path.resolve()`。
+
+### 4.15b 迭代边界消息清理（2026-07-12）
+
+`iteration_start_node` 在每次迭代开始时主动清除上一迭代残留的 non-system 消息，复用 `transition_phase()` 已验证的 archive + clear + restore system 模式。与 phase transition（硬隔离）不同，迭代边界此前无消息清理——对话仅靠 `compress_context()` 被动缩减，导致多轮迭代后 YAML 摘要块不断膨胀。
+
+**机制**（`iteration_start.py`）：迭代计数递增后、cache 清理前：
+
+```python
+# 伪代码
+current_msgs = memory_manager.get_context()
+system_msgs = [m for m in current_msgs if m.role == "system"]
+non_system = [m for m in current_msgs if m.role != "system"]
+if non_system:
+    HistoricalMemory.add(
+        content=_format_iteration_archive(iteration, current_msgs, state),
+        importance=0.5,
+        task_type="iteration_archive",
+    )
+    working_memory.clear()
+    for sm in system_msgs:  # 恢复所有 system 消息
+        working_store.add(sm)
+```
+
+**容错**：`try/except` 包裹，失败时仅 warning log，不阻止迭代流程。
+
+**归档格式**：`_format_iteration_archive()` 生成包含 `best_wns`、`final_wns`、`strategy`、`exit_reason` 的结构化摘要及尾部 3 条消息采样（超 300 字符 → `[TRUNCATED]`）。所有字段通过 `getattr` 安全访问。
 
 ---
 
@@ -1240,7 +1264,7 @@ LLM 在 ANALYZE 阶段以 `min_fanout=50` 重查则正确返回 34 条。
 
 | 文件 | 缺陷 | 修复 |
 |------|------|------|
-| `optimizer/pure/handoff.py` | TRAJECTORY 行将迭代净增益错误归因给最后选中但无效的策略（`narratives` 每迭代一条，策略名取迭代结束时的 `current_strategy`，delta 取迭代级净增量） | `_format_trajectory_brief` 改为同时接收 `optimization_history`，按 iteration 对齐：有生效记录则渲染 per-strategy delta（各策略真实贡献），无则回退 narrative 标签保留"试过 X 无效"可见性 |
+| `optimizer/pure/handoff.py` | TRAJECTORY 行将迭代净增益错误归因给最后选中但无效的策略（`narratives` 每迭代一条，策略名取迭代结束时的 `current_strategy`，delta 取迭代级净增量） | **2026-07-12 已废止**：handoff 精简后不再包含 TRAJECTORY/FAILED STRATEGIES/STATUS，与 Dashboard StateSpace 重叠的内容全部移除，handoff 仅保留 rollback_notice + optimization_history。`_format_trajectory_brief` 等 5 个辅助函数同步删除。详见 §4.4.13（消费方 Handoff）。 |
 | `VivadoMCP/vivado_mcp_server.py` | `place_design -unplace` 后关键路径 cell 行正则硬编码 Location 列，unplace 后 Location 为空导致三条 cell 正则全失配，返回 10 条路径但 cells 全空污染下游 | `RE_CELL_LINE`/`RE_CELL_LINE_BARE` 的 Location 改为可选 `(?:...)?`；追加条件收紧为 `len(cell_names)>=2`（不再 `or len(nodes)>=2`） |
 | `optimizer/pure/execute_contracts.py`、`optimizer/nodes/subgraphs/phase_select_strategy.py`、`optimizer/state.py` | FORMAT_GUARD 违规（LLM 返回纯文本但未调 `report_step_state`）未被校验重试，违规消息写入历史导致下一轮策略偏移；`consecutive_empty_responses` "双重为空"条件使有文本无工具的违规重置计数 | 新增 `detect_format_guard_violation` 纯函数；`extract_step_state` 提前到 `add_message` 之前，违规时跳过写入、注入强提示、重试（限 2 次，不消耗 `tool_round`）；新增 `consecutive_no_tool_call` 计数器，"无工具调用"即计数并退出 |
 | `VivadoMCP/vivado_mcp_server.py` | `check_design_status` 对已 routed DCP 返回 `Unknown/false/false`（`STATUS`/`IS_PLACED`/`IS_ROUTED` 在 `open_checkpoint` 后均返回空），误导 LLM 重新 place+route | 见 §15.1：`report_route_status -return_string` 文本解析兜底 |

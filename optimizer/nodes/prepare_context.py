@@ -316,14 +316,7 @@ async def prepare_context_node(
         except Exception as e:
             logger.warning(f"[prepare_context] Compression failed: {e}")
 
-    # 2. FORMAT_GUARD is now injected per-phase in inject_merged_dashboard
-    #    (see context_snapshot.py), not here. The old once-per-iteration
-    #    injection was lost after the first phase transition; per-phase
-    #    injection ensures the guard is always present with phase-specific
-    #    addenda. Reset the legacy flag so old runs don't carry stale state.
-    state.model.format_guard_injected = False
-
-    # 3. Inject handoff prompt
+    # 2. Inject handoff prompt
     if not state.model.iteration_handoff_injected and state.model.iteration_handoff_prompt:
         if deps.compat is not None:
             try:
@@ -349,14 +342,3 @@ async def prepare_context_node(
 
 
     return NodeName.LLM_TOOL_LOOP
-
-def get_optimal_context_size(iteration: int) -> int:
-    """Optimal context size in tokens per iteration."""
-    if iteration == 1: return 80000
-    return 50000
-
-def _compute_context_strategy(state) -> str:
-    """Select context assembly strategy."""
-    if state.iteration.current == 1: return "full"
-    if state.iteration.global_no_improvement >= 2: return "minimal"
-    return "normal"

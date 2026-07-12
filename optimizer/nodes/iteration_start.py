@@ -64,6 +64,40 @@ async def iteration_start_node(
 
     # Increment iteration
     state.iteration.current += 1
+
+    # ── 迭代边界消息清理（容错设计） ──
+    # 此块与 transition_phase() 的 archive + clear + restore system 模式一致。
+    # 失败时不中断迭代流程（wrap 在 try/except 中，仅 warning log）。
+    if deps.memory_manager is not None:
+        try:
+            current_msgs = deps.memory_manager.get_context()
+            system_msgs = [
+                m for m in current_msgs
+                if hasattr(m, 'role') and m.role.value == "system"
+            ]
+            non_system_msgs = [
+                m for m in current_msgs
+                if not (hasattr(m, 'role') and m.role.value == "system")
+            ]
+            if non_system_msgs:
+                archive_content = _format_iteration_archive(
+                    state.iteration.current, current_msgs, state
+                )
+                deps.memory_manager._historical_memory.add(
+                    content=archive_content,
+                    importance=0.5,
+                    task_type="iteration_archive",
+                )
+                deps.memory_manager._working_memory.clear()
+                for sm in system_msgs:
+                    deps.memory_manager._working_store.add(sm)
+                logger.info(
+                    "[iteration_start] Cleared %d non-system messages from iteration %d",
+                    len(non_system_msgs), state.iteration.current - 1,
+                )
+        except Exception as e:
+            logger.warning("[iteration_start] Iteration cleanup skipped: %s", e)
+
     state.iteration.tool_errors.clear()
     state.iteration.tools_used.clear()
     state.iteration.blocked_strategies.clear()
@@ -130,3 +164,50 @@ async def iteration_start_node(
         logger.warning(f"[iteration_start] Failed to save iteration checkpoint: {e}")
 
     return NodeName.SELECT_MODEL
+
+
+def _format_iteration_archive(
+    iteration: int,
+    messages: list,
+    state,
+) -> str:
+    """迭代归档摘要。所有字段用 getattr 安全访问，不假设任何可选字段存在。
+
+    截断规则：
+    - 每条消息采样超 300 字符 -> " [TRUNCATED]"
+    """
+    prev_iter = iteration - 1
+    wns_str = (
+        f"{state.timing.latest_wns:.3f}ns"
+        if state.timing.latest_wns is not None else "N/A"
+    )
+    best_str = (
+        f"{state.timing.best_wns:.3f}ns"
+        if state.timing.best_wns not in (None, float("-inf")) else "N/A"
+    )
+
+    parts = [
+        f"[Iteration {prev_iter} Archive]",
+        f"  messages={len(messages)}",
+        f"  best_wns={best_str}",
+        f"  final_wns={wns_str}",
+        f"  strategy={state.strategy.current_strategy or 'N/A'}",
+    ]
+    if state.control.done_reason:
+        parts.append(f"  exit_reason={state.control.done_reason}")
+
+    # 采样尾部 non-system 消息
+    non_system = [
+        m for m in messages
+        if not (hasattr(m, "role") and m.role.value == "system")
+    ]
+    if non_system:
+        parts.append(f"--- Last {min(3, len(non_system))} messages ---")
+        for msg in non_system[-3:]:
+            role = str(getattr(msg, "role", "?"))
+            content = str(getattr(msg, "content", ""))
+            if len(content) > 300:
+                content = content[:300] + " [TRUNCATED]"
+            parts.append(f"  [{role}] {content}")
+
+    return "\n".join(parts)

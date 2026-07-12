@@ -16,9 +16,9 @@ fpl26_optimization_contest/
 │   ├── llm_call_logger.py        # LLM 调用日志记录
 │   ├── nodes/                    # 9 个节点实现 + llm_tool_loop 子图
 │   │   ├── init_analysis.py      # 初始化分析
-│   │   ├── iteration_start.py    # 迭代开始
+│   │   ├── iteration_start.py    # 迭代开始（迭代边界消息清理：archive non-system -> HistoricalMemory -> restore system）（迭代边界消息清理：archive non-system -> HistoricalMemory -> restore system）
 │   │   ├── select_model.py       # 模型选择
-│   │   ├── prepare_context.py    # 上下文准备（FORMAT_GUARD 拆分为 BASE + per-phase addendum，由 inject_merged_dashboard 注入）
+│   │   ├── prepare_context.py    # 上下文准备（迭代 handoff / BUDGET 注入 + compress_context 触发；FORMAT_GUARD by inject_merged_dashboard）
 │   │   ├── iteration_end.py      # 迭代结束
 │   │   ├── check_exit.py         # 退出检查
 │   │   ├── rollback.py           # 回滚
@@ -45,7 +45,7 @@ fpl26_optimization_contest/
 │   ├── events.py                 # EventBus
 │   ├── interfaces.py / compat.py / lightyaml.py
 │   ├── stores/ + memory/         # 存储层 + 内存实现
-│   └── strategies/               # YAML 压缩策略（planner/worker）
+│   └── strategies/               # YAML 压缩策略（参数化 max_chars_tier，替代继承）
 ├── skills/                       # Skill 框架（Skill Descriptor v3 + 渐进式三层加载）
 │   ├── base.py / context.py / registry.py / skill_decorator.py
 │   ├── lazy_loader.py             # 三层加载：regex 扫描（发现层）→ 懒 import（激活层）
