@@ -25,6 +25,7 @@ from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.tool_catalog import get_strategy_primary_tool
 from optimizer.pure.model_select import classify_task
+from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns
 from optimizer.pure.critical_path import refresh_violation_summary
@@ -460,10 +461,7 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                     continue
                 tool_name = tc.function.name
                 tools_called.append(tool_name)
-                try:
-                    tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError:
-                    tool_args = {}
+                tool_args = parse_tool_arguments(tc.function.arguments, tool_name)
                 task_type = classify_task(tool_name, tool_args)
                 if task_type == "optimization" or (
                     task_type != "unknown" and state.model.current_task_type != "optimization"
@@ -700,7 +698,7 @@ def _handle_next_iteration(state: OptimizerState, deps, assistant_content: str) 
 def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str) -> None:
     """Handle SWITCH_STRATEGY signal — current strategy failed."""
     logger.info(yellow("[EVALUATE] LLM signaled SWITCH_STRATEGY"))
-    _cool_down_current_strategy_if_stalled(
+    _cooled = _cool_down_current_strategy_if_stalled(
         state,
         detail="EVALUATE switched away from strategy",
     )
@@ -725,29 +723,25 @@ def _handle_switch_strategy(state: OptimizerState, deps, assistant_content: str)
     # Fill the strategy-history black hole: a strategy switched away mid-iteration
     # never reaches iteration_end's failure recording (the loop returns to
     # SELECT_STRATEGY directly), so it was invisible in strategy_outcomes and the
-    # LLM could reselect a known-ineffective strategy. Record it here as
-    # no_improvement (or tool_error for an unmeasured crash). Only ADD a record
-    # when none exists yet - EXECUTE may already have recorded a more specific
-    # reason (strategy_not_applicable, etc.) which must not be overwritten. Skip
-    # strategies that improved best_wns (they are in optimization_history).
+    # LLM could reselect a known-ineffective strategy. Record it here - but ONLY
+    # when _cool_down_current_strategy_if_stalled actually cooled it (fair-run
+    # no-improvement, delta<=0). Gating on _cooled mirrors _cool_down's exemptions
+    # so an unmeasured strategy-tool crash (delta=None, fair retry) or a
+    # chain-failure rollback (delta=0 artifact, never a fair run) is NOT
+    # persistently recorded - recording those would wrongly block a strategy that
+    # deserves a retry (run-20260711_230953 TestStrategyCooldown). Only ADD a
+    # record when none exists yet - EXECUTE may already have recorded a more
+    # specific reason (strategy_not_applicable, etc.) which must not be overwritten.
     _strategy = state.strategy.current_strategy
-    if _strategy:
-        _delta = _strategy_wns_delta_since_entry(state)
+    if _strategy and _cooled:
         _already_failed = any(f.strategy == _strategy for f in state.context.failed_strategies)
         _already_succeeded = any(r.strategy == _strategy for r in state.context.optimization_history)
         if not _already_failed and not _already_succeeded:
-            if _delta is not None and _delta <= 0:
-                record_strategy_failure(
-                    state, strategy=_strategy, reason="no_improvement",
-                    tool=get_strategy_primary_tool(_strategy) or "",
-                    detail=f"Switched away mid-iteration {state.iteration.current}: no WNS improvement",
-                )
-            elif _delta is None:
-                record_strategy_failure(
-                    state, strategy=_strategy, reason="tool_error",
-                    tool=get_strategy_primary_tool(_strategy) or "",
-                    detail=f"Switched away mid-iteration {state.iteration.current}: unmeasured result",
-                )
+            record_strategy_failure(
+                state, strategy=_strategy, reason="no_improvement",
+                tool=get_strategy_primary_tool(_strategy) or "",
+                detail=f"Switched away mid-iteration {state.iteration.current}: no WNS improvement",
+            )
 
 
 def _handle_exhausted(state: OptimizerState, deps) -> None:

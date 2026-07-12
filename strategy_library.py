@@ -407,16 +407,40 @@ STRATEGY_VALIDATION_SAFE: dict[str, bool] = {
 
 # phys_opt-class strategies: their auto-chain runs vivado_phys_opt_design /
 # vivado_physopt_and_route, which Vivado warns is ineffective when WNS is deeply
-# negative (Physopt 32-745: "most effective when WNS is above -0.5ns"). When the
-# current WNS is below this threshold, block them so the LLM steers toward
-# route-directive exploration instead (run-20260710_190708: phys_opt ran twice
-# at WNS=-0.542 with zero gain, ~26s wasted).
+# negative (Physopt 32-745: "most effective when WNS is above -0.5ns"). Softened
+# (Option C, run-20260711_230953): threshold relaxed to -0.75 and, below it,
+# physopt_ineffective_strategies blocks ONLY when the design is not improving
+# (latest_wns <= initial_wns). This releases phys_opt in the critical timing
+# region when the design is still responding; failed_strategies TTL re-blocks it
+# after a no-gain attempt (run-20260710_190708: phys_opt ran twice at WNS=-0.542
+# with zero gain, ~26s wasted - now bounded by TTL, not pre-blocked).
 PHYSOPT_CLASS_STRATEGIES: frozenset[str] = frozenset({
     "PhysOpt",
     "PhysOptAggressive",
     "MUXFTreeReorder",  # chains vivado_phys_opt_design
 })
-PHYSOPT_INEFFECTIVE_WNS_THRESHOLD: float = -0.5
+PHYSOPT_INEFFECTIVE_WNS_THRESHOLD: float = -0.75
+
+
+def physopt_ineffective_strategies(
+    latest_wns: Optional[float],
+    initial_wns: Optional[float],
+) -> frozenset[str]:
+    """PhysOpt-class strategies to block because WNS is deeply negative.
+
+    Returns PHYSOPT_CLASS_STRATEGIES when latest_wns is below
+    PHYSOPT_INEFFECTIVE_WNS_THRESHOLD AND the design is not improving
+    (latest_wns <= initial_wns). If WNS is None/at-or-above the threshold, or
+    the design is still improving (latest_wns > initial_wns), returns empty -
+    phys_opt is allowed to attempt physical optimization. Single source of
+    truth shared by the SELECT guard (phase_select_strategy) and the Dashboard
+    [BLOCKED] rendering (context_snapshot) so the two never disagree.
+    """
+    if latest_wns is None or latest_wns >= PHYSOPT_INEFFECTIVE_WNS_THRESHOLD:
+        return frozenset()
+    if initial_wns is not None and latest_wns > initial_wns:
+        return frozenset()  # design still improving -> don't pre-block
+    return PHYSOPT_CLASS_STRATEGIES
 
 SKILL_EXECUTION_PATTERN = [
     "Use Vivado report_timing/extract_critical_path_cells to get path data",

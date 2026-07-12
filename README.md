@@ -136,7 +136,7 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 27 | 迭代开始 checkpoint | 每迭代开始时自动保存 DCP 快照，作为 `_reload_baseline_on_switch` 的次要回退基线；当 `best_checkpoint.dcp` 存在时使用 `shutil.copy2` 拷贝（节省 ~5s/次 Vivado 序列化） |
 | 28 | 设计指纹缓存 | `transition_phase` 通过 `design_fingerprint` 比较决定是否保留 tool cache；设计未变更时跨阶段缓存保留 |
 | 29 | EVALUATE 偏好 CONTINUE（2026-07） | `verdict=IMPROVED` 时指引 LLM 优先 `CONTINUE` 同策略 1-2 轮榨取剩余增益，仅在 2+ 轮收益递减或瓶颈转移时 `SWITCH_STRATEGY`（避免单轮即放弃有效策略） |
-| 30 | phys_opt WNS 守卫（2026-07） | WNS<-0.5ns 时阻断 `phys_opt` 类策略（PhysOpt/PhysOptAggressive/MUXFTreeReorder，Vivado Physopt 32-745 告警无效），catalog 标 `[BLOCKED]` + 选择层拒绝，引导改用 route-directive 探索 |
+| 30 | phys_opt WNS 守卫（2026-07，2026-07-12 软化） | WNS<-0.5ns 时阻断 `phys_opt` 类策略（PhysOpt/PhysOptAggressive/MUXFTreeReorder，Vivado Physopt 32-745 告警无效），catalog 标 `[BLOCKED]` + 选择层拒绝，引导改用 route-directive 探索。**2026-07-12 软化（run-20260711_230953）**：阈值放宽至 -0.75，且其下仅在「设计未改善（latest<=initial）」时阻断（新增 `physopt_ineffective_strategies` 为 SELECT 守卫与 Dashboard 共用 SSOT）；-0.542 改善中不再被预阻断，`failed_strategies` TTL 兜底防浪费 |
 | 31 | place_design no-op 跳过（2026-07） | `vivado_place_design`（非 unplace）派发前用新鲜 `check_design_status` 检测已全 placed 则短路返回 `skipped`（Vivado Place 30-281：已 placed 时 place_design 为 no-op，避免 ~10s 浪费） |
 
 > 完整实现级技术细节见 [architecture.md](architecture.md)。

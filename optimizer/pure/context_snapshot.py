@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 
 from .tool_filter import LoopPhase
 from strategy_library import (
-    PHYSOPT_CLASS_STRATEGIES,
     PHYSOPT_INEFFECTIVE_WNS_THRESHOLD,
+    physopt_ineffective_strategies,
 )
 
 if TYPE_CHECKING:
@@ -283,17 +283,18 @@ def inject_merged_dashboard(
             _blocked[s] = "cooldown (explored this iteration)"
 
     # P2.7: phys_opt is ineffective when WNS is deeply negative (Vivado Physopt
-    # 32-745). Surface phys_opt-class strategies as [BLOCKED] so the LLM steers
-    # toward route-directive exploration instead. setdefault keeps any stronger
-    # existing block reason (TTL/cooldown).
-    _wns = state.timing.latest_wns
-    if _wns is not None and _wns < PHYSOPT_INEFFECTIVE_WNS_THRESHOLD:
-        for _s in PHYSOPT_CLASS_STRATEGIES:
-            _blocked.setdefault(
-                _s,
-                f"ineffective when WNS<{PHYSOPT_INEFFECTIVE_WNS_THRESHOLD}ns "
-                f"(Vivado Physopt 32-745); prefer route-directive strategies",
-            )
+    # 32-745). Softened (Option C, run-20260711_230953): below the threshold,
+    # block only when the design is not improving - see
+    # physopt_ineffective_strategies. setdefault keeps any stronger existing
+    # block reason (TTL/cooldown).
+    for _s in physopt_ineffective_strategies(
+        state.timing.latest_wns, state.timing.initial_wns
+    ):
+        _blocked.setdefault(
+            _s,
+            f"ineffective when WNS<{PHYSOPT_INEFFECTIVE_WNS_THRESHOLD}ns AND not "
+            f"improving (Vivado Physopt 32-745); prefer route-directive strategies",
+        )
 
     # Prepare catalog parameters.
     _exclude_strategies = _hard_exclude or None

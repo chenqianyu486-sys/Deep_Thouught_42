@@ -32,8 +32,8 @@ from optimizer.nodes.save_output import (
 )
 from optimizer.nodes.subgraphs.phase_execute import (
     _ensure_iteration_start_checkpoint,
-    _execute_exit_reason_after_timing_update,
 )
+from optimizer.pure.execute_contracts import build_timing_update_exit_contract
 from optimizer.nodes.subgraphs.phase_evaluate import _handle_switch_strategy
 from optimizer.tracing import StateTracer
 
@@ -235,14 +235,12 @@ class TestExecutePhaseHelpers:
         assert state.control.iteration_checkpoints == [(3, checkpoint)]
 
     def test_target_met_exits_after_any_tool(self):
-        assert (
-            _execute_exit_reason_after_timing_update(
-                "rapidwright_search_cells",
-                None,
-                target_met=True,
-            )
-            == "wns_target_met"
+        contract = build_timing_update_exit_contract(
+            "rapidwright_search_cells",
+            None,
+            target_met=True,
         )
+        assert contract == {"flow_signal": "DONE", "reason": "wns_target_met"}
 
     @pytest.mark.parametrize(
         ("verdict", "reason"),
@@ -253,33 +251,31 @@ class TestExecutePhaseHelpers:
         ],
     )
     def test_post_eval_verdict_exits_for_evaluated_execution_tools(self, verdict, reason):
-        assert (
-            _execute_exit_reason_after_timing_update(
-                "vivado_route_design",
-                verdict,
-                target_met=False,
-            )
-            == reason
+        contract = build_timing_update_exit_contract(
+            "vivado_route_design",
+            verdict,
+            target_met=False,
         )
+        assert contract == {"flow_signal": "EXEC_DONE", "reason": reason}
 
     def test_unknown_verdict_does_not_exit(self):
         assert (
-            _execute_exit_reason_after_timing_update(
+            build_timing_update_exit_contract(
                 "vivado_route_design",
                 None,
                 target_met=False,
             )
-            == ""
+            is None
         )
 
     def test_non_evaluated_tool_does_not_exit_without_target(self):
         assert (
-            _execute_exit_reason_after_timing_update(
+            build_timing_update_exit_contract(
                 "rapidwright_search_cells",
                 "IMPROVED",
                 target_met=False,
             )
-            == ""
+            is None
         )
 
 
@@ -317,7 +313,12 @@ class TestStrategyCooldown:
         _handle_switch_strategy(state, NodeDeps(), "no improvement")
 
         assert state.iteration.blocked_strategies == ["PBLOCK"]
-        assert state.context.failed_strategies == []
+        # A fair-run no-improvement (delta=0) is also persisted to
+        # failed_strategies so the LLM can't reselect it next iteration
+        # (mid-iteration switches never reach iteration_end's recording).
+        assert len(state.context.failed_strategies) == 1
+        assert state.context.failed_strategies[0].strategy == "PBLOCK"
+        assert state.context.failed_strategies[0].reason == "no_improvement"
 
     def test_switch_skips_cooldown_on_unmeasured_strategy_crash(self):
         """A genuine strategy-tool crash leaves no measurable WNS (delta=None),

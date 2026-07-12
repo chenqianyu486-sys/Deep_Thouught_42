@@ -29,7 +29,7 @@ from optimizer.pure.pblock_plan import PBLOCK_GLOBAL_MODE, PBLOCK_UNPLACE_GLOBAL
 
 
 def test_p27_physopt_class_constants():
-    assert PHYSOPT_INEFFECTIVE_WNS_THRESHOLD == -0.5
+    assert PHYSOPT_INEFFECTIVE_WNS_THRESHOLD == -0.75
     # PhysOpt / PhysOptAggressive chain vivado_phys_opt_design / physopt_and_route;
     # MUXFTreeReorder chains vivado_phys_opt_design. All are ineffective when WNS
     # is deeply negative (Vivado Physopt 32-745).
@@ -57,12 +57,34 @@ def test_p27_wns_ineffective_guard_blocks_only_when_deep_negative():
         _get_wns_ineffective_strategies,
     )
     s = OptimizerState()
+    # At/above threshold (-0.75) -> never blocked (critical region released).
     s.timing.latest_wns = -0.6
-    assert _get_wns_ineffective_strategies(s) == set(PHYSOPT_CLASS_STRATEGIES)
+    s.timing.initial_wns = None
+    assert _get_wns_ineffective_strategies(s) == set()
     s.timing.latest_wns = -0.4
     assert _get_wns_ineffective_strategies(s) == set()
     s.timing.latest_wns = None
     assert _get_wns_ineffective_strategies(s) == set()
+    # Below threshold: blocked only when design NOT improving (latest <= initial).
+    s.timing.latest_wns = -0.8
+    s.timing.initial_wns = -0.8  # not improving (latest == initial)
+    assert _get_wns_ineffective_strategies(s) == set(PHYSOPT_CLASS_STRATEGIES)
+    s.timing.initial_wns = None  # slope unknown -> conservative block
+    assert _get_wns_ineffective_strategies(s) == set(PHYSOPT_CLASS_STRATEGIES)
+    # Below threshold BUT design improving (latest > initial) -> allowed.
+    s.timing.initial_wns = -0.9
+    assert _get_wns_ineffective_strategies(s) == set()
+
+
+def test_p27_physopt_ineffective_helper_is_slope_aware():
+    """The pure SSOT helper mirrors the guard: block only when deep & not improving."""
+    from strategy_library import physopt_ineffective_strategies
+    assert physopt_ineffective_strategies(None, -0.9) == frozenset()
+    assert physopt_ineffective_strategies(-0.4, -0.9) == frozenset()
+    assert physopt_ineffective_strategies(-0.6, -0.9) == frozenset()  # above -0.75
+    assert physopt_ineffective_strategies(-0.8, -0.8) == PHYSOPT_CLASS_STRATEGIES
+    assert physopt_ineffective_strategies(-0.8, None) == PHYSOPT_CLASS_STRATEGIES
+    assert physopt_ineffective_strategies(-0.8, -0.9) == frozenset()  # improving
 
 
 # ── P2.8: place_design no-op skip ──────────────────────────────────────────

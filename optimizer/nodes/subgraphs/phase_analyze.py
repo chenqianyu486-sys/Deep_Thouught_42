@@ -18,6 +18,7 @@ from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools
 from optimizer.pure.tool_summary import summarize_tool_result, compact_tool_summary
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.model_select import classify_task
+from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.timing import parse_timing_summary, is_valid_wns, parse_resource_utilization
@@ -212,10 +213,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 state.iteration.tools_used.append(tool_name)
                 tools_called.append(tool_name)
 
-                try:
-                    tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError:
-                    tool_args = {}
+                tool_args = parse_tool_arguments(tc.function.arguments, tool_name)
                 task_type = classify_task(tool_name, tool_args)
                 if task_type == "optimization" or (
                     task_type != "unknown" and state.model.current_task_type != "optimization"

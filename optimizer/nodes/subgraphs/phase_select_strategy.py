@@ -18,6 +18,7 @@ from optimizer.pure.tool_router import call_tool as call_tool_fn
 from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.tool_summary import summarize_tool_result
 from optimizer.pure.model_select import classify_task
+from optimizer.pure.json_repair import parse_tool_arguments
 from optimizer.pure.phase_policy import PhaseExitContract, build_phase_exit_contract
 from optimizer.pure.step_state import extract_step_state
 from optimizer.pure.execute_contracts import detect_format_guard_violation
@@ -36,6 +37,7 @@ from optimizer.pure.tool_runtime_policy import DASHBOARD_REFRESH_MAP
 from strategy_library import (
     PHYSOPT_CLASS_STRATEGIES,
     PHYSOPT_INEFFECTIVE_WNS_THRESHOLD,
+    physopt_ineffective_strategies,
 )
 from optimizer.color import green, yellow
 
@@ -214,8 +216,8 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     if chosen_key in wns_blocked:
                         reason = (
                             f"ineffective when WNS<"
-                            f"{PHYSOPT_INEFFECTIVE_WNS_THRESHOLD}ns (Vivado "
-                            f"Physopt 32-745); prefer route-directive strategies"
+                            f"{PHYSOPT_INEFFECTIVE_WNS_THRESHOLD}ns AND not improving "
+                            f"(Vivado Physopt 32-745); prefer route-directive strategies"
                         )
                     elif chosen_key in iteration_blocked:
                         reason = "already stalled in this iteration"
@@ -280,10 +282,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     continue
                 tool_name = tc.function.name
                 tools_called.append(tool_name)
-                try:
-                    tool_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except json.JSONDecodeError:
-                    tool_args = {}
+                tool_args = parse_tool_arguments(tc.function.arguments, tool_name)
                 task_type = classify_task(tool_name, tool_args)
                 if task_type == "optimization" or (
                     task_type != "unknown" and state.model.current_task_type != "optimization"
@@ -508,13 +507,19 @@ def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
 def _get_wns_ineffective_strategies(state: OptimizerState) -> set[str]:
     """Return phys_opt-class strategies blocked because WNS is deeply negative.
 
-    Vivado warns phys_opt is ineffective when WNS < -0.5ns (Physopt 32-745).
-    Block these so the LLM uses route-directive exploration instead.
+    Vivado warns phys_opt is ineffective when WNS is deeply negative (Physopt
+    32-745). Softened (Option C, run-20260711_230953): below the threshold, the
+    gate delegates to physopt_ineffective_strategies, which blocks ONLY when the
+    design is not responding (latest_wns <= initial_wns). If the design is still
+    improving, phys_opt is allowed to attempt physical optimization; the
+    failed_strategies TTL re-blocks it after a no-gain attempt, so there is no
+    infinite waste.
     """
-    wns = state.timing.latest_wns
-    if wns is None or wns >= PHYSOPT_INEFFECTIVE_WNS_THRESHOLD:
-        return set()
-    return set(PHYSOPT_CLASS_STRATEGIES)
+    return set(
+        physopt_ineffective_strategies(
+            state.timing.latest_wns, state.timing.initial_wns
+        )
+    )
 
 
 async def _ensure_pending_pblock_plan(state: OptimizerState, deps: NodeDeps) -> None:
