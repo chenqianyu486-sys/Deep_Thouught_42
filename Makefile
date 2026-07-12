@@ -45,12 +45,27 @@ export CLASSPATH := $(RAPIDWRIGHT_PATH)/bin:$(RAPIDWRIGHT_PATH)/jars/*:$(RAPIDWR
 XILINXD_LICENSE_FILE ?= $(HOME)/.Xilinx/Xilinx.lic
 export XILINXD_LICENSE_FILE
 
-# Auto-discover Vivado if not on PATH (AWS AMI: /tools/Xilinx/Vivado/2025.1/)
+# Auto-discover Vivado if not on PATH.
+# AWS FPGA Developer AMI installs at /tools/Xilinx; the Vivado ML 2025.1 Developer AMI
+# (the FPL26 contest platform) installs at /opt/Xilinx and does NOT put vivado on PATH
+# by default. When discovered off-PATH, source the bundled settings64.sh so spawned MCP
+# servers inherit Vivado's runtime env (PATH/LD_LIBRARY_PATH).
 ifeq ($(shell command -v $(VIVADO_EXEC) 2>/dev/null),)
-  VIVADO_CANDIDATE := $(shell ls -d /tools/Xilinx/Vivado/2025.*/bin/vivado 2>/dev/null | head -n 1)
+  VIVADO_CANDIDATE := $(firstword $(wildcard /tools/Xilinx/Vivado/2025.*/bin/vivado /opt/Xilinx/Vivado/2025.*/bin/vivado))
   ifneq ($(VIVADO_CANDIDATE),)
     VIVADO_EXEC := $(VIVADO_CANDIDATE)
     export VIVADO_EXEC
+    VIVADO_SETTINGS := $(wildcard $(patsubst %/bin/vivado,%/settings64.sh,$(VIVADO_CANDIDATE)))
+    ifneq ($(VIVADO_SETTINGS),)
+      _VW_PATH := $(shell bash -c '. "$(VIVADO_SETTINGS)" >/dev/null 2>&1 && printf "%s" "$$PATH"')
+      ifneq ($(_VW_PATH),)
+        export PATH := $(_VW_PATH):$(PATH)
+      endif
+      _VW_LD := $(shell bash -c '. "$(VIVADO_SETTINGS)" >/dev/null 2>&1 && printf "%s" "$$LD_LIBRARY_PATH"')
+      ifneq ($(_VW_LD),)
+        export LD_LIBRARY_PATH := $(_VW_LD)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
+      endif
+    endif
   endif
 endif
 
