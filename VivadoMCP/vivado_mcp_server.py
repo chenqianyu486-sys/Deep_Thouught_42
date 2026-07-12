@@ -2608,10 +2608,12 @@ async def call_tool(name: str, arguments: dict):
                     if directive not in PLACE_SAFE_DIRECTIVES:
                         return [TextContent(
                             type="text",
-                            text=(
-                                f"Error: Directive '{directive}' is not in the safe place_design directive list. "
-                                f"Allowed directives: {', '.join(sorted(PLACE_SAFE_DIRECTIVES))}"
-                            )
+                            text=json.dumps({
+                                "error": (
+                                    f"Directive '{directive}' is not in the safe place_design directive list. "
+                                    f"Allowed directives: {', '.join(sorted(PLACE_SAFE_DIRECTIVES))}"
+                                )
+                            })
                         )]
                     cmd += f" -directive {tcl_quote(directive)}"
                     used_directive = True
@@ -2690,10 +2692,12 @@ async def call_tool(name: str, arguments: dict):
                 if directive not in ROUTE_SAFE_DIRECTIVES:
                     return [TextContent(
                         type="text",
-                        text=(
-                            f"Error: Directive '{directive}' is not in the safe route_design directive list. "
-                            f"Allowed directives: {', '.join(sorted(ROUTE_SAFE_DIRECTIVES))}"
-                        )
+                        text=json.dumps({
+                            "error": (
+                                f"Directive '{directive}' is not in the safe route_design directive list. "
+                                f"Allowed directives: {', '.join(sorted(ROUTE_SAFE_DIRECTIVES))}"
+                            )
+                        })
                     )]
                 cmd += f" -directive {tcl_quote(directive)}"
                 used_directive = True
@@ -2902,10 +2906,12 @@ async def call_tool(name: str, arguments: dict):
                 if directive not in PHYSOPT_SAFE_DIRECTIVES:
                     return [TextContent(
                         type="text",
-                        text=(
-                            f"Error: Directive '{directive}' is not in the safe directive list. "
-                            f"Allowed directives: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
-                        )
+                        text=json.dumps({
+                            "error": (
+                                f"Directive '{directive}' is not in the safe directive list. "
+                                f"Allowed directives: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
+                            )
+                        })
                     )]
                 cmd += f" -directive {tcl_quote(directive)}"
             else:
@@ -2949,19 +2955,23 @@ async def call_tool(name: str, arguments: dict):
             if directive in PHYSOPT_BLOCKED_DIRECTIVES:
                 return [TextContent(
                     type="text",
-                    text=(
-                        f"Error: Directive '{directive}' is BLOCKED because it causes functional errors "
-                        f"(retiming breaks design correctness). "
-                        f"Use a safe directive instead: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
-                    )
+                    text=json.dumps({
+                        "error": (
+                            f"Directive '{directive}' is BLOCKED because it causes functional errors "
+                            f"(retiming breaks design correctness). "
+                            f"Use a safe directive instead: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
+                        )
+                    })
                 )]
             if directive not in PHYSOPT_SAFE_DIRECTIVES:
                 return [TextContent(
                     type="text",
-                    text=(
-                        f"Error: Directive '{directive}' is not in the safe directive list. "
-                        f"Allowed directives: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
-                    )
+                    text=json.dumps({
+                        "error": (
+                            f"Directive '{directive}' is not in the safe directive list. "
+                            f"Allowed directives: {', '.join(sorted(PHYSOPT_SAFE_DIRECTIVES))}"
+                        )
+                    })
                 )]
             # === END SAFETY GUARD ===
 

@@ -25,7 +25,7 @@ from skills.strategy_plan import StrategyPlan, StrategyStep
 _LUT_TYPES = {"LUT1", "LUT2", "LUT3", "LUT4", "LUT5", "LUT6"}
 _MUXF_TYPES = {"MUXF7", "MUXF8", "MUXF9"}
 
-ALLOWED_DIRECTIVES = ["Default", "Explore", "ExploreArea", "AddRemap"]
+ALLOWED_DIRECTIVES = ["Default", "Explore", "ExploreWithAreaDuplication", "AddRemap"]
 
 
 def _cell_type(design, cell_name: str) -> str:

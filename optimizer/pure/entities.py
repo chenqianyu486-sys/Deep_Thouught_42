@@ -42,6 +42,7 @@ CELL_PARAM_SPECS: dict[str, bool] = {
     "cell_names": False,             # list[str] of cell names
     "critical_path_cells": False,    # list[str] of cell names
     "critical_paths": True,          # list[list[str]] of paths
+    "critical_paths_data": True,     # list[list[str]] of paths (analyze_critical_path_spread)
     "hierarchical_input_pins": False,  # list[str] of pin names (hierarchical, validated loosely)
 }
 
@@ -661,5 +662,7 @@ def build_registry_snapshot_yaml(
     lines.append(
         "# NOTE: Use these exact names when calling cell-targeting tools.\n"
         "# Device sites (SLICE_X*, DSP*_X*) and bare type names are NOT valid.\n"
+        "# Module names (e.g. 'aes_core', shown without '/') are NOT valid cell names -\n"
+        "# they are path segments, not hierarchical cell instances.\n"
     )
     return "\n".join(lines)

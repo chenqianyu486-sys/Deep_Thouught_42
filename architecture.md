@@ -730,6 +730,20 @@ LLM calls rapidwright_opt_design_strategy (RapidWright skill)
 
 - **NET NAME CONTRACT 引导补齐**（`prepare_context.py` BASE_FORMAT_GUARD + `state_space.py`）：上述持久化/热点解析/overriding 三项属防御层，但引导层仍只讲 cell 名、未提 net 名空间，LLM 仍会手抄时序报告 net 名或跨命名空间误用。现 `BASE_FORMAT_GUARD` 新增 **NET NAME CONTRACT** 段：明确 `rapidwright_execute_fanout_strategy` 的 `nets` 属 NET 名空间（≠cell 名），权威来源为 Module 4 `high_fanout_nets`/`vivado_get_cached_high_fanout_nets`，`delay_hotspots` 中 `[net]` 标签=net 名、cell 类型标签（`[LUT6]`/`[FDRE]`/`[MUXF7]`）=cell 名；声明框架已 auto-inject+override nets（附 `[DATA INTEGRITY]`），禁止从时序报告手抄（`M1[21]`≠`M1w[21]`）。同时把 Fanout 补进 STALE DATA HANDLING 与 EXECUTE addendum 的自动注入说明，对齐代码侧 `NETLIST_MODIFYING_STRATEGIES` 定义。Dashboard Module 2 `delay_hotspots` 与 Module 4 `high_fanout_nets` 追加 inline 命名空间注释。引导层与防御层对齐。
 
+**其余工具上下文工程审计**（2026-07-12，4-agent 并行排查 + 7 项亲验，共 11 处修复 / 1 处有意跳过）：
+- **F6 design_data_read 未注册**（`dcp_optimizer.py`）：`truncation_advisory` + FORMAT_GUARD 教 LLM 调用 `design_data_read`/`design_data_list_snapshots`，但两者 schema 从未 `tools.append`（只注册了 3 个内部工具），LLM 看不见也调不了。补两个工具 schema（参数 `iteration`/`data_type`，data_type∈critical_paths/high_fanout_nets/congestion/route_status/design_info/failing_endpoint_names/tool_output:<name>）。
+- **F3 CellReplication auto-inject 未文档化**（`prepare_context.py`）：`replicate_critical_cells` 在 `_netlist_strategy_refresh_tools` 且 auto-inject+override 富对象 `critical_paths`（`[{cells:[{name,delay,type,fanout}]}]`），但三处 FORMAT_GUARD 自动注入列表全漏。补进 BASE/EXECUTE/STALE 三列表（同 fanout 同型）。
+- **F5 "ExploreArea" 指令名跨层不一致**（`skills/{opt_design,lut_muxf_repack,combinational_rebalancing}_strategy.py` + `RapidWrightMCP/{server,rapidwright_tools}.py` 共 6 处）：skill 的 ALLOWED_DIRECTIVES + 描述用 "ExploreArea"，但 Vivado 2025.1 `OPT_SAFE_DIRECTIVES`/opt enum 用 "ExploreWithAreaDuplication"，skill 放行后透传 Vivado 被拒致整链失败。6 处统一改为 "ExploreWithAreaDuplication"。
+- **F7 CONTINUE 信号自相矛盾**（`SYSTEM_PROMPT.TXT`）：L45「CONTINUE 仅 ANALYZE/EXECUTE」与 L58「EVALUATE 可 CONTINUE」+ FORMAT_GUARD EVALUATE「PREFER CONTINUE」+ tool_filter 冲突。删 L45 的 `(ANALYZE or EXECUTE only)`。
+- **F2 PinSwap 无 auto-inject/无校验/无引导**（`prepare_context.py`）：`optimize_pin_swapping` 不在 CELL_NAME_TOOLS、不 auto-inject、不在三列表，且 `critical_paths` 是对象格式 `[{cells:[...]}]`（≠ sibling 的 list[list[str]]）。PIN NAME CONTRACT 段注明 PinSwap 不自动注入、需手构对象格式。
+- **F4 lut_input_cone PIN 名空间引导缺失**（`prepare_context.py`）：需 PIN 名（cell+/I0）却指引「从 [CELL REGISTRY] 取」（只有 cell 名）；`is_valid_pin_name` 过松放行 cell 名。新增 **PIN NAME CONTRACT** 段：PIN 名 = [CELL REGISTRY] cell 名 + 输入后缀（/I0–/I5），勿直传 cell 名。
+- **F8 指令白名单拒绝返回纯文本非 JSON**（`VivadoMCP/vivado_mcp_server.py` 5 处：place/route/phys_opt 白名单 + physopt BLOCKED+白名单）：返回 `text="Error: Directive..."` 不匹配 `_MCP_ERROR_PATTERNS`，`build_tool_call_result` 不识别为错误（链会跳过被拒步骤继续 P&R）。改为 `json.dumps({"error":...})`，与 18-641/Vivado 错误路径一致。亲验：新格式被检测、旧格式不被检测。
+- **F1 analyze_critical_path_spread 校验空转**（`optimizer/pure/entities.py`）：工具在 CELL_NAME_TOOLS 但参数 `critical_paths_data` 不在 CELL_PARAM_SPECS -> 校验循环永不命中。CELL_PARAM_SPECS 加 `"critical_paths_data": True`。
+- **F10 module 名未警告非合法 cell 名**（`optimizer/pure/entities.py`）：`aes_core` 等 module 名（无 `/`）在 7+ 处出现，[CELL REGISTRY] NOTE 只提 device site/bare type。NOTE 补「module 名非合法 cell 名」。
+- **F11 cached_high_fanout_nets 描述过承诺**（`dcp_optimizer.py`）：描述称 "no truncation risk" 未提空/陈旧（SYSTEM_PROMPT 提了，schema 没同步）。描述补「cache 可能空或陈旧，空则重跑 vivado_get_critical_high_fanout_nets」。
+- **F12 SYSTEM_PROMPT 策略列表缺 2 项**（`SYSTEM_PROMPT.TXT`）：strategies.available 缺 PlaceRouteDirectiveExplore + CongestionRouteExplore（STRATEGY_MAP/枚举有）。补全。
+- **F9（有意跳过）** physopt_and_route directive 不加 enum：加 `enum=PHYSOPT_SAFE_DIRECTIVES` 会让 retiming `PHYSOPT_BLOCKED_DIRECTIVES` 安全检查（带专项警告）不可达、丢失「retiming 破坏等价性」警告；F8 的 JSON 化已覆盖可检测性，故保留 BLOCKED 路径不加 enum。
+
 **工具调用频率限制**（`PHASE_TOOL_RATE_LIMITS` 补强层，反应式拦截冗余调用）：
 - `rapidwright_search_cells`: 3
 - `vivado_run_tcl`: 2

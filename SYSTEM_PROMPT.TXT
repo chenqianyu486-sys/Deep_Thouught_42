@@ -42,7 +42,7 @@ response_format:
   flow_control:
     ANALYZE_DONE: "Analysis complete"
     EXEC_DONE: "Execution complete"
-    CONTINUE: "Continue in current phase (ANALYZE or EXECUTE only)"
+    CONTINUE: "Continue in current phase"
     NEXT_ITERATION: "Good improvement, restart fresh iteration"
     SWITCH_STRATEGY: "Strategy failed — try another strategy"
     DONE: "WNS >= 0"
@@ -74,6 +74,8 @@ strategies:
     combinational_rebalance: "Combinational Logic Rebalancing — opt_design -remap (logic-equivalent, no FF insertion)"
     lut_muxf_repack: "LUT6+MUXF Co-Repack — opt_design -AddRemap (logic-equivalent repacking)"
     muxf_tree_reorder: "MUXF Tree Reorder — phys_opt_design (no -retime, logic-equivalent)"
+    place_route_directive_explore: "Place&Route Directive Explore - expand place/route directive search space when WNS stalled"
+    congestion_route_explore: "Congestion-Aware Route Directive Explore - route directive tuning for congestion-bound paths"
   validation_constraint: "validate_dcps.py uses cycle-exact simulation — all strategies MUST preserve design latency. Pipeline insertion / register retiming strategies are excluded because they change latency and would FAIL validation."
 
 final_output:

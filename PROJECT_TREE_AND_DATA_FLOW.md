@@ -174,7 +174,7 @@ _prepare_api_messages():
 > **分层上下文注入**（STATIC > PINNED > FORMAT_GUARD > DYNAMIC > EPHEMERAL，详见 [architecture.md §11](architecture.md)）：
 > - **STATIC**（L0）：`SYSTEM_PROMPT.TXT`，启动时注入，作为首个 system message 经 `extra_body[system]` 传入 API（provider 可缓存）。
 > - **PINNED**（L2）：`[CELL REGISTRY]` 由 `state.entity_registry` 每轮重建，不进入 MessageStore，天然抗压缩；附带 `stale`/`fresh` 新鲜度标记与 `iter=N` 版本号。为 LLM 提供 canonical cell 名唯一权威来源。
-> - **FORMAT_GUARD**（L1）：每 phase 按 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，由 `inject_merged_dashboard()` 注入为 system message（幂等，marker 去重）。包含输出格式、Cell Name Contract、**NET NAME CONTRACT（2026-07-12 新增，fanout `nets` 命名空间引导）**、设计一致性验证流程、**STALE DATA HANDLING 指令（2026-07 新增）**、禁止事项、phase-gated tool 可用性。SELECT_STRATEGY 阶段还额外注入策略-工具映射表（`_STRATEGY_MAPPING_LINES`，2026-07 恢复）。
+> - **FORMAT_GUARD**（L1）：每 phase 按 `build_phase_format_guard(phase)` 动态生成 BASE + per-phase addendum，由 `inject_merged_dashboard()` 注入为 system message（幂等，marker 去重）。包含输出格式、Cell Name Contract、**NET NAME CONTRACT（2026-07-12 新增，fanout `nets` 命名空间引导）**、**PIN NAME CONTRACT（2026-07-12 新增，lut_input_cone `pins` 命名空间引导）**、设计一致性验证流程、**STALE DATA HANDLING 指令（2026-07 新增）**、禁止事项、phase-gated tool 可用性。SELECT_STRATEGY 阶段还额外注入策略-工具映射表（`_STRATEGY_MAPPING_LINES`，2026-07 恢复）。
 > - **DYNAMIC**（L3）：7 模块 StateSpace Dashboard + **`strategy_outcomes:` 策略结果表（2026-07 新增）**，作为最后一条 user 消息注入。非 EXECUTE/EVALUATE 阶段抑制 `current_strategy` 残留；时钟名从 `critical_paths[0].clock.source_clock` 提取。
 > - **EPHEMERAL**：tool result summaries、handoff prompts、budget messages。
 > 完整消息流程、顺序压缩步骤、压缩参数表见 [architecture.md §1.1-§1.2](architecture.md)。

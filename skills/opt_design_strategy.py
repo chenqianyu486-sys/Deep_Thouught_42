@@ -16,7 +16,7 @@ from skills.strategy_plan import StrategyPlan, StrategyStep
 
 
 ALLOWED_DIRECTIVES = [
-    "Default", "Explore", "ExploreArea",
+    "Default", "Explore", "ExploreWithAreaDuplication",
     "ExploreSequentialArea", "RuntimeOptimized", "AddRemap",
 ]
 

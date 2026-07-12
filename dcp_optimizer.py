@@ -302,7 +302,10 @@ async def optimize_v2(
                     "truncated or incomplete. "
                     "NOTE: This data is also available in Dashboard Module 4 "
                     "(Netlist Quality) — avoid repeated calls; the cache does not "
-                    "change within an iteration."
+                    "change within an iteration. "
+                    "NOTE: the cache may be EMPTY if init_analysis found no "
+                    "high-fanout nets, or STALE after design modifications; if "
+                    "empty, re-run vivado_get_critical_high_fanout_nets to refresh."
                 ),
                 "parameters": {
                     "type": "object",
@@ -310,6 +313,51 @@ async def optimize_v2(
                         "max_nets": {"type": "integer", "description": "Maximum number of nets to return (0 = return all)"},
                         "min_fanout": {"type": "integer", "description": "Minimum fanout threshold to filter (optional)"},
                     },
+                },
+                "strict": False,
+            },
+        })
+
+        # Internal tool: design_data_read - retrieve persisted design data
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "design_data_read",
+                "description": (
+                    "Retrieve persisted design data for a given iteration (no "
+                    "Vivado/RapidWright call - reads JSON snapshots written to disk). "
+                    "Use this to read FULL untruncated data when the Dashboard "
+                    "shows truncated sections (see truncation_advisory). Returns "
+                    "PERSISTED data as of when it was written - if the field is "
+                    "stale, the persisted value may lag the live design; refresh "
+                    "with the extraction tools for current data."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "iteration": {"type": "integer", "description": "Iteration number (default: current iteration)"},
+                        "data_type": {
+                            "type": "string",
+                            "description": "Data type: critical_paths, high_fanout_nets, congestion, route_status, design_info, failing_endpoint_names, or tool_output:<tool_name>",
+                        },
+                    },
+                },
+                "strict": False,
+            },
+        })
+
+        # Internal tool: design_data_list_snapshots - list available iterations
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "design_data_list_snapshots",
+                "description": (
+                    "List all iterations that have persisted design-data snapshots "
+                    "available for design_data_read. No arguments."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 },
                 "strict": False,
             },

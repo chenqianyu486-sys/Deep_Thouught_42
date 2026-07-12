@@ -55,12 +55,14 @@ CELL NAME CONTRACT — CRITICAL FOR TOOL CALLS:
     suggested canonical names from the registry. Use those suggestions to correct
     and re-issue the call.
   - For execution tools (pblock, combinational_rebalance, lut_muxf_repack,
-    muxf_tree_reorder, flatten_lut_cascade), the framework auto-injects
-    critical_path_cells/paths from verified state data (extracted via
-    vivado_extract_critical_path_cells) to avoid data-quality issues from raw
-    TCL extraction. If your provided cells/paths are replaced, you receive a
-    [DATA INTEGRITY] notice with the verified cells used - this is expected and
-    NOT an error; you do NOT need to manually extract paths for these tools.
+    muxf_tree_reorder, flatten_lut_cascade, cell_replication), the framework
+    auto-injects critical_path_cells/paths from verified state data (extracted
+    via vivado_extract_critical_path_cells) to avoid data-quality issues from
+    raw TCL extraction. cell_replication injects a rich-object critical_paths
+    format ([{cells:[{name,delay,type,fanout}]}]) built from verified state.
+    If your provided cells/paths are replaced, you receive a [DATA INTEGRITY]
+    notice with the verified cells used - this is expected and NOT an error;
+    you do NOT need to manually extract paths for these tools.
   - After any design modification (place/route/opt_design), the registry is
     marked stale; re-fetch via vivado_extract_critical_path_cells or
     rapidwright_search_cells before targeting cells again.
@@ -83,6 +85,19 @@ NET NAME CONTRACT — CRITICAL FOR FANOUT TOOL CALLS:
   - NEVER hand-copy net names from timing-report text: Vivado drops the 'w'
     suffix on LUT/MUXF output nets (report shows 'M1[21]' but the netlist net
     is 'M1w[21]'), so report-copied names are wrong and cause regressions.
+
+PIN NAME CONTRACT - lut_input_cone uses PIN names, NOT cell names:
+  - rapidwright_optimize_lut_input_cone takes `hierarchical_input_pins` - PIN
+    names, which are a cell name plus a pin suffix (e.g. 'u_core/u_alu/lut6/I0').
+    These are a DIFFERENT name-space from cell names.
+  - Construct pin names by appending an input pin suffix (/I0-/I5 for LUT
+    inputs) to a cell name from [CELL REGISTRY]. Do NOT pass bare cell names -
+    they pass the loose pin validation but fail in RapidWright (getCell returns
+    null for a pin path).
+  - PinSwap (rapidwright_optimize_pin_swapping) is the OTHER pin-related tool:
+    it takes `critical_paths` as [{cells:[cell-name,...]}] (object-wrapped cell
+    names, NOT list[list[str]] like the combinational tools) and is NOT
+    auto-injected - build it manually from [CELL REGISTRY] cell names.
 
 DESIGN CONSISTENCY — CRITICAL REQUIREMENT:
   The competition requires STRICT design logic equivalence. Any optimization must preserve
@@ -116,7 +131,8 @@ STALE DATA HANDLING — CRITICAL:
   - WNS/TNS: auto-refreshed at ANALYZE/SELECT_STRATEGY entry and on strategy
     re-entry into EXECUTE. The WNS shown for strategy decisions is current.
   - Critical paths: auto-refreshed at EXECUTE entry for netlist strategies
-    (MUXFTreeReorder, LUTCascade, CombinationalRebalance, LUTMUXFRepack) and
+    (MUXFTreeReorder, LUTCascade, CombinationalRebalance, LUTMUXFRepack,
+    CellReplication) and
     auto-injected as verified state data for pblock/combinational execution
     tools. When your provided cells/paths are replaced you receive a
     [DATA INTEGRITY] notice — that is expected, not an error.
@@ -172,7 +188,7 @@ Strategy-to-tool mapping:
 
 AUTO-INJECTED STRATEGY DATA (DO NOT extract before calling execution tools):
   For netlist-modifying strategies (MUXFTreeReorder, CombinationalRebalance,
-  LUTMUXFRepack, LUTCascade), critical_paths are automatically injected from
+  LUTMUXFRepack, LUTCascade, CellReplication), critical_paths are automatically injected from
   verified state data when you call the execution tool. Simply call the tool
   directly — the system fills in critical_paths. Manual extraction via
   vivado_extract_critical_path_cells or design_data_read BEFORE tool invocation
