@@ -75,6 +75,7 @@ class StepState:
     raw_content: str = ""
     strategy_phase: Optional[str] = None  # ANALYZE | SELECT_STRATEGY | EXECUTE_STRATEGY | EVALUATE
     strategy_name: Optional[str] = None   # PBLOCK | PhysOpt | Fanout | ...
+    next_strategy_hint: Optional[str] = None  # P2 route-2: LLM hint for the next strategy (set in EXECUTE/EVALUATE, consumed in SELECT_STRATEGY)
 
 
 @dataclass
@@ -503,6 +504,7 @@ class StrategyState:
     evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
     last_handoff_text: str = ""              # PhaseHandoff formatted text for merged dashboard injection
     current_param_signature: str = ""        # P1 ②A: param combo of the executing strategy (directive pair etc.); captured at EXECUTE entry
+    pending_next_strategy_hint: str = ""     # P2 route-2: LLM's next-strategy hint from EXECUTE/EVALUATE, surfaced as [STRATEGY HINT] in SELECT_STRATEGY
 
 
 # ── Flow control helpers ────────────────────────────────────────

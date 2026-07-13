@@ -258,7 +258,26 @@ PLACE/ROUTE DIRECTIVE TUNING (optional, advanced):
   When unsure, OMIT and let default Explore run. Do NOT cycle random
   directives hoping to get lucky — each failed chain costs a full P&R run.
   Not every skill tool accepts both; pblock/opt/fanout/flatten take both,
-  physopt/muxf_tree take route_directive only.""",
+  physopt/muxf_tree take route_directive only.
+
+EXECUTE flow_control signals (choose via report_step_state - IMPORTANT):
+  - EXEC_DONE: the current strategy's execution is finished (improved, unchanged, OR
+    simply a bad fit for this design). This is the NORMAL way to move on - it goes to
+    EVALUATE, where you then pick SWITCH_STRATEGY to try a different strategy. If you
+    have a next strategy in mind, use EXEC_DONE, NOT EXHAUSTED.
+  - CONTINUE: keep running the SAME strategy (e.g. retry with a different directive)
+    - only when the strategy is still promising.
+  - EXHAUSTED: TERMINAL - ends the ENTIRE optimization run (cannot be undone; the best
+    WNS so far is banked). Use ONLY when you are certain NO remaining strategy can
+    help: all applicable strategies already tried/blocked AND multiple consecutive
+    strategies yielded no improvement. Do NOT use EXHAUSTED to express "this one
+    strategy is a bad fit" or "no change" - that is EXEC_DONE + SWITCH_STRATEGY.
+    Misusing EXHAUSTED abandons untried strategies that could still close timing.
+  - next_strategy_hint (optional report_step_state field): when signaling EXEC_DONE
+    (or SWITCH_STRATEGY in EVALUATE), set this to the strategy name you want next
+    (e.g. "PlaceRouteDirectiveExplore"). It is surfaced as a [STRATEGY HINT] in the
+    next SELECT_STRATEGY phase (soft, NOT enforced - you still select via strategy_name).
+    Use it to carry your next-strategy intent across phases instead of losing it.""",
 
     LoopPhase.EVALUATE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
    - EVALUATE: read-only tools to assess the WNS delta and decide next.
@@ -272,7 +291,11 @@ DECISION GUIDANCE (choose flow_control based on verdict):
      wastes strategies that are still working.
    - verdict=UNCHANGED: choose SWITCH_STRATEGY (same strategy is now blocked this iteration; CONTINUE will not help) or NEXT_ITERATION.
    - verdict=REGRESSED: choose SWITCH_STRATEGY, or ROLLBACK if WNS regressed beyond threshold (auto-rollback may trigger).
-   - If consecutive strategies yield no improvement, choose EXHAUSTED to end this iteration.
+   - EXHAUSTED is TERMINAL (ends the ENTIRE run, not just this iteration - the best
+     WNS is banked and cannot be improved further). Use ONLY when NO remaining
+     strategy can help: all applicable strategies tried/blocked AND 2+ consecutive
+     strategies yielded no improvement. If you have a next strategy in mind, choose
+     SWITCH_STRATEGY instead - do NOT use EXHAUSTED to express "this strategy is a bad fit".
    - Do NOT choose CONTINUE after UNCHANGED — re-analyzing an unchanged design wastes budget.""",
 }
 

@@ -398,6 +398,9 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         # Extract step state
         step_state = extract_step_state(message)
         state.control.step_state = step_state
+        # P2 route-2: carry the LLM's next-strategy hint to SELECT_STRATEGY.
+        if step_state and step_state.next_strategy_hint:
+            state.strategy.pending_next_strategy_hint = step_state.next_strategy_hint
 
         if step_state:
             state.context.step_state_misses = 0

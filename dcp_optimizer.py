@@ -386,14 +386,14 @@ async def optimize_v2(
                             "type": "string",
                             "enum": ["ANALYZE_DONE", "EXEC_DONE", "CONTINUE", "NEXT_ITERATION", "SWITCH_STRATEGY", "DONE", "ROLLBACK", "EXHAUSTED"],
                             "description": (
-                                "ANALYZE_DONE: analysis phase complete, move to strategy selection; "
-                                "EXEC_DONE: execution phase complete, move to evaluation; "
-                                "CONTINUE: continue in current phase; "
-                                "NEXT_ITERATION: significant improvement, diminishing returns, end iteration; "
-                                "SWITCH_STRATEGY: strategy failed or try another strategy; "
-                                "DONE: WNS>=0 achieved (ONLY when WNS>=0); "
+                                "ANALYZE_DONE: analysis complete, move to SELECT_STRATEGY; "
+                                "EXEC_DONE: this strategy's execution done, move to EVALUATE (the NORMAL way to move on, even if the strategy was a bad fit / no change); "
+                                "CONTINUE: keep going in current phase; "
+                                "NEXT_ITERATION: end this iteration, start fresh from best checkpoint; "
+                                "SWITCH_STRATEGY: abandon current strategy, pick a different one; "
+                                "DONE: WNS>=0 reached, end run (ONLY when WNS>=0); "
                                 "ROLLBACK: revert to best checkpoint; "
-                                "EXHAUSTED: all strategies tried, no further improvement possible"
+                                "EXHAUSTED: TERMINAL - ends the ENTIRE run. ONLY when no remaining strategy can help (all tried/blocked AND 2+ consecutive no-improvement). NOT for a bad-fit strategy (use EXEC_DONE / SWITCH_STRATEGY)"
                             ),
                         },
                         "strategy_phase": {
@@ -414,6 +414,10 @@ async def optimize_v2(
                                      "PhysOptAggressive", "CombinationalRebalance", "LUTMUXFRepack",
                                      "MUXFTreeReorder", "PlaceRouteDirectiveExplore", "CongestionRouteExplore", "CUSTOM"],
                             "description": "The strategy being executed in this step",
+                        },
+                        "next_strategy_hint": {
+                            "type": "string",
+                            "description": "Optional: when signaling EXEC_DONE or SWITCH_STRATEGY, hint which strategy to try next (use a strategy name from the catalog/strategy_name enum). Surfaced as a [STRATEGY HINT] in the next SELECT_STRATEGY phase as a soft suggestion (NOT enforced - you still select via strategy_name). Use this to carry your next-strategy intent across phases instead of losing it or misusing EXHAUSTED.",
                         },
                     },
                     "required": ["step_id", "result_status", "flow_control"],

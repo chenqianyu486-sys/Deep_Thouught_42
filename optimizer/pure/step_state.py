@@ -43,6 +43,7 @@ def extract_step_state(message) -> StepState | None:
                 raw_content=tc.function.arguments or "",
                 strategy_phase=args.get("strategy_phase"),
                 strategy_name=args.get("strategy_name"),
+                next_strategy_hint=args.get("next_strategy_hint"),
             )
             _report_step_call = tc
         else:

@@ -180,6 +180,22 @@ PHASE_FLOW_CONTROL: dict[LoopPhase, list[str]] = {
     ],
 }
 
+# P2 prompt-engineering: per-signal one-line semantics, injected into the
+# report_step_state tool description so the LLM sees signal meanings inline (not
+# just a bare list). Previously the patched description was only "Valid signals
+# for X phase: A, B, C" with no semantics, which contributed to EXHAUSTED misuse
+# (run-20260713_050453: LLM used EXHAUSTED to mean "this strategy is a bad fit").
+_FLOW_CONTROL_BLURBS: dict[str, str] = {
+    "ANALYZE_DONE": "analysis complete -> move to SELECT_STRATEGY",
+    "EXEC_DONE": "this strategy's execution is done -> EVALUATE (the NORMAL way to move on, even if the strategy was a bad fit / no change)",
+    "CONTINUE": "keep going in the current phase",
+    "NEXT_ITERATION": "end this iteration, start fresh from best checkpoint (after a real gain, or when gains have plateaued)",
+    "SWITCH_STRATEGY": "abandon current strategy -> pick a different one in SELECT_STRATEGY",
+    "DONE": "WNS>=0 reached -> end the run (ONLY when WNS>=0)",
+    "ROLLBACK": "revert to best checkpoint (WNS regressed beyond threshold)",
+    "EXHAUSTED": "TERMINAL: ends the ENTIRE run. ONLY when no remaining strategy can help (all tried/blocked AND 2+ consecutive no-improvement). NOT for 'this strategy is a bad fit' (use EXEC_DONE / SWITCH_STRATEGY)",
+}
+
 # ── Per-phase max tool rounds ──────────────────────────────────────
 
 PHASE_MAX_ROUNDS: dict[LoopPhase, int] = {
@@ -246,10 +262,10 @@ def filter_tools_for_phase(
                 patched = copy.deepcopy(tool)
                 props = patched["function"]["parameters"]["properties"]
                 props["flow_control"]["enum"] = list(phase_signals)
-                props["flow_control"]["description"] = (
-                    f"Valid signals for {phase.value} phase: "
-                    + ", ".join(phase_signals)
-                )
+                blurb_lines = [f"Valid flow_control for {phase.value} phase:"]
+                for _sig in phase_signals:
+                    blurb_lines.append(f"  - {_sig}: {_FLOW_CONTROL_BLURBS.get(_sig, '')}")
+                props["flow_control"]["description"] = "\n".join(blurb_lines)
                 filtered[i] = patched
                 break
 

@@ -57,6 +57,20 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     """
 
 
+    # P2 route-2: surface the LLM's next-strategy hint (set in EXECUTE/EVALUATE)
+    # as a soft [STRATEGY HINT]. Consumed once on entry (cleared regardless).
+    _hint = state.strategy.pending_next_strategy_hint
+    state.strategy.pending_next_strategy_hint = ""
+    if _hint and deps.compat is not None:
+        try:
+            from strategy_library import STRATEGIES as _STRATS
+        except Exception:
+            _STRATS = {}
+        _hint_msg = build_strategy_hint_message(_hint, _STRATS)
+        if _hint_msg:
+            deps.compat.add_message("user", _hint_msg)
+            logger.info(f"[SELECT_STRATEGY] Surfaced next_strategy_hint: {_hint}")
+
     # HARD RULE: First iteration ALWAYS tries PBLOCK (85% success, +0.532ns avg gain),
     # but only on the FIRST strategy selection of iteration 1 — skip if a strategy was
     # already selected this iteration (phase_history entry exists), or if PBLOCK is
@@ -500,6 +514,24 @@ def blocking_reason_for_strategy(
                 return f"regression - made WNS worse; unblocks in {remaining} iterations"
             return f"temporarily ineffective; unblocks in {remaining} iterations"
     return "temporarily ineffective; unblocks in 0 iterations"
+
+
+def build_strategy_hint_message(hint: str, valid_strategies) -> str | None:
+    """P2 route-2: build the [STRATEGY HINT] user message, or None if invalid.
+
+    Pure helper used by SELECT_STRATEGY entry to surface the LLM's
+    ``next_strategy_hint`` (set in EXECUTE/EVALUATE) as a soft suggestion.
+    Returns None when the hint is empty or not a known strategy (so garbage
+    hints are silently dropped, not injected).
+    """
+    if not hint or hint not in (valid_strategies or {}):
+        return None
+    return (
+        f"[STRATEGY HINT] A previous phase suggested '{hint}' as the next strategy. "
+        f"Select it via report_step_state(strategy_name=\"{hint}\") if it fits the "
+        f"current bottleneck, or pick a better-fit strategy from the catalog. "
+        f"(suggestion, NOT enforced)"
+    )
 
 
 def _get_wns_ineffective_strategies(state: OptimizerState) -> set[str]:
