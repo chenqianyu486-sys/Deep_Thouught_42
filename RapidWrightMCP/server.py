@@ -488,8 +488,8 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "cell_names": {
                         "type": "array",
-                        "items": {"type": "string", "pattern": "^.+/.+$"},
-                        "description": "Hierarchical cell instance names to optimize. MUST contain '/' separator (e.g. 'u_core/u_alu/lut1'). Device sites (SLICE_X*, DSP*_X*) and bare type names (LUT6, FDRE) are NOT valid. Source names from the [CELL REGISTRY] section in your context.",
+                        "items": {"type": "string"},
+                        "description": "Cell instance names to optimize - hierarchical (e.g. 'u_core/u_alu/lut1') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]'). Device sites (SLICE_X*, DSP*_X*) and bare type names (LUT6, FDRE) are NOT valid. Source names from the [CELL REGISTRY] section in your context.",
                         "examples": ["u_core/u_alu/lut1", "u_core/u_alu/reg_0/Q_reg[0]"]
                     }
                 },
@@ -600,8 +600,8 @@ async def list_tools() -> list[Tool]:
                     },
                     "critical_path_cells": {
                         "type": "array",
-                        "items": {"type": "string", "pattern": "^.+/.+$"},
-                        "description": "Critical path cell names for region centering. MUST contain '/' separator (e.g. 'u_core/u_alu/lut1'). Device sites (SLICE_X*) and bare type names are NOT valid. Auto-injected by optimizer from the [CELL REGISTRY] — optional for LLM.",
+                        "items": {"type": "string"},
+                        "description": "Critical path cell names for region centering - hierarchical (e.g. 'u_core/u_alu/lut1') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]'). Device sites (SLICE_X*) and bare type names are NOT valid. Auto-injected by optimizer from the [CELL REGISTRY] - optional for LLM.",
                         "default": None,
                         "examples": ["u_core/u_alu/lut1", "layer0_inst/layer0_N25_inst/data_out[76]_i_19"]
                     },
@@ -839,9 +839,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string", "pattern": "^.+/.+$"}
+                            "items": {"type": "string"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name is hierarchical (e.g. 'u_core/u_alu/lut1') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]'). Device sites (SLICE_X*) and bare type names (LUT6, FDRE) are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "min_depth": {
                         "type": "integer",
@@ -902,9 +902,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string", "pattern": "^.+/.+$"}
+                            "items": {"type": "string"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name is hierarchical (e.g. 'u_core/u_alu/lut1') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]'). Device sites (SLICE_X*) and bare type names (LUT6, FDRE) are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "directive": {
                         "type": "string",
@@ -964,9 +964,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string", "pattern": "^.+/.+$"}
+                            "items": {"type": "string"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'), e.g. 'u_core/u_alu/lut1'. Device sites and bare type names are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name is hierarchical (e.g. 'u_core/u_alu/lut1') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]'). Device sites (SLICE_X*) and bare type names (LUT6, FDRE) are NOT valid. Provide at most 10 paths. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "directive": {
                         "type": "string",
@@ -1096,9 +1096,9 @@ async def list_tools() -> list[Tool]:
                         "type": "array",
                         "items": {
                             "type": "array",
-                            "items": {"type": "string", "pattern": "^.+/.+$"}
+                            "items": {"type": "string"}
                         },
-                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name MUST be hierarchical (contain '/'). Provide at most 10 paths to avoid excessive prompt size. Source names from the [CELL REGISTRY] section in your context."
+                        "description": "List of paths from Vivado extract_critical_path_cells: [[cell1, cell2, ...], ...]. Each cell name is hierarchical OR top-level. Provide at most 10 paths to avoid excessive prompt size. Source names from the [CELL REGISTRY] section in your context."
                     },
                     "min_cascade_depth": {
                         "type": "integer",
@@ -1267,8 +1267,8 @@ Returns WNS (ns), max delay (ps), and clock period (ps).""",
                             "properties": {
                                 "cells": {
                                     "type": "array",
-                                    "items": {"type": "string", "pattern": "^.+/.+$"},
-                                    "description": "List of hierarchical cell names on the path (MUST contain '/')"
+                                    "items": {"type": "string"},
+                                    "description": "List of cell names on the path - hierarchical (with '/') OR top-level"
                                 }
                             }
                         },
@@ -1315,7 +1315,13 @@ Returns WNS (ns), max delay (ps), and clock period (ps).""",
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "name": {"type": "string", "pattern": "^.+/.+$", "description": "Hierarchical cell name (MUST contain '/')"},
+                                            # Accept both hierarchical names ("mod/cell") and
+                                            # top-level names ("decode_to_execute_INSTRUCTION_reg[7]").
+                                            # Top-level pipeline registers are prime replication
+                                            # targets and are injected from critical-path nodes
+                                            # via derive_cells_rich; rejecting them (run-20260713_073429)
+                                            # silently killed the whole CellReplication strategy.
+                                            "name": {"type": "string", "description": "Cell name - hierarchical (e.g. 'dataCache_1/ways_0_tags_reg_i_57') OR top-level (e.g. 'decode_to_execute_INSTRUCTION_reg[7]')"},
                                             "delay": {"type": "number", "description": "Cell delay in ns"},
                                             "type": {"type": "string", "description": "Cell type (LUT6, FDRE, etc.)"},
                                             "fanout": {"type": "integer", "description": "Output fanout count"}

@@ -202,7 +202,7 @@ class CriticalPathEntry:
 | 冷却逻辑分层 | `phase_evaluate.py` | 区分策略工具错误(`STRATEGY_TOOL_NAMES`) vs 辅助工具错误 |
 | 策略目录分层暴露 | `inject_merged_dashboard()` | `strategy_ineffective`（TTL=1）+ `no_improvement`（TTL=3）+ `strategy_not_applicable`（TTL=5）标为 `[BLOCKED]` 占位符；`tool_error` 完全移出；`get_strategy_catalog(blocked_strategies=...)` 渲染 |
 | 空结果模式匹配 | `iteration_end.py` | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久排除） |
-| Improvement 阈值（三档语义）| `STRATEGY_IMPROVEMENT_EPSILON_NS=0.050` | `delta>0` 不冷却（best_checkpoint 已保存）；`delta>0.050` 重置无进展计数；`delta≤0` 计无进展。边际正收益 (0,0.050] 不惩罚 |
+| Improvement 阈值（两档语义）| `delta>0` | `delta>0` 不冷却且重置无进展计数（与冷却对齐）；`delta≤0` 计无进展。每策略切换时重置计数器（独立预算），防止前策略停滞殃及新策略 |
 
 ---
 
@@ -479,11 +479,10 @@ DeepSeek V4 Flash 在长上下文场景下可能产生"沉默退化"——65% �
 
 ### 4.11 连续无进展自动检测（2026-07）
 
-EVALUATE 阶段 `consecutive_no_progress` 计数器。每次评估计算当前策略 WNS delta（与进入 EXECUTE 时相比），三档语义：
+EVALUATE 阶段 `consecutive_no_progress` 计数器。每次评估计算当前策略 WNS delta（与进入 EXECUTE 时相比），**两档语义**（2026-07-13 从三档简化，与冷却逻辑对齐）：
 
-- `delta > STRATEGY_IMPROVEMENT_EPSILON_NS`（0.050ns，显著收益）→ 重置为 0
+- `delta > 0`（任何正收益，best_checkpoint 已保存）→ 重置为 0
 - `delta ≤ 0`（真无改善）→ `+= 1`，计数 >= 3 强制切换
-- `0 < delta ≤ 0.050`（边际正收益，best_checkpoint 已保存）→ **既不重置也不递增**
 
 ```python
 if state.context.consecutive_no_progress >= 3:
@@ -492,9 +491,11 @@ if state.context.consecutive_no_progress >= 3:
 
 触发后记录日志警告 `"[EVALUATE] 3 consecutive no-progress evaluations — forcing SWITCH_STRATEGY"`。
 
-**冷却判定同步**（`_cool_down_current_strategy_if_stalled`）：以 `delta > 0` 跳过冷却，与计数器三档对齐。2026-07-04 修复：此前冷却用 `delta > 0.050` 而 best_保存用 `>0`，导致 PBLOCK +0.049ns 改进被存为 best 却被冷却（"见好就收"矛盾）。现在任何正收益都不冷却，EPSILON 仅用于"显著收益"判定（重置计数）。
+**冷却判定同步**（`_cool_down_current_strategy_if_stalled`）：以 `delta > 0` 跳过冷却。2026-07-04 修复冷却与 best_保存阈值不一致；2026-07-13 进一步将计数器重置阈值从 0.050ns 降为 `delta > 0`（消除边际收益死区），与冷却共用同一阈值。`STRATEGY_IMPROVEMENT_EPSILON_NS` 常量已移除。
 
-**每迭代重置**（2026-07-09 修复）：`consecutive_no_progress` 在 `iteration_start` 重置为 0（与 `tool_errors`/`tools_used`/`blocked_strategies` 一同清理）。此前该计数器跨迭代持久，导致 iter N 的停滞计数带入 iter N+1 并无限递增（实测 3→4→…→11），每次 eval≥3 都强制 SWITCH 却无升级终止路径，直到时间预算耗尽。重置后该计数器仅门控迭代内的策略切换；跨迭代平台期终止由 `global_no_improvement` + `GLOBAL_NO_IMPROVEMENT_LIMIT`（check_exit）独立处理。
+**每迭代重置**（2026-07-09 修复）：`consecutive_no_progress` 在 `iteration_start` 重置为 0（与 `tool_errors`/`tools_used`/`blocked_strategies` 一同清理）。
+
+**每策略重置**（2026-07-13 新增，gap-4 Layer 2）：`consecutive_no_progress` 在 SELECT_STRATEGY 选定新策略后重置为 0（`phase_select_strategy.py`）。此前计数器仅跨 EVALUATE 累积（策略 A 的停滞计入策略 B；边际收益 0<delta≤0.050 不重置）。现在每策略独立 3 次停滞预算，公平无死区。跨迭代结束时由 `global_no_improvement` + `GLOBAL_NO_IMPROVEMENT_LIMIT`（check_exit）兜底。
 
 ### 4.12 优化历史追踪（2026-07）
 
@@ -893,9 +894,9 @@ DASHBOARD_REFRESH_MAP: dict[str, frozenset[str]] = {
 DESIGN_SIZE_BINS = [(0, 50000, 1.0), (50000, 150000, 1.5), (150000, 2**31, 3.0)]
 MAX_TIMEOUT = 900.0
 
-# 冷却逻辑 Improvement 阈值 (0.001 → 0.050, 2026-06-23)
-# 2026-07-04: 三档语义——delta>0 不冷却；delta>0.050 重置无进展计数；delta≤0 计无进展
-STRATEGY_IMPROVEMENT_EPSILON_NS: float = 0.050
+# 冷却逻辑 Improvement 阈值 (0.050 → 对齐冷却, 2026-07-13)
+# 2026-07-13: 两档语义——delta>0 不冷却且重置无进展计数（与冷却对齐）；delta≤0 计无进展。
+# STRATEGY_IMPROVEMENT_EPSILON_NS 已移除——计数器现在与冷却共享 delta>0 阈值。
 
 # 策略工具名称集合（用于冷却逻辑分层：策略工具本身失败→跳过冷却，仅辅助工具失败→应用冷却）
 STRATEGY_TOOL_NAMES: frozenset[str] = frozenset({

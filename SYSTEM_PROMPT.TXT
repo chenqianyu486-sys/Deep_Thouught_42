@@ -112,7 +112,7 @@ The following patterns have been observed to correlate with suboptimal outcomes:
 
 ## PERFORMANCE OBSERVATIONS
 - PBLOCK: historically highest observed success rate across benchmarks
-- PhysOpt: moderate improvement, typically plateaus after 3 rounds
+- PhysOpt: moderate improvement; re-apply while per-attempt deltas are still growing (see strategy_outcomes trajectories), stop when deltas shrink below ~0.05ns
 - Fanout: modest gains, only applicable when high-fanout nets on critical paths
 - Fast timing: rapidwright_report_timing (~2.5s) vs Vivado (~14s)
 - Cost: Worker=$0.005/call, Planner=$0.075/call (15x diff)

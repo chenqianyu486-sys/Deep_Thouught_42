@@ -522,6 +522,85 @@ def _build_architecture_overview(state: OptimizerState) -> DashboardArchitecture
 
 # ── LLM Context Formatting ───────────────────────────────────────────
 
+
+def compute_strategy_prior(state: OptimizerState) -> list[dict]:
+    """Per-strategy historical prior from this run, for SELECT_STRATEGY ranking.
+
+    Merges ``optimization_history`` (successful, carries a WNS delta) and
+    ``failed_strategies`` (reason) into a per-strategy expected-value view so
+    the LLM can rank alternatives when forced to switch - instead of picking
+    blindly among unblocked strategies (gap-1: no expected-value signal).
+
+    Returns dicts ``{strategy, best_delta, outcome, attempts, blocked}`` sorted
+    by best_delta desc (successful first), then untried, then failed-only.
+    ``best_delta`` is None for never-succeeded strategies. ``blocked`` mirrors
+    ``_get_permanently_blocked_strategies`` (strategy-level
+    strategy_ineffective/regression with active TTL). Pure; reads only state.
+    """
+    from strategy_library import STRATEGIES, STRATEGY_VALIDATION_SAFE
+
+    cur_iter = state.iteration.current
+
+    # Successful deltas (best per strategy)
+    best_delta: dict[str, float] = {}
+    succ_attempts: dict[str, int] = {}
+    for rec in state.context.optimization_history:
+        s = rec.strategy
+        if not s:
+            continue
+        succ_attempts[s] = succ_attempts.get(s, 0) + 1
+        d = rec.wns_after - rec.wns_before
+        if d > best_delta.get(s, float("-inf")):
+            best_delta[s] = d
+
+    # Failures (most recent strategy-level reason per strategy)
+    fail_reason: dict[str, str] = {}
+    fail_attempts: dict[str, int] = {}
+    for fs in state.context.failed_strategies:
+        s = fs.strategy
+        if not s:
+            continue
+        fail_attempts[s] = fail_attempts.get(s, 0) + 1
+        if fs.param_signature == "":
+            fail_reason[s] = fs.reason
+
+    rows: list[dict] = []
+    for key in STRATEGIES:
+        if not STRATEGY_VALIDATION_SAFE.get(key, True):
+            continue  # excluded from catalog (validation-unsafe)
+        if key in succ_attempts:
+            outcome = "succeeded"
+        elif key in fail_reason:
+            outcome = f"failed:{fail_reason[key]}"
+        else:
+            outcome = "untried"
+        blocked = any(
+            fs.strategy == key
+            and fs.reason in ("strategy_ineffective", "regression")
+            and fs.param_signature == ""
+            and cur_iter < fs.blocked_until_iter
+            for fs in state.context.failed_strategies
+        )
+        rows.append({
+            "strategy": key,
+            "best_delta": best_delta.get(key),
+            "outcome": outcome,
+            "attempts": succ_attempts.get(key, 0) + fail_attempts.get(key, 0),
+            "blocked": blocked,
+        })
+
+    def _sort_key(r: dict):
+        d = r["best_delta"]
+        if d is not None:
+            return (0, -d)          # successful, best delta first
+        if r["outcome"] == "untried":
+            return (1, 0.0)         # untried next
+        return (2, 0.0)             # failed-only last
+
+    rows.sort(key=_sort_key)
+    return rows
+
+
 def format_state_space_for_llm(
     *,
     space: StateSpace,
@@ -1037,6 +1116,25 @@ def format_state_space_for_llm(
                 )
         else:
             lines.append("      (none yet)")
+        # Delta trajectory per strategy (momentum signal, gap-2a): show the
+        # sequence of deltas so the LLM can see "still growing" vs
+        # "shrinking" and decide whether to deepen a still-momentum-bearing
+        # strategy instead of abandoning it after one improving round.
+        if opt_history:
+            _by_strat: dict[str, list[float]] = {}
+            for rec in opt_history:
+                _by_strat.setdefault(rec.strategy, []).append(
+                    rec.wns_after - rec.wns_before)
+            lines.append("  trajectories:")
+            for _strat, _deltas in _by_strat.items():
+                _trend = ""
+                if len(_deltas) >= 2:
+                    _trend = ("  # shrinking"
+                              if _deltas[-1] < _deltas[0]
+                              else "  # growing")
+                lines.append(
+                    f"    - {_strat}: deltas=["
+                    f"{', '.join(f'{d:+.3f}' for d in _deltas)}]{_trend}")
         lines.append("  failed:")
         failed = state.context.failed_strategies
         if failed:
@@ -1072,6 +1170,32 @@ def format_state_space_for_llm(
         else:
             lines.append("      (none)")
     lines.append("")
+
+    # ── Strategy prior (SELECT_STRATEGY only) ───────────────────────
+    # Expected-value ranking of all catalog strategies by this run's
+    # history, so the LLM can compare alternatives when forced to switch
+    # (gap-1) instead of picking blindly among unblocked strategies.
+    # Info-only, not enforced.
+    if phase == LoopPhase.SELECT_STRATEGY and state:
+        prior_rows = compute_strategy_prior(state)
+        if prior_rows:
+            lines.append("strategy_prior:")
+            lines.append("  # ranked by best historical WNS delta this run; "
+                         "(blocked) = hard-blocked this iteration")
+            for i, r in enumerate(prior_rows):
+                bd = (f"{r['best_delta']:+.3f}" if r["best_delta"] is not None
+                      else "n/a")
+                tag = " (blocked)" if r["blocked"] else ""
+                marker = ""
+                if (i == 0 and r["best_delta"] is not None
+                        and r["best_delta"] > 0 and not r["blocked"]):
+                    marker = "  # highest prior"
+                lines.append(
+                    f"  - {r['strategy']}: best_delta={bd}, "
+                    f"outcome={r['outcome']}, attempts={r['attempts']}"
+                    f"{tag}{marker}"
+                )
+            lines.append("")
 
     # ── Applied optimizations (persisted in best_checkpoint) ──────────
     if state:

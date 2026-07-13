@@ -361,5 +361,130 @@ class TestFlowControlDescriptionPatch:
         assert d.count("\n") >= 2
 
 
+class TestStrategyPriorAndDeepen:
+    """gap-1 (strategy_prior expected-value ranking) + gap-2a (delta trajectory)
+    + gap-2 optional (_auto_deepen_hint): keep the LLM from abandoning
+    still-effective strategies by surfacing prior, momentum, and a deepen nudge."""
+
+    def test_prior_ranks_successful_by_delta_desc(self):
+        from optimizer.pure.state_space import compute_strategy_prior
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.200, iteration=1),
+            OptimizationAppliedRecord(strategy="PhysOpt", wns_before=-0.200, wns_after=-0.180, iteration=2),
+        ]
+        rows = compute_strategy_prior(s)
+        pblock = next(r for r in rows if r["strategy"] == "PBLOCK")
+        phys = next(r for r in rows if r["strategy"] == "PhysOpt")
+        assert pblock["best_delta"] == pytest.approx(0.300)
+        assert phys["best_delta"] == pytest.approx(0.020)
+        assert pblock["outcome"] == "succeeded"
+        assert rows.index(pblock) < rows.index(phys)  # higher delta ranks first
+
+    def test_prior_marks_untried_and_blocked(self):
+        from optimizer.pure.state_space import compute_strategy_prior
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.failed_strategies = [
+            FailedStrategyRecord(strategy="Fanout", reason="regression",
+                                 blocked_until_iter=5, iteration=2, param_signature=""),
+        ]
+        rows = compute_strategy_prior(s)
+        fanout = next(r for r in rows if r["strategy"] == "Fanout")
+        assert fanout["outcome"] == "failed:regression"
+        assert fanout["blocked"] is True  # iter 3 < blocked_until 5
+        assert any(r["outcome"] == "untried" for r in rows)
+
+    def test_trajectories_renders_growing_sequence(self):
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.400, iteration=1),
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.400, wns_after=-0.250, iteration=2),
+        ]
+        msgs = [{"role": "system", "content": "sys"}]
+        inject_merged_dashboard(msgs, s, LoopPhase.SELECT_STRATEGY)
+        content = msgs[-1]["content"]
+        assert "trajectories:" in content
+        assert "PBLOCK: deltas=[+0.100, +0.150]" in content
+        assert "# growing" in content
+
+    def test_trajectories_shrinking_marker(self):
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.300, iteration=1),
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.300, wns_after=-0.220, iteration=2),
+        ]
+        msgs = [{"role": "system", "content": "sys"}]
+        inject_merged_dashboard(msgs, s, LoopPhase.SELECT_STRATEGY)
+        content = msgs[-1]["content"]
+        assert "PBLOCK: deltas=[+0.200, +0.080]" in content
+        assert "# shrinking" in content
+
+    def test_strategy_prior_only_in_select_phase(self):
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.5, wns_after=-0.2, iteration=1),
+        ]
+        msgs = [{"role": "system", "content": "sys"}]
+        inject_merged_dashboard(msgs, s, LoopPhase.EXECUTE)
+        assert "strategy_prior:" not in msgs[-1]["content"]
+
+    def test_auto_deepen_hint_when_growing_momentum(self):
+        from optimizer.nodes.subgraphs.phase_select_strategy import _auto_deepen_hint
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.400, iteration=1),
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.400, wns_after=-0.250, iteration=2),
+        ]
+        hint = _auto_deepen_hint(s)
+        assert hint is not None
+        assert hint[0] == "PBLOCK"
+        assert hint[1] == pytest.approx(0.150)
+
+    def test_auto_deepen_hint_none_when_shrinking(self):
+        from optimizer.nodes.subgraphs.phase_select_strategy import _auto_deepen_hint
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.300, iteration=1),
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.300, wns_after=-0.220, iteration=2),
+        ]
+        assert _auto_deepen_hint(s) is None  # 0.080 < 0.200, shrinking
+
+    def test_auto_deepen_hint_none_when_noise_delta(self):
+        from optimizer.nodes.subgraphs.phase_select_strategy import _auto_deepen_hint
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.200, wns_after=-0.180, iteration=2),
+        ]
+        assert _auto_deepen_hint(s) is None  # +0.020 below 0.050 noise floor
+
+    def test_auto_deepen_hint_none_when_blocked(self):
+        from optimizer.nodes.subgraphs.phase_select_strategy import _auto_deepen_hint
+        from optimizer.state import OptimizationAppliedRecord
+        s = OptimizerState()
+        s.iteration.current = 3
+        s.context.optimization_history = [
+            OptimizationAppliedRecord(strategy="PBLOCK", wns_before=-0.500, wns_after=-0.300, iteration=1),
+        ]
+        s.context.failed_strategies = [
+            FailedStrategyRecord(strategy="PBLOCK", reason="regression",
+                                 blocked_until_iter=5, iteration=2, param_signature=""),
+        ]
+        assert _auto_deepen_hint(s) is None
+
+
 
 

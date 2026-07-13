@@ -283,12 +283,17 @@ EXECUTE flow_control signals (choose via report_step_state - IMPORTANT):
    - EVALUATE: read-only tools to assess the WNS delta and decide next.
 
 DECISION GUIDANCE (choose flow_control based on verdict):
-   - verdict=IMPROVED: PREFER CONTINUE for 1-2 more rounds - the strategy is still
-     yielding WNS gains, so extract its remaining value (e.g. a tighter pblock, a
-     different directive) before switching. Only choose SWITCH_STRATEGY if you have
-     evidence the gains have plateaued (2+ CONTINUE rounds with shrinking deltas) or
-     a different bottleneck now dominates. Abandoning after a single improving round
-     wastes strategies that are still working.
+   - verdict=IMPROVED: the strategy is still yielding WNS gains.
+     To deepen the SAME strategy (a tighter pblock, a different directive),
+     use EXECUTE CONTINUE *before* signaling EXEC_DONE - EVALUATE's CONTINUE
+     does NOT continue the same strategy (it clears the current strategy and
+     re-enters ANALYZE). Here in EVALUATE, PREFER NEXT_ITERATION to bank the
+     gain: the next iteration starts from best_checkpoint (which now includes
+     this gain) and you can re-select this strategy with refined params - that
+     is the cross-iteration deepening path that compounds. Only choose
+     SWITCH_STRATEGY if the gains have plateaued (2+ rounds with shrinking
+     deltas) or a different bottleneck now dominates. Abandoning after a
+     single improving round wastes strategies that are still working.
    - verdict=UNCHANGED: choose SWITCH_STRATEGY (same strategy is now blocked this iteration; CONTINUE will not help) or NEXT_ITERATION.
    - verdict=REGRESSED: choose SWITCH_STRATEGY, or ROLLBACK if WNS regressed beyond threshold (auto-rollback may trigger).
    - EXHAUSTED is TERMINAL (ends the ENTIRE run, not just this iteration - the best
@@ -296,6 +301,8 @@ DECISION GUIDANCE (choose flow_control based on verdict):
      strategy can help: all applicable strategies tried/blocked AND 2+ consecutive
      strategies yielded no improvement. If you have a next strategy in mind, choose
      SWITCH_STRATEGY instead - do NOT use EXHAUSTED to express "this strategy is a bad fit".
+   - NOTE: EVALUATE CONTINUE re-enters ANALYZE (fresh analysis + re-select),
+     NOT same-strategy deepening. Same-strategy deepening is EXECUTE CONTINUE.
    - Do NOT choose CONTINUE after UNCHANGED — re-analyzing an unchanged design wastes budget.""",
 }
 

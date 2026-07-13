@@ -178,6 +178,24 @@ def parse_high_fanout_nets(report: str) -> list[tuple[str, int, int]]:
     Returns:
         List of (net_name, fanout, path_count) tuples.
     """
+    # The vivado get_critical_high_fanout_nets tool returns a JSON wrapper
+    # (json.dumps({"raw_output": <report>, ...}, indent=2)). The report's
+    # newlines are JSON-escaped inside raw_output, so split('\n') on the
+    # wrapper only sees the inter-key newlines and never the data rows -
+    # the parser returned [] and state.high_fanout_nets stayed empty, forcing
+    # the Fanout strategy to fall back to LLM-hallucinated net names
+    # (run-20260713_073429). Unwrap raw_output first; fall back to treating
+    # the input as plain text for direct callers (e.g. unit tests).
+    if report and report.lstrip().startswith("{"):
+        try:
+            wrapper = json.loads(report)
+            if isinstance(wrapper, dict):
+                raw = wrapper.get("raw_output")
+                if isinstance(raw, str) and raw:
+                    report = raw
+        except (ValueError, TypeError):
+            pass
+
     nets = []
     lines = report.split('\n')
     in_net_section = False

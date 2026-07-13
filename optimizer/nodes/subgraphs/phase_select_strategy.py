@@ -61,15 +61,30 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
     # as a soft [STRATEGY HINT]. Consumed once on entry (cleared regardless).
     _hint = state.strategy.pending_next_strategy_hint
     state.strategy.pending_next_strategy_hint = ""
+    try:
+        from strategy_library import STRATEGIES as _STRATS
+    except Exception:
+        _STRATS = {}
     if _hint and deps.compat is not None:
-        try:
-            from strategy_library import STRATEGIES as _STRATS
-        except Exception:
-            _STRATS = {}
         _hint_msg = build_strategy_hint_message(_hint, _STRATS)
         if _hint_msg:
             deps.compat.add_message("user", _hint_msg)
             logger.info(f"[SELECT_STRATEGY] Surfaced next_strategy_hint: {_hint}")
+    elif deps.compat is not None:
+        # gap-2 optional: no explicit hint - auto-suggest deepening the last
+        # successful strategy when it still has momentum, instead of always
+        # moving on to an untried (possibly less effective) strategy.
+        _auto = _auto_deepen_hint(state)
+        if _auto:
+            _strat, _delta = _auto
+            if _strat in (_STRATS or {}):
+                deps.compat.add_message("user",
+                    f"[STRATEGY HINT - DEEPEN] Your last successful strategy "
+                    f"'{_strat}' recently produced +{_delta:.3f}ns and still shows "
+                    f"growing momentum. Consider re-applying it with refined params "
+                    f"(tighter pblock / different directive) to extract more, instead "
+                    f"of switching to an untried strategy. (suggestion, NOT enforced)")
+                logger.info(f"[SELECT_STRATEGY] Auto deepen-hint surfaced: {_strat}")
 
     # HARD RULE: First iteration ALWAYS tries PBLOCK (85% success, +0.532ns avg gain),
     # but only on the FIRST strategy selection of iteration 1 — skip if a strategy was
@@ -221,6 +236,12 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
 
                 state.strategy.current_strategy = step_state.strategy_name
                 state.strategy.current_param_signature = ""  # P1 ②A: reset; EXECUTE repopulates for directive-bearing strategies
+                # gap-4 Layer 2: give each strategy a fresh stall budget so the
+                # previous strategy's no-progress evaluations don't bleed into the
+                # new one (a new strategy's first delta<=0 eval would otherwise
+                # inherit the prior count and get unfairly force-switched). Makes
+                # consecutive_no_progress per-strategy rather than iteration-cumulative.
+                state.context.consecutive_no_progress = 0
                 state.strategy.strategy_rationale = assistant_content
                 llm_summary = assistant_content
                 logger.info(green(f"[SELECT_STRATEGY] Strategy selected: {step_state.strategy_name}"))
@@ -532,6 +553,44 @@ def build_strategy_hint_message(hint: str, valid_strategies) -> str | None:
         f"current bottleneck, or pick a better-fit strategy from the catalog. "
         f"(suggestion, NOT enforced)"
     )
+
+
+# Threshold for "still has momentum": a recent gain above the Vivado routing
+# noise floor (~0.050ns) suggests the strategy has more to give. Below this the
+# gain is likely noise and re-application will not help.
+_DEEPEN_MOMENTUM_NS = 0.050
+
+
+def _auto_deepen_hint(state: OptimizerState) -> tuple[str, float] | None:
+    """Return (strategy, last_delta) to suggest for deepening, or None.
+
+    gap-2 optional mechanism: when no explicit ``next_strategy_hint`` was set,
+    auto-suggest re-applying the most recent successful strategy IF it still
+    shows momentum - its latest delta is above the noise floor AND (when it has
+    multiple attempts) not shrinking relative to its prior attempt. Nudges the
+    LLM to deepen a still-effective strategy instead of always moving on.
+
+    Returns None when there is no successful history, the latest gain is
+    noise-level, deltas are shrinking (plateauing), or the strategy is
+    currently blocked (iteration-level or permanent TTL block).
+    """
+    hist = state.context.optimization_history
+    if not hist:
+        return None
+    last = hist[-1]
+    if not last.strategy:
+        return None
+    deltas = [r.wns_after - r.wns_before for r in hist if r.strategy == last.strategy]
+    last_delta = deltas[-1] if deltas else 0.0
+    if last_delta <= _DEEPEN_MOMENTUM_NS:
+        return None  # latest gain is noise-level - no momentum signal
+    if len(deltas) >= 2 and deltas[-1] < deltas[-2]:
+        return None  # shrinking - plateauing, stop deepening
+    if last.strategy in _get_permanently_blocked_strategies(state):
+        return None
+    if last.strategy in state.iteration.blocked_strategies:
+        return None
+    return (last.strategy, last_delta)
 
 
 def _get_wns_ineffective_strategies(state: OptimizerState) -> set[str]:

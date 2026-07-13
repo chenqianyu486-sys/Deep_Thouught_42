@@ -40,12 +40,6 @@ from optimizer.color import green, yellow
 
 logger = logging.getLogger(__name__)
 
-# WNS delta threshold for strategy improvement detection.
-# Increased from 0.001 to 0.050 based on log analysis: deltas below 50ps
-# are noise-level (Vivado routing variability) and should not be treated
-# as genuine improvements or as reasons to skip strategy cooldown.
-STRATEGY_IMPROVEMENT_EPSILON_NS = 0.050  # 50ps: Vivado routing noise floor (see doc)
-
 
 def detect_rollback_needed(state: OptimizerState) -> bool:
     """Check if current WNS has regressed significantly from best WNS.
@@ -356,14 +350,17 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
             llm_summary = assistant_content
 
             # ── Consecutive no-progress tracking ──
-            # delta > EPSILON (significant gain) → reset counter.
-            # delta <= 0 (true no-improvement) → increment; >=3 forces SWITCH.
-            # 0 < delta <= EPSILON (marginal gain) → neither reset nor increment:
-            #   best_wns was updated so it's a real gain, but not significant
-            #   enough to reset a prior stall streak. Bounded by max_rounds +
-            #   multi-strategy cap (MAX_STRATEGY_CYCLES=5), so it can't loop.
+            # Two-tier, aligned with the cooldown skip in
+            # _cool_down_current_strategy_if_stalled (which also uses delta > 0):
+            # any positive delta is a real gain (best_wns updated, best_checkpoint
+            # saved) → reset the stall counter. delta <= 0 → increment; >=3 forces
+            # SWITCH_STRATEGY. Previously the reset threshold was a 0.050ns EPSILON,
+            # leaving a marginal-gain dead zone (0, 0.050] that neither reset nor
+            # incremented - a marginally-effective strategy inherited prior stalls
+            # and was unfairly force-switched. Bounded by max_rounds + multi-strategy
+            # cap (MAX_STRATEGY_CYCLES=5). See also Layer 2 (reset on strategy select).
             delta = _strategy_wns_delta_since_entry(state)
-            if delta is not None and delta > STRATEGY_IMPROVEMENT_EPSILON_NS:
+            if delta is not None and delta > 0:
                 state.context.consecutive_no_progress = 0
             elif delta is not None and delta <= 0:
                 state.context.consecutive_no_progress += 1
