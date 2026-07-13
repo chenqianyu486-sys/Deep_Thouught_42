@@ -803,6 +803,11 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
+                    "num_paths": {
+                        "type": "integer",
+                        "description": "Number of critical paths to extract after the auto-chain (vivado_extract_critical_path_cells). Default 10. Increase for complex multi-path analysis.",
+                        "default": 10
+                    },
                 }
             }
         ),
@@ -863,6 +868,11 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
+                    "num_paths": {
+                        "type": "integer",
+                        "description": "Number of critical paths to extract after the auto-chain (vivado_extract_critical_path_cells). Default 10. Increase for complex multi-path analysis.",
+                        "default": 10
+                    },
                 },
                 "required": ["critical_paths"]
             }
@@ -915,6 +925,11 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
+                    },
+                    "num_paths": {
+                        "type": "integer",
+                        "description": "Number of critical paths to extract after the auto-chain (vivado_extract_critical_path_cells). Default 10. Increase for complex multi-path analysis.",
+                        "default": 10
                     },
                 },
                 "required": ["critical_paths"]

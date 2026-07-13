@@ -34,6 +34,15 @@ SCENARIO_WORKFLOW = [
 # ── Strategy Sequences ──────────────────────────────────────────
 
 STRATEGIES = {
+    "CUSTOM": {
+        "name": "Free Orchestration (no auto-chain)",
+        "trigger": "No predetermined chain fits the bottleneck; orchestrate Vivado/RapidWright tools directly in any order",
+        "sequence": [
+            {"step": "any EXECUTE tool (place/route/opt/phys_opt/fanout_batch/search_cells/...)",
+             "platform": "Vivado/RapidWright",
+             "note": "CUSTOM mode: no auto-chain - you call tools directly. All EXECUTE-phase tools are exposed (no narrowing to one primary tool). Equivalence relies on tool-level guards (retiming blocklist, directive whitelist) + DCP validation. Signal EXEC_DONE when your orchestration is complete."},
+        ],
+    },
     "PBLOCK": {
         "name": "PBLOCK-Based Re-placement",
         "trigger": "recommendation == 'PBLOCK'",
@@ -493,7 +502,8 @@ def get_scenario_guide() -> str:
 def get_strategy_catalog(exclude_strategies: list[str] | None = None,
                          blocked_strategies: dict[str, str] | None = None,
                          retryable_strategies: dict[str, str] | None = None,
-                         combo_cooled_strategies: dict[str, str] | None = None) -> str:
+                         combo_cooled_strategies: dict[str, str] | None = None,
+                         soft_failed_strategies: dict[str, str] | None = None) -> str:
     """Compact strategy catalog for system prompt (names + purposes only).
 
     Strategies are listed alphabetically — no implied priority. The LLM
@@ -517,6 +527,7 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None,
     blocked = blocked_strategies or {}
     retryable = retryable_strategies or {}
     combo_cooled = combo_cooled_strategies or {}
+    soft_failed = soft_failed_strategies or {}
     # Always exclude validation-unsafe strategies (insert new FFs → change latency)
     excluded.update(k for k, safe in STRATEGY_VALIDATION_SAFE.items() if not safe)
 
@@ -537,6 +548,8 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None,
             # retries left.
             if key in combo_cooled:
                 parts.append(line + f" [COMBO COOLED: {combo_cooled[key]}]")
+            elif key in soft_failed:
+                parts.append(line + f" [PRIOR FAIL: {soft_failed[key]} - selectable]")
             elif key in retryable:
                 parts.append(line + f" [RETRY: {retryable[key]}]")
             else:

@@ -532,6 +532,7 @@ def format_state_space_for_llm(
     blocked_strategies: dict[str, str] | None = None,
     retryable_strategies: dict[str, str] | None = None,
     combo_cooled_strategies: dict[str, str] | None = None,
+    soft_failed_strategies: dict[str, str] | None = None,
     iteration_narratives: list[dict] | None = None,
     tools_used: list[str] | None = None,
     current_strategy: str = "",
@@ -578,7 +579,8 @@ def format_state_space_for_llm(
             catalog = _get_catalog(exclude_strategies=exclude_strategies,
                                    blocked_strategies=blocked_strategies,
                                    retryable_strategies=retryable_strategies,
-                                   combo_cooled_strategies=combo_cooled_strategies)
+                                   combo_cooled_strategies=combo_cooled_strategies,
+                                   soft_failed_strategies=soft_failed_strategies)
             if catalog:
                 lines.append("strategy_catalog:")
                 for line in catalog.strip().split("\n"):
@@ -1049,7 +1051,15 @@ def format_state_space_for_llm(
                 reason = fs.reason if hasattr(fs, 'reason') else "unknown"
                 blocked_info = ""
                 if hasattr(fs, 'blocked_until_iter') and fs.blocked_until_iter > state.iteration.current:
-                    blocked_info = f" (blocked until iter {fs.blocked_until_iter})"
+                    _remaining = fs.blocked_until_iter - state.iteration.current
+                    # P2 ②D: reflect the unified block semantics - soft failures are
+                    # selectable (not "blocked"), regression is a true block.
+                    if reason in ("no_improvement", "strategy_not_applicable"):
+                        blocked_info = f" (soft, unblocks in {_remaining} iter)"
+                    elif reason == "regression":
+                        blocked_info = f" (blocked - regression, unblocks in {_remaining} iter)"
+                    else:
+                        blocked_info = f" (blocked until iter {fs.blocked_until_iter})"
                 it = fs.iteration if hasattr(fs, 'iteration') else 0
                 lines.append(
                     f"    - strategy: {strategy}"

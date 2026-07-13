@@ -2495,6 +2495,7 @@ def execute_opt_design_strategy(
     retarget: bool = True,
     place_directive: str | None = None,
     route_directive: str | None = None,
+    num_paths: int = 10,
 ) -> dict:
     """Generate opt_design execution plan for Vivado.
 
@@ -2535,7 +2536,9 @@ def execute_opt_design_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r = _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r["extract_num_paths"] = num_paths
+        return _r
 
     except Exception as e:
         return _tool_error("opt_design strategy execution", e)
@@ -2548,6 +2551,7 @@ def execute_combinational_rebalancing_strategy(
     retarget: bool = True,
     place_directive: str | None = None,
     route_directive: str | None = None,
+    num_paths: int = 10,
 ) -> dict:
     """Validation-safe combinational rebalancing (no FF insert).
 
@@ -2586,7 +2590,9 @@ def execute_combinational_rebalancing_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r = _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r["extract_num_paths"] = num_paths
+        return _r
 
     except Exception as e:
         return _tool_error("combinational rebalancing strategy", e)
@@ -2598,6 +2604,7 @@ def execute_lut_muxf_repack_strategy(
     retarget: bool = True,
     place_directive: str | None = None,
     route_directive: str | None = None,
+    num_paths: int = 10,
 ) -> dict:
     """Validation-safe LUT6+MUXF co-repack (no FF insert).
 
@@ -2635,7 +2642,9 @@ def execute_lut_muxf_repack_strategy(
             return {"error": error_msg or "Unknown error"}
 
         plan = result.data
-        return _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r = _attach_chain_directives(_strategy_plan_to_dict(plan), place_directive, route_directive)
+        _r["extract_num_paths"] = num_paths
+        return _r
 
     except ImportError as e:
         logger.error(f"Could not import skill module: {e}")

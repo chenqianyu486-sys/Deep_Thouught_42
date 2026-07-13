@@ -190,14 +190,12 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     elif chosen_key in iteration_blocked:
                         reason = "already stalled in this iteration"
                     else:
-                        unblock_iter = 0
-                        for entry in state.context.failed_strategies:
-                            if (entry.strategy == chosen_key
-                                    and entry.reason == "strategy_ineffective"):
-                                unblock_iter = entry.blocked_until_iter
-                                break
-                        remaining = max(0, unblock_iter - state.iteration.current)
-                        reason = f"temporarily ineffective; unblocks in {remaining} iterations"
+                        # Permanent block (strategy_ineffective or regression, per
+                        # _get_permanently_blocked_strategies). Pure helper reports
+                        # the right reason + unblock time (regression vs ineffective).
+                        reason = blocking_reason_for_strategy(
+                            chosen_key, state.context.failed_strategies,
+                            state.iteration.current)
                     logger.warning(yellow(
                         f"[SELECT_STRATEGY] Blocked strategy '{chosen_key}' — {reason}"
                     ))
@@ -477,6 +475,31 @@ def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
                 blocked.add(entry.strategy)
             # else: TTL expired, strategy is unblocked and can be retried
     return blocked
+
+
+def blocking_reason_for_strategy(
+    strategy: str,
+    failed_strategies: list,
+    current_iter: int,
+) -> str:
+    """Return the block-reason string for a strategy-level (permanent) block.
+
+    Pure helper used by the SELECT_STRATEGY guard so the LLM-facing ``[BLOCKED]``
+    message reports the right reason + unblock time. Distinguishes ``regression``
+    (made WNS worse) from ``strategy_ineffective``. Returns a fallback string if
+    no active block is found (should not happen when the guard already confirmed
+    the strategy is in ``_get_permanently_blocked_strategies``).
+    """
+    for entry in failed_strategies or []:
+        if (entry.strategy == strategy
+                and entry.reason in ("strategy_ineffective", "regression")
+                and entry.param_signature == ""
+                and current_iter < entry.blocked_until_iter):
+            remaining = entry.blocked_until_iter - current_iter
+            if entry.reason == "regression":
+                return f"regression - made WNS worse; unblocks in {remaining} iterations"
+            return f"temporarily ineffective; unblocks in {remaining} iterations"
+    return "temporarily ineffective; unblocks in 0 iterations"
 
 
 def _get_wns_ineffective_strategies(state: OptimizerState) -> set[str]:

@@ -551,7 +551,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     # Auto-chain: combinational rebalancing — same as opt_design chain.
     # RapidWright identifies deep combinational segments; Vivado opt_design -remap
@@ -564,7 +564,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     # Auto-chain: LUT6+MUXF co-repack — same as opt_design chain (AddRemap directive).
     "rapidwright_execute_lut_muxf_repack_strategy": [
@@ -575,7 +575,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     # Auto-chain: MUXF tree reorder — phys_opt_design (NO -retime) + route.
     # phys_opt_design requires a placed design; no place_design step needed.
@@ -585,7 +585,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     # Auto-chain: phys_opt_design modifies placement, then evaluate before routing.
     # Split from vivado_physopt_and_route to allow early termination if phys_opt
@@ -612,7 +612,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_route_design", "args": {"directive": "Explore"},
          "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
 }
 

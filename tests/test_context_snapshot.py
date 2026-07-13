@@ -225,19 +225,20 @@ class TestEdgeCases:
         inject_context_snapshot_at_end(messages, "test")
         assert len(messages) == 1
 
-    def test_failed_strategies_excluded_from_catalog(self):
-        """Failed strategies should not appear in the strategy catalog."""
+    def test_failed_strategy_shown_with_marker_not_excluded(self):
+        """P0 ②C / P2 ②D: failed strategies are NOT excluded from the catalog -
+        they appear in the available list with a marker ([RETRY]/[PRIOR FAIL]/
+        [BLOCKED]) so the LLM can see what failed and retry/avoid accordingly.
+        A default 'unknown' reason is retriable -> [RETRY]."""
         messages = [{"role": "system", "content": "sys"}]
         state = OptimizerState()
         from optimizer.state import FailedStrategyRecord
         state.context.failed_strategies = [
-            FailedStrategyRecord(strategy="PBLOCK"),
+            FailedStrategyRecord(strategy="PBLOCK", reason="unknown"),
         ]
         inject_merged_dashboard(messages, state, LoopPhase.SELECT_STRATEGY)
         content = messages[-1]["content"]
-        # PBLOCK strategy entry should be excluded from catalog
-        # (note: "PBLOCK" can still appear in other strategies' trigger descriptions)
-        if "strategy_catalog:" in content:
-            assert "strategy_1: PBLOCK-Based" not in content, (
-                "Failed strategy entry should be excluded from catalog"
-            )
+        assert "strategy_catalog:" in content
+        # PBLOCK stays in the available list with a [RETRY] marker (not excluded)
+        assert "PBLOCK-Based Re-placement" in content
+        assert "RETRY:" in content

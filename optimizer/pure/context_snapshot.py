@@ -289,15 +289,23 @@ def inject_merged_dashboard(
     #   strategy_not_applicable → TTL=5 (STRATEGY_NOT_APPLICABLE_TTL; structural inapplicability cools down longer than no_improvement)
     # Each entry shows remaining iterations until re-available.
     _blocked: dict[str, str] = {}
+    # P2 ②D: no_improvement/strategy_not_applicable are SOFT (selectable, shown as
+    # [PRIOR FAIL] with context) - NOT hard-blocked. regression joins [BLOCKED]
+    # (consistent with _get_permanently_blocked_strategies). Resolves the old
+    # "shown [BLOCKED] but selectable" contradiction.
+    _soft_failed: dict[str, str] = {}
     if state.context.failed_strategies:
         for fs in state.context.failed_strategies:
-            if fs.reason in ("strategy_ineffective", "no_improvement", "strategy_not_applicable"):
+            if fs.reason in ("strategy_ineffective", "no_improvement", "strategy_not_applicable", "regression"):
                 remaining = max(0, fs.blocked_until_iter - state.iteration.current)
                 if remaining > 0:
                     # P1 ②A: param_signature=="" -> strategy-level block (SELECT_STRATEGY).
                     # param_signature!="" -> per-combo escalation -> [COMBO COOLED] (EXECUTE guard).
                     if fs.param_signature == "":
-                        _blocked[fs.strategy] = f"unblocks in {remaining} iter"
+                        if fs.reason in ("no_improvement", "strategy_not_applicable"):
+                            _soft_failed[fs.strategy] = f"{fs.reason} - unblocks in {remaining} iter"
+                        else:
+                            _blocked[fs.strategy] = f"unblocks in {remaining} iter"
                     else:
                         _combo_cooled[fs.strategy] = f"{fs.param_signature} - unblocks in {remaining} iter"
 
@@ -344,6 +352,7 @@ def inject_merged_dashboard(
         blocked_strategies=_blocked_strategies,
         retryable_strategies=_retryable or None,
         combo_cooled_strategies=_combo_cooled or None,
+        soft_failed_strategies=_soft_failed or None,
         iteration_narratives=state.iteration.narratives,
         tools_used=state.iteration.tools_used,
         current_strategy=_current_strategy,

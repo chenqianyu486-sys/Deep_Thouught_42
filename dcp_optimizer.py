@@ -412,7 +412,7 @@ async def optimize_v2(
                             "enum": ["PBLOCK", "PhysOpt", "OptDesign", "Fanout", "PinSwap", "LUTCascade",
                                      "CellReplication", "CongestionSpreading", "NetSwap", "LogicResynthesis",
                                      "PhysOptAggressive", "CombinationalRebalance", "LUTMUXFRepack",
-                                     "MUXFTreeReorder", "PlaceRouteDirectiveExplore", "CongestionRouteExplore"],
+                                     "MUXFTreeReorder", "PlaceRouteDirectiveExplore", "CongestionRouteExplore", "CUSTOM"],
                             "description": "The strategy being executed in this step",
                         },
                     },

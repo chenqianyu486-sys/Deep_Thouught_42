@@ -67,27 +67,27 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "place_directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     "rapidwright_execute_combinational_rebalancing_strategy": [
         {"tool": "vivado_opt_design", "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "place_directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     "rapidwright_execute_lut_muxf_repack_strategy": [
         {"tool": "vivado_opt_design", "args_from_skill": {"directive": "directive", "retarget": "retarget"}},
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "place_directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     "rapidwright_execute_muxf_tree_reorder_strategy": [
         {"tool": "vivado_phys_opt_design", "args_from_skill": {"directive": "directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
     "rapidwright_execute_physopt_strategy": [
         {"tool": "vivado_phys_opt_design", "args_from_skill": {"directive": "directive"}},
@@ -99,7 +99,7 @@ SKILL_CHAIN_ACTIONS: dict[str, list[dict]] = {
         {"tool": "vivado_place_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "place_directive"}},
         {"tool": "vivado_route_design", "args": {"directive": "Explore"}, "args_from_skill": {"directive": "route_directive"}},
         {"tool": "vivado_report_timing_summary", "args": {}},
-        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+        {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}, "args_from_skill": {"num_paths": "extract_num_paths"}},
     ],
 }
 
