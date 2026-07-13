@@ -49,6 +49,7 @@ class PhaseHandoff:
     design_stage: str = ""               # "unplaced" | "placed" | "routed"
     critical_paths_count: int = 0         # number of paths in state.timing.critical_paths
     stalled_strategies: list[str] = field(default_factory=list)  # blocked this iteration
+    recent_failures: list[str] = field(default_factory=list)  # P1 ③C: recent tool errors (tool: detail), survives within-iteration phase transitions
 
     def to_phase_context_string(self) -> str:
         """Format handoff as injectable context string.
@@ -80,6 +81,14 @@ class PhaseHandoff:
             parts.append("Critical Paths Available: NONE — parser returned 0 paths. Use vivado_extract_critical_path_cells to populate.")
         if self.stalled_strategies:
             parts.append(f"Stalled (blocked this iteration): {', '.join(self.stalled_strategies)}")
+        # P1 ③C: surface recent tool errors so the LLM remembers why a tool failed
+        # when crossing phase boundaries within an iteration (tool_errors is only
+        # cleared at iteration_start, but without this it could be compressed out
+        # of the message history between phases).
+        if self.recent_failures:
+            parts.append("Recent Failures:")
+            for fr in self.recent_failures[-3:]:
+                parts.append(f"  {fr}")
         if self.llm_summary:
             # Trim very long summaries
             summary = self.llm_summary[:600]
@@ -122,6 +131,7 @@ def build_phase_handoff(
     design_stage: str = "",
     critical_paths_count: int = 0,
     stalled_strategies: list[str] | None = None,
+    recent_failures: list[str] | None = None,
 ) -> PhaseHandoff:
     """Build a PhaseHandoff from a completed phase."""
     return PhaseHandoff(
@@ -137,6 +147,7 @@ def build_phase_handoff(
         design_stage=design_stage,
         critical_paths_count=critical_paths_count,
         stalled_strategies=stalled_strategies or [],
+        recent_failures=recent_failures or [],
     )
 
 

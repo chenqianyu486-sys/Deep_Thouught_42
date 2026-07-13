@@ -17,6 +17,7 @@ from .constants import (
     RAW_OUTPUT_DIRECT_THRESHOLD,
     RAW_OUTPUT_SMART_TRUNCATE,
 )
+from .tool_error_classify import error_envelope_lines
 
 
 def filter_tool_result(tool_name: str, result: str, truncate_limit: int = TOOL_RESULT_TRUNCATE) -> str:
@@ -171,11 +172,18 @@ def summarize_tool_result(
     if char_count < SMALL_OUTPUT_THRESHOLD and 'timing' not in tool_name \
             and tool_name != 'vivado_extract_critical_path_cells':
         indent = '\n'.join('    ' + line for line in lines)
+        # Structured error envelope (P0 ③A): surface category/fix_hint/retryable
+        # so the LLM knows what to change before retrying, instead of only a
+        # truncated {"error": ...} blob.
+        _env_block = ""
+        if status in ("error", "failed"):
+            _env_block = "\n".join(error_envelope_lines(tool_name, raw_result)) + "\n"
         return (
             f"tool_result:\n"
             f"  tool: {tool_name}\n"
             f'  summary: "{lines[0][:200] if lines else ""}"\n'
             f"  status: {status}\n"
+            f"{_env_block}"
             f"  raw_output_truncated: false\n"
             f"  raw_output_chars: {char_count}\n"
             f"  raw_output: |\n{indent}"
@@ -505,6 +513,9 @@ def summarize_tool_result(
             if v is not None:
                 yaml_lines.append(f"    {k}: {v}")
     yaml_lines.append(f"  status: {status}")
+    # Structured error envelope (P0 ③A) for large/non-bypass error outputs.
+    if status in ("error", "failed", "validation_failed"):
+        yaml_lines.extend(error_envelope_lines(tool_name, raw_result))
     yaml_lines.append(f"  raw_output_truncated: {str(was_truncated).lower()}")
     yaml_lines.append(f"  raw_output_chars: {char_count}")
 

@@ -136,6 +136,8 @@ init_analysis ──► [WNS >= 0?] ──YES──► save_output ──► end
 | 22 | 工具结果缓存 | 同 phase 内相同参数自动命中缓存；执行工具后自动失效 |
 | 23 | 工具调用频率限制 | `search_cells` 最多 3 次/phase，`vivado_run_tcl` 最多 2 次/phase |
 | 24 | 收益递减自动检测 | 同一策略最近 2+ 次使用且每次 |delta| < 0.020ns 时标记为 `no_improvement`（TTL=3 轮） |
+| 24a | 失败->修正->重试闭环（P0，2026-07-13） | 可重试失败（`tool_error`/`data_quality_error`）带 `detail` + 剩余重试次数在 catalog 标 `[RETRY: ...]`（不再消失），LLM 可调参重选同一策略；连续 `RETRY_BUDGET=2` 次后升级 `strategy_ineffective` 冷却（`FailedStrategyRecord.retry_count` 累计）。结构化错误信封 `tool_error_classify.classify_tool_error` 为每条工具错误附 `category`+`fix_hint`+`retryable`（注入 `tool_summary` 摘要 + EVALUATE `[EVAL ERROR]` user message）。pblock/fanout `trust_llm_input: bool` 显式跳过 state 数据覆盖（cells 仍经 `EntityRegistry.contains` 校验） |
+| 24b | 按参数组合冷却（P1，2026-07-13） | `FailedStrategyRecord.param_signature`（directive 对等组合指纹）+ `record_strategy_failure` 按 `(strategy, param_signature)` 去重。directive 类策略的 tool_error 重试预算按组合独立（OptDesign directive A 升级不阻塞 directive B）。升级组合**不在 SELECT_STRATEGY 阻断整策略**，而由 EXECUTE `combo_is_cooled` 守卫拦截重试（emit `[COMBO COOLED]`）；结构性/regression 失败仍按策略级阻断。catalog 三态：`[RETRY]`/`[BLOCKED]`/`[COMBO COOLED]`。`PhaseHandoff.recent_failures` 跨阶段（EXECUTE->EVALUATE->SELECT）携带最近工具错误摘要 |
 | 25 | 连续无进展检测 | EVALUATE 阶段连续 3 次无进展评估后强制 `SWITCH_STRATEGY` |
 | 26 | 优化历史追踪 | 每次 `best_checkpoint` 更新时记录策略名/WNS 前后对比/迭代号，注入 handoff 和 Dashboard |
 | 27 | 迭代开始 checkpoint | 每迭代开始时自动保存 DCP 快照，作为 `_reload_baseline_on_switch` 的次要回退基线；当 `best_checkpoint.dcp` 存在时使用 `shutil.copy2` 拷贝（节省 ~5s/次 Vivado 序列化） |

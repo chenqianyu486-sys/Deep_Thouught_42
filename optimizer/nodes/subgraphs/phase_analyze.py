@@ -330,6 +330,7 @@ async def run_analyze_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         design_stage=getattr(state.timing, 'current_stage', ''),
         critical_paths_count=len(state.timing.critical_paths),
         stalled_strategies=list(state.iteration.blocked_strategies),
+        recent_failures=[f"{e['tool']}: {str(e.get('result', ''))[:120]}" for e in state.iteration.tool_errors[-3:]],
     )
     state.strategy.analysis_summary = llm_summary
     state.strategy.last_handoff_text = handoff.to_phase_context_string()

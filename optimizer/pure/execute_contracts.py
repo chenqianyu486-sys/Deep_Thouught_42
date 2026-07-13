@@ -25,6 +25,74 @@ from optimizer.pure.tool_contracts import coerce_payload_dict
 
 WNS_VERDICT_EPSILON = 0.001
 NON_IMPROVING_VERDICTS: frozenset[str] = frozenset({"UNCHANGED", "REGRESSED"})
+
+# P1 ②A: keys that distinguish a strategy's adjustable parameter combo. Only
+# directive/multiplier-bearing strategies get a non-empty signature; data-only
+# strategies (Fanout, NetSwap, CellReplication) return "" -> strategy-level
+# failure (blocks the whole strategy, current behavior).
+_PARAM_SIGNATURE_KEYS = ("directive", "place_directive", "route_directive", "resource_multiplier")
+
+
+def compute_param_signature(strategy: str, tool_args: dict | None) -> str:
+    """Compute a stable signature for the strategy's adjustable parameter combo.
+
+    Returns "" for strategies without directive/multiplier params (strategy-level
+    failures). For directive-bearing strategies, returns ``key=val|...`` sorted by
+    key, with resource_multiplier quantized to 1 decimal to avoid float noise.
+    Two calls with the same directive combo yield the same signature; a different
+    directive combo yields a different signature (so a failed combo does not block
+    retrying the strategy with a different combo).
+    """
+    if not tool_args:
+        return ""
+    parts = []
+    for key in _PARAM_SIGNATURE_KEYS:
+        if key not in tool_args:
+            continue
+        val = tool_args[key]
+        if val is None:
+            continue
+        if key == "resource_multiplier":
+            try:
+                val = f"{float(val):.1f}"
+            except (TypeError, ValueError):
+                continue
+        else:
+            val = str(val)
+        parts.append(f"{key}={val}")
+    return "|".join(parts)
+
+
+def combo_is_cooled(
+    failed_strategies: list,
+    strategy: str,
+    param_signature: str,
+    current_iter: int,
+) -> tuple[bool, int]:
+    """P1 ②A: is this (strategy, param_signature) combo in cooldown?
+
+    Returns (is_cooled, remaining_iters). A combo is cooled when a prior
+    tool_error escalation produced a strategy_ineffective record with the same
+    param_signature whose TTL has not expired. Used by the EXECUTE combo guard
+    to skip re-running an exhausted combo while letting the LLM retry the same
+    strategy with a different combo.
+
+    Pure (operates on the failed_strategies list + scalars) so it is unit-testable
+    without the EXECUTE async loop.
+    """
+    if not param_signature:
+        return False, 0
+    for f in failed_strategies or []:
+        if (
+            f.strategy == strategy
+            and f.param_signature == param_signature
+            and f.reason == "strategy_ineffective"
+            and current_iter < f.blocked_until_iter
+        ):
+            return True, f.blocked_until_iter - current_iter
+    return False, 0
+
+
 POST_EVAL_EXIT_VERDICTS: frozenset[str] = frozenset({
     "IMPROVED",
     "UNCHANGED",

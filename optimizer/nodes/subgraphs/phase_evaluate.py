@@ -22,6 +22,7 @@ from optimizer.deps import NodeDeps
 from optimizer.edges import NodeName
 from optimizer.pure.tool_filter import LoopPhase, PHASE_MAX_ROUNDS, filter_tools_for_phase
 from optimizer.pure.tool_summary import summarize_tool_result
+from optimizer.pure.tool_error_classify import classify_tool_error
 from optimizer.pure.tool_router import call_tool_structured as call_tool_structured_fn
 from optimizer.pure.tool_catalog import get_strategy_primary_tool
 from optimizer.pure.model_select import classify_task
@@ -541,6 +542,16 @@ async def run_evaluate_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase
                         f"[EVALUATE] Tool '{tool_name}' returned structured error: "
                         f"{tool_result.error[:200]}"
                     )
+                    # P0 ③B: surface the error to the LLM as a user message
+                    # (previously only logged, so the LLM had no system framing
+                    # of EVALUATE-phase tool failures). Pair with the structured
+                    # envelope so the LLM knows the category + how to fix it.
+                    if deps.compat is not None:
+                        _cls = classify_tool_error(tool_name, tool_result.error)
+                        deps.compat.add_message("user",
+                            f"[EVAL ERROR] {tool_name} failed during EVALUATE "
+                            f"(category={_cls.category}). {_cls.fix_hint} "
+                            f"retryable={_cls.retryable}")
 
                 # Store raw output (mirrors ANALYZE/EXECUTE pattern)
                 state.context.raw_tool_outputs[(state.iteration.current, "EVALUATE", tool_round, tool_name)] = result

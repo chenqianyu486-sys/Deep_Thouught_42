@@ -24,7 +24,7 @@ fpl26_optimization_contest/
 │   │   ├── rollback.py           # 回滚
 │   │   ├── save_output.py        # 保存输出
 │   │   └── subgraphs/            # llm_tool_loop + 4 阶段
-│   └── pure/                     # 18 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview；时钟名从 critical_paths 提取，非硬编码）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验 + design_data_read/design_data_list_snapshots 内部工具）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + stale/fresh 标记 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入 + per-phase FORMAT_GUARD 注入 + 共享 extract_system_message + DesignDataManager 全量数据持久化触发）、tool_summary.py（tool result 摘要 + compact_tool_summary 共享函数）、**design_data.py**（DesignDataManager 设计数据持久化 + 截断聚合统计 compute_unshown_path_stats / compute_unshown_hotspot_stats）、cost_tracking.py（四阶段共享 LLM 调用成本累计 track_llm_call_cost，修复仅 EXECUTE 计数的 2.77x 低估，见 architecture.md §15.10）、**freshness.py**（R1 新鲜度写入路径统一：mark_all_fields_stale / mark_critical_paths_stale / mark_critical_paths_fresh 三个纯函数消除 field_freshness dict 与 critical_paths_stale bool 的双写漂移；R2 数据驱动阶段入口刷新：RefreshSpec 声明式表 + run_phase_entry_refresh 替代 4 个硬编码 ANALYZE 刷新块 + 1 个 SELECT 块，新增 route_status / congestion_data 自动刷新覆盖）
+│   └── pure/                     # 18 个无状态纯函数模块（可独立单测），含 state_space.py（7 模块 StateSpace 构建器，含 Module 7 Architecture Overview；时钟名从 critical_paths 提取，非硬编码）、timing.py（时序/路由/控制集/CDC/设计信息解析）、tool_filter.py（阶段白名单）、tool_router.py（MCP 路由+缓存+cell 名边界校验 + design_data_read/design_data_list_snapshots 内部工具）、critical_path.py（关键路径解析 + 数据质量验证）、entities.py（EntityRegistry 实体注册表 + cell 名校验 SSOT + Pinned 层渲染 + stale/fresh 标记 + 富错误反馈）、context_snapshot.py（Dashboard 注入 + Pinned cell 注册表注入 + per-phase FORMAT_GUARD 注入 + 共享 extract_system_message + DesignDataManager 全量数据持久化触发）、tool_summary.py（tool result 摘要 + compact_tool_summary 共享函数）、tool_error_classify.py（P0 ③A 结构化错误信封：classify_tool_error 将工具错误分类为 category+fix_hint+retryable，由 tool_summary 在错误摘要注入）、execute_contracts.py（P1 ②A compute_param_signature 策略参数组合指纹 + combo_is_cooled EXECUTE 组合守卫；兼 chain 步参数解析 resolve_chain_step_arguments）、**design_data.py**（DesignDataManager 设计数据持久化 + 截断聚合统计 compute_unshown_path_stats / compute_unshown_hotspot_stats）、cost_tracking.py（四阶段共享 LLM 调用成本累计 track_llm_call_cost，修复仅 EXECUTE 计数的 2.77x 低估，见 architecture.md §15.10）、**freshness.py**（R1 新鲜度写入路径统一：mark_all_fields_stale / mark_critical_paths_stale / mark_critical_paths_fresh 三个纯函数消除 field_freshness dict 与 critical_paths_stale bool 的双写漂移；R2 数据驱动阶段入口刷新：RefreshSpec 声明式表 + run_phase_entry_refresh 替代 4 个硬编码 ANALYZE 刷新块 + 1 个 SELECT 块，新增 route_status / congestion_data 自动刷新覆盖）
 ├── architecture.md               # 架构技术细节（迁移映射、压缩管线、消息流、数据质量守卫、冷却逻辑等）
 ├── config_loader.py              # 模型配置加载器
 ├── model_config.yaml             # 模型层级与 fallback 配置
@@ -133,7 +133,7 @@ llm_tool_loop_node (调度器)
       [auto] 连续3次无进展 → 强制 SWITCH_STRATEGY
 ```
 
-**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因区分处理：`strategy_ineffective`（1 轮后解封）、`strategy_not_applicable`（2 轮后解封）、`no_improvement`（3 轮后解封）、`tool_error`（无 TTL，始终可重试）。EVALUATE 阶段还新增连续无进展检测：连续 3 次评估无改善时自动强制 `SWITCH_STRATEGY`。
+**多策略循环**: 一次迭代内最多尝试 5 个策略 (`MAX_STRATEGY_CYCLES=5`)。EVALUATE 阶段的 `SWITCH_STRATEGY` 信号触发循环回 SELECT_STRATEGY（跳过 ANALYZE）。失败策略通过 TTL 机制按原因区分处理：`strategy_ineffective`（1 轮后解封）、`strategy_not_applicable`（5 轮后解封，`STRATEGY_NOT_APPLICABLE_TTL`）、`no_improvement`（3 轮后解封）、`regression`（2 轮后解封）、`tool_error`/`data_quality_error`（无 TTL，可重试）。**P0 ②B/②C（2026-07-13）**：可重试失败（`tool_error`/`data_quality_error`）不再从目录消失，而是带 `detail` 与剩余重试次数显示为 `[RETRY: ...]`（`get_strategy_catalog(retryable_strategies=...)`），LLM 可用调整后的参数重选同一策略；连续重试 `RETRY_BUDGET=2` 次后自动升级为 `strategy_ineffective`（TTL=1 冷却），防止无限重试（`record_strategy_failure` 内 `retry_count` 累计 + 升级）。EVALUATE 阶段还新增连续无进展检测：连续 3 次评估无改善时自动强制 `SWITCH_STRATEGY`。**P1 ②A（2026-07-13）**：`FailedStrategyRecord.param_signature`（directive 对等组合指纹，`execute_contracts.compute_param_signature`）+ `record_strategy_failure` 按 `(strategy, param_signature)` 去重；directive 类策略的 tool_error 重试预算按组合独立（OptDesign directive A 升级不阻塞 directive B）。升级组合**不在 SELECT_STRATEGY 阻断整策略**（`_get_permanently_blocked_strategies` 仅阻断 `param_signature==""` 的策略级失败），而由 EXECUTE `combo_is_cooled` 守卫拦截已冷却组合的重试（emit `[COMBO COOLED]`）。catalog 三态：`[RETRY]`/`[BLOCKED]`/`[COMBO COOLED]`。**P1 ③C**：`PhaseHandoff.recent_failures` 跨阶段携带最近工具错误摘要。
 
 阶段切换时：当前阶段消息压缩存档→HistoricalMemory，下一阶段注入 PhaseHandoff 摘要上下文。切换时通过 `design_fingerprint`（当前 `best_checkpoint_path`）判断设计是否变更：若指纹不变（设计未修改过），tool cache 被保留避免 EVALUATE→CONTINUE→ANALYZE 循环中缓存数据不必要的丢失。
 
@@ -294,12 +294,14 @@ architecture_overview:
 | 工具缓存 | `state.context.tool_cache` — 同 phase 同参数返回 `[CACHED]`；执行工具后 clear() |
 | 调用频率限制 | 超限返回 `[RATE LIMITED]`（`search_cells`:3, `vivado_run_tcl`:2 等） |
 | DCP 身份 | EXECUTE 阶段移除白名单中的 `vivado_open_checkpoint` |
-| 策略 catalog 排除 | 按原因分级：`tool_error` 永久移出目录（无 TTL，立即重试）；`strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=2）从目录标为 `[BLOCKED]` 占位符（含剩余轮数）；冷却策略在目录中标 `[BLOCKED: cooldown]` |
+| 策略 catalog 排除 | 按原因分级（P0 ②C 更新）：`tool_error`/`data_quality_error` **不再移出目录**，带 `detail` + 剩余重试次数标为 `[RETRY: ...]` 供 LLM 调参重试；`strategy_ineffective`（TTL=1）、`no_improvement`（TTL=3）、`strategy_not_applicable`（TTL=5）、`regression`（TTL=2）从目录标为 `[BLOCKED]` 占位符（含剩余轮数）；冷却策略在目录中标 `[BLOCKED: cooldown]` |
 | 空结果 | `optimized_count: 0` → `tool_error`（可重试）非 `strategy_ineffective`（永久） |
 | **cell 名边界校验** | **`tool_router.call_tool` 在 LLM→MCP 咽喉校验 cell 名（`validate_and_sanitize_cell_args`，部分放行+警告，2026-06-27 新增 `allow_unverified` 参数）；全部非法返回富错误（含候选名建议），不调用 MCP；设计修改工具强制 strict 模式（拒绝 unverified 名）** |
 | 细胞名验证 | `_is_valid_cell_name()`（SSOT 在 `entities.py`，`critical_path.py` re-export）过滤非细胞字符串；>50% 无效整条跳过 |
 | TCL 拦截 | `tool_router.py` 检测 `get_timing_paths`+`get_cells` 返回 `[AUTO-GUIDANCE]` |
-| 冷却分层 | **策略工具失败**→跳过冷却；**仅辅助工具失败**→应用冷却；阈值 0.050ns |
+| 冷却分层 | **策略工具失败**→跳过冷却；**仅辅助工具失败**→应用冷却；阈值 0.050ns。**P0 ②B**：可重试失败累计 `retry_count`，达 `RETRY_BUDGET=2` 升级 `strategy_ineffective` |
+| **结构化错误信封（P0 ③A）** | **`tool_error_classify.classify_tool_error()`** 将工具错误分类为 `category`（bad_cell_name/bad_directive/tcl_blocked/timeout/vivado_error/rw_error/schema_validation/partial_failure/rate_limited/unknown）+ `fix_hint` + `retryable`，由 `tool_summary.summarize_tool_result()` 在错误摘要中注入 `error_category`/`fix_hint`/`retryable` 三段；EVALUATE 阶段工具错误额外注入 `[EVAL ERROR]` user message（P0 ③B）。LLM 据此调整参数重试 |
+| **参数覆盖显式 opt-out（P0 ①A）** | pblock/fanout skill 的 `inputSchema` 新增 `trust_llm_input: bool`（`server.py`）；`phase_execute` 在调用前 `pop` 该 flag，为 True 时 pblock 用 LLM 的 `critical_path_cells`（仍经 `EntityRegistry.contains` 校验，无效则回退 state 数据）、fanout 用 LLM 的 `nets`（无 registry，保留 tool 端 `MIN_FANOUT_TO_SPLIT` 守卫）；`resource_multiplier` 2.0x 地板不放开 |
 
 > 完整保护机制表见 [architecture.md §2.2](architecture.md)。
 

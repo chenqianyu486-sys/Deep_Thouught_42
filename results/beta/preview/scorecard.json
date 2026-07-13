@@ -1,0 +1,63 @@
+{
+  "validation_id": "v_39a747034a7b",
+  "round": "beta",
+  "validator_git_sha": "b2aafb7ac71aecd40985a19104773ed767803e1c",
+  "validator_bundle_sha256": "9659b77b3cb37d9b8634f0011c8b6a54ff6546de4aa7444335b05d0e8474c1c2",
+  "benchmarks": [
+    {
+      "name": "logicnets_jscl",
+      "benchmark_sha256": "bcb39dba4f4db123f3b6dc61c21a0f4c340adfa5b7e6d9847980a29bec630746",
+      "input_dcp_sha256": "a359141a00ce58255650645732cba0033c6255290ce289b4818f96f2e4fecc02",
+      "status": "scored",
+      "fmax_input_mhz": 403.551251,
+      "fmax_output_mhz": 516.529,
+      "wns_ns": -0.436,
+      "whs_ns": 0.0,
+      "alpha_fmax_improvement_mhz": 112.978,
+      "beta_openrouter_cost_usd": 0.1284,
+      "gamma_runtime_hours": 0.5915,
+      "score": 104.845,
+      "validation": {
+        "par_routed": true,
+        "par_drc_clean": true,
+        "hold_passed": true,
+        "pulse_width_passed": true,
+        "sim_passed": true
+      },
+      "wall_time_seconds": 2129.576,
+      "gamma_capped": false,
+      "produced_output_dcp": true,
+      "failure_reason": null,
+      "openrouter_metering_failed": false
+    },
+    {
+      "name": "vexriscv_re-place_v2",
+      "benchmark_sha256": "88769efb8bdd95e853ab6a6d5b8e95f77e8b1db22060473ccd414f506f6deed7",
+      "input_dcp_sha256": "99c566851cc746adf3356fcfb2315197865bc3848712d5528dc131a61225464f",
+      "status": "scored",
+      "fmax_input_mhz": 397.45628,
+      "fmax_output_mhz": 397.456,
+      "wns_ns": -0.946,
+      "whs_ns": 0.0,
+      "alpha_fmax_improvement_mhz": -0.0,
+      "beta_openrouter_cost_usd": 0.1643,
+      "gamma_runtime_hours": 0.5524,
+      "score": 0.0,
+      "validation": {
+        "par_routed": true,
+        "par_drc_clean": true,
+        "hold_passed": true,
+        "pulse_width_passed": true,
+        "sim_passed": true
+      },
+      "wall_time_seconds": 1988.591,
+      "gamma_capped": false,
+      "produced_output_dcp": true,
+      "failure_reason": "no_improvement",
+      "openrouter_metering_failed": false
+    }
+  ],
+  "total_score": 104.845,
+  "failure_reason": null,
+  "status": "completed"
+}

@@ -386,6 +386,8 @@ class FailedStrategyRecord:
     iteration: int = 0
     detail: str = ""            # Human-readable detail (truncated to 200 chars)
     blocked_until_iter: int = 0  # TTL: strategy unblocks when iteration.current >= this value
+    retry_count: int = 0         # P0 ②B: retriable-failure retries so far (tool_error/data_quality_error/unknown)
+    param_signature: str = ""    # P1 ②A: combo key (directive pair etc.); "" = strategy-level failure (blocks whole strategy)
 
 
 @dataclass
@@ -500,12 +502,20 @@ class StrategyState:
     evaluation_wns_delta: float = 0.0        # WNS change after execution
     evaluation_result: str = "PENDING"       # IMPROVED | REGRESSION | UNCHANGED | PENDING
     last_handoff_text: str = ""              # PhaseHandoff formatted text for merged dashboard injection
+    current_param_signature: str = ""        # P1 ②A: param combo of the executing strategy (directive pair etc.); captured at EXECUTE entry
 
 
 # ── Flow control helpers ────────────────────────────────────────
 
 
 STRATEGY_NOT_APPLICABLE_TTL = 5
+
+# P0 ②B: max parameter-adjusted retries for a retriable failure (tool_error /
+# data_quality_error / unknown) before escalating to strategy_ineffective (TTL=1).
+# Semantics: the strategy gets RETRY_BUDGET retries (RETRY_BUDGET+1 total attempts)
+# before cooldown, so the LLM can adjust parameters instead of being forced to
+# switch strategies on the first failure.
+RETRY_BUDGET = 2
 
 
 def _ttl_for_reason(reason: str, current: int) -> int:
@@ -539,16 +549,23 @@ def record_strategy_failure(
     reason: str = "unknown",
     tool: str = "",
     detail: str = "",
+    param_signature: str = "",
 ) -> None:
     """Record a failed strategy attempt to state.context.failed_strategies.
 
-    Deduplicates by strategy name: same strategy is only recorded once.
+    Deduplicates by (strategy, param_signature): the same strategy with a
+    different param combo (directive pair etc.) is a distinct record, so a
+    failed combo does not block retrying the strategy with a different combo
+    (P1 ②A). param_signature="" means a strategy-level failure (regression,
+    structural inapplicability) that blocks the whole strategy.
+
     Replaces MemoryManager.record_failure() / DCPOptimizerCompat.record_failure()
     as the canonical V2 path.
 
     TTL (per-reason cooldown): see _ttl_for_reason for the complete scheme.
     """
-    existing = [f for f in state.context.failed_strategies if f.strategy == strategy]
+    existing = [f for f in state.context.failed_strategies
+                if f.strategy == strategy and f.param_signature == param_signature]
     if existing:
         # Refresh reason and blocked_until_iter on re-failure so TTL
         # restarts and the entry stays blocked if still ineffective.
@@ -573,6 +590,34 @@ def record_strategy_failure(
                        "ignored_reason": reason},
             )
             return
+        # P0 ②B: retry budget for retriable failures. Each re-failure with a
+        # retriable reason (TTL=0: tool_error/data_quality_error/unknown) counts
+        # as one parameter-adjusted retry; after RETRY_BUDGET retries, escalate
+        # to strategy_ineffective (TTL=1) so the LLM cannot loop forever on the
+        # same bad parameter combo. Escalation is a stricter classification
+        # (TTL 0 -> 1), consistent with the no-downgrade guard above. Only
+        # triggers when the existing entry is itself retriable - a strategy
+        # already cooled (strategy_ineffective/regression/...) is untouched here
+        # and falls through to the normal TTL-refresh update below.
+        _RETRIABLE_REASONS = ("tool_error", "data_quality_error", "unknown")
+        if entry.reason in _RETRIABLE_REASONS and reason in _RETRIABLE_REASONS:
+            entry.retry_count = (entry.retry_count or 0) + 1
+            if entry.retry_count >= RETRY_BUDGET:
+                entry.reason = "strategy_ineffective"
+                entry.tool = tool
+                entry.iteration = state.iteration.current
+                entry.detail = (detail or "")[:200]
+                entry.blocked_until_iter = _ttl_for_reason(
+                    "strategy_ineffective", state.iteration.current)
+                logger.warning(
+                    "[FAILED_STRATEGY] Escalated: %s after %d retriable retries -> "
+                    "strategy_ineffective (blocked_until_iter=%d)",
+                    strategy, entry.retry_count, entry.blocked_until_iter,
+                    extra={"strategy": strategy, "reason": "strategy_ineffective",
+                           "tool": tool, "retries": entry.retry_count,
+                           "blocked_until": entry.blocked_until_iter},
+                )
+                return
         entry.reason = reason
         entry.tool = tool
         entry.iteration = state.iteration.current
@@ -593,6 +638,7 @@ def record_strategy_failure(
         iteration=state.iteration.current,
         detail=detail[:200],
         blocked_until_iter=blocked_until_iter,
+        param_signature=param_signature,
     )
     state.context.failed_strategies.append(entry)
     logger.warning(

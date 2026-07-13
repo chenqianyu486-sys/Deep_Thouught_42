@@ -491,7 +491,9 @@ def get_scenario_guide() -> str:
 
 
 def get_strategy_catalog(exclude_strategies: list[str] | None = None,
-                         blocked_strategies: dict[str, str] | None = None) -> str:
+                         blocked_strategies: dict[str, str] | None = None,
+                         retryable_strategies: dict[str, str] | None = None,
+                         combo_cooled_strategies: dict[str, str] | None = None) -> str:
     """Compact strategy catalog for system prompt (names + purposes only).
 
     Strategies are listed alphabetically — no implied priority. The LLM
@@ -513,6 +515,8 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None,
     """
     excluded = set(exclude_strategies or [])
     blocked = blocked_strategies or {}
+    retryable = retryable_strategies or {}
+    combo_cooled = combo_cooled_strategies or {}
     # Always exclude validation-unsafe strategies (insert new FFs → change latency)
     excluded.update(k for k, safe in STRATEGY_VALIDATION_SAFE.items() if not safe)
 
@@ -527,7 +531,16 @@ def get_strategy_catalog(exclude_strategies: list[str] | None = None,
             line = f"  - {s['name']} (trigger: {s['trigger']})"
             if s.get('ff_prerequisite'):
                 line += f" - {s['ff_prerequisite']}"
-            parts.append(line)
+            # P1 ②A: priority combo_cooled > retryable. [COMBO COOLED] means a
+            # specific directive combo exhausted retries (strategy still selectable
+            # with a different combo); [RETRY] means a retriable failure with
+            # retries left.
+            if key in combo_cooled:
+                parts.append(line + f" [COMBO COOLED: {combo_cooled[key]}]")
+            elif key in retryable:
+                parts.append(line + f" [RETRY: {retryable[key]}]")
+            else:
+                parts.append(line)
     if not parts[1:]:
         parts.append("  (all strategies unavailable)")
 

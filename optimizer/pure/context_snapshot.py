@@ -257,11 +257,30 @@ def inject_merged_dashboard(
             logger.warning(f"[DESIGN_DATA] Snapshot store failed: {_dd_err}", exc_info=True)
 
     # Build exclusion and blocked-strategy sets.
-    # Hard-exclude: tool_error is permanent/immediate (no TTL).
+    # P0 ②C: retriable failures (tool_error/data_quality_error/unknown) are NO
+    # LONGER hard-excluded - they stay in the available catalog with a [RETRY:]
+    # marker so the LLM can reselect with adjusted params. After RETRY_BUDGET
+    # retries they escalate to strategy_ineffective (record_strategy_failure)
+    # and flow into _blocked below.
     _hard_exclude: list[str] = [
         fs.strategy for fs in state.context.failed_strategies
-        if fs.reason in ("tool_error",)
+        if False  # nothing hard-excluded; retriable failures shown via _retryable
     ] if state.context.failed_strategies else []
+
+    # Retriable failures: show in available catalog with detail + retries left.
+    _retryable: dict[str, str] = {}
+    # P1 ②A: per-combo escalations (param_signature!="" strategy_ineffective from
+    # tool_error retries). NOT blocked at SELECT_STRATEGY; enforced at EXECUTE by
+    # the combo guard. Shown as [COMBO COOLED] on the available line.
+    _combo_cooled: dict[str, str] = {}
+    if state.context.failed_strategies:
+        from optimizer.state import RETRY_BUDGET
+        for fs in state.context.failed_strategies:
+            if fs.reason in ("tool_error", "data_quality_error", "unknown"):
+                _retries_left = max(0, RETRY_BUDGET - (fs.retry_count or 0))
+                _detail = (fs.detail or fs.reason)[:60]
+                _combo = f" [{fs.param_signature}]" if fs.param_signature else ""
+                _retryable[fs.strategy] = f"{_detail}{_combo} - {_retries_left} retry/retries left"
 
     # TTL-persistent blocks: strategies with a finite cooldown that unblocks
     # after a specific number of iterations.
@@ -275,7 +294,12 @@ def inject_merged_dashboard(
             if fs.reason in ("strategy_ineffective", "no_improvement", "strategy_not_applicable"):
                 remaining = max(0, fs.blocked_until_iter - state.iteration.current)
                 if remaining > 0:
-                    _blocked[fs.strategy] = f"unblocks in {remaining} iter"
+                    # P1 ②A: param_signature=="" -> strategy-level block (SELECT_STRATEGY).
+                    # param_signature!="" -> per-combo escalation -> [COMBO COOLED] (EXECUTE guard).
+                    if fs.param_signature == "":
+                        _blocked[fs.strategy] = f"unblocks in {remaining} iter"
+                    else:
+                        _combo_cooled[fs.strategy] = f"{fs.param_signature} - unblocks in {remaining} iter"
 
     # Per-iteration cooldown strategies.
     if state.iteration.blocked_strategies:
@@ -318,6 +342,8 @@ def inject_merged_dashboard(
         show_strategy_catalog=(phase == LoopPhase.SELECT_STRATEGY),
         exclude_strategies=_exclude_strategies,
         blocked_strategies=_blocked_strategies,
+        retryable_strategies=_retryable or None,
+        combo_cooled_strategies=_combo_cooled or None,
         iteration_narratives=state.iteration.narratives,
         tools_used=state.iteration.tools_used,
         current_strategy=_current_strategy,

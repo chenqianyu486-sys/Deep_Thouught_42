@@ -530,6 +530,8 @@ def format_state_space_for_llm(
     show_strategy_catalog: bool = False,
     exclude_strategies: list[str] | None = None,
     blocked_strategies: dict[str, str] | None = None,
+    retryable_strategies: dict[str, str] | None = None,
+    combo_cooled_strategies: dict[str, str] | None = None,
     iteration_narratives: list[dict] | None = None,
     tools_used: list[str] | None = None,
     current_strategy: str = "",
@@ -574,7 +576,9 @@ def format_state_space_for_llm(
         try:
             from strategy_library import get_strategy_catalog as _get_catalog
             catalog = _get_catalog(exclude_strategies=exclude_strategies,
-                                   blocked_strategies=blocked_strategies)
+                                   blocked_strategies=blocked_strategies,
+                                   retryable_strategies=retryable_strategies,
+                                   combo_cooled_strategies=combo_cooled_strategies)
             if catalog:
                 lines.append("strategy_catalog:")
                 for line in catalog.strip().split("\n"):
@@ -1051,6 +1055,9 @@ def format_state_space_for_llm(
                     f"    - strategy: {strategy}"
                     f"\n      iteration: {it}"
                     f"\n      reason: {reason}{blocked_info}"
+                    f"\n      detail: {(fs.detail if hasattr(fs, 'detail') else '')[:120]}"
+                    f"\n      retries: {fs.retry_count if hasattr(fs, 'retry_count') else 0}"
+                    f"\n      param_signature: {(fs.param_signature if hasattr(fs, 'param_signature') else '')}"
                 )
         else:
             lines.append("      (none)")

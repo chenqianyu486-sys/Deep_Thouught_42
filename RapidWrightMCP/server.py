@@ -725,6 +725,15 @@ async def list_tools() -> list[Tool]:
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
                     },
+                    "trust_llm_input": {
+                        "type": "boolean",
+                        "description": "P0 ①A: If true, use LLM-provided critical_path_cells as-is (still "
+                                       "validated against the cell registry; falls back to verified state "
+                                       "data if any are invalid). Default false (use verified state data). "
+                                       "Set true only when state data is stale/rollback-affected AND you "
+                                       "have valid canonical cells from [CELL REGISTRY].",
+                        "default": False
+                    },
                 }
             }
         ),
@@ -1028,6 +1037,16 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional override for the auto-chain's route_design directive (default Explore). "
                                         "Pick from ROUTE_SAFE_DIRECTIVES: Explore, AggressiveExplore, HigherDelayCost, NoTimingRelaxation, RuntimeOptimized, Quick. Omit to use default Explore.",
+                    },
+                    "trust_llm_input": {
+                        "type": "boolean",
+                        "description": "P0 ①A: If true, use LLM-provided nets as-is (no registry check available "
+                                       "for nets; the tool-side MIN_FANOUT_TO_SPLIT guard still rejects harmful "
+                                       "low-fanout splits). Default false (use verified state data, which "
+                                       "avoids hallucinated net-name regressions). Set true only when state "
+                                       "has no verified high_fanout_nets and you have nets from a fresh "
+                                       "vivado_get_critical_high_fanout_nets call.",
+                        "default": False
                     },
                 },
                 "required": ["nets"]

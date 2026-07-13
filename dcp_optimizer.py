@@ -471,10 +471,12 @@ async def optimize_v2(
             reasoning_config={
                 "worker": {
                     "enabled": _v2_worker_data.reasoning_enabled,
+                    "effort": _v2_worker_data.reasoning_effort,
                     "max_output_tokens": _v2_worker_data.reasoning_max_output_tokens,
                 },
                 "planner": {
                     "enabled": _v2_planner_data.reasoning_enabled,
+                    "effort": _v2_planner_data.reasoning_effort,
                     "max_output_tokens": _v2_planner_data.reasoning_max_output_tokens,
                 },
             },

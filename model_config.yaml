@@ -8,6 +8,7 @@ worker:
   model_name: "z-ai/glm-5.2"
   reasoning_enabled: true
   reasoning_max_output_tokens: null
+  reasoning_effort: "max"  # OpenRouter effort: ~95% of max_tokens allocated to reasoning
   max_tokens: 250000
   soft_threshold: 200000
   hard_limit: 220000
@@ -29,6 +30,7 @@ planner:
   max_tokens: 1000000
   reasoning_enabled: true
   reasoning_max_output_tokens: null
+  reasoning_effort: "max"  # OpenRouter effort: ~95% of max_tokens allocated to reasoning
   soft_threshold: 500000
   hard_limit: 600000
   token_budget: 500000

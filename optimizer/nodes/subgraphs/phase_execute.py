@@ -34,6 +34,7 @@ from optimizer.pure.execute_contracts import (
     build_timing_update_exit_contract,
     build_post_eval_guidance,
     build_precheck_failure_contract,
+    compute_param_signature,
     extract_skill_precheck_diagnostics,
     extract_post_eval_metrics,
     get_pblock_place_only_threshold,
@@ -486,6 +487,31 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         )
 
                     had_llm_data = bool(tool_args.get("critical_path_cells"))
+                    # P0 ①A: explicit opt-out of the state-data override. Pop the
+                    # flag so it never reaches the MCP skill (the skill signature
+                    # does not accept it). When True AND every LLM-provided cell is
+                    # a valid canonical name in the registry, honor the LLM cells;
+                    # otherwise fall through to the verified-state override below.
+                    _honor_llm_cells = False
+                    if bool(tool_args.pop("trust_llm_input", False)) and had_llm_data:
+                        from optimizer.pure.entities import is_valid_cell_name as _valid
+                        _llm_in = [c for c in (tool_args.get("critical_path_cells") or []) if isinstance(c, str)]
+                        _llm_ok = [
+                            c for c in _llm_in
+                            if _valid(c) and (state.entity_registry is None or state.entity_registry.contains(c))
+                        ]
+                        if _llm_in and len(_llm_ok) == len(_llm_in):
+                            _honor_llm_cells = True
+                            if deps.compat is not None:
+                                deps.compat.add_message("user",
+                                    f"[DATA INTEGRITY] trust_llm_input=True: using your "
+                                    f"{len(_llm_ok)} critical_path_cells (validated against the "
+                                    f"registry) for {tool_name}. State override skipped.")
+                        elif deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[DATA INTEGRITY] trust_llm_input=True but "
+                                f"{len(_llm_in) - len(_llm_ok)}/{len(_llm_in)} cells failed registry "
+                                f"validation; falling back to verified state data for {tool_name}.")
                     if state.timing.critical_paths:
                         from optimizer.pure.entities import extract_registry_cells_for_inject
                         cells = extract_registry_cells_for_inject(
@@ -529,7 +555,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                 f"[EXECUTE] critical_paths sample: "
                                 f"{[cp.cells[:5] for cp in state.timing.critical_paths[:3]]}"
                             )
-                        if cells:
+                        if cells and not _honor_llm_cells:
                             if had_llm_data:
                                 logger.warning(
                                     f"[EXECUTE] Overriding LLM-provided critical_path_cells "
@@ -570,7 +596,12 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             continue
                         if name:
                             injected_nets.append({"net_name": name, "fanout": int(fan or 0)})
-                    if injected_nets:
+                    # P0 ①A: pop trust_llm_input so it never reaches the MCP skill.
+                    # When True and the LLM provided nets, honor them (no registry
+                    # check for nets; the tool-side MIN_FANOUT_TO_SPLIT guard still
+                    # rejects harmful low-fanout splits).
+                    _honor_llm_nets = bool(tool_args.pop("trust_llm_input", False)) and bool(tool_args.get("nets"))
+                    if injected_nets and not _honor_llm_nets:
                         had_llm_nets = bool(tool_args.get("nets"))
                         if had_llm_nets:
                             logger.warning(
@@ -589,6 +620,14 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             f"[EXECUTE] Injected {len(injected_nets)} high-fanout nets "
                             f"for {tool_name} from state.timing.high_fanout_nets"
                         )
+                    elif _honor_llm_nets:
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[DATA INTEGRITY] trust_llm_input=True: using your "
+                                f"{len(tool_args.get('nets') or [])} nets for {tool_name} "
+                                f"(no registry check for nets; tool-side MIN_FANOUT_TO_SPLIT "
+                                f"guard still rejects harmful low-fanout splits). State override skipped."
+                            )
                     elif not tool_args.get("nets"):
                         logger.warning(
                             f"[EXECUTE] No high-fanout nets to inject for {tool_name} "
@@ -877,6 +916,39 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                         f"[PRECHECK] Design unplaced — skipping RW timing estimate "
                         f"(wireload would be inaccurate)"
                     )
+
+                # P1 ②A: capture the strategy's param combo (directive pair etc.)
+                # and guard against re-running a combo that already exhausted its
+                # retry budget and escalated to strategy_ineffective. param_signature
+                # ="" (no directive params, e.g. Fanout/NetSwap) -> strategy-level,
+                # guarded by SELECT_STRATEGY instead. Storing on state.strategy lets
+                # downstream record_strategy_failure (iteration_end/EVALUATE) tag
+                # the failure with this combo.
+                _sig = compute_param_signature(state.strategy.current_strategy, tool_args)
+                if _sig:
+                    state.strategy.current_param_signature = _sig
+                    from optimizer.pure.execute_contracts import combo_is_cooled
+                    _cooled, _remaining = combo_is_cooled(
+                        state.context.failed_strategies,
+                        state.strategy.current_strategy, _sig, state.iteration.current)
+                    if _cooled:
+                        logger.info(
+                            f"[EXECUTE] Combo guard: {state.strategy.current_strategy} "
+                            f"combo ({_sig}) cooled (unblocks in {_remaining} iter) - "
+                            f"skipping MCP call; reselect with a different directive combo"
+                        )
+                        if deps.compat is not None:
+                            deps.compat.add_message("user",
+                                f"[COMBO COOLED] {state.strategy.current_strategy} with combo "
+                                f"({_sig}) is in cooldown (unblocks in {_remaining} iter) after "
+                                f"exhausting retries. Select the SAME strategy with a DIFFERENT "
+                                f"directive combo, or pick a different strategy.")
+                        state.iteration.tool_errors.append({
+                            "tool": tool_name,
+                            "result": f"[COMBO COOLED] combo {_sig} in cooldown",
+                        })
+                        _pending_tool_count -= 1
+                        continue
 
                 tool_result = await call_tool_structured_fn(
                     tool_name=tool_name, arguments=tool_args,
@@ -1466,6 +1538,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
         design_stage=getattr(state.timing, 'current_stage', ''),
         critical_paths_count=len(state.timing.critical_paths),
         stalled_strategies=list(state.iteration.blocked_strategies),
+        recent_failures=[f"{e['tool']}: {str(e.get('result', ''))[:120]}" for e in state.iteration.tool_errors[-3:]],
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
     await transition_phase(deps, LoopPhase.EXECUTE, LoopPhase.EVALUATE, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path), iteration=state.iteration.current)

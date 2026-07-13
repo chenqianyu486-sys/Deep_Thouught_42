@@ -186,6 +186,10 @@ async def iteration_end_node(
                     reason=reason,
                     tool=_failure_tool,
                     detail=f"Iteration {state.iteration.current}: no WNS improvement",
+                    # P1 ②A: tag tool_error with the executing combo's param signature
+                    # so a bad directive combo cools per-combo (not blocking the whole
+                    # strategy). Strategy-level reasons (no_improvement) keep "" below.
+                    param_signature=state.strategy.current_param_signature if reason == "tool_error" else "",
                 )
                 logger.info(f"[iteration_end] Recorded failure: {strategy_label} ({reason})")
 

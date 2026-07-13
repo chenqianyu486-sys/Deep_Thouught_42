@@ -464,10 +464,19 @@ def build_llm_extra_body(
         if tier_key:
             cfg = reasoning_config.get(tier_key)
             if cfg and cfg.get("enabled"):
-                reasoning_payload: dict[str, bool | int] = {"enabled": True}
+                # effort / max_output_tokens / enabled are mutually exclusive in the
+                # OpenRouter `reasoning` object: effort and max_tokens cannot both be
+                # set, and `enabled` is inferred from either. Prefer an explicit
+                # effort, then a token budget, else fall back to the bare flag.
+                reasoning_payload: dict[str, bool | int | str] = {}
+                effort = cfg.get("effort")
                 max_output = cfg.get("max_output_tokens")
-                if max_output is not None:
+                if effort:
+                    reasoning_payload["effort"] = effort
+                elif max_output is not None:
                     reasoning_payload["max_output_tokens"] = max_output
+                else:
+                    reasoning_payload["enabled"] = True
                 extra["reasoning"] = reasoning_payload
 
     return extra

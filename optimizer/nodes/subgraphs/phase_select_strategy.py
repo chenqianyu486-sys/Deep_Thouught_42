@@ -208,6 +208,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
                     continue
 
                 state.strategy.current_strategy = step_state.strategy_name
+                state.strategy.current_param_signature = ""  # P1 ②A: reset; EXECUTE repopulates for directive-bearing strategies
                 state.strategy.strategy_rationale = assistant_content
                 llm_summary = assistant_content
                 logger.info(green(f"[SELECT_STRATEGY] Strategy selected: {step_state.strategy_name}"))
@@ -353,6 +354,7 @@ async def run_select_strategy_phase(state: OptimizerState, deps: NodeDeps) -> Lo
         design_stage=getattr(state.timing, 'current_stage', ''),
         critical_paths_count=len(state.timing.critical_paths),
         stalled_strategies=list(state.iteration.blocked_strategies),
+        recent_failures=[f"{e['tool']}: {str(e.get('result', ''))[:120]}" for e in state.iteration.tool_errors[-3:]],
     )
     state.strategy.last_handoff_text = handoff.to_phase_context_string()
     await transition_phase(deps, LoopPhase.SELECT_STRATEGY, LoopPhase.EXECUTE, handoff, tool_cache=state.context.tool_cache, design_fingerprint=str(state.control.best_checkpoint_path), iteration=state.iteration.current)
@@ -465,7 +467,12 @@ def _get_permanently_blocked_strategies(state: OptimizerState) -> set[str]:
     blocked: set[str] = set()
     current_iter = state.iteration.current
     for entry in state.context.failed_strategies:
-        if entry.reason in ("strategy_ineffective", "regression"):
+        # P1 ②A: only strategy-level failures (param_signature=="") block the
+        # whole strategy here. Per-combo escalations (param_signature!="" from
+        # tool_error retries) are enforced at EXECUTE by the combo guard, so a
+        # bad directive combo does not block retrying the strategy with a
+        # different combo.
+        if entry.reason in ("strategy_ineffective", "regression") and entry.param_signature == "":
             if current_iter < entry.blocked_until_iter:
                 blocked.add(entry.strategy)
             # else: TTL expired, strategy is unblocked and can be retried
