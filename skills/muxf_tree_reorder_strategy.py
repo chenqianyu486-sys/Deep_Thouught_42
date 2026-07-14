@@ -9,9 +9,7 @@ instead use MUXF7/MUXF8 mux trees (8:1/16:1 selectors) as the dominant
 inter-layer combinational structure — common in neural-network designs.
 Identifies MUXF trees on critical paths where the timing-critical input
 traverses the deepest mux level, then delegates to Vivado
-phys_opt_design -directive Explore (NO -retime) for logic-equivalent
-pin/cell optimization that reorders selection paths and pulls critical
-inputs to faster mux levels.
+phys_opt_design -directive Explore (NO -retime) for general logic-equivalent pin/cell optimization (relocation/duplication) of the MUXF-heavy paths - NOT a dedicated MUXF tree rewrite (phys_opt may only incidentally reorder selection paths).
 
 Validation-safe: phys_opt_design without -retime performs only
 placement-level logic-equivalent optimization (pin swap, cell relocation,
@@ -198,8 +196,7 @@ def generate_muxf_tree_reorder_plan(
             step_name="phys_opt_design",
             platform="Vivado",
             params={"directive": resolved_directive},
-            description="Post-placement logic-equivalent optimization: reorder MUXF "
-                        "selection paths, pull critical inputs to faster mux levels. "
+            description="Post-placement logic-equivalent optimization: apply general relocation/duplication to MUXF-heavy paths (NOT a dedicated tree rewrite). "
                         "NO -retime (latency preserved).",
             executed=False,
             expected_duration_seconds=300,
@@ -258,9 +255,7 @@ def generate_muxf_tree_reorder_plan(
                 "CARRY4/CARRY8: identifies MUXF7/MUXF8 mux tree runs on critical "
                 "paths (the dominant inter-layer combinational structure in NN "
                 "designs) and delegates to Vivado phys_opt_design -directive "
-                "Explore (NO -retime) for logic-equivalent pin/cell optimization "
-                "that reorders selection paths and pulls critical inputs to faster "
-                "mux levels. Inserts NO flip-flops — latency preserved, cycle-exact "
+                "Explore (NO -retime) for general logic-equivalent pin/cell optimization (relocation/duplication) of the MUXF-heavy paths - NOT a dedicated MUXF tree rewrite (phys_opt may only incidentally reorder selection paths). Inserts NO flip-flops — latency preserved, cycle-exact "
                 "validation passes. MUTATING. Side effects: placement/netlist "
                 "optimization (logic-equivalent), checkpoint via Vivado chain. "
                 "Trigger: NN/datapath design, MUXF7/MUXF8 tree on critical paths, "

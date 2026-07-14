@@ -636,6 +636,18 @@ if non_system:
 
 > 注：本节为 P0「RW 设计状态不同步」的通用根治（覆盖 analyze+mutate、所有 u+ 设计、所有策略序列）。fanout -1.342 另有「改网表自链全局 `place_design -unplace` 丢弃紧凑布局」的伴生根因（P0b），其修复（RW 写 DCP 前对新建 cell 保持 UNPLACED，使链增量布局新 cell 而保留既有布局）待验证 4（重跑确认 Part A 未能连带修复 fanout）后实施，仅对 cell-additive 工具（fanout/replicate）安全，重构型工具保留既有 unplace。
 
+---
+
+### 4.18 自链盲区与空转不透明（P1/P2，2026-07-14）
+
+`SKILL_CHAIN_ACTIONS`（`tool_chain_policy.py` runtime / `constants.py` test 两份）的 key 仅 RapidWright execute 工具，表外工具成盲区，致两类 bug（run-20260713_130643 串联放大，30min 白做 + 超时）：
+
+**P1：Vivado-only place 策略 EXEC_DONE 缺 route。** `PlaceRouteDirectiveExplore` 的 execute_tool 是 `vivado_place_design`（单步原语，∉ SKILL_CHAIN_ACTIONS 且 ∉ POST_EVAL_TOOLS）。LLM signal EXEC_DONE 后 `_execute_single_chain_actions` 早退（`if not chain: return`），无 route、无 timing 评估，设计停 placed，WNS 陈旧，verdict 必 UNCHANGED。`physopt_and_route` 是 Vivado 复合工具（内部 route）故 PhysOpt 免疫。修复：EXEC_DONE 出口（无 pending 与 deferred 两条，用 `_pending_exec_done` 区分 EXEC_DONE vs EXHAUSTED）调用 `_ensure_vivado_strategy_completion`，对 execute_tool=`vivado_place_design` 以 `chain_override=_VIVADO_PLACE_COMPLETION_CHAIN`（`[route, report, extract]`，无 open_checkpoint--设计已在 Vivado 内存）跑完成链；`_execute_single_chain_actions` 新增 `chain_override` 形参复用全部链逻辑。不按工具加链（否则 `place_design -unplace` 也会触链 route 未布局设计）。
+
+**P2-2A：5 个 DCP 写盘策略缺链 + no-op 不透明。** `replicate/pin_swap/net_swap/congestion_spreading/smart_retiming` 全部 ∉ SKILL_CHAIN_ACTIONS，其变异 DCP 从不被 Vivado open+place+route（变异静默丢失；net_swap/smart_retiming 返回里甚至内嵌 `vivado_open_checkpoint(...)` 期待一条不存在的链）。且 `should_skip_chain_for_empty_result` 只认 `successful_count`（fanout），replicate 用 `replications_performed` + no-op 返回 `skipped:True`（无 `status`）-> 真复制被误判空跳链。修复：5 个加入两份 SKILL_CHAIN_ACTIONS（fanout 式 `[open(<path>), place, route, report, extract]`，path：replicate/pin_swap/net_swap/congestion_spreading=`checkpoint_path`，smart_retiming=`final_checkpoint_path`）；`should_skip` 增强：`is_skipped` 增 `skipped is True`，`has_effect` 增 `has_written_dcp`（checkpoint_path/final_checkpoint_path/post_checkpoint_path 非空）+ `replications_performed`/`swaps_performed` 计数；`[CHAIN SKIPPED]` 消息带技能 `message` + 计数（让 LLM 知「0 cells met delay≥0.25ns」而非误判「复制了但无效」）。
+
+**P2-2B：MUXFTreeReorder 语义对齐。** 该策略实为委托**通用** `phys_opt_design`（非专用 MUXF 树重排），原描述「reorders selection paths and pulls critical inputs to faster mux levels」过承诺（run-20260713_130643 Call #29 LLM 信以为真）。改为「general logic-equivalent pin/cell optimization (relocation/duplication) of MUXF-heavy paths - NOT a dedicated MUXF tree rewrite」，覆盖 skill 文档/@skill/StrategyStep/JSON descriptor/server.py。「1ms」非空转（找到 MUXF7+MUXF8 树，链跑 phys_opt+route 58s）。
+
 ## 5. 工具输出摘要化 + 历史自动裁剪
 
 ### 5.1 动机

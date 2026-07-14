@@ -944,8 +944,7 @@ async def list_tools() -> list[Tool]:
             combinational structure in NN designs). Identifies MUXF tree runs on
             critical paths where the timing-critical input traverses the deepest
             mux level, then delegates to Vivado phys_opt_design -directive Explore
-            (NO -retime) for logic-equivalent pin/cell optimization that reorders
-            selection paths and pulls critical inputs to faster mux levels.
+            (NO -retime) for general logic-equivalent pin/cell optimization (relocation/duplication) of the MUXF-heavy paths - NOT a dedicated MUXF tree rewrite (phys_opt may only incidentally reorder selection paths).
 
             Trigger: NN/datapath design, MUXF7/MUXF8 tree on critical paths,
             no CARRY4 carry chains, WNS stuck after PBLOCK.

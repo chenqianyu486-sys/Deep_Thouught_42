@@ -344,6 +344,7 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
     reached_callback = False  # track if the strategy reached callback indicating completion
     no_progress_count = 0  # consecutive rounds without side-effect tool calls
     _exit_after_tools = False  # defer exit until pending tools execute
+    _pending_exec_done = False  # EXEC_DONE deferred behind pending tools (vs EXHAUSTED)
     chain_failed = False  # set True when an auto-chain step errors and restores the design
 
     # Record phase entry
@@ -473,8 +474,13 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                                    phase="EXECUTE_STRATEGY", result_status=step_state.result_status or "")
                 if message.tool_calls:
                     _exit_after_tools = True
+                    _pending_exec_done = True
                     logger.info(f"[EXECUTE] Deferred EXEC_DONE — executing {len(message.tool_calls)} pending tool(s) first")
                 else:
+                    # P1 fix: Vivado-only place strategies have no auto-chain, so
+                    # EXEC_DONE would skip routing/evaluation. Run the completion
+                    # chain before exiting to EVALUATE.
+                    await _ensure_vivado_strategy_completion(state, deps, tools_called)
                     break
 
             # EXHAUSTED during execution
@@ -1508,6 +1514,10 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                 break
 
             if _exit_after_tools:
+                if _pending_exec_done:
+                    # P1 fix: deferred EXEC_DONE for a Vivado-only place strategy -
+                    # run the completion chain (route + evaluate) before exiting.
+                    await _ensure_vivado_strategy_completion(state, deps, tools_called)
                 break
 
             continue
@@ -2388,7 +2398,56 @@ async def _probe_design_fully_placed(deps, design_size_factor: float = 1.0) -> b
         return False
 
 
-async def _execute_single_chain_actions(state, deps, tool_name, skill_result_data, tools_called):
+# Completion chain for Vivado-only place strategies (PlaceRouteDirectiveExplore).
+# vivado_place_design is a single primitive with no SKILL_CHAIN_ACTIONS entry and
+# is not in POST_EVAL_TOOLS, so EXEC_DONE would exit without routing/evaluating
+# (run-20260713_130643: 12-min place_design never routed -> stale UNCHANGED, 30min
+# wasted). No open_checkpoint step: the design is already in Vivado memory (the LLM
+# placed it); chain_override bypasses the empty get_skill_chain_actions lookup.
+_VIVADO_PLACE_COMPLETION_CHAIN = [
+    {"tool": "vivado_route_design", "args": {"directive": "Explore"},
+     "args_from_skill": {"directive": "route_directive"}},
+    {"tool": "vivado_report_timing_summary", "args": {}},
+    {"tool": "vivado_extract_critical_path_cells", "args": {"num_paths": 10}},
+]
+
+
+async def _ensure_vivado_strategy_completion(state, deps, tools_called):
+    """Route + evaluate after EXEC_DONE for Vivado-only place strategies.
+
+    PlaceRouteDirectiveExplore's execute_tool is vivado_place_design (a single
+    primitive with no auto-chain). The LLM signals EXEC_DONE expecting the chain
+    to route, but none exists. This runs [route, report, extract] so the placed
+    design is routed and timing is evaluated with a real post-route WNS. No-op
+    for other strategies.
+    """
+    execute_tool = STRATEGY_MAP.get(
+        state.strategy.current_strategy, StrategyEntry("", "")
+    ).execute_tool
+    if execute_tool != "vivado_place_design":
+        return
+    # A re-place invalidates any prior routing, so always route + evaluate. We do
+    # NOT gate on design_state: it is only explicitly set to ROUTED by route tools,
+    # so after a place it is stale and an unreliable skip signal.
+    logger.info(
+        f"[EXECUTE] Vivado-only place strategy '{state.strategy.current_strategy}' "
+        f"signaled EXEC_DONE without routing -> running completion chain [route, report, extract]"
+    )
+    if deps.compat is not None:
+        deps.compat.add_message("user",
+            f"[AUTO-CHAIN] After {state.strategy.current_strategy}: design placed but not routed. "
+            f"Auto-running route_design + report_timing_summary to evaluate the real WNS."
+        )
+    try:
+        await _execute_single_chain_actions(
+            state, deps, "vivado_place_design", {}, tools_called,
+            chain_override=_VIVADO_PLACE_COMPLETION_CHAIN,
+        )
+    except Exception as e:
+        logger.warning(f"[EXECUTE] Vivado place completion chain failed: {e}")
+
+
+async def _execute_single_chain_actions(state, deps, tool_name, skill_result_data, tools_called, chain_override=None):
     """Auto-execute chained MCP tools after a skill completes.
 
     Workflow:
@@ -2402,8 +2461,13 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
          - Restore from pre-chain checkpoint
          - Break (do not continue with remaining steps)
          - Inject [AUTO-CHAIN ERROR] notification into LLM context
+
+    chain_override: explicit chain steps (bypasses get_skill_chain_actions).
+    Used by _ensure_vivado_strategy_completion for Vivado-only place/route
+    strategies whose execute_tool is a single primitive (vivado_place_design)
+    with no SKILL_CHAIN_ACTIONS entry.
     """
-    chain = get_skill_chain_actions(tool_name)
+    chain = chain_override if chain_override is not None else get_skill_chain_actions(tool_name)
     if not chain:
         return
     selected_plan = resolve_selected_pblock_plan(skill_result_data)
@@ -2427,8 +2491,22 @@ async def _execute_single_chain_actions(state, deps, tool_name, skill_result_dat
             f"This avoids ~17s of unproductive rollback when the skill had no effect."
         )
         if deps.compat is not None:
+            # P2 2A: surface the skill-specific no-op reason (message + count) so the
+            # LLM knows WHY (e.g. "0 cells met delay>=0.25ns or fanout>=25"), not just
+            # that it was skipped - avoids misattribution like "ran but ineffective".
+            _skip_detail = skill_result_data.get("message") or ""
+            _skip_count = (
+                skill_result_data.get("replications_performed")
+                or skill_result_data.get("swaps_performed")
+                or skill_result_data.get("successful_count")
+            )
+            _skip_extra = ""
+            if _skip_detail:
+                _skip_extra += f" Detail: {_skip_detail}"
+            if _skip_count is not None:
+                _skip_extra += f" (operations performed: {_skip_count})"
             deps.compat.add_message("user",
-                f"[CHAIN SKIPPED] '{tool_name}' returned '{skip_reason}'. "
+                f"[CHAIN SKIPPED] '{tool_name}' returned '{skip_reason}'.{_skip_extra} "
                 f"The Vivado P&R chain was skipped because the strategy had no netlist effect. "
                 f"Consider selecting a strategy that does not require critical path data, "
                 f"or use vivado_extract_critical_path_cells to populate path data first.")
