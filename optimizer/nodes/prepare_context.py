@@ -168,22 +168,36 @@ _PHASE_GUIDES: dict[str, str] = {
 
     LoopPhase.SELECT_STRATEGY.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
   - SELECT_STRATEGY: pick exactly one strategy_name via report_step_state.
-    Execution tools are NOT available here. Review the strategy_catalog in
-    the Dashboard and the handoff findings, then signal your choice.
+    Catalog strategies (PBLOCK, PhysOpt, ...) each map to ONE execution tool
+    whose auto-chain handles the post-skill P&R and timing. CUSTOM is an equal
+    peer: it exposes the FULL EXECUTE toolset so you orchestrate Vivado /
+    RapidWright tools directly in any order, with no auto-chain. Choose CUSTOM
+    when no catalog strategy fits the bottleneck, or when catalog strategies
+    have been ineffective for this design. Decide from the objective Dashboard
+    data (delay profile, congestion, high-fanout nets, critical-path cell
+    types), the strategy_catalog, and the handoff findings - not from priors.
 
-Strategy-to-tool mapping (for your reference when choosing):
+Strategy-to-tool mapping (reference: which execution tool each catalog strategy
+narrows EXECUTE to; CUSTOM keeps ALL EXECUTE tools):
 {_STRATEGY_MAPPING_LINES}
 
-NOTE: A strategy listed here has a corresponding execution tool in the
-EXECUTE phase. CellReplication only becomes available during EXECUTE after
-you have selected it and the phase transitions.""",
+NOTE: CellReplication only becomes available during EXECUTE after you have
+selected it and the phase transitions. CUSTOM exposes every EXECUTE tool from
+the start.""",
 
     LoopPhase.EXECUTE.value: f"""PHASE-GATED TOOL AVAILABILITY — CRITICAL:
-  - EXECUTE_STRATEGY: only the selected strategy's primary tool(s) are exposed.
+  - EXECUTE_STRATEGY: a catalog strategy exposes only its primary tool(s); the
+    auto-chain then handles the post-skill workflow (checkpoint open, route,
+    timing) for you. CUSTOM instead exposes the FULL EXECUTE toolset (all
+    place/route/opt/phys_opt tools plus analysis tools) so you orchestrate tools
+    directly in any order; there is no auto-chain, so you run the
+    place -> route -> report_timing sequence yourself. Equivalence is still
+    enforced by tool-level guards (retiming blocklist, directive whitelist)
+    plus DCP validation. If the current strategy is ineffective, signal
+    EXEC_DONE and re-select CUSTOM (or another strategy) next.
 
-EXECUTE phase: tool filtering restricts available tools to the selected strategy.
-Auto-chain actions handle post-skill workflow (checkpoint open, route, timing).
-Strategy-to-tool mapping:
+EXECUTE phase: tool filtering narrows to the selected catalog strategy's tool;
+CUSTOM keeps ALL EXECUTE tools. Strategy-to-tool mapping:
 {_STRATEGY_MAPPING_LINES}
 
 AUTO-INJECTED STRATEGY DATA (DO NOT extract before calling execution tools):

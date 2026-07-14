@@ -1448,7 +1448,7 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
                     seq_steps.append(f"{step}({platform})" if platform else step)
                 lines.append(f"  sequence: {' -> '.join(seq_steps)}")
 
-            lines.append("  avoid: vivado_run_tcl — use the tool above instead.")
+            lines.append("  # Calling this tool triggers the auto_chain above; reference info on system behavior, not a directive. Prefer dedicated tools over hand-written vivado_run_tcl for structured results.")
 
             # Combined strategy flow guidance
             if current_strategy == "PhysOpt+RegisterRetiming":
@@ -1458,6 +1458,10 @@ def _append_skill_guidance(lines: list[str], current_strategy: str) -> None:
                 lines.append("    step_3: rapidwright_execute_register_retiming(retiming_candidates=<from step_2>)")
                 lines.append("    step_4: signal EXEC_DONE")
                 lines.append("  note: step_3 auto-chains open_checkpoint + route_design")
+        elif current_strategy == "CUSTOM":
+            lines.append("skill_guidance:")
+            lines.append("  mode: CUSTOM - free orchestration, no auto-chain")
+            lines.append("  # Call any EXECUTE-phase tool directly in any order. You run the place -> route -> report_timing sequence yourself; signal EXEC_DONE when complete. Equivalence is enforced by tool-level guards + DCP validation.")
     except Exception:
         pass
 

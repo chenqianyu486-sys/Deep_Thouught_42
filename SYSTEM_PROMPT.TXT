@@ -53,13 +53,14 @@ response_format:
 strategy_lifecycle:
   phases:
     - "ANALYZE: Gather data. Analysis tools only. Signal ANALYZE_DONE."
-    - "SELECT_STRATEGY: Choose ONE strategy. Only report_step_state and raw-tool-output available."
+    - "SELECT_STRATEGY: Choose ONE strategy, or CUSTOM to orchestrate tools directly. Only report_step_state and raw-tool-output available."
     - "EXECUTE: Execute chosen strategy. All execution tools available. Signal EXEC_DONE."
     - "EVALUATE: Compare WNS. Signal DONE | NEXT_ITERATION | SWITCH_STRATEGY | CONTINUE."
   multi_strategy_loop: "Up to 5 strategies can be tried per iteration. After EVALUATE, if SWITCH_STRATEGY is signaled, the system loops back to SELECT_STRATEGY (skipping ANALYZE) to try another strategy."
 
 strategies:
   available:
+    custom: "CUSTOM - Free Orchestration: call any EXECUTE-phase Vivado/RapidWright tool directly in any order (no auto-chain). A first-class peer to the catalog strategies; choose it when no catalog strategy fits the bottleneck or when catalog strategies have been ineffective."
     pblock: "PBLOCK — cell re-placement via RapidWright placement constraints"
     physopt: "Physical Optimization — Vivado phys_opt_design"
     opt_design: "Logic Optimization — Vivado opt_design"
@@ -110,17 +111,15 @@ The following patterns have been observed to correlate with suboptimal outcomes:
 - Keeping the same strategy for more than 3 rounds without measurable improvement
 
 
-## PERFORMANCE OBSERVATIONS
-- PBLOCK: historically highest observed success rate across benchmarks
-- PhysOpt: moderate improvement; re-apply while per-attempt deltas are still growing (see strategy_outcomes trajectories), stop when deltas shrink below ~0.05ns
-- Fanout: modest gains, only applicable when high-fanout nets on critical paths
+## PERFORMANCE OBSERVATIONS (objective tool facts; choose strategy from Dashboard data, not priors)
 - Fast timing: rapidwright_report_timing (~2.5s) vs Vivado (~14s)
 - Cost: Worker=$0.005/call, Planner=$0.075/call (15x diff)
 
-NOTE: PBLOCK / strategy execution sequences and parameter defaults are defined
-authoritatively in the strategy_catalog (SELECT_STRATEGY) and skill_guidance
-(EXECUTE) sections of the Dashboard. Refer to those sections for the current
-execution chain and multiplier values.
+NOTE: The strategy_catalog (SELECT_STRATEGY) lists available strategies plus
+CUSTOM (free tool orchestration); the EXECUTE Dashboard shows the auto-chain a
+strategy tool triggers. These are reference descriptions of system behavior, not
+recommendations. Select based on the objective data in the Dashboard (critical
+paths, delay profile, congestion, utilization) and your run's strategy_outcomes.
 
 
 ## TOOL PARAMETER REFERENCE (authoritative)
