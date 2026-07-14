@@ -166,6 +166,60 @@ def _is_strategy_reentry(state: OptimizerState) -> bool:
     return entry_count > 1
 
 
+# RapidWright netlist-mutating execute tools: they edit _current_design in place
+# (fanout/replicate add cells, smart_retiming re-routes) and write a DCP. Excludes
+# plan-only tools (pblock/opt_design generate a plan executed by Vivado) and the
+# read-only analyze/get_* tools, which do not mutate _current_design.
+RAPIDWRIGHT_MUTATE_TOOLS = frozenset({
+    "rapidwright_execute_fanout_strategy",
+    "rapidwright_flatten_lut_cascade",
+    "rapidwright_optimize_pin_swapping",
+    "rapidwright_replicate_critical_cells",
+    "rapidwright_execute_net_swapping",
+    "rapidwright_execute_congestion_spreading",
+    "rapidwright_execute_register_retiming",
+    "rapidwright_smart_retiming",
+    "rapidwright_execute_combinational_rebalancing_strategy",
+    "rapidwright_execute_lut_muxf_repack_strategy",
+    "rapidwright_execute_muxf_tree_reorder_strategy",
+})
+
+
+async def sync_rapidwright_baseline(
+    state: OptimizerState, deps: NodeDeps, target_path: Path
+) -> None:
+    """Reload RapidWright's _current_design to target_path unless already synced.
+
+    Mirrors the Vivado-side _reload_baseline_on_switch. RapidWright's in-memory
+    design is a long-lived global that drifts from best_checkpoint whenever a
+    netlist-mutating strategy runs (in-place mutation, never auto-resynced).
+    Without this, later RW strategies and analysis run on a stale/drifted netlist
+    (run-20260713_130643: after fanout, replicate/muxf ran on original+fanout).
+    Skips the ~2.4s reload when the target is already loaded and clean.
+    """
+    target = Path(target_path)
+    if should_skip_reopen(
+        state.control.rapidwright_dcp_path, str(target),
+        state.control.rapidwright_design_dirty,
+    ):
+        return
+    if not target.exists():
+        logger.warning(f"[EXECUTE] RapidWright sync skipped, target missing: {target}")
+        return
+    try:
+        await call_tool_fn(
+            "rapidwright_read_checkpoint",
+            {"dcp_path": str(target.resolve())},
+            deps.rapidwright_session, deps.vivado_session,
+            design_size_factor=state.timing.design_size_factor,
+        )
+        state.control.rapidwright_dcp_path = target.resolve()
+        state.control.rapidwright_design_dirty = False
+        logger.info(f"[EXECUTE] RapidWright reloaded to baseline: {target}")
+    except Exception as e:
+        logger.warning(f"[EXECUTE] RapidWright baseline reload failed: {e}")
+
+
 async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> None:
     """Reload iteration baseline DCP into Vivado on strategy switch.
 
@@ -213,6 +267,11 @@ async def _reload_baseline_on_switch(state: OptimizerState, deps: NodeDeps) -> N
         state.control.current_dcp_path = iter_ckpt.resolve()
         # Vivado memory now exactly matches the reopened file.
         state.control.live_design_dirty = False
+
+    # 1b. Sync RapidWright to the same baseline (P0: RW _current_design drifts
+    # from best_checkpoint after a netlist-mutating strategy; without this the
+    # next RW strategy/analysis runs on a stale netlist). No-op if already synced.
+    await sync_rapidwright_baseline(state, deps, iter_ckpt)
 
     # 2. Refresh timing summary to get fresh baseline WNS
     timing_result = await call_tool_fn(
@@ -1108,6 +1167,17 @@ async def run_execute_phase(state: OptimizerState, deps: NodeDeps) -> LoopPhase:
                             state.control.live_design_dirty = False
                     else:
                         state.control.live_design_dirty = True
+
+                # P0: track RapidWright _current_design divergence. A RW netlist-
+                # mutating tool edits _current_design in place -> mark dirty so the
+                # next sync_rapidwright_baseline reloads rather than trusting a
+                # stale path match. rapidwright_read_checkpoint reloads clean.
+                if tool_name in RAPIDWRIGHT_MUTATE_TOOLS:
+                    state.control.rapidwright_design_dirty = True
+                elif (tool_name == "rapidwright_read_checkpoint"
+                      and not tool_result.error and "dcp_path" in tool_args):
+                    state.control.rapidwright_dcp_path = Path(tool_args["dcp_path"]).resolve()
+                    state.control.rapidwright_design_dirty = False
 
                 # Dashboard freshness
                 refreshable = DASHBOARD_REFRESH_MAP.get(tool_name)

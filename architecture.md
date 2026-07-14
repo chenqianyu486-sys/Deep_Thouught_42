@@ -621,6 +621,21 @@ if non_system:
 
 场景：iter1 PBLOCK 成功写 best（dirty=False）-> 后续策略 chain 跑 P&R（dirty=True）-> 无改善不写 best -> 下次策略切换路径匹配但 dirty=True -> 强制 reopen，基线 WNS 正确。
 
+---
+
+### 4.17 RapidWright ↔ Vivado 设计状态同步不变量（P0，2026-07-14）
+
+4.16 只跟踪 **Vivado** 侧设计状态；RapidWright 侧的 `_current_design`（`RapidWrightMCP/rapidwright_tools.py` 模块级全局）是无跟踪的第二状态源。RW 改网表工具（fanout/replicate/muxf/lut_cascade/comb_rebal/lut_muxf_repack/retiming/...）**就地修改** `_current_design` 且从不自动复位，于是首次改网表后 `_current_design` 永久漂移，后续所有 RW 操作（analyze + mutate）基于错误网表（run-20260713_130643：fanout 后 replicate/muxf 跑在 original+fanout 上，而非 best_checkpoint；fanout 亦因 RW 持有的是原始设计而丢失 PBLOCK 增益 -> -1.342 回退）。该 bug 架构性，对所有 u+ 设计、任意策略序列均复现。
+
+修复：建立不变量「RapidWright 的 `_current_design` 始终镜像 Vivado 当前基线设计（best_checkpoint / iteration_start）」，对称复用 4.16 的 `should_skip_reopen` 语义：
+
+- 新增 `ControlState.rapidwright_dcp_path`（RW 当前加载的 DCP）+ `rapidwright_design_dirty`（改网表工具就地修改后置 True）。
+- 纯调用 helper `sync_rapidwright_baseline(state, deps, target)`（`optimizer/nodes/subgraphs/phase_execute.py`）：`should_skip_reopen(rapidwright_dcp_path, target, rapidwright_design_dirty)` 为真则跳过（省 ~2.4s），否则 `rapidwright_read_checkpoint(target)` 并同步两字段。
+- 在所有 Vivado 基线加载点对称调用：`init_analysis`（read_checkpoint 后置两字段）、`iteration_start`（复制 best 给 Vivado 后 sync RW，顺带修好 ANALYZE 阶段漂移）、`_reload_baseline_on_switch`（Vivado reopen best 后 sync 同一 target）、`rollback`（Vivado reopen best 后 sync best）。
+- 置位规则：主工具循环中 `tool_name in RAPIDWRIGHT_MUTATE_TOOLS`（fanout/replicate/muxf/lut_cascade/comb_rebal/lut_muxf_repack/pin_swap/net_swap/congestion_spreading/register_retiming/smart_retiming）成功后置 `rapidwright_design_dirty=True`；`rapidwright_read_checkpoint` 成功后置 False 并同步路径。plan-only（pblock/opt_design 生成计划由 Vivado 执行）与只读 analyze/get_* 工具不置脏。
+
+> 注：本节为 P0「RW 设计状态不同步」的通用根治（覆盖 analyze+mutate、所有 u+ 设计、所有策略序列）。fanout -1.342 另有「改网表自链全局 `place_design -unplace` 丢弃紧凑布局」的伴生根因（P0b），其修复（RW 写 DCP 前对新建 cell 保持 UNPLACED，使链增量布局新 cell 而保留既有布局）待验证 4（重跑确认 Part A 未能连带修复 fanout）后实施，仅对 cell-additive 工具（fanout/replicate）安全，重构型工具保留既有 unplace。
+
 ## 5. 工具输出摘要化 + 历史自动裁剪
 
 ### 5.1 动机

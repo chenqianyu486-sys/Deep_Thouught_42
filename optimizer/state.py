@@ -483,6 +483,15 @@ class ControlState:
     # dirty design whose (wrong) WNS pollutes the next strategy's baseline
     # (run-20260711_015650: -0.602 reported instead of real best -0.542).
     live_design_dirty: bool = False
+    # Mirror of current_dcp_path/live_design_dirty for RapidWright's in-memory
+    # _current_design. RW netlist-mutating tools (fanout/replicate/muxf/...) edit
+    # _current_design in place and never auto-resync, so without tracking a later
+    # RW strategy runs on a drifted netlist (run-20260713_130643: after fanout,
+    # replicate/muxf ran on original+fanout, not best_checkpoint). sync_rapidwright
+    # _baseline reloads via rapidwright_read_checkpoint unless these indicate the
+    # target is already loaded and clean.
+    rapidwright_dcp_path: Optional[Path] = None  # DCP currently loaded in RapidWright _current_design
+    rapidwright_design_dirty: bool = False        # True after a RW netlist-mutating tool ran (in-place mutation)
     post_rollback_analyze: bool = False  # set by EVALUATE when rollback detected, used by next ANALYZE
     # Iteration-level checkpoints for multi-granularity rollback.
     # Saved before each EXECUTE phase; capped at 3 entries.

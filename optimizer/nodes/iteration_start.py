@@ -18,6 +18,7 @@ from ..edges import NodeName
 from ..color import green
 from optimizer.pure.tool_router import call_tool as call_tool_fn
 from .subgraphs.phase_handoff import reset_design_fingerprint
+from .subgraphs.phase_execute import sync_rapidwright_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,16 @@ async def iteration_start_node(
             state.control.iteration_checkpoints.append((state.iteration.current, iter_ckpt))
     except Exception as e:
         logger.warning(f"[iteration_start] Failed to save iteration checkpoint: {e}")
+
+    # P0: sync RapidWright to the iteration baseline (best_checkpoint). RW's
+    # _current_design drifts after a netlist-mutating strategy; without this the
+    # new iteration's ANALYZE + RW strategies run on a stale/drifted netlist.
+    best = state.control.best_checkpoint_path
+    if best is not None and best.exists():
+        try:
+            await sync_rapidwright_baseline(state, deps, best)
+        except Exception as e:
+            logger.warning(f"[iteration_start] RapidWright baseline sync failed: {e}")
 
     return NodeName.SELECT_MODEL
 

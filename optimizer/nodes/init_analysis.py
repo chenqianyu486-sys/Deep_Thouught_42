@@ -333,6 +333,11 @@ async def init_analysis_node(
             )
             if "error" in result.lower() and "success" not in result.lower():
                 logger.warning(f"[init_analysis] Could not load design in RapidWright: {result}")
+            else:
+                # Track RapidWright's loaded baseline so sync_rapidwright_baseline
+                # can skip redundant reloads (P0 RW/Vivado state-sync invariant).
+                state.control.rapidwright_dcp_path = input_dcp.resolve()
+                state.control.rapidwright_design_dirty = False
 
             # Step B-R2: Device topology → capacity
             await _extract_device_capacity(state, deps)

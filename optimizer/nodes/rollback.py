@@ -21,6 +21,7 @@ from ..pure.tool_router import call_tool as call_tool_fn
 from ..pure.freshness import mark_all_fields_stale
 from ..color import green, yellow
 from .subgraphs.phase_handoff import reset_design_fingerprint
+from .subgraphs.phase_execute import sync_rapidwright_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,14 @@ async def rollback_node(
         state.control.current_dcp_path = ckpt.resolve()
         # Reopened best_checkpoint - Vivado memory matches the file (clean).
         state.control.live_design_dirty = False
+
+        # P0: sync RapidWright to the same best_checkpoint. RW's _current_design
+        # may have drifted (e.g. a prior fanout mutated it in place); without this
+        # the post-rollback ANALYZE + RW strategies run on a stale/drifted netlist.
+        try:
+            await sync_rapidwright_baseline(state, deps, ckpt)
+        except Exception as e:
+            logger.warning(f"[ROLLBACK] RapidWright baseline sync failed: {e}")
 
         # Verify WNS after restore
         wns_result = await call_tool_fn(
